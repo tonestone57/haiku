@@ -23,7 +23,7 @@ rule MultiBootSubDirSetup bootTargets
 		# Clone the current config variable values and the variables SubDir
 		# resets.
 		for var in $(AUTO_SET_UP_CONFIG_VARIABLES) SUBDIR$(SUBDIRRESET) {
-			$(var) on $(architectureObject) = $($(var)) ;
+			$(var) on $(bootTargetObject) = $($(var)) ;
 		}
 
 		local hostTarget = HOST TARGET ;

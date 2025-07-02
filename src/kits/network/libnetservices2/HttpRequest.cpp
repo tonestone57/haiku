@@ -22,7 +22,7 @@
 #include "HttpBuffer.h"
 #include "HttpPrivate.h"
 
-using namespace std::literals;
+// using namespace std::literals; // C++17, for ""sv suffix, no longer needed
 using namespace BPrivate::Network;
 
 
@@ -62,43 +62,96 @@ BHttpMethod::InvalidMethod::DebugMessage() const
 
 BHttpMethod::BHttpMethod(Verb verb) noexcept
 	:
-	fMethod(verb)
+	fVerbValue(verb),
+	fIsCustomMethod(false)
 {
+	// Cache the string form
+	MethodString();
 }
 
+// BHttpMethod::BHttpMethod(const std::string_view& verb)
+// C++17 version, replaced by BString and const char* versions in header
+// and corresponding .cpp implementations if any (likely covered by BString one)
 
-BHttpMethod::BHttpMethod(const std::string_view& verb)
+BHttpMethod::BHttpMethod(const BString& method)
 	:
-	fMethod(BString(verb.data(), verb.length()))
+	fVerbValue(Get), // Default verb
+	fCustomMethodString(method),
+	fIsCustomMethod(true)
 {
-	if (verb.size() == 0 || !validate_http_token_string(verb))
-		throw BHttpMethod::InvalidMethod(
-			__PRETTY_FUNCTION__, std::move(std::get<BString>(fMethod)));
+	if (method.IsEmpty() || !validate_http_token_string(method.String()))
+		throw BHttpMethod::InvalidMethod(__PRETTY_FUNCTION__, method);
+	fMethodStringInternal = method;
 }
 
 
-BHttpMethod::BHttpMethod(const BHttpMethod& other) = default;
+BHttpMethod::BHttpMethod(const char* method)
+	:
+	fVerbValue(Get), // Default verb
+	fCustomMethodString(method),
+	fIsCustomMethod(true)
+{
+	if (method == nullptr || method[0] == '\0' || !validate_http_token_string(method))
+		throw BHttpMethod::InvalidMethod(__PRETTY_FUNCTION__, method);
+	fMethodStringInternal = method;
+}
+
+
+BHttpMethod::BHttpMethod(const BHttpMethod& other)
+	:
+	fVerbValue(other.fVerbValue),
+	fCustomMethodString(other.fCustomMethodString),
+	fIsCustomMethod(other.fIsCustomMethod),
+	fMethodStringInternal(other.fMethodStringInternal)
+{
+}
 
 
 BHttpMethod::BHttpMethod(BHttpMethod&& other) noexcept
 	:
-	fMethod(std::move(other.fMethod))
+	fVerbValue(other.fVerbValue),
+	fCustomMethodString(std::move(other.fCustomMethodString)),
+	fIsCustomMethod(other.fIsCustomMethod),
+	fMethodStringInternal(std::move(other.fMethodStringInternal))
 {
-	other.fMethod = Get;
+	other.fVerbValue = Get;
+	other.fIsCustomMethod = false;
+	// other.fMethodStringInternal should be updated if it was representing a verb
+	// For simplicity, let it be cleared or set by its new state.
+	other.fMethodStringInternal.Truncate(0);
 }
 
 
-BHttpMethod::~BHttpMethod() = default;
+BHttpMethod::~BHttpMethod()
+{
+}
 
 
-BHttpMethod& BHttpMethod::operator=(const BHttpMethod& other) = default;
+BHttpMethod& BHttpMethod::operator=(const BHttpMethod& other)
+{
+	if (this != &other) {
+		fVerbValue = other.fVerbValue;
+		fCustomMethodString = other.fCustomMethodString;
+		fIsCustomMethod = other.fIsCustomMethod;
+		fMethodStringInternal = other.fMethodStringInternal;
+	}
+	return *this;
+}
 
 
 BHttpMethod&
 BHttpMethod::operator=(BHttpMethod&& other) noexcept
 {
-	fMethod = std::move(other.fMethod);
-	other.fMethod = Get;
+	if (this != &other) {
+		fVerbValue = other.fVerbValue;
+		fCustomMethodString = std::move(other.fCustomMethodString);
+		fIsCustomMethod = other.fIsCustomMethod;
+		fMethodStringInternal = std::move(other.fMethodStringInternal);
+
+		other.fVerbValue = Get;
+		other.fIsCustomMethod = false;
+		other.fMethodStringInternal.Truncate(0);
+	}
 	return *this;
 }
 
@@ -106,13 +159,12 @@ BHttpMethod::operator=(BHttpMethod&& other) noexcept
 bool
 BHttpMethod::operator==(const BHttpMethod::Verb& other) const noexcept
 {
-	if (std::holds_alternative<Verb>(fMethod)) {
-		return std::get<Verb>(fMethod) == other;
-	} else {
-		BHttpMethod otherMethod(other);
-		auto otherMethodSv = otherMethod.Method();
-		return std::get<BString>(fMethod).Compare(otherMethodSv.data(), otherMethodSv.size()) == 0;
+	if (fIsCustomMethod) {
+		// Compare custom string to string representation of Verb other
+		BHttpMethod otherAsMethod(other); // Create a temporary from Verb
+		return fCustomMethodString.Compare(otherAsMethod.MethodString()) == 0;
 	}
+	return fVerbValue == other;
 }
 
 
@@ -123,36 +175,70 @@ BHttpMethod::operator!=(const BHttpMethod::Verb& other) const noexcept
 }
 
 
-const std::string_view
-BHttpMethod::Method() const noexcept
+const BString&
+BHttpMethod::MethodString() const noexcept
 {
-	if (std::holds_alternative<Verb>(fMethod)) {
-		switch (std::get<Verb>(fMethod)) {
-			case Get:
-				return "GET"sv;
-			case Head:
-				return "HEAD"sv;
-			case Post:
-				return "POST"sv;
-			case Put:
-				return "PUT"sv;
-			case Delete:
-				return "DELETE"sv;
-			case Connect:
-				return "CONNECT"sv;
-			case Options:
-				return "OPTIONS"sv;
-			case Trace:
-				return "TRACE"sv;
-			default:
-				// should never be reached
-				std::abort();
-		}
-	} else {
-		const auto& methodString = std::get<BString>(fMethod);
-		// the following constructor is not noexcept, but we know we pass in valid data
-		return std::string_view(methodString.String());
+	if (fIsCustomMethod) {
+		return fCustomMethodString;
 	}
+	// For non-custom methods, ensure fMethodStringInternal is populated
+	// This const_cast is unfortunate but necessary if we want to cache lazily in a const method.
+	// Alternatively, populate in all constructors.
+	BHttpMethod* nonConstThis = const_cast<BHttpMethod*>(this);
+	if (nonConstThis->fMethodStringInternal.IsEmpty() && !fIsCustomMethod) {
+		switch (fVerbValue) {
+			case Get:
+				nonConstThis->fMethodStringInternal = "GET";
+				break;
+			case Head:
+				nonConstThis->fMethodStringInternal = "HEAD";
+				break;
+			case Post:
+				nonConstThis->fMethodStringInternal = "POST";
+				break;
+			case Put:
+				nonConstThis->fMethodStringInternal = "PUT";
+				break;
+			case Delete:
+				nonConstThis->fMethodStringInternal = "DELETE";
+				break;
+			case Connect:
+				nonConstThis->fMethodStringInternal = "CONNECT";
+				break;
+			case Options:
+				nonConstThis->fMethodStringInternal = "OPTIONS";
+				break;
+			case Trace:
+				nonConstThis->fMethodStringInternal = "TRACE";
+				break;
+			default:
+				// Should not be reached if fIsCustomMethod is false
+				// and fVerbValue is a valid Verb.
+				// For safety, assign a default or assert.
+				nonConstThis->fMethodStringInternal = "GET"; // Fallback
+				break;
+		}
+	}
+	return fMethodStringInternal;
+}
+
+
+bool
+BHttpMethod::IsCustom() const noexcept
+{
+	return fIsCustomMethod;
+}
+
+
+BHttpMethod::Verb
+BHttpMethod::GetVerb() const
+{
+	if (fIsCustomMethod) {
+		// Or throw an exception, or return a special error Verb value
+		// Depending on desired contract. Let's throw for now.
+		throw BRuntimeError(__PRETTY_FUNCTION__, "GetVerb() called on a custom method.");
+	}
+	return fVerbValue;
 }
 
 
@@ -166,10 +252,16 @@ struct BHttpRequest::Data {
 	BHttpMethod method = kDefaultMethod;
 	uint8 maxRedirections = 8;
 	BHttpFields optionalFields;
-	std::optional<BHttpAuthentication> authentication;
+	// std::optional<BHttpAuthentication> authentication;
+	BHttpAuthentication authenticationValue;
+	bool hasAuthentication;
 	bool stopOnError = false;
 	bigtime_t timeout = B_INFINITE_TIMEOUT;
-	std::optional<Body> requestBody;
+	// std::optional<Body> requestBody;
+	Body requestBodyValue;
+	bool hasRequestBody;
+
+	Data() : hasAuthentication(false), hasRequestBody(false) {}
 };
 
 
@@ -226,8 +318,8 @@ BHttpRequest::IsEmpty() const noexcept
 const BHttpAuthentication*
 BHttpRequest::Authentication() const noexcept
 {
-	if (fData && fData->authentication)
-		return std::addressof(*fData->authentication);
+	if (fData && fData->hasAuthentication)
+		return std::addressof(fData->authenticationValue);
 	return nullptr;
 }
 
@@ -262,8 +354,8 @@ BHttpRequest::Method() const noexcept
 const BHttpRequest::Body*
 BHttpRequest::RequestBody() const noexcept
 {
-	if (fData && fData->requestBody)
-		return std::addressof(*fData->requestBody);
+	if (fData && fData->hasRequestBody)
+		return std::addressof(fData->requestBodyValue);
 	return nullptr;
 }
 
@@ -301,12 +393,15 @@ BHttpRequest::SetAuthentication(const BHttpAuthentication& authentication)
 	if (!fData)
 		fData = std::make_unique<Data>();
 
-	fData->authentication = authentication;
+	fData->authenticationValue = authentication;
+	fData->hasAuthentication = true;
 }
 
 
-static constexpr std::array<std::string_view, 6> fReservedOptionalFieldNames
-	= {"Host"sv, "Accept-Encoding"sv, "Connection"sv, "Content-Type"sv, "Content-Length"sv};
+// static constexpr std::array<std::string_view, 6> fReservedOptionalFieldNames // C++17
+// 	= {"Host"sv, "Accept-Encoding"sv, "Connection"sv, "Content-Type"sv, "Content-Length"sv};
+static const std::array<const char*, 5> fReservedOptionalFieldNames // Last one seems unused or typo in original size
+	= {"Host", "Accept-Encoding", "Connection", "Content-Type", "Content-Length"};
 
 
 void
@@ -316,12 +411,17 @@ BHttpRequest::SetFields(const BHttpFields& fields)
 		fData = std::make_unique<Data>();
 
 	for (auto& field: fields) {
-		if (std::find(fReservedOptionalFieldNames.begin(), fReservedOptionalFieldNames.end(),
-				field.Name())
-			!= fReservedOptionalFieldNames.end()) {
-			std::string_view fieldName = field.Name();
+		// field.Name() returns BString, so we need to compare with const char*
+		bool isReserved = false;
+		for (const char* reservedName : fReservedOptionalFieldNames) {
+			if (field.Name() == reservedName) {
+				isReserved = true;
+				break;
+			}
+		}
+		if (isReserved) {
 			throw BHttpFields::InvalidInput(
-				__PRETTY_FUNCTION__, BString(fieldName.data(), fieldName.size()));
+				__PRETTY_FUNCTION__, field.Name());
 		}
 	}
 	fData->optionalFields = fields;
@@ -348,7 +448,7 @@ BHttpRequest::SetMethod(const BHttpMethod& method)
 
 void
 BHttpRequest::SetRequestBody(
-	std::unique_ptr<BDataIO> input, BString mimeType, std::optional<off_t> size)
+	std::unique_ptr<BDataIO> input, BString mimeType, off_t sizeParam, bool hasSizeParam)
 {
 	if (input == nullptr)
 		throw std::invalid_argument("input cannot be null");
@@ -363,13 +463,22 @@ BHttpRequest::SetRequestBody(
 
 	if (!fData)
 		fData = std::make_unique<Data>();
-	fData->requestBody = {std::move(input), std::move(mimeType), size};
+
+	fData->requestBodyValue.input = std::move(input);
+	fData->requestBodyValue.mimeType = std::move(mimeType);
+	fData->requestBodyValue.sizeValue = hasSizeParam ? sizeParam : 0;
+	fData->requestBodyValue.hasSize = hasSizeParam;
+	fData->requestBodyValue.hasStartPosition = false; // Initialize
+	fData->hasRequestBody = true;
+
 
 	// Check if the input is a BPositionIO, and if so, store the current position, so that it can
 	// be rewinded in case of a redirect.
-	auto inputPositionIO = dynamic_cast<BPositionIO*>(fData->requestBody->input.get());
-	if (inputPositionIO != nullptr)
-		fData->requestBody->startPosition = inputPositionIO->Position();
+	auto inputPositionIO = dynamic_cast<BPositionIO*>(fData->requestBodyValue.input.get());
+	if (inputPositionIO != nullptr) {
+		fData->requestBodyValue.startPositionValue = inputPositionIO->Position();
+		fData->requestBodyValue.hasStartPosition = true;
+	}
 }
 
 
@@ -414,16 +523,18 @@ void
 BHttpRequest::ClearAuthentication() noexcept
 {
 	if (fData)
-		fData->authentication = std::nullopt;
+		fData->hasAuthentication = false;
+		// fData->authenticationValue can be left as is or cleared
 }
 
 
 std::unique_ptr<BDataIO>
 BHttpRequest::ClearRequestBody() noexcept
 {
-	if (fData && fData->requestBody) {
-		auto body = std::move(fData->requestBody->input);
-		fData->requestBody = std::nullopt;
+	if (fData && fData->hasRequestBody) {
+		auto body = std::move(fData->requestBodyValue.input);
+		fData->hasRequestBody = false;
+		// fData->requestBodyValue members can be left or cleared
 		return body;
 	}
 	return nullptr;
@@ -436,7 +547,10 @@ BHttpRequest::HeaderToString() const
 	HttpBuffer buffer;
 	SerializeHeaderTo(buffer);
 
-	return BString(static_cast<const char*>(buffer.Data().data()), buffer.RemainingBytes());
+	size_t length;
+	const unsigned char* data = buffer.Data(length);
+	// buffer.RemainingBytes() should be equivalent to length here after Data() call
+	return BString(static_cast<const char*>(static_cast<const void*>(data)), length);
 }
 
 
@@ -449,10 +563,12 @@ BHttpRequest::HeaderToString() const
 bool
 BHttpRequest::RewindBody() noexcept
 {
-	if (fData && fData->requestBody && fData->requestBody->startPosition) {
-		auto inputData = dynamic_cast<BPositionIO*>(fData->requestBody->input.get());
-		return *fData->requestBody->startPosition
-			== inputData->Seek(*fData->requestBody->startPosition, SEEK_SET);
+	if (fData && fData->hasRequestBody && fData->requestBodyValue.hasStartPosition) {
+		auto inputData = dynamic_cast<BPositionIO*>(fData->requestBodyValue.input.get());
+		if (inputData == nullptr) // Should not happen if startPosition is set, but good practice
+			return false;
+		return fData->requestBodyValue.startPositionValue
+			== inputData->Seek(fData->requestBodyValue.startPositionValue, SEEK_SET);
 	}
 	return true;
 }
@@ -467,17 +583,17 @@ BHttpRequest::SerializeHeaderTo(HttpBuffer& buffer) const
 {
 	// Method & URL
 	//	TODO: proxy
-	buffer << fData->method.Method() << " "sv;
+	buffer << fData->method.MethodString() << " "; // Removed "sv"
 	if (fData->url.HasPath() && fData->url.Path().Length() > 0)
-		buffer << std::string_view(fData->url.Path().String());
+		buffer << fData->url.Path(); // BString can be directly streamed
 	else
-		buffer << "/"sv;
+		buffer << "/"; // Removed "sv"
 
 	if (fData->url.HasRequest())
-		buffer << "?"sv << Url().Request().String();
+		buffer << "?" << Url().Request().String(); // Removed "sv"
 
 	// TODO: switch between HTTP 1.0 and 1.1 based on configuration
-	buffer << " HTTP/1.1\r\n"sv;
+	buffer << " HTTP/1.1\r\n"; // Removed "sv"
 
 	BHttpFields outputFields;
 	if (true /* http == 1.1 */) {
@@ -486,41 +602,43 @@ BHttpRequest::SerializeHeaderTo(HttpBuffer& buffer) const
 		if (fData->url.HasPort() && fData->url.Port() != defaultPort)
 			host << ':' << fData->url.Port();
 
+		// AddFields takes an initializer_list of BHttpFields::Field.
+		// BHttpFields::Field can be constructed from {const char*, const char*}.
 		outputFields.AddFields({
-			{"Host"sv, std::string_view(host.String())}, {"Accept-Encoding"sv, "gzip"sv},
+			{"Host", host.String()}, {"Accept-Encoding", "gzip"},
 			// Allows the server to compress data using the "gzip" format.
 			// "deflate" is not supported, because there are two interpretations
 			// of what it means (the RFC and Microsoft products), and we don't
 			// want to handle this. Very few websites support only deflate,
 			// and most of them will send gzip, or at worst, uncompressed data.
-			{"Connection"sv, "close"sv}
+			{"Connection", "close"}
 			// Let the remote server close the connection after response since
 			// we don't handle multiple request on a single connection
 		});
 	}
 
-	if (fData->authentication) {
+	if (fData->hasAuthentication) {
 		// This request will add a Basic authorization header
 		BString authorization = build_basic_http_header(
-			fData->authentication->username, fData->authentication->password);
-		outputFields.AddField("Authorization"sv, std::string_view(authorization.String()));
+			fData->authenticationValue.username, fData->authenticationValue.password);
+		outputFields.AddField("Authorization", authorization.String()); // Removed "sv" and string_view
 	}
 
-	if (fData->requestBody) {
+	if (fData->hasRequestBody) {
 		outputFields.AddField(
-			"Content-Type"sv, std::string_view(fData->requestBody->mimeType.String()));
-		if (fData->requestBody->size)
-			outputFields.AddField("Content-Length"sv, std::to_string(*fData->requestBody->size));
+			"Content-Type", fData->requestBodyValue.mimeType.String()); // Removed "sv" and string_view
+		if (fData->requestBodyValue.hasSize)
+			outputFields.AddField("Content-Length", std::to_string(fData->requestBodyValue.sizeValue)); // Removed "sv"
 		else
 			throw BRuntimeError(__PRETTY_FUNCTION__,
 				"Transfer body with unknown content length; chunked transfer not supported");
 	}
 
 	for (const auto& field: outputFields)
-		buffer << field.RawField() << "\r\n"sv;
+		buffer << field.RawField() << "\r\n"; // Removed "sv"
 
 	for (const auto& field: fData->optionalFields)
-		buffer << field.RawField() << "\r\n"sv;
+		buffer << field.RawField() << "\r\n"; // Removed "sv"
 
-	buffer << "\r\n"sv;
+	buffer << "\r\n"; // Removed "sv"
 }

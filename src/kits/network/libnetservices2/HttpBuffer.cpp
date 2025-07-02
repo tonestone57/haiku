@@ -20,7 +20,8 @@ using namespace BPrivate::Network;
 
 	As per the RFC, defined as \r\n
 */
-static constexpr std::array<std::byte, 2> kNewLine = {std::byte('\r'), std::byte('\n')};
+// static constexpr std::array<std::byte, 2> kNewLine = {std::byte('\r'), std::byte('\n')}; // C++17
+static constexpr std::array<char, 2> kNewLine = {'\r', '\n'};
 
 
 /*!
@@ -41,7 +42,7 @@ HttpBuffer::HttpBuffer(size_t capacity)
 	\retval >=0 The actual number of bytes read.
 */
 ssize_t
-HttpBuffer::ReadFrom(BDataIO* source, std::optional<size_t> maxSize)
+HttpBuffer::ReadFrom(BDataIO* source, size_t maxSize)
 {
 	// Remove any unused bytes at the beginning of the buffer
 	Flush();
@@ -49,8 +50,8 @@ HttpBuffer::ReadFrom(BDataIO* source, std::optional<size_t> maxSize)
 	auto currentSize = fBuffer.size();
 	auto remainingBufferSize = fBuffer.capacity() - currentSize;
 
-	if (maxSize && maxSize.value() < remainingBufferSize)
-		remainingBufferSize = maxSize.value();
+	if (maxSize != SIZE_MAX && maxSize < remainingBufferSize)
+		remainingBufferSize = maxSize;
 
 	// Adjust the buffer to the maximum size
 	fBuffer.resize(fBuffer.capacity());
@@ -84,14 +85,14 @@ HttpBuffer::ReadFrom(BDataIO* source, std::optional<size_t> maxSize)
 	\returns the actual number of bytes written to the \a func.
 */
 size_t
-HttpBuffer::WriteTo(HttpTransferFunction func, std::optional<size_t> maxSize)
+HttpBuffer::WriteTo(HttpTransferFunction func, size_t maxSize)
 {
 	if (RemainingBytes() == 0)
 		return 0;
 
 	auto size = RemainingBytes();
-	if (maxSize.has_value() && *maxSize < size)
-		size = *maxSize;
+	if (maxSize != SIZE_MAX && maxSize < size)
+		size = maxSize;
 
 	auto bytesWritten = func(fBuffer.data() + fCurrentOffset, size);
 	if (bytesWritten > size)
@@ -113,17 +114,19 @@ HttpBuffer::WriteTo(HttpTransferFunction func, std::optional<size_t> maxSize)
 	\retval std::nullopt There are no more lines in the buffer.
 	\retval BString The next line.
 */
-std::optional<BString>
-HttpBuffer::GetNextLine()
+BString
+HttpBuffer::GetNextLine(bool& hasLine)
 {
+	hasLine = false;
 	auto offset = fBuffer.cbegin() + fCurrentOffset;
 	auto result = std::search(offset, fBuffer.cend(), kNewLine.cbegin(), kNewLine.cend());
 	if (result == fBuffer.cend())
-		return std::nullopt;
+		return BString(); // No line found
 
 	BString line(
 		reinterpret_cast<const char*>(std::addressof(*offset)), std::distance(offset, result));
 	fCurrentOffset = std::distance(fBuffer.cbegin(), result) + 2;
+	hasLine = true;
 	return line;
 }
 
@@ -170,14 +173,19 @@ HttpBuffer::Clear() noexcept
 /*!
 	\brief Get a view over the current data
 */
-std::string_view
-HttpBuffer::Data() const noexcept
+const unsigned char*
+HttpBuffer::Data(size_t& length) const noexcept
 {
-	if (RemainingBytes() > 0) {
-		return std::string_view(
-			reinterpret_cast<const char*>(fBuffer.data()) + fCurrentOffset, RemainingBytes());
-	} else
-		return std::string_view();
+	length = RemainingBytes();
+	if (length > 0) {
+		return fBuffer.data() + fCurrentOffset;
+	} else {
+		// Return nullptr or a valid pointer to satisfy API, length will be 0
+		// For consistency, returning fBuffer.data() which might be nullptr if capacity is 0
+		// or a valid pointer if capacity > 0 but size is 0.
+		// The key is that length is 0.
+		return fBuffer.data();
+	}
 }
 
 
@@ -187,15 +195,31 @@ HttpBuffer::Data() const noexcept
 	\exception BNetworkRequestError in case of a buffer overflow
 */
 HttpBuffer&
-HttpBuffer::operator<<(const std::string_view& data)
+HttpBuffer::operator<<(const BString& data)
 {
-	if (data.size() > (fBuffer.capacity() - fBuffer.size())) {
+	if (data.length() > (fBuffer.capacity() - fBuffer.size())) {
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 			"No capacity left in buffer to append data.");
 	}
 
-	for (const auto& character: data)
-		fBuffer.push_back(static_cast<const std::byte>(character));
+	for (int i = 0; i < data.Length(); ++i)
+		fBuffer.push_back(static_cast<unsigned char>(data[i]));
+
+	return *this;
+}
+
+
+HttpBuffer&
+HttpBuffer::operator<<(const char* data)
+{
+	size_t len = strlen(data);
+	if (len > (fBuffer.capacity() - fBuffer.size())) {
+		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
+			"No capacity left in buffer to append data.");
+	}
+
+	for (size_t i = 0; i < len; ++i)
+		fBuffer.push_back(static_cast<unsigned char>(data[i]));
 
 	return *this;
 }

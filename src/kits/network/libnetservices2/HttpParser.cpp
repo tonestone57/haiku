@@ -15,6 +15,7 @@
 #include <NetServicesDefs.h>
 #include <ZlibCompressionAlgorithm.h>
 
+
 // using namespace std::literals; // For sv suffix, removed
 using namespace BPrivate::Network;
 // Re-evaluating HttpParser.cpp for subtle syntax issues.
@@ -97,159 +98,140 @@ HttpParser::ParseStatus(HttpBuffer& buffer, BHttpStatus& status)
 
 	\exception BNetworkRequestException The fields not conform to the HTTP spec.
 */
-bool
-HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
+
+bool HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 {
-	/* Entire body commented out for diagnostics
-	if (fStreamState != HttpInputStreamState::Fields)
-		debugger("The parser is not expecting header fields at this point");
+    if (fStreamState != HttpInputStreamState::Fields) {
+        debugger("The parser is not expecting header fields at this point");
+    }
 
-	bool hasFieldLine;
-	BString fieldLineString = buffer.GetNextLine(hasFieldLine);
+    // 1. Read all header lines
+    bool hasLine = false;
+    BString line = buffer.GetNextLine(hasLine);
+    while (hasLine && !line.IsEmpty()) {
+        fields.AddField(line);
+        line = buffer.GetNextLine(hasLine);
+    }
 
-	while (hasFieldLine && !fieldLineString.IsEmpty()) {
-		// Parse next header line
-		fields.AddField(fieldLineString);
-		fieldLineString = buffer.GetNextLine(hasFieldLine);
-	}
+    // If buffer ended mid-header, wait for more data
+    if (!hasLine || !line.IsEmpty()) {
+        return false;
+    }
 
-	if (!hasFieldLine || (hasFieldLine && !fieldLineString.IsEmpty())) {
-		// there is more to parse or buffer ended mid-header
-		return false;
-	}
+    // 2. Prepare for body detection
+    off_t       totalBytes      = -1;
+    bool        haveByteCount   = false;
 
-	// Determine the properties for the body
-	// RFC 7230 section 3.3.3 has a prioritized list of 7 rules around determining the body:
-	// std::optional<off_t> bodyBytesTotal = std::nullopt; // C++17
-	off_t bodyBytesTotalValue = -1;
-	bool hasBodyBytesTotal = false;
+    // 3. Rule [1] & [2]: No-content responses
+    if (fBodyType == HttpBodyType::NoContent
+        || fStatus.StatusCode() == BHttpStatusCode::NoContent
+        || fStatus.StatusCode() == BHttpStatusCode::NotModified)
+    {
+        fBodyType    = HttpBodyType::NoContent;
+        fStreamState = HttpInputStreamState::Done;
+    }
+    else {
+        // 4. Rule [3]: Transfer-Encoding: chunked
+        const BString transferKey("Transfer-Encoding");
+        auto headerIt = fields.FindField(transferKey);
+        if (headerIt != fields.end()
+            && headerIt->Value() == "chunked")
+        {
+            fBodyType    = HttpBodyType::Chunked;
+            fStreamState = HttpInputStreamState::Body;
+        }
+        // 5. Rule [4] & [5]: Content-Length
+        else if (fields.CountFields(BString("Content-Length")) > 0)
+        {
+            BString combinedValue;
+            const BString      contentKey("Content-Length");
 
-	if (fBodyType == HttpBodyType::NoContent || fStatus.StatusCode() == BHttpStatusCode::NoContent
-		|| fStatus.StatusCode() == BHttpStatusCode::NotModified) {
-		// [1] In case of HEAD (set previously), status codes 1xx (TODO!), status code 204 or 304,
-		// no content [2] NOT SUPPORTED: when doing a CONNECT request, no content
-		fBodyType = HttpBodyType::NoContent;
-		fStreamState = HttpInputStreamState::Done;
-	} else {
-		const BString transferEncodingFieldName("Transfer-Encoding");
-		auto header = fields.FindField(transferEncodingFieldName);
-		if (header != fields.end() && header->Value() == "chunked") {
-		// [3] If there is a Transfer-Encoding heading set to 'chunked'
-		// TODO: support the more advanced rules in the RFC around the meaning of this field
-		fBodyType = HttpBodyType::Chunked;
-		fStreamState = HttpInputStreamState::Body;
-	} else if (fields.CountFields(BString("Content-Length")) > 0) {
-		// [4] When there is no Transfer-Encoding, then look for Content-Encoding:
-		//	- If there are more than one, the values must match
-		//	- The value must be a valid number
-		// [5] If there is a valid value, then that is the expected size of the body
-		try {
-			BString contentLengthBStr;
-			const BString contentLengthFieldName("Content-Length");
-			for (const auto& field: fields) {
-				if (field.Name() == contentLengthFieldName) {
-					if (contentLengthBStr.Length() == 0)
-						contentLengthBStr = field.Value();
-					else if (contentLengthBStr != field.Value()) {
-						throw BNetworkRequestError(__PRETTY_FUNCTION__,
-							BNetworkRequestError::ProtocolError,
-							"Multiple Content-Length fields with differing values");
-					}
-				}
-			}
-			// bodyBytesTotal = std::stol(contentLength); // C++17
-			if (contentLengthBStr.Length() > 0) {
-				// Convert BString to std::string for std::stol
-				std::string clStdString(contentLengthBStr.String());
-				bodyBytesTotalValue = std::stol(clStdString);
-				hasBodyBytesTotal = true;
-			} else {
-				// This case should ideally not be reached if CountFields("Content-Length") > 0
-				// and the field has an empty value, which might be a protocol error.
-				// Or, if no Content-Length field was actually found (e.g. due to case issues if FindField is case-sensitive).
-				// For now, we'll treat it as Content-Length not definitively set.
-				hasBodyBytesTotal = false;
-			}
+            for (auto& fld : fields) {
+                if (fld.Name() == contentKey) {
+                    if (combinedValue.IsEmpty()) {
+                        combinedValue = fld.Value();
+                    } else if (combinedValue != fld.Value()) {
+                        throw BNetworkRequestError(
+                            __func__,
+                            BNetworkRequestError::ProtocolError,
+                            "Conflicting Content-Length values"
+                        );
+                    }
+                }
+            }
 
-			if (hasBodyBytesTotal && bodyBytesTotalValue == 0) {
-				fBodyType = HttpBodyType::NoContent;
-				fStreamState = HttpInputStreamState::Done;
-			} else if (hasBodyBytesTotal) { // Only FixedSize if Content-Length was valid and > 0
-				fBodyType = HttpBodyType::FixedSize;
-				fStreamState = HttpInputStreamState::Body;
-			} else {
-				// If Content-Length was present but invalid/empty, or multiple different values.
-				// RFC 7230 Section 3.3.3 Rule 5 indicates if Content-Length is invalid, it should be rejected or recovered.
-				// Here, we might fall through to chunked/variable size or error out.
-				// For now, let's assume if it's not a valid fixed size, it's variable (or an error later).
-				// This part of the logic might need refinement based on strict RFC adherence.
-				// The original code would throw if stol failed.
-				// If hasBodyBytesTotal is false here, it means std::stol would have failed.
-				// So we should re-throw or handle as per original logic.
-				if (fields.CountFields("Content-Length") > 0 && !hasBodyBytesTotal) {
-					// This means Content-Length was found, but was not parsable by previous logic.
-					throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
-						"Cannot parse Content-Length field value");
-				}
-				// If no valid Content-Length, proceed to rule 7 (variable size / close delimited)
-				fBodyType = HttpBodyType::VariableSize;
-				fStreamState = HttpInputStreamState::Body;
-			}
-		} catch (const std::logic_error& e) {
-			// This catch is for std::stol failing (invalid_argument, out_of_range)
-			throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
-				"Cannot parse Content-Length field value (logic_error)");
-		}
-	} else {
-		// [6] Applies to request messages only (this is a response)
-		// [7] If nothing else then the received message is all data until connection close
-		// (this is the default)
-		fStreamState = HttpInputStreamState::Body;
-		fBodyType = HttpBodyType::VariableSize; // Explicitly set for clarity
-	} // Closes the main else related to (fBodyType == HttpBodyType::NoContent)
-	// } // This was the diff from before, which was incorrect, it should be above the switch
+            if (!combinedValue.IsEmpty()) {
+                // Convert to std::string for stol
+                std::string tmp(combinedValue.String());
+                try {
+                    totalBytes    = std::stol(tmp);
+                    haveByteCount = true;
+                }
+                catch (const std::logic_error&) {
+                    throw BNetworkRequestError(
+                        __func__,
+                        BNetworkRequestError::ProtocolError,
+                        "Invalid Content-Length value"
+                    );
+                }
+            }
 
-	// Set up the body parser based on the logic above.
-	switch (fBodyType) {
-		case HttpBodyType::VariableSize:
-			fBodyParser = std::make_unique<HttpRawBodyParser>();
-			break;
-		case HttpBodyType::FixedSize:
-			if (hasBodyBytesTotal)
-				fBodyParser = std::make_unique<HttpRawBodyParser>(bodyBytesTotalValue, true);
-			else {
-				// This should not be reached if fBodyType is FixedSize, implies logic error above.
-				// For safety, create a variable size parser or throw.
-				// Original code might have thrown before this.
-				throw BRuntimeError(__PRETTY_FUNCTION__, "FixedSize body type without a valid size.");
-				// fBodyParser = std::make_unique<HttpRawBodyParser>(); // Fallback, but indicates issue
-			}
-			break;
-		case HttpBodyType::Chunked:
-			fBodyParser = std::make_unique<HttpChunkedBodyParser>();
-			break;
-		case HttpBodyType::NoContent:
-		default:
-			// For NoContent, fBodyParser remains nullptr, and we should return true.
-			return true;
-	}
+            // Decide specific body type
+            if (haveByteCount && totalBytes == 0) {
+                fBodyType    = HttpBodyType::NoContent;
+                fStreamState = HttpInputStreamState::Done;
+            }
+            else if (haveByteCount) {
+                fBodyType    = HttpBodyType::FixedSize;
+                fStreamState = HttpInputStreamState::Body;
+            }
+            else {
+                // Content-Length present but not parseable
+                throw BNetworkRequestError(
+                    __func__,
+                    BNetworkRequestError::ProtocolError,
+                    "Cannot parse Content-Length"
+                );
+            }
+        }
+        // 6. Rule [7]: Read until close
+        else {
+            fBodyType    = HttpBodyType::VariableSize;
+            fStreamState = HttpInputStreamState::Body;
+        }
+    }
 
-	// Check Content-Encoding for compression
-	const BString contentEncodingFieldName("Content-Encoding");
-	auto compressionHeader = fields.FindField(contentEncodingFieldName);
-	if (compressionHeader != fields.end() && (compressionHeader->Value() == "gzip" || compressionHeader->Value() == "deflate")) {
-		if (!fBodyParser) {
-			// This can happen if fBodyType was NoContent but Content-Encoding is present.
-			// This is unusual, but technically the body parser should wrap a "no-op" parser.
-			// For simplicity, if there's no content, compression is irrelevant.
-			// However, if there IS a body parser, we wrap it.
-		} else {
-			fBodyParser = std::make_unique<HttpBodyDecompression>(std::move(fBodyParser));
-		}
-	}
-	return true;
-	*/
-	return false; // Diagnostic: return a default value
+    // 4. Instantiate the correct body parser
+    switch (fBodyType) {
+        case HttpBodyType::VariableSize:
+            fBodyParser = std::make_unique<HttpRawBodyParser>();
+            break;
+
+        case HttpBodyType::FixedSize:
+            fBodyParser = std::make_unique<HttpRawBodyParser>(totalBytes, true);
+            break;
+
+        case HttpBodyType::Chunked:
+            fBodyParser = std::make_unique<HttpChunkedBodyParser>();
+            break;
+
+        case HttpBodyType::NoContent:
+        default:
+            return true;
+    }
+
+    // 5. Wrap with decompression if needed
+    const BString encodingKey("Content-Encoding");
+    auto compIt = fields.FindField(encodingKey);
+    if (compIt != fields.end()) {
+        auto val = compIt->Value();
+        if ((val == "gzip" || val == "deflate") && fBodyParser) {
+            fBodyParser =
+                std::make_unique<HttpBodyDecompression>(std::move(fBodyParser));
+        }
+    }
+
+    return true;
 }
 
 

@@ -34,7 +34,7 @@ class BorrowAdmin
 private:
 	static constexpr uint8 kOwned = 0x1;
 	static constexpr uint8 kBorrowed = 0x2;
-	std::atomic<uint8> fState = kOwned;
+	std::atomic<uint8> fState{kOwned}; // Direct initialization
 
 protected:
 	virtual ~BorrowAdmin() = default;

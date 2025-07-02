@@ -174,11 +174,19 @@ BHttpResult::Status() const
 	status_t status = B_OK;
 	while (status == B_INTERRUPTED || status == B_OK) {
 		auto dataStatus = fData->GetStatusAtomic();
-		if (dataStatus == HttpResultPrivate::kError)
-			std::rethrow_exception(*(fData->error));
+		if (dataStatus == HttpResultPrivate::kError) {
+			if (fData->hasErrorValue)
+				std::rethrow_exception(fData->errorValue);
+			else // Should not happen if kError is set
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Unknown error state in HttpResult");
+		}
 
-		if (dataStatus >= HttpResultPrivate::kStatusReady)
-			return fData->status.value();
+		if (dataStatus >= HttpResultPrivate::kStatusReady) {
+			if (fData->hasStatusValue)
+				return fData->statusValue;
+			else // Should not happen if kStatusReady or higher
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Status ready but no status value");
+		}
 
 		status = acquire_sem(fData->data_wait);
 	}
@@ -194,11 +202,19 @@ BHttpResult::Fields() const
 	status_t status = B_OK;
 	while (status == B_INTERRUPTED || status == B_OK) {
 		auto dataStatus = fData->GetStatusAtomic();
-		if (dataStatus == HttpResultPrivate::kError)
-			std::rethrow_exception(*(fData->error));
+		if (dataStatus == HttpResultPrivate::kError) {
+			if (fData->hasErrorValue)
+				std::rethrow_exception(fData->errorValue);
+			else
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Unknown error state in HttpResult");
+		}
 
-		if (dataStatus >= HttpResultPrivate::kHeadersReady)
-			return *(fData->fields);
+		if (dataStatus >= HttpResultPrivate::kHeadersReady) {
+			if (fData->hasFieldsValue)
+				return fData->fieldsValue;
+			else
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Fields ready but no fields value");
+		}
 
 		status = acquire_sem(fData->data_wait);
 	}
@@ -214,11 +230,19 @@ BHttpResult::Body() const
 	status_t status = B_OK;
 	while (status == B_INTERRUPTED || status == B_OK) {
 		auto dataStatus = fData->GetStatusAtomic();
-		if (dataStatus == HttpResultPrivate::kError)
-			std::rethrow_exception(*(fData->error));
+		if (dataStatus == HttpResultPrivate::kError) {
+			if (fData->hasErrorValue)
+				std::rethrow_exception(fData->errorValue);
+			else
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Unknown error state in HttpResult");
+		}
 
-		if (dataStatus >= HttpResultPrivate::kBodyReady)
-			return *(fData->body);
+		if (dataStatus >= HttpResultPrivate::kBodyReady) {
+			if (fData->hasBodyValue)
+				return fData->bodyValue;
+			else
+				throw BRuntimeError(__PRETTY_FUNCTION__, "Body ready but no body value");
+		}
 
 		status = acquire_sem(fData->data_wait);
 	}

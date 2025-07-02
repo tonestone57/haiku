@@ -9,7 +9,7 @@
 #include <memory>
 // #include <optional> // C++17, removed
 // #include <string_view> // C++17, removed
-#include <variant> // Will be handled in a later step
+// #include <variant> // C++17, replaced
 
 #include <ErrorsExt.h>
 #include <String.h>
@@ -59,11 +59,14 @@ public:
 			// const std::string_view Method() const noexcept; // C++17
 			const BString&		MethodString() const noexcept; // Returns BString if custom, or string representation of Verb
 			bool				IsCustom() const noexcept;
-			Verb				GetVerb() const; // Assumes !IsCustom()
+			Verb				GetVerb() const; // Assumes !IsCustom(), throws if custom.
 
 private:
-			std::variant<Verb, BString> fMethod; // To be replaced later
-			BString fMethodStringInternal; // Cache for string form
+			// std::variant<Verb, BString> fMethod; // Replaced with fVerbValue, fCustomMethodString, fIsCustomMethod
+			Verb				fVerbValue;
+			BString				fCustomMethodString;
+			bool				fIsCustomMethod;
+			BString				fMethodStringInternal; // Cache for string form of Verb, or copy of fCustomMethodString
 };
 
 

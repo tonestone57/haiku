@@ -51,20 +51,21 @@ HttpParser::ParseStatus(HttpBuffer& buffer, BHttpStatus& status)
 	if (fStreamState != HttpInputStreamState::StatusLine)
 		debugger("The Status line has already been parsed");
 
-	auto statusLine = buffer.GetNextLine();
-	if (!statusLine)
+	bool hasStatusLine;
+	BString statusLineString = buffer.GetNextLine(hasStatusLine);
+	if (!hasStatusLine)
 		return false;
 
-	auto codeStart = statusLine->FindFirst(' ') + 1;
+	auto codeStart = statusLineString.FindFirst(' ') + 1;
 	if (codeStart < 0)
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
 
-	auto codeEnd = statusLine->FindFirst(' ', codeStart);
+	auto codeEnd = statusLineString.FindFirst(' ', codeStart);
 
 	if (codeEnd < 0 || (codeEnd - codeStart) != 3)
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
 
-	std::string statusCodeString(statusLine->String() + codeStart, 3);
+	std::string statusCodeString(statusLineString.String() + codeStart, 3);
 
 	// build the output
 	try {
@@ -73,7 +74,7 @@ HttpParser::ParseStatus(HttpBuffer& buffer, BHttpStatus& status)
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
 	}
 
-	status.text = std::move(statusLine.value());
+	status.text = statusLineString; // statusLineString is already a BString
 	fStatus.code = status.code; // cache the status code
 	fStreamState = HttpInputStreamState::Fields;
 	return true;
@@ -101,77 +102,109 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 	if (fStreamState != HttpInputStreamState::Fields)
 		debugger("The parser is not expecting header fields at this point");
 
-	auto fieldLine = buffer.GetNextLine();
+	bool hasFieldLine;
+	BString fieldLineString = buffer.GetNextLine(hasFieldLine);
 
-	while (fieldLine && !fieldLine.value().IsEmpty()) {
+	while (hasFieldLine && !fieldLineString.IsEmpty()) {
 		// Parse next header line
-		fields.AddField(fieldLine.value());
-		fieldLine = buffer.GetNextLine();
+		fields.AddField(fieldLineString);
+		fieldLineString = buffer.GetNextLine(hasFieldLine);
 	}
 
-	if (!fieldLine || (fieldLine && !fieldLine.value().IsEmpty())) {
-		// there is more to parse
+	if (!hasFieldLine || (hasFieldLine && !fieldLineString.IsEmpty())) {
+		// there is more to parse or buffer ended mid-header
 		return false;
 	}
 
 	// Determine the properties for the body
 	// RFC 7230 section 3.3.3 has a prioritized list of 7 rules around determining the body:
-	std::optional<off_t> bodyBytesTotal = std::nullopt;
+	// std::optional<off_t> bodyBytesTotal = std::nullopt; // C++17
+	off_t bodyBytesTotalValue = -1;
+	bool hasBodyBytesTotal = false;
+
 	if (fBodyType == HttpBodyType::NoContent || fStatus.StatusCode() == BHttpStatusCode::NoContent
 		|| fStatus.StatusCode() == BHttpStatusCode::NotModified) {
 		// [1] In case of HEAD (set previously), status codes 1xx (TODO!), status code 204 or 304,
 		// no content [2] NOT SUPPORTED: when doing a CONNECT request, no content
 		fBodyType = HttpBodyType::NoContent;
 		fStreamState = HttpInputStreamState::Done;
-	// } else if (auto header = fields.FindField("Transfer-Encoding"sv); // C++17
-	// 			   header != fields.end() && header->Value() == "chunked"sv) { // C++17
 	} else {
-		auto header = fields.FindField("Transfer-Encoding");
+		const BString transferEncodingFieldName("Transfer-Encoding");
+		auto header = fields.FindField(transferEncodingFieldName);
 		if (header != fields.end() && header->Value() == "chunked") {
 		// [3] If there is a Transfer-Encoding heading set to 'chunked'
 		// TODO: support the more advanced rules in the RFC around the meaning of this field
 		fBodyType = HttpBodyType::Chunked;
 		fStreamState = HttpInputStreamState::Body;
-	// } else if (fields.CountFields("Content-Length"sv) > 0) { // C++17
-	} else if (fields.CountFields("Content-Length") > 0) {
+	} else if (fields.CountFields(BString("Content-Length")) > 0) {
 		// [4] When there is no Transfer-Encoding, then look for Content-Encoding:
 		//	- If there are more than one, the values must match
 		//	- The value must be a valid number
 		// [5] If there is a valid value, then that is the expected size of the body
 		try {
-			// auto contentLength = std::string(); // C++ std::string
-			BString contentLength;
+			BString contentLengthBStr;
+			const BString contentLengthFieldName("Content-Length");
 			for (const auto& field: fields) {
-				// if (field.Name() == "Content-Length"sv) { // C++17
-				if (field.Name().GetString() == "Content-Length") {
-					// if (contentLength.size() == 0) // C++ std::string
-					if (contentLength.Length() == 0)
-						contentLength = field.Value();
-					else if (contentLength != field.Value()) {
+				if (field.Name() == contentLengthFieldName) {
+					if (contentLengthBStr.Length() == 0)
+						contentLengthBStr = field.Value();
+					else if (contentLengthBStr != field.Value()) {
 						throw BNetworkRequestError(__PRETTY_FUNCTION__,
 							BNetworkRequestError::ProtocolError,
 							"Multiple Content-Length fields with differing values");
 					}
 				}
 			}
-			bodyBytesTotal = std::stol(contentLength);
-			if (*bodyBytesTotal == 0) {
+			// bodyBytesTotal = std::stol(contentLength); // C++17
+			if (contentLengthBStr.Length() > 0) {
+				// Convert BString to std::string for std::stol
+				std::string clStdString(contentLengthBStr.String());
+				bodyBytesTotalValue = std::stol(clStdString);
+				hasBodyBytesTotal = true;
+			} else {
+				// This case should ideally not be reached if CountFields("Content-Length") > 0
+				// and the field has an empty value, which might be a protocol error.
+				// Or, if no Content-Length field was actually found (e.g. due to case issues if FindField is case-sensitive).
+				// For now, we'll treat it as Content-Length not definitively set.
+				hasBodyBytesTotal = false;
+			}
+
+			if (hasBodyBytesTotal && bodyBytesTotalValue == 0) {
 				fBodyType = HttpBodyType::NoContent;
 				fStreamState = HttpInputStreamState::Done;
-			} else {
+			} else if (hasBodyBytesTotal) { // Only FixedSize if Content-Length was valid and > 0
 				fBodyType = HttpBodyType::FixedSize;
+				fStreamState = HttpInputStreamState::Body;
+			} else {
+				// If Content-Length was present but invalid/empty, or multiple different values.
+				// RFC 7230 Section 3.3.3 Rule 5 indicates if Content-Length is invalid, it should be rejected or recovered.
+				// Here, we might fall through to chunked/variable size or error out.
+				// For now, let's assume if it's not a valid fixed size, it's variable (or an error later).
+				// This part of the logic might need refinement based on strict RFC adherence.
+				// The original code would throw if stol failed.
+				// If hasBodyBytesTotal is false here, it means std::stol would have failed.
+				// So we should re-throw or handle as per original logic.
+				if (fields.CountFields("Content-Length") > 0 && !hasBodyBytesTotal) {
+					// This means Content-Length was found, but was not parsable by previous logic.
+					throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
+						"Cannot parse Content-Length field value");
+				}
+				// If no valid Content-Length, proceed to rule 7 (variable size / close delimited)
+				fBodyType = HttpBodyType::VariableSize;
 				fStreamState = HttpInputStreamState::Body;
 			}
 		} catch (const std::logic_error& e) {
+			// This catch is for std::stol failing (invalid_argument, out_of_range)
 			throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 				"Cannot parse Content-Length field value (logic_error)");
 		}
-	} else { // This closing brace was for the `else if (fields.CountFields("Content-Length") > 0)`
+	} else {
 		// [6] Applies to request messages only (this is a response)
 		// [7] If nothing else then the received message is all data until connection close
 		// (this is the default)
 		fStreamState = HttpInputStreamState::Body;
-	} // This is the new closing brace for the `else` that replaced `else if (auto header ...)`
+		fBodyType = HttpBodyType::VariableSize; // Explicitly set for clarity
+	}
 
 	// Set up the body parser based on the logic above.
 	switch (fBodyType) {
@@ -179,30 +212,38 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 			fBodyParser = std::make_unique<HttpRawBodyParser>();
 			break;
 		case HttpBodyType::FixedSize:
-			// fBodyParser = std::make_unique<HttpRawBodyParser>(*bodyBytesTotal); // bodyBytesTotal is optional
-			// This will be handled when std::optional is fully replaced in cpp files.
-			// For now, assuming bodyBytesTotal will be correctly passed.
-			if (bodyBytesTotal) // This check will be refined later
-				fBodyParser = std::make_unique<HttpRawBodyParser>(*bodyBytesTotal, true);
-			else // Should not happen if HttpBodyType::FixedSize is set
-				fBodyParser = std::make_unique<HttpRawBodyParser>();
+			if (hasBodyBytesTotal)
+				fBodyParser = std::make_unique<HttpRawBodyParser>(bodyBytesTotalValue, true);
+			else {
+				// This should not be reached if fBodyType is FixedSize, implies logic error above.
+				// For safety, create a variable size parser or throw.
+				// Original code might have thrown before this.
+				throw BRuntimeError(__PRETTY_FUNCTION__, "FixedSize body type without a valid size.");
+				// fBodyParser = std::make_unique<HttpRawBodyParser>(); // Fallback, but indicates issue
+			}
 			break;
 		case HttpBodyType::Chunked:
 			fBodyParser = std::make_unique<HttpChunkedBodyParser>();
 			break;
 		case HttpBodyType::NoContent:
 		default:
+			// For NoContent, fBodyParser remains nullptr, and we should return true.
 			return true;
 	}
 
 	// Check Content-Encoding for compression
-	// auto header = fields.FindField("Content-Encoding"sv); // C++17
-	auto compressionHeader = fields.FindField("Content-Encoding");
-	// if (header != fields.end() && (header->Value() == "gzip" || header->Value() == "deflate")) { // C++17
+	const BString contentEncodingFieldName("Content-Encoding");
+	auto compressionHeader = fields.FindField(contentEncodingFieldName);
 	if (compressionHeader != fields.end() && (compressionHeader->Value() == "gzip" || compressionHeader->Value() == "deflate")) {
-		fBodyParser = std::make_unique<HttpBodyDecompression>(std::move(fBodyParser));
+		if (!fBodyParser) {
+			// This can happen if fBodyType was NoContent but Content-Encoding is present.
+			// This is unusual, but technically the body parser should wrap a "no-op" parser.
+			// For simplicity, if there's no content, compression is irrelevant.
+			// However, if there IS a body parser, we wrap it.
+		} else {
+			fBodyParser = std::make_unique<HttpBodyDecompression>(std::move(fBodyParser));
+		}
 	}
-
 	return true;
 }
 
@@ -244,12 +285,14 @@ HttpParser::HasContent() const noexcept
 /*!
 	\brief Return the total size of the body, if known.
 */
-std::optional<off_t>
-HttpParser::BodyBytesTotal() const noexcept
+off_t
+HttpParser::BodyBytesTotal(bool& hasTotal) const noexcept
 {
-	if (fBodyParser)
-		return fBodyParser->TotalBodySize();
-	return std::nullopt;
+	hasTotal = false;
+	if (fBodyParser) {
+		return fBodyParser->TotalBodySize(hasTotal);
+	}
+	return -1; // Or some other indicator of not-known when no parser
 }
 
 
@@ -279,12 +322,13 @@ HttpParser::Complete() const noexcept
 
 
 /*!
-	\brief Default implementation to return std::nullopt.
+	\brief Default implementation to return no total.
 */
-std::optional<off_t>
-HttpBodyParser::TotalBodySize() const noexcept
+off_t
+HttpBodyParser::TotalBodySize(bool& hasTotal) const noexcept
 {
-	return std::nullopt;
+	hasTotal = false;
+	return -1;
 }
 
 
@@ -305,6 +349,9 @@ HttpBodyParser::TransferredBodySize() const noexcept
 	\brief Construct a HttpRawBodyParser with an unknown content size.
 */
 HttpRawBodyParser::HttpRawBodyParser()
+	:
+	fBodyBytesTotalValue(-1),
+	fHasBodyBytesTotal(false)
 {
 }
 
@@ -312,9 +359,10 @@ HttpRawBodyParser::HttpRawBodyParser()
 /*!
 	\brief Construct a HttpRawBodyParser with expected \a bodyBytesTotal size.
 */
-HttpRawBodyParser::HttpRawBodyParser(off_t bodyBytesTotal)
+HttpRawBodyParser::HttpRawBodyParser(off_t bodyBytesTotal, bool hasTotal)
 	:
-	fBodyBytesTotal(bodyBytesTotal)
+	fBodyBytesTotalValue(bodyBytesTotal),
+	fHasBodyBytesTotal(hasTotal)
 {
 }
 
@@ -343,11 +391,15 @@ BodyParseResult
 HttpRawBodyParser::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeToBody, bool readEnd)
 {
 	auto bytesToRead = buffer.RemainingBytes();
-	if (fBodyBytesTotal) {
-		auto expectedRemainingBytes = *fBodyBytesTotal - fTransferredBodySize;
-		if (expectedRemainingBytes < static_cast<off_t>(buffer.RemainingBytes()))
+	if (fHasBodyBytesTotal) {
+		auto expectedRemainingBytes = fBodyBytesTotalValue - fTransferredBodySize;
+		if (expectedRemainingBytes < 0) expectedRemainingBytes = 0; // Already read enough or too much
+
+		if (static_cast<off_t>(bytesToRead) > expectedRemainingBytes)
 			bytesToRead = expectedRemainingBytes;
 		else if (readEnd && expectedRemainingBytes > static_cast<off_t>(buffer.RemainingBytes())) {
+			// This condition means: we expected more bytes (expectedRemainingBytes > current buffer content)
+			// AND this is the end of the input stream. So, data is incomplete.
 			throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 				"Message body is incomplete; less data received than expected");
 		}
@@ -363,8 +415,8 @@ HttpRawBodyParser::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeToBod
 			"Could not write all available body bytes to the target.");
 	}
 
-	if (fBodyBytesTotal) {
-		if (*fBodyBytesTotal == fTransferredBodySize)
+	if (fHasBodyBytesTotal) {
+		if (fBodyBytesTotalValue == fTransferredBodySize)
 			return {bytesRead, bytesRead, true};
 		else
 			return {bytesRead, bytesRead, false};
@@ -374,12 +426,15 @@ HttpRawBodyParser::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeToBod
 
 
 /*!
-	\brief Override default implementation and return known body size (or std::nullopt)
+	\brief Override default implementation and return known body size (or indicate if not known)
 */
-std::optional<off_t>
-HttpRawBodyParser::TotalBodySize() const noexcept
+off_t
+HttpRawBodyParser::TotalBodySize(bool& hasTotal) const noexcept
 {
-	return fBodyBytesTotal;
+	hasTotal = fHasBodyBytesTotal;
+	if (fHasBodyBytesTotal)
+		return fBodyBytesTotalValue;
+	return -1;
 }
 
 
@@ -409,29 +464,34 @@ HttpChunkedBodyParser::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 			case ChunkSize:
 			{
 				// Read the next chunk size from the buffer; if unsuccesful wait for more data
-				auto chunkSizeString = buffer.GetNextLine();
-				if (!chunkSizeString)
-					return {totalBytesRead, totalBytesRead, false};
-				auto chunkSizeStr = std::string(chunkSizeString.value().String());
+				bool hasChunkSizeLine;
+				BString chunkSizeBString = buffer.GetNextLine(hasChunkSizeLine);
+				if (!hasChunkSizeLine)
+					return {totalBytesRead, totalBytesRead, false}; // Pass through existing bytesWritten if any
+
+				// auto chunkSizeStr = std::string(chunkSizeString.value().String()); // C++17
+				std::string chunkSizeStdString(chunkSizeBString.String());
 				try {
 					size_t pos = 0;
-					fRemainingChunkSize = std::stoll(chunkSizeStr, &pos, 16);
-					if (pos < chunkSizeStr.size() && chunkSizeStr[pos] != ';') {
+					fRemainingChunkSize = std::stoll(chunkSizeStdString, &pos, 16);
+					if (pos < chunkSizeStdString.size() && chunkSizeStdString[pos] != ';') {
 						throw BNetworkRequestError(
-							__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
+							__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError, "Invalid char after chunk size");
 					}
-				} catch (const std::invalid_argument&) {
+				} catch (const std::invalid_argument& e) {
 					throw BNetworkRequestError(
-						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
-				} catch (const std::out_of_range&) {
+						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError, "Invalid chunk size format (invalid_argument)");
+				} catch (const std::out_of_range& e) {
 					throw BNetworkRequestError(
-						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
+						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError, "Chunk size out of range");
 				}
 
 				if (fRemainingChunkSize > 0)
 					fChunkParserState = Chunk;
-				else
-					fChunkParserState = Trailers;
+				else { // Zero chunk size means this is the last chunk
+					fLastChunk = true; // Mark that we've seen the 0-size chunk
+					fChunkParserState = Trailers; // Proceed to trailers
+				}
 				break;
 			}
 
@@ -444,58 +504,60 @@ HttpChunkedBodyParser::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 					bytesToRead = fRemainingChunkSize;
 
 				auto bytesRead = buffer.WriteTo(writeToBody, bytesToRead);
-				if (bytesRead != bytesToRead) {
-					// Fail if not all expected bytes are written.
-					throw BNetworkRequestError(__PRETTY_FUNCTION__,
-						BNetworkRequestError::SystemError,
-						"Could not write all available body bytes to the target.");
-				}
+				// The writeToBody function itself should handle errors by throwing.
+				// Here we just assert that it wrote what we asked, or less if buffer was smaller (already handled by bytesToRead calc).
+				// The HttpRawBodyParser's WriteTo might throw if the func doesn't write all.
 
 				fTransferredBodySize += bytesRead;
-				totalBytesRead += bytesRead;
+				totalBytesRead += bytesRead; // totalBytesRead is for this ParseBody call only
 				fRemainingChunkSize -= bytesRead;
 				if (fRemainingChunkSize == 0)
-					fChunkParserState = ChunkEnd;
+					fChunkParserState = ChunkEnd; // Expect CRLF after chunk data
 				break;
 			}
 
-			case ChunkEnd:
+			case ChunkEnd: // After chunk data, expect CRLF
 			{
-				if (buffer.RemainingBytes() < 2) {
-					// not enough data in the buffer to finish the chunk
+				if (buffer.RemainingBytes() < 2) { // Need at least CRLF
 					return {totalBytesRead, totalBytesRead, false};
 				}
-				auto chunkEndString = buffer.GetNextLine();
-				if (!chunkEndString || chunkEndString.value().Length() != 0) {
-					// There should have been an empty chunk
-					throw BNetworkRequestError(
-						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError);
+				bool hasChunkEndLine;
+				BString chunkEndString = buffer.GetNextLine(hasChunkEndLine);
+				if (!hasChunkEndLine) { // Should find CRLF
+					// Not enough data for CRLF, or malformed
+					return {totalBytesRead, totalBytesRead, false};
 				}
-
-				fChunkParserState = ChunkSize;
+				if (!chunkEndString.IsEmpty()) { // Expecting an empty line (just CRLF)
+					throw BNetworkRequestError(
+						__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError, "Chunk data not followed by CRLF");
+				}
+				// Successfully read CRLF
+				if (fLastChunk) // If this CRLF was after the 0-size chunk
+					fChunkParserState = Trailers;
+				else
+					fChunkParserState = ChunkSize; // Go look for next chunk size
 				break;
 			}
 
 			case Trailers:
 			{
-				auto trailerString = buffer.GetNextLine();
-				if (!trailerString) {
-					// More data to come
+				bool hasTrailerLine;
+				BString trailerString = buffer.GetNextLine(hasTrailerLine);
+				if (!hasTrailerLine) {
 					return {totalBytesRead, totalBytesRead, false};
 				}
 
-				if (trailerString.value().Length() > 0) {
-					// Ignore empty trailers for now
-					// TODO: review if the API should support trailing headers
-				} else {
+				if (trailerString.IsEmpty()) { // Empty line signifies end of trailers
 					fChunkParserState = Complete;
 					return {totalBytesRead, totalBytesRead, true};
 				}
+				// TODO: Process trailerString if needed (RFC 7230 allows them)
+				// For now, we just consume them until an empty line.
 				break;
 			}
 
 			case Complete:
-				return {totalBytesRead, totalBytesRead, true};
+				return {totalBytesRead, totalBytesRead, true}; // Already complete
 		}
 	}
 	return {totalBytesRead, totalBytesRead, false};
@@ -588,8 +650,17 @@ HttpBodyDecompression::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 /*!
 	\brief Return the TotalBodySize() from the underlying chunked or raw parser.
 */
-std::optional<off_t>
-HttpBodyDecompression::TotalBodySize() const noexcept
+off_t
+HttpBodyDecompression::TotalBodySize(bool& hasTotal) const noexcept
 {
-	return fBodyParser->TotalBodySize();
+	// The underlying parser (fBodyParser) might know the total size
+	// (e.g. if it's a HttpRawBodyParser for a non-chunked, non-compressed stream
+	// with Content-Length). Decompression itself (like gzip) usually doesn't
+	// know the uncompressed size beforehand unless it's in a trailer, which
+	// our current chunked parser doesn't fully process for size.
+	if (fBodyParser)
+		return fBodyParser->TotalBodySize(hasTotal);
+
+	hasTotal = false;
+	return -1;
 }

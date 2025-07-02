@@ -11,8 +11,9 @@
 
 
 #include <memory>
-#include <optional>
+// #include <optional> // C++17, replaced
 #include <string>
+#include <exception> // For std::exception_ptr
 
 #include <DataIO.h>
 #include <ExclusiveBorrow.h>
@@ -35,10 +36,18 @@ struct HttpResultPrivate {
 			sem_id				data_wait;
 
 	// Data
-			std::optional<BHttpStatus> status;
-			std::optional<BHttpFields> fields;
-			std::optional<BHttpBody> body;
-			std::optional<std::exception_ptr> error;
+			// std::optional<BHttpStatus> status;
+			BHttpStatus			statusValue;
+			bool				hasStatusValue;
+			// std::optional<BHttpFields> fields;
+			BHttpFields			fieldsValue;
+			bool				hasFieldsValue;
+			// std::optional<BHttpBody> body;
+			BHttpBody			bodyValue;
+			bool				hasBodyValue;
+			// std::optional<std::exception_ptr> error;
+			std::exception_ptr	errorValue;
+			bool				hasErrorValue;
 
 	// Interim body storage (used while the request is running)
 			BString				bodyString;
@@ -59,7 +68,11 @@ struct HttpResultPrivate {
 
 inline HttpResultPrivate::HttpResultPrivate(int32 identifier)
 	:
-	id(identifier)
+	id(identifier),
+	hasStatusValue(false),
+	hasFieldsValue(false),
+	hasBodyValue(false),
+	hasErrorValue(false)
 {
 	std::string name = "httpresult:" + std::to_string(identifier);
 	data_wait = create_sem(1, name.c_str());
@@ -95,7 +108,8 @@ HttpResultPrivate::SetError(std::exception_ptr e)
 	// Release any held body target borrow
 	bodyTarget.Return();
 
-	error = e;
+	errorValue = e;
+	hasErrorValue = true;
 	atomic_set(&requestStatus, kError);
 	release_sem(data_wait);
 }
@@ -104,7 +118,8 @@ HttpResultPrivate::SetError(std::exception_ptr e)
 inline void
 HttpResultPrivate::SetStatus(BHttpStatus&& s)
 {
-	status = std::move(s);
+	statusValue = std::move(s);
+	hasStatusValue = true;
 	atomic_set(&requestStatus, kStatusReady);
 	release_sem(data_wait);
 }
@@ -113,7 +128,8 @@ HttpResultPrivate::SetStatus(BHttpStatus&& s)
 inline void
 HttpResultPrivate::SetFields(BHttpFields&& f)
 {
-	fields = std::move(f);
+	fieldsValue = std::move(f);
+	hasFieldsValue = true;
 	atomic_set(&requestStatus, kHeadersReady);
 	release_sem(data_wait);
 }
@@ -123,10 +139,11 @@ inline void
 HttpResultPrivate::SetBody()
 {
 	if (bodyTarget.HasValue()) {
-		body = BHttpBody{};
+		bodyValue = BHttpBody{};
 		bodyTarget.Return();
 	} else
-		body = BHttpBody{std::move(bodyString)};
+		bodyValue = BHttpBody{std::move(bodyString)};
+	hasBodyValue = true;
 
 	atomic_set(&requestStatus, kBodyReady);
 	release_sem(data_wait);

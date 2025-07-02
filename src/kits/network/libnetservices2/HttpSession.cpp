@@ -362,7 +362,7 @@ BHttpSession::Impl::DataThreadFunc(void* arg)
 			continue;
 		else if (waitStatus < 0) {
 			// Something went inexplicably wrong
-			throw BSystemError("wait_for_objects()", status);
+			throw BSystemError("wait_for_objects()", waitStatus);
 		}
 
 		// First check if the change is in acquiring the sem, meaning that

@@ -7,7 +7,7 @@
 #define _B_HTTP_RESULT_H_
 
 #include <memory>
-#include <optional>
+// #include <optional> // C++17, removed
 
 #include <String.h>
 
@@ -23,7 +23,9 @@ struct HttpResultPrivate;
 
 
 struct BHttpBody {
-			std::optional<BString> text;
+			// std::optional<BString> text; // C++17
+			BString text; // If text is not set, it will be empty. Use text.IsEmpty() to check.
+			bool hasText = false; // Indicates if text is set
 };
 
 

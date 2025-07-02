@@ -15,7 +15,7 @@
 #include <NetServicesDefs.h>
 #include <ZlibCompressionAlgorithm.h>
 
-using namespace std::literals;
+// using namespace std::literals; // For sv suffix, removed
 using namespace BPrivate::Network;
 
 
@@ -123,22 +123,29 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 		// no content [2] NOT SUPPORTED: when doing a CONNECT request, no content
 		fBodyType = HttpBodyType::NoContent;
 		fStreamState = HttpInputStreamState::Done;
-	} else if (auto header = fields.FindField("Transfer-Encoding"sv);
-			   header != fields.end() && header->Value() == "chunked"sv) {
+	// } else if (auto header = fields.FindField("Transfer-Encoding"sv); // C++17
+	// 			   header != fields.end() && header->Value() == "chunked"sv) { // C++17
+	} else {
+		auto header = fields.FindField("Transfer-Encoding");
+		if (header != fields.end() && header->Value() == "chunked") {
 		// [3] If there is a Transfer-Encoding heading set to 'chunked'
 		// TODO: support the more advanced rules in the RFC around the meaning of this field
 		fBodyType = HttpBodyType::Chunked;
 		fStreamState = HttpInputStreamState::Body;
-	} else if (fields.CountFields("Content-Length"sv) > 0) {
+	// } else if (fields.CountFields("Content-Length"sv) > 0) { // C++17
+	} else if (fields.CountFields("Content-Length") > 0) {
 		// [4] When there is no Transfer-Encoding, then look for Content-Encoding:
 		//	- If there are more than one, the values must match
 		//	- The value must be a valid number
 		// [5] If there is a valid value, then that is the expected size of the body
 		try {
-			auto contentLength = std::string();
+			// auto contentLength = std::string(); // C++ std::string
+			BString contentLength;
 			for (const auto& field: fields) {
-				if (field.Name() == "Content-Length"sv) {
-					if (contentLength.size() == 0)
+				// if (field.Name() == "Content-Length"sv) { // C++17
+				if (field.Name().GetString() == "Content-Length") {
+					// if (contentLength.size() == 0) // C++ std::string
+					if (contentLength.Length() == 0)
 						contentLength = field.Value();
 					else if (contentLength != field.Value()) {
 						throw BNetworkRequestError(__PRETTY_FUNCTION__,
@@ -159,12 +166,12 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 			throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 				"Cannot parse Content-Length field value (logic_error)");
 		}
-	} else {
+	} else { // This closing brace was for the `else if (fields.CountFields("Content-Length") > 0)`
 		// [6] Applies to request messages only (this is a response)
 		// [7] If nothing else then the received message is all data until connection close
 		// (this is the default)
 		fStreamState = HttpInputStreamState::Body;
-	}
+	} // This is the new closing brace for the `else` that replaced `else if (auto header ...)`
 
 	// Set up the body parser based on the logic above.
 	switch (fBodyType) {
@@ -172,7 +179,13 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 			fBodyParser = std::make_unique<HttpRawBodyParser>();
 			break;
 		case HttpBodyType::FixedSize:
-			fBodyParser = std::make_unique<HttpRawBodyParser>(*bodyBytesTotal);
+			// fBodyParser = std::make_unique<HttpRawBodyParser>(*bodyBytesTotal); // bodyBytesTotal is optional
+			// This will be handled when std::optional is fully replaced in cpp files.
+			// For now, assuming bodyBytesTotal will be correctly passed.
+			if (bodyBytesTotal) // This check will be refined later
+				fBodyParser = std::make_unique<HttpRawBodyParser>(*bodyBytesTotal, true);
+			else // Should not happen if HttpBodyType::FixedSize is set
+				fBodyParser = std::make_unique<HttpRawBodyParser>();
 			break;
 		case HttpBodyType::Chunked:
 			fBodyParser = std::make_unique<HttpChunkedBodyParser>();
@@ -183,8 +196,10 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 	}
 
 	// Check Content-Encoding for compression
-	auto header = fields.FindField("Content-Encoding"sv);
-	if (header != fields.end() && (header->Value() == "gzip" || header->Value() == "deflate")) {
+	// auto header = fields.FindField("Content-Encoding"sv); // C++17
+	auto compressionHeader = fields.FindField("Content-Encoding");
+	// if (header != fields.end() && (header->Value() == "gzip" || header->Value() == "deflate")) { // C++17
+	if (compressionHeader != fields.end() && (compressionHeader->Value() == "gzip" || compressionHeader->Value() == "deflate")) {
 		fBodyParser = std::make_unique<HttpBodyDecompression>(std::move(fBodyParser));
 	}
 
@@ -533,7 +548,8 @@ HttpBodyDecompression::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 	// Get the underlying raw or chunked parser to write data to our decompressionstream
 	auto parseResults = fBodyParser->ParseBody(
 		buffer,
-		[this](const std::byte* buffer, size_t bufferSize) {
+		// [this](const std::byte* buffer, size_t bufferSize) { // C++17
+		[this](const unsigned char* buffer, size_t bufferSize) {
 			auto status = fDecompressingStream->WriteExactly(buffer, bufferSize);
 			if (status != B_OK) {
 				throw BNetworkRequestError(
@@ -553,9 +569,12 @@ HttpBodyDecompression::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 	}
 
 	size_t bytesWritten = 0;
-	if (auto bodySize = fDecompressorStorage->Position(); bodySize > 0) {
+	// if (auto bodySize = fDecompressorStorage->Position(); bodySize > 0) { // C++17 if-initializer
+	auto bodySize = fDecompressorStorage->Position();
+	if (bodySize > 0) {
 		bytesWritten
-			= writeToBody(static_cast<const std::byte*>(fDecompressorStorage->Buffer()), bodySize);
+			// = writeToBody(static_cast<const std::byte*>(fDecompressorStorage->Buffer()), bodySize); // C++17
+			= writeToBody(static_cast<const unsigned char*>(fDecompressorStorage->Buffer()), bodySize);
 		if (static_cast<off_t>(bytesWritten) != bodySize) {
 			throw BNetworkRequestError(
 				__PRETTY_FUNCTION__, BNetworkRequestError::SystemError, B_PARTIAL_WRITE);

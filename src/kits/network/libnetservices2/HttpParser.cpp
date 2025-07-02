@@ -35,7 +35,7 @@ HttpParser::SetNoContent() noexcept
 	if (fStreamState > HttpInputStreamState::Fields)
 		debugger("Cannot set the parser to no content after parsing of the body has started");
 	fBodyType = HttpBodyType::NoContent;
-};
+}
 
 
 /*!
@@ -361,10 +361,10 @@ HttpRawBodyParser::HttpRawBodyParser()
 /*!
 	\brief Construct a HttpRawBodyParser with expected \a bodyBytesTotal size.
 */
-HttpRawBodyParser::HttpRawBodyParser(off_t bodyBytesTotal, bool hasTotal)
+HttpRawBodyParser::HttpRawBodyParser(off_t bodyBytesTotalValue, bool hasTotalValue)
 	:
-	fBodyBytesTotalValue(bodyBytesTotal),
-	fHasBodyBytesTotal(hasTotal)
+	fBodyBytesTotalValue(bodyBytesTotalValue),
+	fHasBodyBytesTotal(hasTotalValue)
 {
 }
 

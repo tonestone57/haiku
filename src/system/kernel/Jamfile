@@ -104,7 +104,7 @@ KernelLd kernel_$(TARGET_ARCH) :
 	kernel_messaging.o
 	kernel_posix.o
 	kernel_slab.o
-	kernel_util.o
+	<util>kernel_util.o
 	kernel_vm.o
 
 	kernel_arch_$(TARGET_KERNEL_ARCH).o

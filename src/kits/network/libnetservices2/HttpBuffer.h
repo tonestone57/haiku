@@ -10,7 +10,8 @@
 // #include <optional> // C++17, removed
 // #include <string_view> // C++17, removed. Will use BString or const char* + length.
 #include <vector>
-#include <cstddef> // For SIZE_MAX
+#include <cstddef> // For size_t
+#include <cstdint> // For SIZE_MAX
 
 class BDataIO;
 class BString;

@@ -8,6 +8,7 @@
 
 #include "HttpBuffer.h"
 
+#include <algorithm> // For std::search
 #include <DataIO.h>
 #include <NetServicesDefs.h>
 #include <String.h>
@@ -197,7 +198,7 @@ HttpBuffer::Data(size_t& length) const noexcept
 HttpBuffer&
 HttpBuffer::operator<<(const BString& data)
 {
-	if (data.length() > (fBuffer.capacity() - fBuffer.size())) {
+	if (data.Length() > (fBuffer.capacity() - fBuffer.size())) { // Changed .length() to .Length()
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 			"No capacity left in buffer to append data.");
 	}

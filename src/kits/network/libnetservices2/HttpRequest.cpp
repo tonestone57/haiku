@@ -411,17 +411,18 @@ BHttpRequest::SetFields(const BHttpFields& fields)
 		fData = std::make_unique<Data>();
 
 	for (auto& field: fields) {
-		// field.Name() returns BString, so we need to compare with const char*
+		// field.Name() returns const FieldName&. We need to compare with const char* reservedName.
+		// FieldName has operator==(const BString&).
 		bool isReserved = false;
 		for (const char* reservedName : fReservedOptionalFieldNames) {
-			if (field.Name() == reservedName) {
+			if (field.Name() == BString(reservedName)) { // Explicitly convert reservedName to BString
 				isReserved = true;
 				break;
 			}
 		}
 		if (isReserved) {
 			throw BHttpFields::InvalidInput(
-				__PRETTY_FUNCTION__, field.Name());
+				__PRETTY_FUNCTION__, field.Name().GetString()); // Use GetString() for BString output
 		}
 	}
 	fData->optionalFields = fields;

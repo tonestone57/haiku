@@ -17,6 +17,7 @@
 
 // using namespace std::literals; // For sv suffix, removed
 using namespace BPrivate::Network;
+// Re-evaluating HttpParser.cpp for subtle syntax issues.
 
 
 // #pragma mark -- HttpParser
@@ -204,7 +205,8 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 		// (this is the default)
 		fStreamState = HttpInputStreamState::Body;
 		fBodyType = HttpBodyType::VariableSize; // Explicitly set for clarity
-	}
+	} // Closes the main else related to (fBodyType == HttpBodyType::NoContent)
+	// } // This was the diff from before, which was incorrect, it should be above the switch
 
 	// Set up the body parser based on the logic above.
 	switch (fBodyType) {

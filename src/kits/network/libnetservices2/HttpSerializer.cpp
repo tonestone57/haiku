@@ -14,7 +14,7 @@
 
 #include "HttpBuffer.h"
 
-using namespace std::literals;
+// using namespace std::literals; // C++17, for ""sv suffix, no longer needed
 using namespace BPrivate::Network;
 
 
@@ -27,13 +27,17 @@ HttpSerializer::SetTo(HttpBuffer& buffer, const BHttpRequest& request)
 	buffer.Clear();
 	request.SerializeHeaderTo(buffer);
 	fState = HttpSerializerState::Header;
+	fHasBodySize = false; // Initialize
 
 	if (auto requestBody = request.RequestBody()) {
 		fBody = requestBody->input.get();
-		if (requestBody->size) {
-			fBodySize = *(requestBody->size);
+		if (requestBody->hasSize) {
+			fBodySizeValue = requestBody->sizeValue;
+			fHasBodySize = true;
 		}
+		// If !requestBody->hasSize, fHasBodySize remains false, meaning chunked or close-delimited.
 	}
+	// If no requestBody, fBody remains nullptr, fHasBodySize remains false.
 }
 
 
@@ -82,7 +86,7 @@ HttpSerializer::Serialize(HttpBuffer& buffer, BDataIO* target)
 					break;
 				}
 
-				if (fBodySize && fBodySize.value() == fTransferredBodySize) {
+				if (fHasBodySize && fBodySizeValue == fTransferredBodySize) {
 					fState = HttpSerializerState::Done;
 					finishing = true;
 				}
@@ -96,10 +100,23 @@ HttpSerializer::Serialize(HttpBuffer& buffer, BDataIO* target)
 		}
 
 		// Load more data into the buffer
-		std::optional<size_t> maxReadSize = std::nullopt;
-		if (fBodySize)
-			maxReadSize = fBodySize.value() - fTransferredBodySize;
-		buffer.ReadFrom(fBody, maxReadSize);
+		size_t readSizeHint = SIZE_MAX; // from <cstddef>
+		if (fHasBodySize) {
+			if (fBodySizeValue > fTransferredBodySize) {
+				readSizeHint = fBodySizeValue - fTransferredBodySize;
+			} else {
+				readSizeHint = 0;
+			}
+		}
+
+		if (fState != HttpSerializerState::Done) {
+			if (fHasBodySize && readSizeHint == 0) {
+				// If body size is known and we've transferred it all, mark as done.
+				fState = HttpSerializerState::Done;
+			} else {
+				buffer.ReadFrom(fBody, readSizeHint);
+			}
+		}
 	}
 
 	return bodyBytesWritten;
@@ -109,7 +126,7 @@ HttpSerializer::Serialize(HttpBuffer& buffer, BDataIO* target)
 bool
 HttpSerializer::_IsChunked() const noexcept
 {
-	return fBodySize == std::nullopt;
+	return !fHasBodySize;
 }
 
 
@@ -117,7 +134,7 @@ size_t
 HttpSerializer::_WriteToTarget(HttpBuffer& buffer, BDataIO* target) const
 {
 	size_t bytesWritten = 0;
-	buffer.WriteTo([target, &bytesWritten](const std::byte* buffer, size_t size) {
+	buffer.WriteTo([target, &bytesWritten](const unsigned char* buffer, size_t size) { // Replaced std::byte
 		ssize_t result = B_INTERRUPTED;
 		while (result == B_INTERRUPTED) {
 			result = target->Write(buffer, size);

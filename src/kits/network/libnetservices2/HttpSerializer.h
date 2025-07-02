@@ -8,7 +8,7 @@
 
 
 #include <functional>
-#include <optional>
+// #include <optional> // C++17, replaced
 
 class BDataIO;
 
@@ -19,7 +19,8 @@ namespace Network {
 class BHttpRequest;
 class HttpBuffer;
 
-using HttpTransferFunction = std::function<size_t(const std::byte*, size_t)>;
+// using HttpTransferFunction = std::function<size_t(const std::byte*, size_t)>; // C++17
+using HttpTransferFunction = std::function<size_t(const unsigned char*, size_t)>;
 
 
 enum class HttpSerializerState { Uninitialized, Header, ChunkHeader, Body, Done };
@@ -35,7 +36,8 @@ public:
 
 			size_t				Serialize(HttpBuffer& buffer, BDataIO* target);
 
-			std::optional<off_t> BodyBytesTotal() const noexcept;
+			// std::optional<off_t> BodyBytesTotal() const noexcept; // C++17
+			off_t				BodyBytesTotal(bool& hasTotal) const noexcept;
 			off_t				BodyBytesTransferred() const noexcept;
 			bool				Complete() const noexcept;
 
@@ -47,7 +49,9 @@ private:
 			HttpSerializerState	fState = HttpSerializerState::Uninitialized;
 			BDataIO*			fBody = nullptr;
 			off_t				fTransferredBodySize = 0;
-			std::optional<off_t> fBodySize;
+			// std::optional<off_t> fBodySize; // C++17
+			off_t				fBodySizeValue;
+			bool				fHasBodySize;
 };
 
 
@@ -58,10 +62,13 @@ HttpSerializer::IsInitialized() const noexcept
 }
 
 
-inline std::optional<off_t>
-HttpSerializer::BodyBytesTotal() const noexcept
+inline off_t
+HttpSerializer::BodyBytesTotal(bool& hasTotal) const noexcept
 {
-	return fBodySize;
+	hasTotal = fHasBodySize;
+	if (fHasBodySize)
+		return fBodySizeValue;
+	return -1; // Or some other indicator for "not known"
 }
 
 

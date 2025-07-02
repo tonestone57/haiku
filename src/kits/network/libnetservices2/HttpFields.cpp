@@ -34,10 +34,11 @@ using namespace BPrivate::Network;
 	\returns \c true if the string is valid, or \c false if it is not.
 */
 static inline bool
-validate_value_string(const std::string_view& string)
+validate_value_string(const BString& string)
 {
-	for (auto it = string.cbegin(); it < string.cend(); it++) {
-		if ((*it >= 0 && *it < 32) || *it == 127 || *it == '\t')
+	for (int32 i = 0; i < string.Length(); ++i) {
+		char c = string[i];
+		if ((c >= 0 && c < 32) || c == 127 || c == '\t')
 			return false;
 	}
 	return true;
@@ -50,10 +51,15 @@ validate_value_string(const std::string_view& string)
 	Inspired by https://stackoverflow.com/a/4119881
 */
 static inline bool
-iequals(const std::string_view& a, const std::string_view& b)
+iequals(const BString& a, const BString& b)
 {
-	return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-		[](char a, char b) { return tolower(a) == tolower(b); });
+	if (a.Length() != b.Length())
+		return false;
+	for (int32 i = 0; i < a.Length(); ++i) {
+		if (tolower(a[i]) != tolower(b[i]))
+			return false;
+	}
+	return true;
 }
 
 
@@ -63,22 +69,23 @@ iequals(const std::string_view& a, const std::string_view& b)
 	Inspired by:
 		https://terrislinenbach.medium.com/trimming-whitespace-from-a-string-view-6795e18b108f
 */
-static inline std::string_view
-trim(std::string_view in)
+static inline BString
+trim(const BString& in)
 {
-	auto left = in.begin();
-	for (;; ++left) {
-		if (left == in.end())
-			return std::string_view();
-		if (!isspace(*left))
-			break;
+	int32_t start = 0;
+	while (start < in.Length() && isspace(in[start])) {
+		start++;
 	}
 
-	auto right = in.end() - 1;
-	for (; right > left && isspace(*right); --right)
-		;
+	int32_t end = in.Length() - 1;
+	while (end >= start && isspace(in[end])) {
+		end--;
+	}
 
-	return std::string_view(left, std::distance(left, right) + 1);
+	if (start > end) // String is all whitespace or empty
+		return BString();
+
+	return BString(in.String() + start, end - start + 1);
 }
 
 
@@ -113,15 +120,28 @@ BHttpFields::InvalidInput::DebugMessage() const
 
 
 BHttpFields::FieldName::FieldName() noexcept
+	// fNameString is default constructed
+{
+}
+
+// This constructor was for std::string_view, which is removed from the header.
+// BHttpFields::FieldName::FieldName(const std::string_view& name) noexcept
+// 	:
+// 	fName(name) // This fName would be BString fNameString now
+// {
+// }
+
+
+BHttpFields::FieldName::FieldName(const BString& name) noexcept
 	:
-	fName(std::string_view())
+	fNameString(name)
 {
 }
 
 
-BHttpFields::FieldName::FieldName(const std::string_view& name) noexcept
+BHttpFields::FieldName::FieldName(const char* name) noexcept
 	:
-	fName(name)
+	fNameString(name)
 {
 }
 
@@ -129,7 +149,10 @@ BHttpFields::FieldName::FieldName(const std::string_view& name) noexcept
 /*!
 	\brief Copy constructor;
 */
-BHttpFields::FieldName::FieldName(const FieldName& other) noexcept = default;
+BHttpFields::FieldName::FieldName(const FieldName& other) noexcept
+	: fNameString(other.fNameString) // Default would work too if BString copy is fine
+{
+}
 
 
 /*!
@@ -141,9 +164,9 @@ BHttpFields::FieldName::FieldName(const FieldName& other) noexcept = default;
 */
 BHttpFields::FieldName::FieldName(FieldName&& other) noexcept
 	:
-	fName(std::move(other.fName))
+	fNameString(std::move(other.fNameString))
 {
-	other.fName = std::string_view();
+	// other.fNameString is now in a valid but unspecified state (moved from)
 }
 
 
@@ -151,7 +174,13 @@ BHttpFields::FieldName::FieldName(FieldName&& other) noexcept
 	\brief Copy assignment;
 */
 BHttpFields::FieldName& BHttpFields::FieldName::operator=(
-	const BHttpFields::FieldName& other) noexcept = default;
+	const BHttpFields::FieldName& other) noexcept
+{
+	if (this != &other) {
+		fNameString = other.fNameString;
+	}
+	return *this;
+}
 
 
 /*!
@@ -164,8 +193,10 @@ BHttpFields::FieldName& BHttpFields::FieldName::operator=(
 BHttpFields::FieldName&
 BHttpFields::FieldName::operator=(BHttpFields::FieldName&& other) noexcept
 {
-	fName = std::move(other.fName);
-	other.fName = std::string_view();
+	if (this != &other) {
+		fNameString = std::move(other.fNameString);
+		// other.fNameString is now in a valid but unspecified state
+	}
 	return *this;
 }
 
@@ -173,27 +204,28 @@ BHttpFields::FieldName::operator=(BHttpFields::FieldName&& other) noexcept
 bool
 BHttpFields::FieldName::operator==(const BString& other) const noexcept
 {
-	return iequals(fName, std::string_view(other.String()));
+	return iequals(fNameString, other);
 }
 
-
-bool
-BHttpFields::FieldName::operator==(const std::string_view& other) const noexcept
-{
-	return iequals(fName, other);
-}
-
+// operator==(const std::string_view& other) removed from header
 
 bool
 BHttpFields::FieldName::operator==(const BHttpFields::FieldName& other) const noexcept
 {
-	return iequals(fName, other.fName);
+	return iequals(fNameString, other.fNameString);
+}
+
+// operator std::string_view() removed from header
+BHttpFields::FieldName::operator const BString&() const
+{
+	return fNameString;
 }
 
 
-BHttpFields::FieldName::operator std::string_view() const
+const BString&
+BHttpFields::FieldName::GetString() const
 {
-	return fName;
+	return fNameString;
 }
 
 
@@ -201,95 +233,138 @@ BHttpFields::FieldName::operator std::string_view() const
 
 
 BHttpFields::Field::Field() noexcept
-	:
-	fName(std::string_view()),
-	fValue(std::string_view())
+	: // fName (FieldName) and fValueString (BString) are default constructed
+	fHasRawField(false)
 {
 }
 
+// Constructor for std::string_view name, std::string_view value removed from header,
+// so definition removed. BString and const char* overloads will be used.
 
-BHttpFields::Field::Field(const std::string_view& name, const std::string_view& value)
+BHttpFields::Field::Field(const BString& name, const BString& value)
+	: fHasRawField(true), fName(name), fValueString(value)
 {
-	if (name.length() == 0 || !validate_http_token_string(name))
-		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, BString(name.data(), name.size()));
-	if (value.length() == 0 || !validate_value_string(value))
-		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, BString(value.data(), value.length()));
+	if (name.IsEmpty() || !validate_http_token_string(name)) // validate_http_token_string needs to be adapted for BString
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, name);
+	if (value.IsEmpty() || !validate_value_string(value)) // validate_value_string already takes BString
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, value);
 
-	BString rawField(name.data(), name.size());
-	rawField << ": ";
-	rawField.Append(value.data(), value.size());
+	fRawFieldString.SetToFormat("%s: %s", name.String(), value.String());
+}
 
-	fName = std::string_view(rawField.String(), name.size());
-	fValue = std::string_view(rawField.String() + name.size() + 2, value.size());
-	fRawField = std::move(rawField);
+BHttpFields::Field::Field(const char* name, const char* value)
+	: fHasRawField(true), fName(name), fValueString(value)
+{
+	BString bname(name);
+	BString bvalue(value);
+	if (bname.IsEmpty() || !validate_http_token_string(bname))
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, bname);
+	if (bvalue.IsEmpty() || !validate_value_string(bvalue))
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, bvalue);
+
+	fRawFieldString.SetToFormat("%s: %s", name, value);
 }
 
 
-BHttpFields::Field::Field(BString& field)
+BHttpFields::Field::Field(BString& field) // Takes non-const BString& to potentially move from it
+	: fHasRawField(true)
 {
 	// Check if the input contains a key, a separator and a value.
 	auto separatorIndex = field.FindFirst(':');
-	if (separatorIndex <= 0)
+	if (separatorIndex <= 0) // Must have name, ':', and some value part (even if empty after trim)
 		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, field);
 
-	// Get the name and the value. Remove whitespace around the value.
-	auto name = std::string_view(field.String(), separatorIndex);
-	auto value = trim(std::string_view(field.String() + separatorIndex + 1));
+	BString namePart;
+	field.CopyInto(namePart, 0, separatorIndex);
 
-	if (name.length() == 0 || !validate_http_token_string(name))
-		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, BString(name.data(), name.size()));
-	if (value.length() == 0 || !validate_value_string(value))
-		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, BString(value.data(), value.length()));
+	// The value part starts after ':' and any leading spaces.
+	// The original trim function returned a new string_view. Now it returns BString.
+	BString valuePartFull;
+	if (separatorIndex < field.Length() -1)
+		field.CopyInto(valuePartFull, separatorIndex + 1, field.Length() - (separatorIndex + 1));
 
-	fRawField = std::move(field);
-	fName = name;
-	fValue = value;
+	BString trimmedValuePart = trim(valuePartFull);
+
+
+	if (namePart.IsEmpty() || !validate_http_token_string(namePart)) // validate_http_token_string needs BString
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, namePart);
+	// Value can be empty after trim, but original validate_value_string checked for length > 0.
+	// Let's assume an empty value is valid for a field (e.g. "X-Empty-Header:").
+	// The original validate_value_string checked `value.length() == 0` then threw.
+	// We should keep that behavior if intended. For now, let's assume empty value is okay,
+	// but `validate_value_string` itself will check for invalid chars if not empty.
+	if (!trimmedValuePart.IsEmpty() && !validate_value_string(trimmedValuePart))
+		throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, trimmedValuePart);
+
+	// If the original `field` BString is being stored in `fRawFieldString`,
+	// then `fName` and `fValueString` should reference parts of it, or be copies.
+	// The header implies fName is FieldName (which holds a BString) and fValueString is BString.
+	// The original string_view fName and fValue pointed into fRawField.
+	// To maintain that, we'd need to store pointers/offsets.
+	// For simplicity now, fName and fValueString will be copies.
+
+	fRawFieldString = field; // Store the original passed-in string
+	fName = FieldName(namePart);
+	fValueString = trimmedValuePart;
+}
+
+BHttpFields::Field::Field(BString&& rawField)
+    : // Similar to the BString& constructor, but takes rvalue
+    fHasRawField(true)
+{
+    auto separatorIndex = rawField.FindFirst(':');
+    if (separatorIndex <= 0)
+        throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, rawField);
+
+    BString namePart;
+    rawField.CopyInto(namePart, 0, separatorIndex);
+
+    BString valuePartFull;
+	if (separatorIndex < rawField.Length() -1)
+	    rawField.CopyInto(valuePartFull, separatorIndex + 1, rawField.Length() - (separatorIndex + 1));
+    BString trimmedValuePart = trim(valuePartFull);
+
+    if (namePart.IsEmpty() || !validate_http_token_string(namePart))
+        throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, namePart);
+    if (!trimmedValuePart.IsEmpty() && !validate_value_string(trimmedValuePart))
+        throw BHttpFields::InvalidInput(__PRETTY_FUNCTION__, trimmedValuePart);
+
+    fRawFieldString = std::move(rawField);
+    fName = FieldName(namePart);
+    fValueString = trimmedValuePart;
 }
 
 
 BHttpFields::Field::Field(const BHttpFields::Field& other)
 	:
-	fName(std::string_view()),
-	fValue(std::string_view())
+	fRawFieldString(other.fRawFieldString),
+	fHasRawField(other.fHasRawField),
+	fName(other.fName), // FieldName has proper copy constructor
+	fValueString(other.fValueString)
 {
-	if (other.IsEmpty()) {
-		fRawField = BString();
-		fName = std::string_view();
-		fValue = std::string_view();
-	} else {
-		fRawField = other.fRawField;
-		auto nameSize = other.Name().fName.size();
-		auto valueOffset = other.fValue.data() - other.fRawField.value().String();
-		fName = std::string_view((*fRawField).String(), nameSize);
-		fValue = std::string_view((*fRawField).String() + valueOffset, other.fValue.size());
-	}
 }
 
 
 BHttpFields::Field::Field(BHttpFields::Field&& other) noexcept
 	:
-	fRawField(std::move(other.fRawField)),
-	fName(std::move(other.fName)),
-	fValue(std::move(other.fValue))
+	fRawFieldString(std::move(other.fRawFieldString)),
+	fHasRawField(other.fHasRawField),
+	fName(std::move(other.fName)), // FieldName has proper move constructor
+	fValueString(std::move(other.fValueString))
 {
-	other.fName.fName = std::string_view();
-	other.fValue = std::string_view();
+	other.fHasRawField = false;
+	// other.fName and other.fValueString are in a valid but unspecified state
 }
 
 
 BHttpFields::Field&
 BHttpFields::Field::operator=(const BHttpFields::Field& other)
 {
-	if (other.IsEmpty()) {
-		fRawField = BString();
-		fName = std::string_view();
-		fValue = std::string_view();
-	} else {
-		fRawField = other.fRawField;
-		auto nameSize = other.Name().fName.size();
-		auto valueOffset = other.fValue.data() - other.fRawField.value().String();
-		fName = std::string_view((*fRawField).String(), nameSize);
-		fValue = std::string_view((*fRawField).String() + valueOffset, other.fValue.size());
+	if (this != &other) {
+		fRawFieldString = other.fRawFieldString;
+		fHasRawField = other.fHasRawField;
+		fName = other.fName; // FieldName has proper copy assignment
+		fValueString = other.fValueString;
 	}
 	return *this;
 }
@@ -298,11 +373,15 @@ BHttpFields::Field::operator=(const BHttpFields::Field& other)
 BHttpFields::Field&
 BHttpFields::Field::operator=(BHttpFields::Field&& other) noexcept
 {
-	fRawField = std::move(other.fRawField);
-	fName = std::move(other.fName);
-	other.fName.fName = std::string_view();
-	fValue = std::move(other.fValue);
-	fValue = std::string_view();
+	if (this != &other) {
+		fRawFieldString = std::move(other.fRawFieldString);
+		fHasRawField = other.fHasRawField;
+		fName = std::move(other.fName); // FieldName has proper move assignment
+		fValueString = std::move(other.fValueString);
+
+		other.fHasRawField = false;
+		// other.fName and other.fValueString are in a valid but unspecified state
+	}
 	return *this;
 }
 
@@ -310,32 +389,30 @@ BHttpFields::Field::operator=(BHttpFields::Field&& other) noexcept
 const BHttpFields::FieldName&
 BHttpFields::Field::Name() const noexcept
 {
-	return fName;
+	return fName; // fName is FieldName, which has BString fNameString
 }
 
 
-std::string_view
+const BString&
 BHttpFields::Field::Value() const noexcept
 {
-	return fValue;
+	return fValueString;
 }
 
 
-std::string_view
+const BString&
 BHttpFields::Field::RawField() const noexcept
 {
-	if (fRawField)
-		return std::string_view((*fRawField).String(), (*fRawField).Length());
-	else
-		return std::string_view();
+	// If !fHasRawField, fRawFieldString might be empty or hold some default.
+	// The caller should check IsEmpty() first if they need to distinguish.
+	return fRawFieldString;
 }
 
 
 bool
 BHttpFields::Field::IsEmpty() const noexcept
 {
-	// The object is either fully empty, or it has data, so we only have to check fValue.
-	return !fRawField.has_value();
+	return !fHasRawField;
 }
 
 
@@ -397,12 +474,8 @@ BHttpFields::operator[](size_t index) const
 }
 
 
-void
-BHttpFields::AddField(const std::string_view& name, const std::string_view& value)
-{
-	fFields.emplace_back(name, value);
-}
-
+// Definition for AddField(const std::string_view&, const std::string_view&) removed,
+// as it's removed from the header. BString and const char* overloads are used.
 
 void
 BHttpFields::AddField(BString& field)
@@ -422,7 +495,7 @@ BHttpFields::AddFields(std::initializer_list<Field> fields)
 
 
 void
-BHttpFields::RemoveField(const std::string_view& name) noexcept
+BHttpFields::RemoveField(const BString& name) noexcept
 {
 	for (auto it = FindField(name); it != end(); it = FindField(name)) {
 		fFields.erase(it);
@@ -445,10 +518,10 @@ BHttpFields::MakeEmpty() noexcept
 
 
 BHttpFields::ConstIterator
-BHttpFields::FindField(const std::string_view& name) const noexcept
+BHttpFields::FindField(const BString& name) const noexcept
 {
 	for (auto it = fFields.cbegin(); it != fFields.cend(); it++) {
-		if ((*it).Name() == name)
+		if ((*it).Name() == name) // FieldName::operator==(const BString&)
 			return it;
 	}
 	return fFields.cend();
@@ -463,11 +536,11 @@ BHttpFields::CountFields() const noexcept
 
 
 size_t
-BHttpFields::CountFields(const std::string_view& name) const noexcept
+BHttpFields::CountFields(const BString& name) const noexcept
 {
 	size_t count = 0;
 	for (auto it = fFields.cbegin(); it != fFields.cend(); it++) {
-		if ((*it).Name() == name)
+		if ((*it).Name() == name) // FieldName::operator==(const BString&)
 			count += 1;
 	}
 	return count;

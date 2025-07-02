@@ -9,7 +9,7 @@
 #include <list>
 // #include <optional> // C++17, removed
 // #include <string_view> // C++17, removed
-#include <variant> // Will be handled in a later step
+// #include <variant> // C++17, unused in this file
 #include <vector>
 
 #include <ErrorsExt.h>

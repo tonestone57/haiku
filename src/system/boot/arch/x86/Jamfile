@@ -8,6 +8,7 @@ local platform ;
 for platform in [ MultiBootSubDirSetup bios_ia32 efi pxe_ia32 ] {
 	on $(platform) {
 		SubDirHdrs $(HAIKU_TOP) src system boot platform $(TARGET_BOOT_PLATFORM) ;
+		UsePrivateHeaders [ FDirName kernel platform ] ;
 
 		DEFINES = $(defines) ;
 

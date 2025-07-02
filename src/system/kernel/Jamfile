@@ -79,6 +79,24 @@ KernelMergeObject kernel_core.o :
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;
 
+# SubIncludes for kernel components must happen before they are referenced.
+SubInclude HAIKU_TOP src system kernel arch ;
+SubInclude HAIKU_TOP src system kernel cache ;
+SubInclude HAIKU_TOP src system kernel device_manager ;
+SubInclude HAIKU_TOP src system kernel debug ;
+SubInclude HAIKU_TOP src system kernel disk_device_manager ;
+SubInclude HAIKU_TOP src system kernel fs ;
+SubInclude HAIKU_TOP src system kernel lib ;
+SubInclude HAIKU_TOP src system kernel messaging ;
+SubInclude HAIKU_TOP src system kernel posix ;
+SubInclude HAIKU_TOP src system kernel slab ;
+SubInclude HAIKU_TOP src system kernel util ;
+SubInclude HAIKU_TOP src system kernel vm ;
+
+if $(TARGET_KERNEL_PLATFORM) {
+	SubInclude HAIKU_TOP src system kernel platform $(TARGET_KERNEL_PLATFORM) ;
+}
+
 # We need to specify the dependency on the generated syscalls files explicitly.
 Includes [ FGristFiles syscalls.cpp ]
 	:
@@ -125,24 +143,6 @@ KernelLd kernel_$(TARGET_ARCH) :
 	  $(TARGET_KERNEL_PIC_LINKFLAGS) --no-undefined
 	:
 ;
-
-# SubIncludes for kernel components must happen before they are referenced.
-SubInclude HAIKU_TOP src system kernel arch ;
-SubInclude HAIKU_TOP src system kernel cache ;
-SubInclude HAIKU_TOP src system kernel device_manager ;
-SubInclude HAIKU_TOP src system kernel debug ;
-SubInclude HAIKU_TOP src system kernel disk_device_manager ;
-SubInclude HAIKU_TOP src system kernel fs ;
-SubInclude HAIKU_TOP src system kernel lib ;
-SubInclude HAIKU_TOP src system kernel messaging ;
-SubInclude HAIKU_TOP src system kernel posix ;
-SubInclude HAIKU_TOP src system kernel slab ;
-SubInclude HAIKU_TOP src system kernel util ;
-SubInclude HAIKU_TOP src system kernel vm ;
-
-if $(TARGET_KERNEL_PLATFORM) {
-	SubInclude HAIKU_TOP src system kernel platform $(TARGET_KERNEL_PLATFORM) ;
-}
 
 if $(HAIKU_ARCH) in x86_64 arm {
 	# Cannot relink everything as a shared object on x86_64 as shared library

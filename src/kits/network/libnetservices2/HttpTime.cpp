@@ -165,7 +165,9 @@ BHttpTime::ToString(BHttpTimeFormat outputFormat) const
 	expirationTm.tm_yday = 0;
 	expirationTm.tm_isdst = 0;
 
-	for (auto& [format, formatString]: kDateFormats) {
+	for (const auto& entry : kDateFormats) {
+		BHttpTimeFormat format = entry.first;
+		const char* formatString = entry.second;
 		if (format != outputFormat)
 			continue;
 
@@ -193,7 +195,9 @@ BHttpTime::_Parse(const BString& dateString)
 	struct tm expireTime = {};
 
 	bool found = false;
-	for (auto& [format, formatString]: kDateFormats) {
+	for (const auto& entry : kDateFormats) {
+		BHttpTimeFormat format = entry.first;
+		const char* formatString = entry.second;
 		const char* result = strptime(dateString.String(), formatString, &expireTime);
 
 		if (result == dateString.String() + dateString.Length()) {

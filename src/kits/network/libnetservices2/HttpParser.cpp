@@ -611,14 +611,14 @@ HttpBodyDecompression::ParseBody(HttpBuffer& buffer, HttpTransferFunction writeT
 
 	if (readEnd || parseResults.complete) {
 		// No more bytes expected so flush out the final bytes
-		if (auto status = fDecompressingStream->Flush(); status != B_OK) {
+		auto status = fDecompressingStream->Flush();
+		if (status != B_OK) {
 			throw BNetworkRequestError(
 				"BZlibDecompressionStream::Flush()", BNetworkRequestError::SystemError, status);
 		}
 	}
 
 	size_t bytesWritten = 0;
-	// if (auto bodySize = fDecompressorStorage->Position(); bodySize > 0) { // C++17 if-initializer
 	auto bodySize = fDecompressorStorage->Position();
 	if (bodySize > 0) {
 		bytesWritten

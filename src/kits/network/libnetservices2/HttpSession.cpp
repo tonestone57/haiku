@@ -149,7 +149,7 @@ private:
 
 	// locking mechanism
 	BLocker fLock;
-	std::atomic<bool> fQuitting = false;
+	std::atomic<bool> fQuitting {false};
 
 	// queues & shared data
 	std::list<BHttpSession::Request> fControlQueue;
@@ -161,8 +161,8 @@ private:
 	std::map<Host, int32> fConnectionCount;
 
 	// data that can only be accessed atomically
-	std::atomic<size_t> fMaxConnectionsPerHost = 2;
-	std::atomic<size_t> fMaxHosts = 10;
+	std::atomic<size_t> fMaxConnectionsPerHost {2};
+	std::atomic<size_t> fMaxHosts {10};
 
 	// data owned by the dataThread
 	std::map<int, BHttpSession::Request> connectionMap;
@@ -279,7 +279,8 @@ BHttpSession::Impl::ControlThreadFunc(void* arg)
 
 	// Outer loop to use the fControlQueueSem when new items have entered the queue
 	while (true) {
-		if (auto status = acquire_sem(impl->fControlQueueSem); status == B_INTERRUPTED)
+		auto status = acquire_sem(impl->fControlQueueSem);
+		if (status == B_INTERRUPTED)
 			continue;
 		else if (status != B_OK) {
 			// Most likely B_BAD_SEM_ID indicating that the sem was deleted; go to cleanup
@@ -356,10 +357,10 @@ BHttpSession::Impl::DataThreadFunc(void* arg)
 		object_wait_info{data->fDataQueueSem, B_OBJECT_TYPE_SEMAPHORE, B_EVENT_ACQUIRE_SEMAPHORE});
 
 	while (true) {
-		if (auto status = wait_for_objects(data->objectList.data(), data->objectList.size());
-			status == B_INTERRUPTED)
+		auto waitStatus = wait_for_objects(data->objectList.data(), data->objectList.size());
+		if (waitStatus == B_INTERRUPTED)
 			continue;
-		else if (status < 0) {
+		else if (waitStatus < 0) {
 			// Something went inexplicably wrong
 			throw BSystemError("wait_for_objects()", status);
 		}
@@ -367,9 +368,10 @@ BHttpSession::Impl::DataThreadFunc(void* arg)
 		// First check if the change is in acquiring the sem, meaning that
 		// there are new requests to be scheduled
 		if (data->objectList[0].events == B_EVENT_ACQUIRE_SEMAPHORE) {
-			if (auto status = acquire_sem(data->fDataQueueSem); status == B_INTERRUPTED)
+			auto sem_status = acquire_sem(data->fDataQueueSem);
+			if (sem_status == B_INTERRUPTED)
 				continue;
-			else if (status != B_OK) {
+			else if (sem_status != B_OK) {
 				// Most likely B_BAD_SEM_ID indicating that the sem was deleted
 				break;
 			}
@@ -585,7 +587,10 @@ BHttpSession::Impl::GetRequestsForControlThread()
 				});
 				return false;
 			}
-			auto [newIt, success] = fConnectionCount.insert({host, 1});
+			// auto [newIt, success] = fConnectionCount.insert({host, 1}); C++17
+			auto insertResult = fConnectionCount.insert({host, 1});
+			auto newIt = insertResult.first;
+			bool success = insertResult.second;
 			if (!success) {
 				throw BRuntimeError(__PRETTY_FUNCTION__, "Cannot insert into fConnectionCount");
 			}
@@ -751,7 +756,8 @@ BHttpSession::Request::ResolveHostName()
 		port = 80;
 
 	// TODO: proxy
-	if (auto status = fRemoteAddress.SetTo(fRequest.Url().Host(), port); status != B_OK) {
+	auto status = fRemoteAddress.SetTo(fRequest.Url().Host(), port);
+	if (status != B_OK) {
 		throw BNetworkRequestError(
 			"BNetworkAddress::SetTo()", BNetworkRequestError::HostnameError, status);
 	}
@@ -779,7 +785,8 @@ BHttpSession::Request::OpenConnection()
 	fSocket->SetTimeout(fRequest.Timeout());
 
 	// Open connection
-	if (auto status = fSocket->Connect(fRemoteAddress); status != B_OK) {
+	auto status = fSocket->Connect(fRemoteAddress);
+	if (status != B_OK) {
 		// TODO: inform listeners that the connection failed
 		throw BNetworkRequestError(
 			"BSocket::Connect()", BNetworkRequestError::NetworkError, status);
@@ -819,8 +826,10 @@ BHttpSession::Request::TransferRequest()
 	if (currentBytesWritten > 0) {
 		SendMessage(UrlEvent::UploadProgress, [this](BMessage& msg) {
 			msg.AddInt64(UrlEventData::NumBytes, fSerializer.BodyBytesTransferred());
-			if (auto totalSize = fSerializer.BodyBytesTotal())
-				msg.AddInt64(UrlEventData::TotalBytes, totalSize.value());
+			bool hasTotal = false;
+			off_t totalSize = fSerializer.BodyBytesTotal(hasTotal);
+			if (hasTotal)
+				msg.AddInt64(UrlEventData::TotalBytes, totalSize);
 		});
 	}
 
@@ -945,8 +954,12 @@ BHttpSession::Request::ReceiveResult()
 								BNetworkRequestError::ProtocolError,
 								"Redirect; the Location field must be present and cannot be found");
 						}
-						auto locationString = BString(
-							(*locationField).Value().data(), (*locationField).Value().size());
+						// auto locationString = BString(
+						//	(*locationField).Value().data(), (*locationField).Value().size());
+						// BString::data() and BString::size() are not standard. Use String() and Length().
+						// Also, locationField->Value() is already a BString.
+						const BString& locationValue = (*locationField).Value();
+						auto locationString = BString(locationValue.String(), locationValue.Length());
 						auto redirect = BHttpSession::Redirect{
 							BUrl(fRequest.Url(), locationString), redirectToGet};
 						if (!redirect.url.IsValid()) {
@@ -994,7 +1007,7 @@ BHttpSession::Request::ReceiveResult()
 				// there is compression on the incoming stream.
 			bytesRead = fParser.ParseBody(
 				fBuffer,
-				[this, &bytesWrittenToBody](const std::byte* buffer, size_t size) {
+				[this, &bytesWrittenToBody](const unsigned char* buffer, size_t size) {
 					bytesWrittenToBody = fResult->WriteToBody(buffer, size);
 					return bytesWrittenToBody;
 				},
@@ -1002,8 +1015,11 @@ BHttpSession::Request::ReceiveResult()
 
 			SendMessage(UrlEvent::DownloadProgress, [this, bytesRead](BMessage& msg) {
 				msg.AddInt64(UrlEventData::NumBytes, bytesRead);
-				if (fParser.BodyBytesTotal())
-					msg.AddInt64(UrlEventData::TotalBytes, fParser.BodyBytesTotal().value());
+				// Corrected call to BodyBytesTotal will be handled in the next step
+				bool hasTotal = false;
+				off_t totalBytes = fParser.BodyBytesTotal(hasTotal);
+				if (hasTotal)
+					msg.AddInt64(UrlEventData::TotalBytes, totalBytes);
 			});
 
 			if (bytesWrittenToBody > 0) {

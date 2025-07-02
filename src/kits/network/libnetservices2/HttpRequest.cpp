@@ -629,7 +629,7 @@ BHttpRequest::SerializeHeaderTo(HttpBuffer& buffer) const
 		outputFields.AddField(
 			"Content-Type", fData->requestBodyValue.mimeType.String()); // Removed "sv" and string_view
 		if (fData->requestBodyValue.hasSize)
-			outputFields.AddField("Content-Length", BString() << fData->requestBodyValue.sizeValue);
+			outputFields.AddField("Content-Length", (BString() << fData->requestBodyValue.sizeValue).String());
 		else
 			throw BRuntimeError(__PRETTY_FUNCTION__,
 				"Transfer body with unknown content length; chunked transfer not supported");

@@ -26,10 +26,6 @@ local sources =
 	wait_for_objects.cpp
 	;
 
-if $(TARGET_SYMBOLS_LEVEL) >= 2 {
-	sources += debug.c ;
-}
-
 SourceHdrs $(sources) : $(librootOSSources) ;
 
 KernelMergeObject kernel_os_main.o : $(sources)
@@ -57,12 +53,6 @@ local muslSources =
 	rand.c
 	rand_r.c
 	;
-
-local muslComplexSources =
-	ccosh.c
-	csinh.c
-;
-muslSources += $(muslComplexSources) ;
 
 SourceHdrs $(muslSources) :
 	[ FDirName $(posixSources) musl include ]
@@ -163,7 +153,6 @@ KernelMergeObject kernel_lib_posix.o :
 
 SEARCH on [ FGristFiles $(muslSources) ] += [ FDirName $(posixSources) musl misc ] ;
 SEARCH on [ FGristFiles $(muslSources) ] += [ FDirName $(posixSources) musl prng ] ;
-SEARCH on [ FGristFiles $(muslComplexSources) ] = [ FDirName $(posixSources) musl complex ] ;
 
 # misc
 

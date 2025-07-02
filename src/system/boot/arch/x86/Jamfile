@@ -8,7 +8,12 @@ local platform ;
 for platform in [ MultiBootSubDirSetup bios_ia32 efi pxe_ia32 ] {
 	on $(platform) {
 		SubDirHdrs $(HAIKU_TOP) src system boot platform $(TARGET_BOOT_PLATFORM) ;
-		UsePrivateHeaders [ FDirName kernel platform ] ;
+		UsePrivateHeaders [ FDirName kernel platform ] ; # For efi's <efi/system-table.h>
+
+		if $(TARGET_BOOT_PLATFORM) = pxe_ia32 {
+			# pxe_ia32 reuses bios_ia32 mmu.h and other headers from its source dir
+			SubDirHdrs $(HAIKU_TOP) src system boot platform bios_ia32 ;
+		}
 
 		DEFINES = $(defines) ;
 

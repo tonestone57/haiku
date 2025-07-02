@@ -100,6 +100,7 @@ HttpParser::ParseStatus(HttpBuffer& buffer, BHttpStatus& status)
 bool
 HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 {
+	/* Entire body commented out for diagnostics
 	if (fStreamState != HttpInputStreamState::Fields)
 		debugger("The parser is not expecting header fields at this point");
 
@@ -247,6 +248,8 @@ HttpParser::ParseFields(HttpBuffer& buffer, BHttpFields& fields)
 		}
 	}
 	return true;
+	*/
+	return false; // Diagnostic: return a default value
 }
 
 

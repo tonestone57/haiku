@@ -198,7 +198,7 @@ HttpBuffer::Data(size_t& length) const noexcept
 HttpBuffer&
 HttpBuffer::operator<<(const BString& data)
 {
-	if (data.Length() > (fBuffer.capacity() - fBuffer.size())) { // Changed .length() to .Length()
+	if (static_cast<size_t>(data.Length()) > (fBuffer.capacity() - fBuffer.size())) {
 		throw BNetworkRequestError(__PRETTY_FUNCTION__, BNetworkRequestError::ProtocolError,
 			"No capacity left in buffer to append data.");
 	}

@@ -54,12 +54,6 @@ local muslSources =
 	rand_r.c
 	;
 
-local muslComplexSources =
-	ccosh.c
-	csinh.c
-;
-muslSources += $(muslComplexSources) ;
-
 SourceHdrs $(muslSources) :
 	[ FDirName $(posixSources) musl include ]
 	[ FDirName $(posixSources) musl internal ]
@@ -159,7 +153,6 @@ KernelMergeObject kernel_lib_posix.o :
 
 SEARCH on [ FGristFiles $(muslSources) ] += [ FDirName $(posixSources) musl misc ] ;
 SEARCH on [ FGristFiles $(muslSources) ] += [ FDirName $(posixSources) musl prng ] ;
-SEARCH on [ FGristFiles $(muslComplexSources) ] = [ FDirName $(posixSources) musl complex ] ;
 
 # misc
 

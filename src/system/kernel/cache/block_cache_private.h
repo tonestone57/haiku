@@ -11,6 +11,7 @@
 
 #include <slab/Slab.h> // For object_cache typedef
 #include <fs_cache.h> // For transaction_notification_hook
+#include <cstdio> // For printf
 
 #include <block_cache.h> // Public API
 #include <condition_variable.h>

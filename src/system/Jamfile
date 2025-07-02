@@ -1,7 +1,11 @@
 SubDir HAIKU_TOP src system ;
 
 SubInclude HAIKU_TOP src system boot ;
-SubInclude HAIKU_TOP src system kernel ;
+
+# Ensure kernel util rules are loaded before kernel main Jamfile, just in case.
+SubInclude HAIKU_TOP src system kernel util ;
+
+SubInclude HAIKU_TOP src system kernel ; # This already includes util again, but Jam handles duplicates.
 SubInclude HAIKU_TOP src system glue ;
 SubInclude HAIKU_TOP src system libroot ;
 SubInclude HAIKU_TOP src system libnetwork ;

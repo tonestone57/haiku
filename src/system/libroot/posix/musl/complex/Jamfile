@@ -24,14 +24,14 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			catan.c catanf.c catanl.c
 			catanh.c catanhf.c catanhl.c
 			ccos.c ccosf.c ccosl.c
-			ccosh.c ccoshf.c
+			./ccosh.c ccoshf.c
 			cexp.c cexpf.c
 			cimag.c cimagf.c cimagl.c
 			conj.c conjf.c conjl.c
 			cproj.c cprojf.c cprojl.c
 			creal.c crealf.c creall.c
 			csin.c csinf.c csinl.c
-			csinh.c csinhf.c
+			./csinh.c csinhf.c
 			csqrt.c csqrtf.c
 			ctan.c ctanf.c ctanl.c
 			ctanh.c ctanhf.c

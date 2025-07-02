@@ -8,7 +8,7 @@
 
 
 #include <functional>
-#include <optional>
+// #include <optional> // C++17, removed
 
 #include <HttpResult.h>
 
@@ -20,7 +20,8 @@ namespace BPrivate {
 
 namespace Network {
 
-using HttpTransferFunction = std::function<size_t(const std::byte*, size_t)>;
+// using HttpTransferFunction = std::function<size_t(const std::byte*, size_t)>; // C++17
+using HttpTransferFunction = std::function<size_t(const unsigned char*, size_t)>;
 
 
 enum class HttpInputStreamState { StatusLine, Fields, Body, Done };
@@ -56,7 +57,8 @@ public:
 
 	// Details on the body status
 			bool				HasContent() const noexcept;
-			std::optional<off_t> BodyBytesTotal() const noexcept;
+			// std::optional<off_t> BodyBytesTotal() const noexcept; // C++17
+			off_t				BodyBytesTotal(bool& hasTotal) const noexcept; // Returns -1 if no total, hasTotal will be false.
 			off_t				BodyBytesTransferred() const noexcept;
 			bool				Complete() const noexcept;
 
@@ -77,7 +79,8 @@ public:
 	virtual						BodyParseResult ParseBody(HttpBuffer& buffer,
 									HttpTransferFunction writeToBody, bool readEnd) = 0;
 
-	virtual	std::optional<off_t> TotalBodySize() const noexcept;
+	// virtual	std::optional<off_t> TotalBodySize() const noexcept; // C++17
+	virtual	off_t				TotalBodySize(bool& hasTotal) const noexcept; // Returns -1 if no total, hasTotal will be false.
 
 			off_t				TransferredBodySize() const noexcept;
 
@@ -90,13 +93,16 @@ class HttpRawBodyParser : public HttpBodyParser
 {
 public:
 								HttpRawBodyParser();
-								HttpRawBodyParser(off_t bodyBytesTotal);
+								HttpRawBodyParser(off_t bodyBytesTotal, bool hasTotal);
 	virtual	BodyParseResult		ParseBody(HttpBuffer& buffer, HttpTransferFunction writeToBody,
 									bool readEnd) override;
-	virtual	std::optional<off_t> TotalBodySize() const noexcept override;
+	// virtual	std::optional<off_t> TotalBodySize() const noexcept override; // C++17
+	virtual	off_t				TotalBodySize(bool& hasTotal) const noexcept override; // Returns -1 if no total, hasTotal will be false.
 
 private:
-			std::optional<off_t> fBodyBytesTotal;
+			// std::optional<off_t> fBodyBytesTotal; // C++17
+			off_t fBodyBytesTotalValue;
+			bool fHasBodyBytesTotal;
 };
 
 
@@ -120,7 +126,8 @@ public:
 	virtual	BodyParseResult		ParseBody(HttpBuffer& buffer, HttpTransferFunction writeToBody,
 									bool readEnd) override;
 
-	virtual	std::optional<off_t> TotalBodySize() const noexcept;
+	// virtual	std::optional<off_t> TotalBodySize() const noexcept; // C++17
+	virtual	off_t				TotalBodySize(bool& hasTotal) const noexcept; // Returns -1 if no total, hasTotal will be false.
 
 private:
 			std::unique_ptr<HttpBodyParser> fBodyParser;

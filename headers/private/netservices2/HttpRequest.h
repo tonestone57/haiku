@@ -7,9 +7,9 @@
 #define _B_HTTP_REQUEST_H_
 
 #include <memory>
-#include <optional>
-#include <string_view>
-#include <variant>
+// #include <optional> // C++17, removed
+// #include <string_view> // C++17, removed
+#include <variant> // Will be handled in a later step
 
 #include <ErrorsExt.h>
 #include <String.h>
@@ -40,7 +40,9 @@ public:
 
 	// Constructors & Destructor
 								BHttpMethod(Verb verb) noexcept;
-								BHttpMethod(const std::string_view& method);
+								// BHttpMethod(const std::string_view& method); // C++17
+								BHttpMethod(const BString& method);
+								BHttpMethod(const char* method); // For literals
 								BHttpMethod(const BHttpMethod& other);
 								BHttpMethod(BHttpMethod&& other) noexcept;
 								~BHttpMethod();
@@ -54,10 +56,14 @@ public:
 			bool				operator!=(const Verb& other) const noexcept;
 
 	// Get the method as a string
-			const std::string_view Method() const noexcept;
+			// const std::string_view Method() const noexcept; // C++17
+			const BString&		MethodString() const noexcept; // Returns BString if custom, or string representation of Verb
+			bool				IsCustom() const noexcept;
+			Verb				GetVerb() const; // Assumes !IsCustom()
 
 private:
-			std::variant<Verb, BString> fMethod;
+			std::variant<Verb, BString> fMethod; // To be replaced later
+			BString fMethodStringInternal; // Cache for string form
 };
 
 
@@ -112,8 +118,10 @@ public:
 			void				SetFields(const BHttpFields& fields);
 			void				SetMaxRedirections(uint8 maxRedirections);
 			void				SetMethod(const BHttpMethod& method);
+			// void				SetRequestBody(std::unique_ptr<BDataIO> input, BString mimeType,
+			// 						std::optional<off_t> size); // C++17
 			void				SetRequestBody(std::unique_ptr<BDataIO> input, BString mimeType,
-									std::optional<off_t> size);
+									off_t size, bool hasSize); // if hasSize is false, size is ignored
 			void				SetStopOnError(bool stopOnError);
 			void				SetTimeout(bigtime_t timeout);
 			void				SetUrl(const BUrl& url);
@@ -140,8 +148,12 @@ private:
 struct BHttpRequest::Body {
 			std::unique_ptr<BDataIO> input;
 			BString				mimeType;
-			std::optional<off_t> size;
-			std::optional<off_t> startPosition;
+			// std::optional<off_t> size; // C++17
+			off_t sizeValue;
+			bool hasSize;
+			// std::optional<off_t> startPosition; // C++17
+			off_t startPositionValue;
+			bool hasStartPosition;
 };
 
 

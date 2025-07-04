@@ -13,13 +13,13 @@
 #include <SupportDefs.h>
 #include <OS.h>
 #include <GraphicsDefs.h>
+#include <kernel/locks/mutex.h> // For mutex type
 
-#include "accelerant.h" // For intel_i915_shared_info
+#include "accelerant.h"
 
-// Forward declare from other local headers
 struct intel_vbt_data;
 struct intel_clock_params_t;
-struct intel_engine_cs; // Forward declare from engine.h
+struct intel_engine_cs;
 
 #define DEVICE_NAME_PRIV "intel_i915"
 #ifdef TRACE_DRIVER
@@ -114,7 +114,11 @@ typedef struct intel_i915_device_info {
 
 	area_id     scratch_page_area;
 	phys_addr_t scratch_page_phys_addr;
-	uint32      scratch_page_gtt_offset;
+	uint32      scratch_page_gtt_offset; // In bytes
+
+	// GTT Allocator state
+	mutex       gtt_allocator_lock;
+	uint32_t    gtt_next_free_page; // Next available GTT page index for bump allocator
 
 	struct intel_vbt_data* vbt;
 	area_id     rom_area;
@@ -130,12 +134,9 @@ typedef struct intel_i915_device_info {
 	void*		framebuffer_addr;
 	phys_addr_t	framebuffer_phys_addr;
 	size_t		framebuffer_alloc_size;
-	uint32		framebuffer_gtt_offset;
+	uint32		framebuffer_gtt_offset; // In bytes
 
-	// Command submission engines
-	struct intel_engine_cs* rcs0; // Render Command Streamer
-	// struct intel_engine_cs* bcs0; // Blitter, if used
-	// struct intel_engine_cs* vcs0; // Video, if used
+	struct intel_engine_cs* rcs0;
 
 	uint32		open_count;
 	int32		irq_line;

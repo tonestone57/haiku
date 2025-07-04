@@ -15,11 +15,10 @@ struct intel_i915_device_info;
 typedef struct intel_i915_device_info intel_i915_device_info;
 
 
-// GTT Caching types for use with intel_i915_gtt_insert_pte
 enum gtt_caching_type {
-	GTT_CACHE_NONE = 0,      // No specific caching bits, might default to OS/PAT0 (often WB)
-	GTT_CACHE_UNCACHED,      // Request Uncached (maps to a PAT index for UC)
-	GTT_CACHE_WRITE_COMBINING // Request Write-Combining (maps to a PAT index for WC)
+	GTT_CACHE_NONE = 0,
+	GTT_CACHE_UNCACHED,
+	GTT_CACHE_WRITE_COMBINING
 };
 
 
@@ -35,10 +34,17 @@ status_t intel_i915_gtt_map_memory(intel_i915_device_info* devInfo,
                                   size_t area_offset_pages,
                                   uint32 gtt_offset_bytes,
                                   size_t num_pages,
-                                  enum gtt_caching_type cache_type); // Updated parameter
+                                  enum gtt_caching_type cache_type);
 
 status_t intel_i915_gtt_unmap_memory(intel_i915_device_info* devInfo,
                                     uint32 gtt_offset_in_bytes, size_t num_pages);
+
+// GTT Space Management
+status_t intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
+                                   size_t num_pages, uint32_t* gtt_page_offset_out);
+status_t intel_i915_gtt_free_space(intel_i915_device_info* devInfo,
+                                  uint32_t gtt_page_offset, size_t num_pages);
+
 #ifdef __cplusplus
 }
 #endif

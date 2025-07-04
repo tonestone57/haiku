@@ -21,8 +21,11 @@ enum {
 	INTEL_I915_IOCTL_GEM_CREATE,
 	INTEL_I915_IOCTL_GEM_MMAP_AREA,
 	INTEL_I915_IOCTL_GEM_CLOSE,
-	INTEL_I915_IOCTL_GEM_EXECBUFFER, // New IOCTL for command submission
-	INTEL_I915_IOCTL_GEM_WAIT,       // New IOCTL for waiting on seqno
+	INTEL_I915_IOCTL_GEM_EXECBUFFER,
+	INTEL_I915_IOCTL_GEM_WAIT,
+	INTEL_I915_IOCTL_GEM_CONTEXT_CREATE, // For Step 2 of Phase C.2
+	INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY, // For Step 2 of Phase C.2
+	INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO, // For Step 3 of Phase C.2
 };
 
 typedef struct {
@@ -46,23 +49,49 @@ typedef struct {
 	uint32 handle;
 } intel_i915_gem_close_args;
 
+// Relocation entry for execbuffer
+typedef struct {
+	uint32 target_handle;       // Handle of the object to relocate to
+	uint32 offset;              // Byte offset within the command buffer to patch
+	uint32 delta;               // Value to add to the object's GTT offset
+	uint32 read_domains;        // Placeholder for cache coherency (e.g., I915_GEM_DOMAIN_RENDER)
+	uint32 write_domain;        // Placeholder for cache coherency
+	// No presumes_offset for now, assume target_handle is an object, not an offset.
+} intel_i915_gem_relocation_entry;
+
 // Args for INTEL_I915_IOCTL_GEM_EXECBUFFER
-// For simplicity, this initial version will not support a list of command buffers
-// or relocations. It will take a single command buffer.
 typedef struct {
 	uint32 cmd_buffer_handle;   // in: GEM handle of the command buffer
-	uint32 cmd_buffer_length;   // in: Length of commands in bytes within the buffer to execute
-	uint32 engine_id;           // in: Target engine (e.g., RCS0 from enum intel_engine_id)
-	uint32 flags;               // in: Execution flags (e.g., for non-blocking, reserved for now)
-	// uint64 user_data;        // in/out: For passing seqno or other data (optional)
+	uint32 cmd_buffer_length;   // in: Length of commands in bytes
+	uint32 engine_id;           // in: Target engine (e.g., RCS0)
+	uint32 flags;               // in: Execution flags
+	// Relocations
+	uint64 relocations_ptr;     // in: Pointer to array of intel_i915_gem_relocation_entry in user space
+	uint32 relocation_count;    // in: Number of relocation entries
+	uint32 context_handle;      // in: GEM context handle (0 for default/global) - for Step 2
 } intel_i915_gem_execbuffer_args;
 
-// Args for INTEL_I915_IOCTL_GEM_WAIT
 typedef struct {
-    uint32 engine_id;       // in: Engine ID whose seqno to wait for
-    uint32 target_seqno;    // in: The sequence number to wait for
-    uint64 timeout_micros;  // in: Timeout for waiting
+    uint32 engine_id;
+    uint32 target_seqno;
+    uint64 timeout_micros;
 } intel_i915_gem_wait_args;
+
+// Args for context create/destroy (Step 2)
+typedef struct {
+	uint32 handle; // out: context handle
+	uint32 flags;  // in: reserved for future use
+} intel_i915_gem_context_create_args;
+
+typedef struct {
+	uint32 handle; // in: context handle
+} intel_i915_gem_context_destroy_args;
+
+// Args for flush and get seqno (Step 3)
+typedef struct {
+	uint32 engine_id;    // in
+	uint32 seqno;        // out
+} intel_i915_gem_flush_and_get_seqno_args;
 
 
 typedef struct {
@@ -83,9 +112,6 @@ typedef struct {
 	uint16			vendor_id;
 	uint16			device_id;
 	uint8			revision;
-	// For GEM command submission / synchronization via shared info (optional, can be via IOCTL only)
-	// volatile uint32_t rcs_hw_seqno; // Example: kernel writes latest completed seqno here
-	// area_id rcs_hw_seqno_area;
 } intel_i915_shared_info;
 
 typedef struct {

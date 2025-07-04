@@ -158,56 +158,73 @@ status_t
 intel_i915_gmbus_read_edid_block(intel_i915_device_info* devInfo, uint8_t pin_select,
 	uint8_t* edid_buffer, uint8_t block_num)
 {
-	uint8_t edid_segment_pointer_addr = 0x60; // DDC/CI Segment Address Pointer
-	uint8_t edid_data_addr = EDID_I2C_SLAVE_ADDR; // 0xA0
-	uint8_t current_offset_in_block = 0;
+	const uint8_t edid_segment_pointer_addr = 0x60; // E-DDC segment pointer I2C address
+	const uint8_t edid_data_addr = EDID_I2C_SLAVE_ADDR;    // Standard EDID I2C address (0xA0)
 	status_t status = B_OK;
+	int i;
 
 	TRACE("gmbus_read_edid_block: pin_select %u, block_num %u\n", pin_select, block_num);
 
-	if (block_num > 0) { // For extensions (block_num 1 means segment 0, extension 1)
-		uint8_t segment_index = block_num; // E-EDID spec uses segment index directly for extensions
-		// Write the segment index to slave 0x60, offset 0x00
-		// This is an indexed write: first write offset 0, then write segment_index
-		// GMBUS_CYCLE_INDEX: Slave Address, then Index/Offset, then Data
-		// This is complex to implement correctly with the basic GMBUS1 command.
-		// The FreeBSD/Linux drivers use a more elaborate sequence for indexed writes.
-		// For now, this part is a STUB and will likely fail for extensions.
-		TRACE("GMBUS: Reading EDID extension block %u (segment %u) - NOT FULLY IMPLEMENTED\n", block_num, segment_index);
-		// A proper implementation would use GMBUS_CYCLE_INDEX or two separate GMBUS_CYCLE_STOP writes.
-		// For example, to write segment_index to address 0x60, offset 0:
-		// 1. GMBUS1: slave 0x60, write, len 1 (offset byte 0), data byte 0, GMBUS_CYCLE_STOP (or no stop if followed by data)
-		// 2. GMBUS1: slave 0x60, write, len 1 (data byte segment_index), GMBUS_CYCLE_STOP
-		// This stub will not correctly set the segment pointer for extensions.
-		if (block_num > 0) { // Only attempt for non-base block if we had a way to set segment
-			// return B_UNSUPPORTED; // Cannot set segment pointer with current simple _gmbus_xfer
+	// For EDID blocks > 0, we need to set the segment pointer for the E-DDC device.
+	// The E-DDC standard specifies that to read EDID extension block N,
+	// we write N to I2C slave 0x60 at offset 0x00.
+	if (block_num > 0) {
+		uint8_t segment_data[2] = {0x00, block_num}; // Offset 0, Data block_num
+		// This requires an "indexed write" or a "write two bytes" operation.
+		// The current _gmbus_xfer is limited. We will attempt two single-byte writes.
+		// This is not a standard I2C combined write, but might work for some simple slaves
+		// if they interpret consecutive writes appropriately or if GMBUS handles it.
+		// A more robust method would use GMBUS_CYCLE_INDEX if _gmbus_xfer supported it,
+		// or ensure _gmbus_xfer can write N bytes.
+		// For now, we'll try to write the offset, then the data, as separate operations.
+		// This is NOT how intel_i915_gmbus_write is currently implemented (it writes all bytes at once).
+		// We need a way to write a specific byte to a specific offset.
+		// The simplest GMBUS sequence for this is to use GMBUS_CYCLE_INDEX,
+		// or perform two separate GMBUS transactions if the slave address is the same.
+
+		// Let's assume we need a new helper or an enhanced _gmbus_xfer for indexed write.
+		// For now, this part remains difficult with the current _gmbus_xfer.
+		// To make progress, we'll focus on block 0 and acknowledge this limitation.
+		TRACE("GMBUS: EDID extension block %u requested. Segment pointer set is NOT YET ROBUSTLY IMPLEMENTED.\n", block_num);
+		// Placeholder for future:
+		// status = intel_i915_gmbus_write_indexed(devInfo, pin_select, edid_segment_pointer_addr, 0x00, block_num);
+		// if (status != B_OK) {
+		// TRACE("GMBUS: Failed to set EDID segment pointer for block %u: %s\n", block_num, strerror(status));
+		// return status;
+		// }
+		// For now, we are likely to fail reading extension blocks correctly.
+		// To avoid certain failure, let's restrict to block 0 for now for the read part.
+		if (block_num > 0) {
+			// Skip reading if it's an extension block until segment setting is fixed.
+			// Fill with zeros or return error. For now, let's return error.
+			 TRACE("GMBUS: Aborting read for extension block %u due to unimplemented segment pointer set.\n", block_num);
+			 return B_UNSUPPORTED;
 		}
 	}
-	// For block 0, or if segment pointer was set, proceed to read data.
-	// EDID read is: Write slave address with offset, then read data.
-	// This requires a combined write/read or an indexed read sequence.
-	// We'll use a common technique: write offset, then read data.
 
-	// Step 1: Write the offset (0 for base block, or 0 for extensions after segment set)
-	current_offset_in_block = 0; // For EDID, reads always start from an offset set by a prior write
-	status = intel_i915_gmbus_write(devInfo, pin_select, edid_data_addr, &current_offset_in_block, 1);
+	// Step 1: Set the EDID data offset to 0 for the target block.
+	// This is done by writing a single byte (0x00) to the EDID data slave (0xA0).
+	uint8_t edid_offset = 0;
+	status = _gmbus_xfer(devInfo, pin_select, edid_data_addr, &edid_offset, 1, false /* is_write */);
 	if (status != B_OK) {
-		TRACE("GMBUS: Failed to write EDID offset 0 for block %d: %s\n", block_num, strerror(status));
+		TRACE("GMBUS: Failed to write EDID data offset 0 for block %d: %s\n", block_num, strerror(status));
 		return status;
 	}
 
-	// Step 2: Read 128 bytes. This simple _gmbus_xfer can only do 4 bytes at a time.
-	// A real implementation needs to loop and read in chunks, or use GMBUS_CYCLE_INDEX for each byte.
-	TRACE("GMBUS: Reading EDID block %d (128 bytes) in chunks of 4 bytes (STUB)\n", block_num);
-	for (int i = 0; i < 128 / 4; i++) {
-		status = _gmbus_xfer(devInfo, pin_select, edid_data_addr, edid_buffer + (i * 4), 4, true);
+	// Step 2: Read 128 bytes from EDID data slave (0xA0).
+	// The I2C slave should auto-increment its internal address pointer for sequential reads.
+	// We read one byte at a time as _gmbus_xfer currently only reliably supports small transfers.
+	TRACE("GMBUS: Reading EDID block %d (128 bytes), one byte at a time.\n", block_num);
+	for (i = 0; i < EDID_BLOCK_SIZE; i++) {
+		status = _gmbus_xfer(devInfo, pin_select, edid_data_addr, &edid_buffer[i], 1, true /* is_read */);
 		if (status != B_OK) {
-			TRACE("GMBUS: Failed to read chunk %d of EDID block %d: %s\n", i, block_num, strerror(status));
+			TRACE("GMBUS: Failed to read byte %d of EDID block %d: %s\n", i, block_num, strerror(status));
+			// Invalidate partially read buffer by zeroing it.
+			memset(edid_buffer, 0, EDID_BLOCK_SIZE);
 			return status;
 		}
 	}
-	// Handle remaining bytes if not multiple of 4 (not an issue for 128)
 
-	TRACE("GMBUS: Successfully read EDID block %d (stubbed as multiple 4-byte reads)\n", block_num);
+	TRACE("GMBUS: Successfully read EDID block %d.\n", block_num);
 	return B_OK;
 }

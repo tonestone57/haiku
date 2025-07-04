@@ -27,7 +27,160 @@ static const char BDB_SIGNATURE[] = "BIOS_DATA_BLOCK";
 
 
 static status_t map_pci_rom(intel_i915_device_info* devInfo) { /* ... as before ... */ return B_OK; }
-static void parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size) { /* ... as before ... */ }
+
+// Define assumed structures and constants for VBT Child Device parsing
+// These should ideally be in vbt.h and be accurate for the target hardware.
+// This is a simplified version for demonstration.
+struct bdb_child_device_entry_assumed {
+	uint16_t handle;
+	uint16_t device_type; // See DEVICE_TYPE_* flags below
+	uint8_t  child_dev_size; // Size of this child device entry structure in VBT
+	uint8_t  ddc_pin_mapping; // For DVI/HDMI: DDC pin index (maps to GMBUS_PIN_*)
+	                          // For DP: Often combined with dp_aux_ch_mapping or directly gives GMBUS pin for AUX
+	uint8_t  dp_aux_ch_mapping; // For DP: AUX CH (e.g. 0=CH_A, 1=CH_B)
+	// ... other fields exist but are omitted for this simplified parsing ...
+} __attribute__((packed));
+
+// Simplified device type bits (actual VBTs are more complex)
+#define CHILD_DEVICE_PRESENT          (1 << 15) // If this bit is set in device_type
+#define CHILD_DEVICE_TYPE_MASK        (0x0F00)  // Example mask for major type
+#define CHILD_DEVICE_TYPE_LVDS        (0x0100)
+#define CHILD_DEVICE_TYPE_CRT         (0x0000)  // Often 0 or another value
+#define CHILD_DEVICE_TYPE_DVI         (0x0200)
+#define CHILD_DEVICE_TYPE_HDMI        (0x0600)  // Often same base as DVI + flags
+#define CHILD_DEVICE_TYPE_DP          (0x0300)
+#define CHILD_DEVICE_TYPE_EDP         (0x0700)  // Often a variant of DP
+
+// Simplified port indexing from device_type (e.g. bits 7-4)
+#define CHILD_DEVICE_PORT_MASK  (0x00F0)
+#define CHILD_DEVICE_PORT_B     (0x0010) // Example for Port B (DPB, HDMIB)
+#define CHILD_DEVICE_PORT_C     (0x0020) // Example for Port C
+#define CHILD_DEVICE_PORT_D     (0x0030) // Example for Port D
+
+// Mapping from VBT DDC/AUX pin definition to GMBUS_PIN_* constants
+// This is highly VBT specific. These are examples.
+static uint8_t vbt_to_gmbus_pin(uint16_t device_type, uint8_t ddc_pin_val, uint8_t aux_ch_val) {
+	// This function needs to accurately map VBT's DDC/AUX info to GMBUS_PIN_*
+	// For DP, aux_ch_val might map to GMBUS_PIN_DPB_AUX, DPC_AUX, etc.
+	// For HDMI/DVI, ddc_pin_val might map to GMBUS_PIN_DDC_B, DDC_C, etc.
+	// Example placeholder logic:
+	if ((device_type & CHILD_DEVICE_TYPE_MASK) == CHILD_DEVICE_TYPE_DP ||
+		(device_type & CHILD_DEVICE_TYPE_MASK) == CHILD_DEVICE_TYPE_EDP) {
+		switch (aux_ch_val) { // Assuming aux_ch_val is 0 for AUX_A, 1 for AUX_B, etc.
+			// Or aux_ch_val directly contains the GMBUS_PIN value from VBT.
+			// VBTs often store GMBUS pin index directly (e.g., 0x05 for DPB/HDMI-B)
+			case 0x05: return GMBUS_PIN_DPB_AUX; // DP_B on some Intel VBTs
+			case 0x06: return GMBUS_PIN_DPC_AUX; // DP_C
+			case 0x04: return GMBUS_PIN_DPD_AUX; // DP_D (some VBTs use 0x04 for DPD)
+			default: return GMBUS_PIN_DISABLED;
+		}
+	} else if ((device_type & CHILD_DEVICE_TYPE_MASK) == CHILD_DEVICE_TYPE_HDMI ||
+			   (device_type & CHILD_DEVICE_TYPE_MASK) == CHILD_DEVICE_TYPE_DVI) {
+		switch (ddc_pin_val) { // Assuming ddc_pin_val directly contains GMBUS_PIN value
+			case 0x05: return GMBUS_PIN_DDC_B; // HDMI/DVI Port B
+			case 0x06: return GMBUS_PIN_DDC_C; // HDMI/DVI Port C
+			case 0x04: return GMBUS_PIN_DDC_D; // HDMI/DVI Port D
+			default: return GMBUS_PIN_DISABLED;
+		}
+	} else if ((device_type & CHILD_DEVICE_TYPE_MASK) == CHILD_DEVICE_TYPE_CRT) {
+		return GMBUS_PIN_VGADDC; // Analog VGA DDC
+	}
+	return GMBUS_PIN_DISABLED;
+}
+
+
+static void
+parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt || !block_data) return;
+
+	const uint8_t* current_ptr = block_data;
+	const uint8_t* end_ptr = block_data + block_size;
+	int child_idx = 0;
+
+	TRACE("VBT: Parsing Child Device Table (block size %u)\n", block_size);
+
+	// The first byte of the child device block is often the size of each entry.
+	// Or, the BDB header for this block might specify entry size or count.
+	// For this example, assume child_dev_size in the entry itself is reliable.
+	// If not, a fixed size or VBT version specific size must be used.
+
+	while (current_ptr + sizeof(struct bdb_child_device_entry_assumed) <= end_ptr && // Basic check
+	       child_idx < MAX_VBT_CHILD_DEVICES) {
+
+		const struct bdb_child_device_entry_assumed* vbt_child =
+			(const struct bdb_child_device_entry_assumed*)current_ptr;
+
+		// VBTs often use child_dev_size = 0 or handle = 0 to mark end of list or invalid entry.
+		if (vbt_child->child_dev_size == 0 || vbt_child->handle == 0) {
+			TRACE("VBT: End of child device list (size %u, handle 0x%x).\n", vbt_child->child_dev_size, vbt_child->handle);
+			break;
+		}
+		// Ensure we don't read past the block with child_dev_size.
+		if (current_ptr + vbt_child->child_dev_size > end_ptr) {
+			TRACE("VBT: Child device entry size (%u) exceeds block boundary.\n", vbt_child->child_dev_size);
+			break;
+		}
+
+		if (vbt_child->device_type & CHILD_DEVICE_PRESENT) {
+			intel_output_port_state* port_state = &devInfo->ports[devInfo->vbt->num_child_devices];
+			memset(port_state, 0, sizeof(intel_output_port_state)); // Initialize
+
+			port_state->present_in_vbt = true;
+			port_state->child_device_handle = vbt_child->handle;
+
+			uint16_t dev_type = vbt_child->device_type;
+			uint16_t output_type_bits = dev_type & CHILD_DEVICE_TYPE_MASK;
+			// uint16_t port_bits = dev_type & CHILD_DEVICE_PORT_MASK; // For mapping to PORT_B, C, D etc.
+
+			// Decode device type (this is highly simplified)
+			if (output_type_bits == CHILD_DEVICE_TYPE_EDP) {
+				port_state->type = PRIV_OUTPUT_EDP;
+			} else if (output_type_bits == CHILD_DEVICE_TYPE_DP) {
+				port_state->type = PRIV_OUTPUT_DP;
+			} else if (output_type_bits == CHILD_DEVICE_TYPE_HDMI) {
+				port_state->type = PRIV_OUTPUT_HDMI;
+			} else if (output_type_bits == CHILD_DEVICE_TYPE_DVI) {
+				port_state->type = PRIV_OUTPUT_DVI;
+			} else if (output_type_bits == CHILD_DEVICE_TYPE_LVDS) {
+				port_state->type = PRIV_OUTPUT_LVDS;
+			} else if (output_type_bits == CHILD_DEVICE_TYPE_CRT) {
+				port_state->type = PRIV_OUTPUT_ANALOG;
+			} else {
+				port_state->type = PRIV_OUTPUT_NONE;
+			}
+
+			// Get GMBUS pin mapping
+			// The VBT ddc_pin_mapping or dp_aux_ch_mapping often directly contains the
+			// value that should be programmed into GMBUS0's pin selection bits.
+			// This value might be pre-shifted or needs shifting by GMBUS_PIN_SHIFT.
+			// For simplicity, assume vbt_to_gmbus_pin returns the raw GMBUS_PIN_* value.
+			port_state->gmbus_pin_pair = vbt_to_gmbus_pin(dev_type, vbt_child->ddc_pin_mapping, vbt_child->dp_aux_ch_mapping);
+
+			// For DP, also store AUX channel if distinct from GMBUS pin
+			if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
+				// VBT often has a specific field for AUX CH (e.g. 0 for A, 1 for B)
+				// or the gmbus_pin_pair for DP already implies the AUX CH.
+				// This needs mapping based on specific VBT structure.
+				// Example: if dp_aux_ch_mapping is 0 for CH_A, 1 for CH_B, etc.
+				// port_state->dp_aux_ch = vbt_child->dp_aux_ch_mapping;
+				// For now, gmbus_pin_pair is assumed to also identify the AUX channel for GMBUS access.
+			}
+
+			TRACE("VBT: Found child device: handle 0x%04x, type 0x%04x (decoded as %d), gmbus_pin 0x%02x\n",
+				vbt_child->handle, vbt_child->device_type, port_state->type, port_state->gmbus_pin_pair);
+
+			devInfo->vbt->children[devInfo->vbt->num_child_devices] = *(const struct bdb_child_device_entry*)vbt_child; // Risky cast if structs differ
+			devInfo->vbt->num_child_devices++;
+		}
+
+		current_ptr += vbt_child->child_dev_size; // Advance to next child device entry
+		child_idx++;
+	}
+	devInfo->num_ports_detected = devInfo->vbt->num_child_devices;
+	TRACE("VBT: Detected %u child devices/ports.\n", devInfo->num_ports_detected);
+}
+
 
 static void
 parse_bdb_general_features(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)

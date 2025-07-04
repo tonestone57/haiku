@@ -121,7 +121,134 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 	}
 
 	// TODO: Parse Standard Timings (bytes 38-53 / 0x26-0x35)
-	// TODO: Parse Established Timings (bytes 35-37 / 0x23-0x25)
+
+	// Parse Established Timings (bytes 35-37 / 0x23-0x25)
+	// Byte 35: Established Timings I
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x80)) { // 720x400 @ 70Hz (IBM, VGA)
+		// modes[mode_count++] = ... ; // Requires full timing_t struct
+		TRACE("EDID: Found Established Timing: 720x400 @ 70Hz (not added yet)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x40)) { // 720x400 @ 88Hz (IBM, XGA2)
+		TRACE("EDID: Found Established Timing: 720x400 @ 88Hz (not added yet)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x20)) { // 640x480 @ 60Hz (IBM, VGA)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 25175, 640, 656, 752, 800, 480, 490, 492, 525, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC }; // Standard VESA 640x480@60Hz
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 640x480 @ 60Hz (VGA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x10)) { // 640x480 @ 67Hz (Apple Mac II)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 30240, 640, 664, 704, 832, 480, 489, 492, 520, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 640x480 @ 67Hz (MacII)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x08)) { // 640x480 @ 72Hz (VESA)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 31500, 640, 664, 704, 832, 480, 489, 492, 520, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 640x480 @ 72Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x04)) { // 640x480 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 31500, 640, 656, 720, 840, 480, 481, 484, 500, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 640x480 @ 75Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x02)) { // 800x600 @ 56Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 36000, 800, 824, 896, 1024, 600, 601, 603, 625, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 800x600 @ 56Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x01)) { // 800x600 @ 60Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 40000, 800, 840, 968, 1056, 600, 601, 605, 628, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 800x600 @ 60Hz (VESA)\n");
+	}
+
+	// Byte 36: Established Timings II
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x80)) { // 800x600 @ 72Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 50000, 800, 856, 976, 1040, 600, 637, 643, 666, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 800x600 @ 72Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x40)) { // 800x600 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 49500, 800, 816, 896, 1056, 600, 601, 604, 625, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 800x600 @ 75Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x20)) { // 832x624 @ 75Hz (Apple Mac II)
+		TRACE("EDID: Found Established Timing: 832x624 @ 75Hz (MacII) (not added yet)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x10)) { // 1024x768 @ 87Hz (IBM, interlaced)
+		TRACE("EDID: Found Established Timing: 1024x768 @ 87Hz (Interlaced) (not added yet)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x08)) { // 1024x768 @ 60Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 65000, 1024, 1048, 1184, 1344, 768, 771, 777, 806, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 1024x768 @ 60Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x04)) { // 1024x768 @ 70Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 75000, 1024, 1048, 1184, 1328, 768, 771, 777, 806, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 1024x768 @ 70Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x02)) { // 1024x768 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 78750, 1024, 1040, 1152, 1312, 768, 769, 772, 800, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 1024x768 @ 75Hz (VESA)\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x01)) { // 1280x1024 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 1280; modes[mode_count].virtual_height = 1024;
+		modes[mode_count].timing = (timing_t){ 135000, 1280, 1296, 1440, 1688, 1024, 1025, 1028, 1066, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 1280x1024 @ 75Hz (VESA)\n");
+	}
+
+	// Byte 37: Manufacturer's Timings / Established Timings III
+	if (mode_count < max_modes && (edid->manufacturer_reserved_established_timings_3 & 0x80)) { // 1152x870 @ 75Hz (Apple MacII)
+		// Also sometimes referred to as 1152x864
+		modes[mode_count].virtual_width = 1152; modes[mode_count].virtual_height = 870;
+		// Exact timings for 1152x870@75Hz (Apple) can be specific, using common values.
+		modes[mode_count].timing = (timing_t){ 100000, 1152, 1184, 1248, 1472, 870, 871, 874, 900, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC }; // Placeholder timings
+		modes[mode_count].space = B_RGB32_LITTLE;
+		modes[mode_count].h_display_start = 0; modes[mode_count].v_display_start = 0;
+		mode_count++;
+		TRACE("EDID: Added Established Timing: 1152x870 @ 75Hz (MacII)\n");
+	}
+	// Other bits in byte 37 are reserved or for specific manufacturer use in older EDID versions.
+
 	// TODO: Handle EDID extensions if edid->extension_flag > 0
 
 	if (mode_count == 0) {

@@ -549,7 +549,7 @@ rule KernelArchitectureSetup architecture
 				# library to provide compiler runtime routines like _restgpr_
 				# and _restfpr_ which are needed when -ffreestanding is used.
 				# $(architecture) here refers to the primary packaging architecture.
-				HAIKU_BOOT_$(bootTarget:U)_LDFLAGS = -L$(HAIKU_GCC_LIB_DIR_$(architecture)) -lgcc ;
+				HAIKU_BOOT_$(bootTarget:U)_LDFLAGS = -L$(HAIKU_GCC_LIB_DIR_$(architecture)) -L$(HAIKU_CROSS_TOOLS_ARCH_LIB_DIR_$(architecture)) -lgcc -lsupc++ ;
 			case * :
 				# all other bootloaders are non-PIC
 				HAIKU_BOOT_$(bootTarget:U)_CCFLAGS += -fno-pic -Wno-error=main ;

@@ -50,6 +50,20 @@ void intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id
 intel_output_port_state* intel_display_get_port_by_vbt_handle(intel_i915_device_info* devInfo, uint16_t vbt_handle);
 intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* devInfo, enum intel_port_id_priv id);
 
+// DPMS Kernel Functions
+status_t intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t dpms_mode);
+status_t intel_display_get_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t* current_dpms_mode);
+
+// Plane offset / Panning
+status_t intel_display_set_plane_offset(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint16_t x_offset, uint16_t y_offset);
+
+// Palette / CLUT
+status_t intel_display_load_palette(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint8_t first_color_index, uint16_t count, const uint8_t* color_data);
+
 
 #ifdef __cplusplus
 }

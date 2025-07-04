@@ -1021,8 +1021,261 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 }
 
 
+// --- Palette / CLUT ---
+status_t
+intel_display_load_palette(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint8_t first_color_index, uint16_t count, const uint8_t* color_data)
+{
+	TRACE("DISPLAY: Load palette for pipe %d, first %u, count %u\n", pipe, first_color_index, count);
+	if (devInfo == NULL || pipe < 0 || pipe >= PRIV_MAX_PIPES || color_data == NULL || count == 0)
+		return B_BAD_VALUE;
+	if ((uint32_t)first_color_index + count > 256)
+		return B_BAD_VALUE;
+
+	uint32_t palette_reg_base;
+	switch (pipe) {
+		case PRIV_PIPE_A: palette_reg_base = LGC_PALETTE_A; break;
+		case PRIV_PIPE_B: palette_reg_base = LGC_PALETTE_B; break;
+		case PRIV_PIPE_C: palette_reg_base = LGC_PALETTE_C; break;
+		default:
+			TRACE("DISPLAY: load_palette: Invalid pipe %d\n", pipe);
+			return B_BAD_VALUE;
+	}
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Palette regs might need forcewake
+
+	for (uint16 i = 0; i < count; i++) {
+		uint8_t r = color_data[(i * 4) + 0];
+		uint8_t g = color_data[(i * 4) + 1];
+		uint8_t b = color_data[(i * 4) + 2];
+		// Alpha (color_data[i*4 + 3]) is ignored for hardware palette.
+
+		uint32_t palette_val = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+		intel_i915_write32(devInfo, palette_reg_base + (first_color_index + i) * 4, palette_val);
+	}
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("DISPLAY: Palette loaded for pipe %d.\n", pipe);
+	return B_OK;
+}
+
+
+// --- Plane Offset / Panning ---
+status_t
+intel_display_set_plane_offset(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint16_t x_offset, uint16_t y_offset)
+{
+	TRACE("DISPLAY: Set plane offset for pipe %d to (%u, %u)\n", pipe, x_offset, y_offset);
+	if (devInfo == NULL || pipe < 0 || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	// This assumes Gen7+ like IVB/HSW which have DSPSLSOFF registers.
+	// Older gens might need to adjust DSPABASE or have different offset registers.
+	uint32_t reg_plane_linoff; // Linear Offset register (e.g. DSPASLSOFF)
+	uint32_t reg_plane_tileoff; // Tile Offset register (e.g. DSPATILEOFF) - for tiled formats
+
+	// Map pipe to plane offset registers
+	switch (pipe) {
+		case PRIV_PIPE_A:
+			reg_plane_linoff = DSPASLSOFF;
+			reg_plane_tileoff = DSPATILEOFF;
+			break;
+		case PRIV_PIPE_B:
+			reg_plane_linoff = DSPBSLSOFF;
+			reg_plane_tileoff = DSPBTILEOFF;
+			break;
+		case PRIV_PIPE_C:
+			reg_plane_linoff = DSPCSLSOFF;
+			reg_plane_tileoff = DSPCTILEOFF;
+			break;
+		default:
+			TRACE("DISPLAY: set_plane_offset: Invalid pipe %d\n", pipe);
+			return B_BAD_VALUE;
+	}
+
+	// Assuming a linear framebuffer for now, so DSPSLSOFF is primarily used.
+	// If the framebuffer is tiled, DSPTILEOFF would be used, and x_offset/y_offset
+	// would need to be tile-aligned or hardware handles sub-tile offsets.
+	// For DSPSLSOFF: Bits 11:0 = Y Offset, Bits 27:16 = X Offset.
+	// These are pixel offsets.
+	uint32_t offset_val = ((uint32_t)x_offset << 16) | y_offset;
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // May not be needed for all plane regs
+	intel_i915_write32(devInfo, reg_plane_linoff, offset_val);
+	// If using tiled formats, DSPTILEOFF would also be set.
+	// For linear, DSPTILEOFF is typically 0.
+	// intel_i915_write32(devInfo, reg_plane_tileoff, 0); // Assuming linear
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+
+	// Update shared_info current_mode if it stores h_display_start/v_display_start
+	// This assumes the offsets are relative to the framebuffer base, not absolute screen coords.
+	if (devInfo->shared_info != NULL) {
+		// The display_mode struct has h_display_start and v_display_start.
+		// These are usually for defining the active area within the virtual width/height.
+		// Panning is different; it's the start of the scanout from the framebuffer.
+		// For now, we won't update shared_info->current_mode's display_start fields
+		// as they have a different meaning. The hardware is updated.
+		// If app_server needs to know the current pan offset, a new shared_info field or IOCTL would be needed.
+	}
+
+	TRACE("DISPLAY: Pipe %d plane offset set to X=%u, Y=%u (Reg 0x%x Val 0x%08lx)\n",
+		pipe, x_offset, y_offset, reg_plane_linoff, offset_val);
+
+	return B_OK;
+}
+
+
 intel_output_port_state* intel_display_get_port_by_vbt_handle(intel_i915_device_info* d, uint16_t h){ return NULL;}
 intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* d, enum intel_port_id_priv id){ if (!d) return NULL; for (int i = 0; i < d->num_ports_detected; i++) { if (d->ports[i].logical_port_id == id) return &d->ports[i]; } return NULL; }
+
+
+// --- DPMS Kernel Functions ---
+status_t
+intel_display_get_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t* current_dpms_mode)
+{
+	if (devInfo == NULL || current_dpms_mode == NULL || pipe < 0 || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	// TODO: Could add logic to read HW state to infer DPMS mode if cache is unreliable,
+	// but that's complex. For now, rely on cached state.
+	*current_dpms_mode = devInfo->pipes[pipe].current_dpms_mode;
+	TRACE("DPMS: Get DPMS mode for pipe %d: 0x%lx\n", pipe, *current_dpms_mode);
+	return B_OK;
+}
+
+status_t
+intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t dpms_mode)
+{
+	TRACE("DPMS: Set DPMS mode for pipe %d to 0x%lx\n", pipe, dpms_mode);
+	if (devInfo == NULL || pipe < 0 || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	// Find the port associated with this pipe
+	intel_output_port_state* port = NULL;
+	enum intel_port_id_priv port_id = PRIV_PORT_ID_NONE;
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].current_pipe_assignment == pipe) {
+			port = &devInfo->ports[i];
+			port_id = port->logical_port_id;
+			break;
+		}
+	}
+
+	if (port == NULL && dpms_mode != B_DPMS_OFF) {
+		// If no port is assigned to the pipe, we can only really turn it "off"
+		// (which it effectively is). Trying to turn it "on" without a port is an error.
+		TRACE("DPMS: Pipe %d has no assigned port, cannot set DPMS mode 0x%lx (unless OFF).\n", pipe, dpms_mode);
+		if (devInfo->pipes[pipe].enabled) { // If pipe was somehow enabled without a port, try to disable
+			intel_i915_plane_enable(devInfo, pipe, false);
+			intel_i915_pipe_disable(devInfo, pipe);
+			// DPLL disable might need clock_params, skip if we don't have them for this orphaned pipe
+		}
+		devInfo->pipes[pipe].current_dpms_mode = B_DPMS_OFF;
+		return (dpms_mode == B_DPMS_OFF) ? B_OK : B_BAD_VALUE;
+	}
+	if (port != NULL) {
+		TRACE("DPMS: Operating on port %d (type %d) for pipe %d\n", port_id, port->type, pipe);
+	}
+
+
+	// Retrieve current mode and clock parameters for the pipe if we are turning it ON.
+	// This assumes that a mode was previously set on this pipe.
+	display_mode current_pipe_mode = devInfo->pipes[pipe].current_mode;
+	intel_clock_params_t current_clocks; // This needs to be populated if enabling.
+
+	// If turning ON, we need clock_params. Recalculate if not stored per pipe.
+	// This is a simplification; a robust DPMS ON might need to restore specific clock settings.
+	if (dpms_mode == B_DPMS_ON) {
+		if (current_pipe_mode.timing.pixel_clock == 0 || port == NULL) {
+			TRACE("DPMS: Cannot turn ON pipe %d, no current mode or port defined.\n", pipe);
+			return B_ERROR; // Or try a default mode? Risky.
+		}
+		// Recalculate clocks for the current mode on this pipe/port.
+		// This assumes calculate_display_clocks doesn't itself depend on current DPMS state.
+		status_t clock_status = intel_i915_calculate_display_clocks(devInfo, &current_pipe_mode, pipe, port_id, &current_clocks);
+		if (clock_status != B_OK) {
+			TRACE("DPMS: Failed to calculate clocks for pipe %d ON state: %s\n", pipe, strerror(clock_status));
+			return clock_status;
+		}
+	}
+
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL); // Ensure power for display regs
+
+	switch (dpms_mode) {
+		case B_DPMS_ON:
+			if (!devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Turning ON pipe %d, port %d\n", pipe, port_id);
+				// Full power on: PLL, Pipe, Plane, Port (panel, backlight, link)
+				intel_i915_program_dpll_for_pipe(devInfo, pipe, &current_clocks); // Reprogram DPLL
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, &current_clocks);
+				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, &current_clocks);
+				intel_i915_plane_enable(devInfo, pipe, true);
+				// Port enable should handle panel power, backlight, DP link training etc.
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_on(devInfo, port); // Ensure panel VDD is on before port enable
+				}
+				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode);
+			} else {
+				TRACE("DPMS: Pipe %d already ON or no port to enable.\n", pipe);
+			}
+			break;
+
+		case B_DPMS_STANDBY: // Often maps to Suspend
+		case B_DPMS_SUSPEND:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Setting pipe %d, port %d to SUSPEND/STANDBY\n", pipe, port_id);
+				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					uint8_t dpcd_val = DPCD_POWER_D3; // D3 is standby/suspend for DP
+					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+					TRACE("DPMS: DP port %d set to DPCD D3 power state.\n", port_id);
+				} else if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					// For LVDS/eDP, typically turn off backlight first.
+					// intel_lvds_set_backlight(devInfo, port, 0); // Conceptual
+					// Then, can disable panel signals via PP_CONTROL, but keep VDD on for quick resume.
+					// This part of intel_lvds_panel_power_off might be too aggressive for SUSPEND.
+					// For now, a simple pipe disable will cut signals.
+					TRACE("DPMS: LVDS/eDP port %d suspend - backlight control is part of panel_power_off.\n", port_id);
+				}
+				intel_i915_plane_enable(devInfo, pipe, false); // Turn off plane before pipe
+				intel_i915_pipe_disable(devInfo, pipe);
+				// Keep DPLL enabled for faster resume from suspend.
+			} else {
+				TRACE("DPMS: Pipe %d already OFF or no port for SUSPEND.\n", pipe);
+			}
+			break;
+
+		case B_DPMS_OFF:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Turning OFF pipe %d, port %d\n", pipe, port_id);
+				// Full power off: Port (panel, backlight, link), Plane, Pipe, PLL
+				intel_i915_port_disable(devInfo, port_id); // Handles panel VDD off, DPCD D3 etc.
+				intel_i915_plane_enable(devInfo, pipe, false);
+				intel_i915_pipe_disable(devInfo, pipe);
+				// Get current clocks for disabling DPLL, even if it's just for selected_dpll_id
+				// This might be problematic if clocks weren't calculated for ON state first.
+				// For OFF, we mainly need to know which DPLL was used by this pipe.
+				// The clock_params passed to enable_dpll(false,...) is mostly for selected_dpll_id.
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].placeholder_clocks_for_dpll_id_TODO);
+			} else if (devInfo->pipes[pipe].enabled) { // Pipe on but no port, just disable pipe
+				TRACE("DPMS: Turning OFF pipe %d (no port assigned).\n", pipe);
+				intel_i915_plane_enable(devInfo, pipe, false);
+				intel_i915_pipe_disable(devInfo, pipe);
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].placeholder_clocks_for_dpll_id_TODO);
+			}
+			break;
+
+		default:
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+			return B_BAD_VALUE;
+	}
+
+	devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	return B_OK;
+}
 
 
 // --- Cursor IOCTL Handlers ---

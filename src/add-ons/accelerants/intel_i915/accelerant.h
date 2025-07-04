@@ -29,7 +29,24 @@ enum {
 
 	INTEL_I915_GET_DPMS_MODE,
 	INTEL_I915_SET_DPMS_MODE,
+	INTEL_I915_MOVE_DISPLAY_OFFSET,
+	INTEL_I915_SET_INDEXED_COLORS,
 };
+
+// Args for INTEL_I915_SET_INDEXED_COLORS
+typedef struct {
+	uint32_t pipe;          // Input: which pipe/display's palette to set
+	uint8_t  first_color;   // Input: starting index in the palette
+	uint16_t count;         // Input: number of color entries to set
+	uint64_t user_color_data_ptr; // Input: user-space pointer to color data (array of B_RGB32 or similar)
+} intel_i915_set_indexed_colors_args;
+
+// Args for INTEL_I915_MOVE_DISPLAY_OFFSET
+typedef struct {
+	uint32_t pipe; // Input: which pipe/display to move
+	uint16_t x;    // Input: new horizontal display start offset
+	uint16_t y;    // Input: new vertical display start offset
+} intel_i915_move_display_args;
 
 typedef struct {
 	area_id shared_area;

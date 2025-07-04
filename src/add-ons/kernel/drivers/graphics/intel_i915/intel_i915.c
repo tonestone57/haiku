@@ -281,7 +281,62 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
 			return intel_i915_set_cursor_bitmap_ioctl(devInfo, buffer, length);
 
+		case INTEL_I915_GET_DPMS_MODE: {
+			if (buffer == NULL || length != sizeof(intel_i915_get_dpms_mode_args))
+				return B_BAD_VALUE;
+			intel_i915_get_dpms_mode_args args;
+			// Only need to copy the pipe index from userland for which to get the mode.
+			// The mode field will be populated by the kernel and copied back.
+			if (copy_from_user(&args.pipe, &((intel_i915_get_dpms_mode_args*)buffer)->pipe, sizeof(args.pipe)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			status_t status = intel_display_get_pipe_dpms_mode(devInfo, args.pipe, &args.mode);
+			if (status != B_OK)
+				return status;
+			if (copy_to_user(&((intel_i915_get_dpms_mode_args*)buffer)->mode, &args.mode, sizeof(args.mode)) != B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+		}
+		case INTEL_I915_SET_DPMS_MODE: {
+			if (buffer == NULL || length != sizeof(intel_i915_set_dpms_mode_args))
+				return B_BAD_VALUE;
+			intel_i915_set_dpms_mode_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+			return intel_display_set_pipe_dpms_mode(devInfo, args.pipe, args.mode);
+		}
+		case INTEL_I915_MOVE_DISPLAY_OFFSET: {
+			if (buffer == NULL || length != sizeof(intel_i915_move_display_args))
+				return B_BAD_VALUE;
+			intel_i915_move_display_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+			return intel_display_set_plane_offset(devInfo, (enum pipe_id_priv)args.pipe, args.x, args.y);
+		}
+		case INTEL_I915_SET_INDEXED_COLORS: {
+			if (buffer == NULL || length != sizeof(intel_i915_set_indexed_colors_args))
+				return B_BAD_VALUE;
+			intel_i915_set_indexed_colors_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+			if (args.count == 0 || args.count > 256 || (args.first_color + args.count) > 256)
+				return B_BAD_VALUE;
+
+			// Max color data size: 256 entries * 4 bytes/entry (RGBA) = 1024 bytes
+			// Haiku's color_data is {r,g,b,a} but palette hardware is often {r,g,b} (24-bit).
+			// Assuming kernel function will handle the format.
+			uint8 kernel_color_data[256 * 4]; // Max possible size
+			size_t data_size_to_copy = args.count * sizeof(uint32); // Assuming B_RGB32 like structure
+
+			if (args.user_color_data_ptr == 0) return B_BAD_ADDRESS;
+			if (copy_from_user(kernel_color_data, (void*)args.user_color_data_ptr, data_size_to_copy) != B_OK)
+				return B_BAD_ADDRESS;
+
+			return intel_display_load_palette(devInfo, (enum pipe_id_priv)args.pipe,
+				args.first_color, args.count, kernel_color_data);
+		}
+
 		default: return B_DEV_INVALID_IOCTL;
 	}
-	return B_DEV_INVALID_IOCTL;
+	return B_DEV_INVALID_IOCTL; // Should not be reached
 }

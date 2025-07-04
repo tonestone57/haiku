@@ -22,6 +22,9 @@ struct intel_vbt_data;
 struct intel_engine_cs;
 struct rps_info;
 
+// DPMS States from GraphicsDefs.h (B_DPMS_ON, B_DPMS_STANDBY, B_DPMS_SUSPEND, B_DPMS_OFF)
+// No need to redefine them here, just ensure GraphicsDefs.h is included where they are used.
+
 #define DEVICE_NAME_PRIV "intel_i915"
 #ifdef TRACE_DRIVER
 #	define TRACE(x...) dprintf(DEVICE_NAME_PRIV ": " x)
@@ -47,13 +50,19 @@ static inline int INTEL_GRAPHICS_GEN(uint16_t devid) { if (IS_GEN7(devid)) retur
 
 enum pipe_id_priv { PRIV_PIPE_A = 0, PRIV_PIPE_B, PRIV_PIPE_C, PRIV_PIPE_INVALID = -1, PRIV_MAX_PIPES = PRIV_PIPE_C + 1 };
 enum transcoder_id_priv { PRIV_TRANSCODER_A=0, PRIV_TRANSCODER_B, PRIV_TRANSCODER_C, PRIV_TRANSCODER_EDP, PRIV_TRANSCODER_INVALID=-1, PRIV_MAX_TRANSCODERS=PRIV_TRANSCODER_EDP+1};
-enum intel_port_id_priv { PRIV_PORT_ID_NONE = 0, /* ... */ PRIV_MAX_PORTS };
+enum intel_port_id_priv { PRIV_PORT_ID_NONE = 0, /* ... */ PRIV_MAX_PORTS = 5 }; // Adjusted for DDI A-E example
 enum intel_output_type_priv { PRIV_OUTPUT_NONE = 0, /* ... */ };
 
 #define PRIV_MAX_EDID_MODES_PER_PORT 32
 #define PRIV_EDID_BLOCK_SIZE 128
 
-typedef struct { enum pipe_id_priv id; bool enabled; display_mode current_mode; } intel_pipe_hw_state;
+typedef struct {
+	enum pipe_id_priv id;
+	bool enabled;
+	display_mode current_mode;
+	uint32_t current_dpms_mode; // Current DPMS state for this pipe
+} intel_pipe_hw_state;
+
 typedef struct { /* ... intel_output_port_state fields ... */
 	enum intel_port_id_priv logical_port_id; enum intel_output_type_priv type;
 	uint16_t child_device_handle; bool present_in_vbt; uint8_t gmbus_pin_pair;
@@ -71,6 +80,7 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	uint8_t  dp_max_lane_count; // Max lanes from DPCD_MAX_LANE_COUNT
 	bool     dp_enhanced_framing_capable;
 	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
+	enum pipe_id_priv current_pipe_assignment; // Which pipe is this port currently configured for
 } intel_output_port_state;
 
 // Define backlight control source enum (conceptual)

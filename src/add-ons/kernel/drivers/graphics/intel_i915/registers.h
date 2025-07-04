@@ -344,6 +344,13 @@
 	// ... other bits for sample rate, channel count, etc.
 
 
+// --- Palette / CLUT Registers ---
+// Gen4+ through Haswell. Pipe C only on HSW+.
+#define LGC_PALETTE_A           0x4A000 // Pipe A Palette
+#define LGC_PALETTE_B           0x4A800 // Pipe B Palette
+#define LGC_PALETTE_C           0x4B000 // Pipe C Palette (HSW+)
+// Each palette has 256 entries of 32-bit (00:RR:GG:BB) values. Offset = index * 4.
+
 // --- Gen7 Logical Ring Context Area (LRCA) Offsets (Conceptual DWord Offsets from start of context image) ---
 // These are for the Render Command Streamer (RCS0) context image.
 // Actual hardware context image layout is defined by PRM and can be sparse.

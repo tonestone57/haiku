@@ -346,8 +346,58 @@ intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *low_khz, uint32 *hig
 	return B_OK;
 }
 
-static status_t intel_i915_move_display(uint16 x, uint16 y) { TRACE("MOVE_DISPLAY (stub)\n"); return B_UNSUPPORTED;}
-static void     intel_i915_set_indexed_colors(uint c, uint8 f, uint8 *d, uint32 fl) { TRACE("SET_INDEXED_COLORS (stub)\n");}
+static status_t
+intel_i915_move_display(uint16 h_display_start, uint16 v_display_start)
+{
+	TRACE("MOVE_DISPLAY to %u, %u\n", h_display_start, v_display_start);
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE("MOVE_DISPLAY: Accelerant not initialized.\n");
+		return B_NO_INIT;
+	}
+
+	intel_i915_move_display_args args;
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe from display_id or other context.
+	args.x = h_display_start;
+	args.y = v_display_start;
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_MOVE_DISPLAY_OFFSET, &args, sizeof(args));
+	if (status != B_OK) {
+		TRACE("MOVE_DISPLAY: IOCTL failed: %s\n", strerror(status));
+	} else {
+		// If successful, the kernel has updated the hardware.
+		// The accelerant's view of current_mode.h_display_start/v_display_start
+		// in gInfo->shared_info should be updated by the kernel if these fields are part of shared_info.
+		// Let's check shared_info structure. Yes, current_mode is in shared_info.
+		// So, after ioctl, gInfo->shared_info->current_mode.h_display_start should reflect the change.
+		// No need for accelerant to manually update its gInfo->shared_info copy for these fields.
+		TRACE("MOVE_DISPLAY: IOCTL successful for pipe %lu to %u,%u.\n", args.pipe, args.x, args.y);
+	}
+	return status;
+}
+
+static void
+intel_i915_set_indexed_colors(uint count, uint8 first, uint8 *color_data, uint32 flags)
+{
+	TRACE("SET_INDEXED_COLORS: count %u, first %u, flags 0x%lx\n", count, first, flags);
+	if (!gInfo || gInfo->device_fd < 0 || count == 0 || color_data == NULL) {
+		TRACE("SET_INDEXED_COLORS: Accelerant not initialized or invalid args.\n");
+		return;
+	}
+
+	// The color_data is an array of {red, green, blue, not_alpha} values.
+	// For a count of N, it's N*4 bytes.
+	// We need to pass this user-space pointer to the kernel.
+	intel_i915_set_indexed_colors_args args;
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe from display_id or other context.
+	args.first_color = first;
+	args.count = count;
+	args.user_color_data_ptr = (uint64_t)(uintptr_t)color_data;
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_INDEXED_COLORS, &args, sizeof(args));
+	if (status != B_OK) {
+		TRACE("SET_INDEXED_COLORS: IOCTL failed: %s\n", strerror(status));
+	}
+}
 
 static uint32
 intel_i915_dpms_capabilities(void)
@@ -368,8 +418,8 @@ intel_i915_dpms_mode(void)
 	}
 
 	intel_i915_get_dpms_mode_args args;
-	args.pipe = 0; // Assume pipe 0 for now
-	args.mode = B_DPMS_ON; // Default if ioctl fails
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe from display_id or other context.
+	args.mode = gInfo->cached_dpms_mode; // Default to cached if ioctl fails
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_GET_DPMS_MODE, &args, sizeof(args)) == 0) {
 		TRACE("DPMS_MODE: Kernel returned mode 0x%lx for pipe %lu\n", args.mode, args.pipe);
@@ -391,7 +441,7 @@ intel_i915_set_dpms_mode(uint32 dpms_flags)
 	}
 
 	intel_i915_set_dpms_mode_args args;
-	args.pipe = 0; // Assume pipe 0 for now
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe from display_id or other context.
 	args.mode = dpms_flags;
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DPMS_MODE, &args, sizeof(args));
@@ -567,7 +617,7 @@ intel_i915_move_cursor(uint16 x, uint16 y)
 	gInfo->cursor_current_y = y;
 
 	intel_i915_set_cursor_state_args args;
-	args.pipe = 0; // Default to Pipe A for now
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe for cursor based on x,y or active display.
 	args.x = gInfo->cursor_current_x;
 	args.y = gInfo->cursor_current_y;
 	args.is_visible = gInfo->cursor_is_visible;
@@ -586,7 +636,7 @@ intel_i915_show_cursor(bool is_visible)
 	gInfo->cursor_is_visible = is_visible;
 
 	intel_i915_set_cursor_state_args args;
-	args.pipe = 0; // Default to Pipe A for now
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe for cursor.
 	args.x = gInfo->cursor_current_x; // Use cached position
 	args.y = gInfo->cursor_current_y;
 	args.is_visible = gInfo->cursor_is_visible;
@@ -617,7 +667,7 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 h
 	}
 
 	intel_i915_set_cursor_bitmap_args args;
-	args.pipe = 0; // Default to Pipe A for now
+	args.pipe = 0; // TODO: Multi-monitor: Determine target pipe for cursor.
 	args.width = width;
 	args.height = height;
 	args.hot_x = hot_x;
@@ -639,7 +689,7 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 h
 	// If it was previously invisible, this won't show it unless show_cursor(true) is called by app_server.
 	// If it was visible, this re-applies its position with the new hotspot.
 	intel_i915_set_cursor_state_args state_args;
-	state_args.pipe = 0; // Default to Pipe A
+	state_args.pipe = 0; // TODO: Multi-monitor: Determine target pipe for cursor.
 	state_args.x = gInfo->cursor_current_x;
 	state_args.y = gInfo->cursor_current_y;
 	state_args.is_visible = gInfo->cursor_is_visible; // Use cached visibility
@@ -664,12 +714,38 @@ static status_t intel_i915_sync_to_token(sync_token *st) { TRACE("SYNC_TO_TOKEN 
 // For now, provide minimal stubs here if accel_2d.c functions are static.
 // If accel_2d.c functions are non-static and declared in a header included by hooks.c, these are not needed.
 // Assuming they are now non-static and declared elsewhere (e.g. a new accel_2d.h or in accelerant_protos.h)
-// void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
-// void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
-// void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
-// void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count); // Now implemented in accel_2d.c
+/*
+void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
+void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
+void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
+void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
+*/
+// These are implemented in accel_2d.c and called via the get_accelerant_hook mechanism.
 
-static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 tc, blit_params *l, uint32 c) { TRACE("S2S_TRANSPARENT_BLIT (stub)\n");}
-static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *l, uint32 c) { TRACE("S2S_SCALED_FILTERED_BLIT (stub)\n");}
-// Removed the stub implementation of intel_i915_fill_span as it's now in accel_2d.c
-// Removed the stub implementation of intel_i915_invert_rectangle as it's now in accel_2d.c
+static void
+intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color,
+	blit_params *list, uint32 count)
+{
+	TRACE("S2S_TRANSPARENT_BLIT: Transparent color 0x%08lx, count %lu. (Fallback to opaque blit)\n",
+		transparent_color, count);
+	// Fallback to standard screen-to-screen blit, ignoring transparency.
+	// This provides basic functionality but without the transparency effect.
+	intel_i915_screen_to_screen_blit(et, list, count);
+	// TODO: Implement actual transparent blit if hardware supports a simple mechanism
+	// via BLT commands (e.g., color keying ROP or specific setup).
+	// Otherwise, this would require render engine or software fallback.
+}
+
+static void
+intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et,
+	scaled_blit_params *list, uint32 count)
+{
+	TRACE("S2S_SCALED_FILTERED_BLIT: count %lu. (STUB - UNSUPPORTED)\n", count);
+	// This is a complex operation typically requiring the render engine or dedicated
+	// scaling hardware, not usually available in the basic 2D BLT engine.
+	// For now, mark as unsupported. A partial fallback might do an unscaled blit
+	// if scaling factors are 1.0 and no filtering is requested, but the hook
+	// name implies scaling/filtering is expected.
+	// To return an error, this hook would need to be status_t.
+	// Since it's void, we just trace and do nothing.
+}

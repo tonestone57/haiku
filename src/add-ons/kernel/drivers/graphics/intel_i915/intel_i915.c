@@ -84,6 +84,14 @@ extern "C" status_t init_driver(void) {
 		memset(gDeviceInfo[gDeviceCount], 0, sizeof(intel_i915_device_info));
 		// ... (Initialize all devInfo fields to -1 or NULL as appropriate) ...
 		gDeviceInfo[gDeviceCount]->pciinfo = info;
+		// Initialize pipe states
+		for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; pipe_idx++) {
+			gDeviceInfo[gDeviceCount]->pipes[pipe_idx].id = (enum pipe_id_priv)pipe_idx;
+			gDeviceInfo[gDeviceCount]->pipes[pipe_idx].enabled = false;
+			memset(&gDeviceInfo[gDeviceCount]->pipes[pipe_idx].current_mode, 0, sizeof(display_mode));
+			gDeviceInfo[gDeviceCount]->pipes[pipe_idx].current_dpms_mode = B_DPMS_ON; // Default to ON
+			memset(&gDeviceInfo[gDeviceCount]->pipes[pipe_idx].cached_clock_params, 0, sizeof(intel_clock_params_t));
+		}
 		gDeviceInfo[gDeviceCount]->vendor_id = info.vendor_id;
 		gDeviceInfo[gDeviceCount]->device_id = info.device_id;
 		gDeviceInfo[gDeviceCount]->revision = info.revision;

@@ -61,6 +61,7 @@ typedef struct {
 	bool enabled;
 	display_mode current_mode;
 	uint32_t current_dpms_mode; // Current DPMS state for this pipe
+	intel_clock_params_t cached_clock_params; // Store clock params used for current mode
 } intel_pipe_hw_state;
 
 typedef struct { /* ... intel_output_port_state fields ... */

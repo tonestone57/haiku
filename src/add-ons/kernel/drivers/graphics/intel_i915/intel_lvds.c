@@ -432,3 +432,35 @@ intel_lvds_port_disable(intel_i915_device_info* devInfo, intel_output_port_state
 	// If intel_lvds_panel_power_off is not called after this, it should be called here.
 	// In current display.c flow, panel_power_off is called if pipe was enabled on this port.
 }
+
+
+status_t
+intel_lvds_set_backlight(intel_i915_device_info* devInfo, intel_output_port_state* port, bool on)
+{
+	TRACE("LVDS/eDP: Set backlight for port %d to %s (STUBBED)\n", port->logical_port_id, on ? "ON" : "OFF");
+	if (devInfo == NULL || port == NULL)
+		return B_BAD_VALUE;
+
+	// This function would encapsulate the logic currently split between
+	// intel_lvds_panel_power_on and intel_lvds_panel_power_off for backlight.
+	// It needs to use port->backlight_control_source to determine method.
+
+	// intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // If accessing regs directly
+
+	if (on) {
+		// TODO: Implement backlight ON logic based on port->backlight_control_source
+		// This might involve:
+		// - Setting EDP_BLC_ENABLE in PP_CONTROL for eDP.
+		// - Programming PWM CTL1/CTL2 registers for LVDS/PWM eDP.
+		// - Sending DPCD AUX commands for eDP AUX backlight control.
+		TRACE("LVDS/eDP: Backlight ON logic STUBBED for port %d, source %u.\n",
+			port->logical_port_id, port->backlight_control_source);
+	} else {
+		// TODO: Implement backlight OFF logic
+		TRACE("LVDS/eDP: Backlight OFF logic STUBBED for port %d, source %u.\n",
+			port->logical_port_id, port->backlight_control_source);
+	}
+
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return B_OK; // Placeholder
+}

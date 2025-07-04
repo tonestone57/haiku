@@ -484,10 +484,12 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	devInfo->shared_info->framebuffer_size = new_fb_size;
 	devInfo->shared_info->bytes_per_row = new_bytes_per_row;
 	devInfo->shared_info->framebuffer_area = devInfo->framebuffer_area;
-	devInfo->current_hw_mode = *mode;
+	devInfo->current_hw_mode = *mode; // This might be redundant if pipes[X].current_mode is the source of truth
 	devInfo->pipes[targetPipe].enabled = true;
 	devInfo->pipes[targetPipe].current_mode = *mode;
-	port_state->current_pipe = targetPipe;
+	devInfo->pipes[targetPipe].cached_clock_params = clock_params; // Cache the clocks used
+	devInfo->pipes[targetPipe].current_dpms_mode = B_DPMS_ON; // Successful modeset implies DPMS ON
+	port_state->current_pipe_assignment = targetPipe; // Update port to pipe assignment
 
 	// Ensure VBlank IRQs enabled for this pipe
 	if (devInfo->irq_cookie != NULL) { /* ... enable specific pipe vblank ... */ }
@@ -1228,16 +1230,20 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 			if (devInfo->pipes[pipe].enabled && port != NULL) {
 				TRACE("DPMS: Setting pipe %d, port %d to SUSPEND/STANDBY\n", pipe, port_id);
 				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					// For eDP, also handle backlight before potential D3.
+					if (port->type == PRIV_OUTPUT_EDP) {
+						intel_lvds_set_backlight(devInfo, port, false); // Turn off eDP backlight
+						snooze(devInfo->vbt ? devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS); // T3: BL off to Panel off
+					}
 					uint8_t dpcd_val = DPCD_POWER_D3; // D3 is standby/suspend for DP
 					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
-					TRACE("DPMS: DP port %d set to DPCD D3 power state.\n", port_id);
-				} else if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
-					// For LVDS/eDP, typically turn off backlight first.
-					// intel_lvds_set_backlight(devInfo, port, 0); // Conceptual
-					// Then, can disable panel signals via PP_CONTROL, but keep VDD on for quick resume.
-					// This part of intel_lvds_panel_power_off might be too aggressive for SUSPEND.
-					// For now, a simple pipe disable will cut signals.
-					TRACE("DPMS: LVDS/eDP port %d suspend - backlight control is part of panel_power_off.\n", port_id);
+					TRACE("DPMS: DP/eDP port %d set to DPCD D3 power state.\n", port_id);
+				} else if (port->type == PRIV_OUTPUT_LVDS) { // LVDS only (eDP handled above)
+					intel_lvds_set_backlight(devInfo, port, false); // Turn off LVDS backlight
+					snooze(devInfo->vbt ? devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS);
+					// Optionally, could disable panel signals via PP_CONTROL for deeper suspend.
+					// For now, pipe disable will cut signals.
+					TRACE("DPMS: LVDS port %d suspend - backlight off.\n", port_id);
 				}
 				intel_i915_plane_enable(devInfo, pipe, false); // Turn off plane before pipe
 				intel_i915_pipe_disable(devInfo, pipe);
@@ -1257,13 +1263,21 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 				// Get current clocks for disabling DPLL, even if it's just for selected_dpll_id
 				// This might be problematic if clocks weren't calculated for ON state first.
 				// For OFF, we mainly need to know which DPLL was used by this pipe.
-				// The clock_params passed to enable_dpll(false,...) is mostly for selected_dpll_id.
-				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].placeholder_clocks_for_dpll_id_TODO);
+				// Use the cached clock_params for this pipe.
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
 			} else if (devInfo->pipes[pipe].enabled) { // Pipe on but no port, just disable pipe
 				TRACE("DPMS: Turning OFF pipe %d (no port assigned).\n", pipe);
 				intel_i915_plane_enable(devInfo, pipe, false);
 				intel_i915_pipe_disable(devInfo, pipe);
-				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].placeholder_clocks_for_dpll_id_TODO);
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
+			} else {
+				// Pipe already off, ensure DPLL is also off if it was associated with this pipe
+				// This requires knowing which DPLL was last used by this pipe.
+				// If cached_clock_params.selected_dpll_id is valid, we can use it.
+				if (devInfo->pipes[pipe].cached_clock_params.selected_dpll_id != -1) { // Assuming -1 is invalid
+					TRACE("DPMS: Pipe %d already OFF, ensuring its DPLL is also OFF.\n", pipe);
+					intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
+				}
 			}
 			break;
 

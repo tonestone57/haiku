@@ -36,58 +36,56 @@
 // --- Helper: Read current CDCLK ---
 static uint32_t read_current_cdclk_khz(intel_i915_device_info* devInfo) {
 	if (IS_HASWELL(devInfo->device_id)) {
-		uint32_t lcpll_ctl = intel_i915_read32(devInfo, LCPLL_CTL);
+		uint32_t lcpll1_ctl = intel_i915_read32(devInfo, LCPLL_CTL); // LCPLL1_CTL for HSW
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_HSW);
-		uint32_t lcpll_link_rate_sel = cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT; // This is actually wrong, should be LCPLL_CTL
-		uint32_t lcpll_freq_khz;
+		uint32_t lcpll_source_for_cdclk_khz;
 
-		// Correctly get LCPLL frequency from LCPLL_CTL
-		uint32_t lcpll_rate_bits = lcpll_ctl & LCPLL1_LINK_RATE_HSW_MASK;
-		switch (lcpll_rate_bits) {
-			case LCPLL_LINK_RATE_810: lcpll_freq_khz = 810000; break;
-			case LCPLL_LINK_RATE_1350: lcpll_freq_khz = 1350000; break;
-			case LCPLL_LINK_RATE_1620: lcpll_freq_khz = 1620000; break;
-			case LCPLL_LINK_RATE_2700: lcpll_freq_khz = 2700000; break;
-			default: lcpll_freq_khz = 1350000; // Fallback
+		// Determine the LCPLL frequency that sources the CDCLK dividers
+		uint32_t cdclk_lcpll_select = cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT; // Bit 26
+		if (cdclk_lcpll_select == HSW_CDCLK_SELECT_2700) {
+			lcpll_source_for_cdclk_khz = 2700000;
+		} else if (cdclk_lcpll_select == HSW_CDCLK_SELECT_810) {
+			lcpll_source_for_cdclk_khz = 810000;
+		} else { // HSW_CDCLK_SELECT_1350 (0) or other default: Use LCPLL1_CTL configured frequency
+			uint32_t lcpll_rate_bits = lcpll1_ctl & LCPLL1_LINK_RATE_HSW_MASK;
+			switch (lcpll_rate_bits) {
+				case LCPLL_LINK_RATE_810:  lcpll_source_for_cdclk_khz = 810000; break;
+				case LCPLL_LINK_RATE_1350: lcpll_source_for_cdclk_khz = 1350000; break;
+				case LCPLL_LINK_RATE_1620: lcpll_source_for_cdclk_khz = 1620000; break;
+				case LCPLL_LINK_RATE_2700: lcpll_source_for_cdclk_khz = 2700000; break;
+				default:
+					TRACE("Clocks: HSW LCPLL1_CTL unknown rate bits 0x%x, defaulting LCPLL source for CDCLK to 1.35GHz\n", lcpll_rate_bits);
+					lcpll_source_for_cdclk_khz = 1350000;
+			}
 		}
-		TRACE("Clocks: HSW LCPLL_CTL=0x%x, LCPLL Freq = %u kHz\n", lcpll_ctl, lcpll_freq_khz);
+		TRACE("Clocks: HSW CDCLK source LCPLL freq: %u kHz (CDCLK_CTL[26]=%u, LCPLL1_CTL=0x%x)\n",
+			lcpll_source_for_cdclk_khz, cdclk_lcpll_select >> 26, lcpll1_ctl);
 
-		// Now determine CDCLK based on LCPLL source selected by CDCLK_CTL[26]
-		// and divisor CDCLK_CTL[1:0]
-		uint32_t cdclk_lcpll_source_sel = cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT;
-		uint32_t cdclk_source_freq_khz;
-
-		// This logic for HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT might be simplified.
-		// Often, CDCLK is derived from a fixed LCPLL output (e.g. 1350 or 2700)
-		// and the HSW_CDCLK_FREQ_SEL_MASK bits directly indicate the resulting CDCLK.
-		// The PRM implies CDCLK_CTL[26] selects if LCPLL output (from LCPLL_CTL) or FCLK is source.
-		// Assuming LCPLL is the source for now.
-		// For simplicity, the original switch on HSW_CDCLK_FREQ_SEL_MASK might be more direct if
-		// those values are absolute CDCLK frequencies regardless of LCPLL_CTL setting.
-		// Reverting to simpler HSW CDCLK interpretation based on nominal values if LCPLL complexity is too much for now.
-		switch (cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK) {
-			case HSW_CDCLK_FREQ_450:   return 450000;
-			case HSW_CDCLK_FREQ_540:   return 540000;
-			case HSW_CDCLK_FREQ_337_5: return 337500;
-			case HSW_CDCLK_FREQ_675:   return 675000;
+		uint32_t cdclk_divisor_sel = cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK; // Bits 1:0
+		switch (cdclk_divisor_sel) {
+			// Divisor values from PRM for CDCLK_CTL[1:0]: 00b=/3, 01b=/2.5, 10b=/4, 11b=/2
+			case 0x0: return lcpll_source_for_cdclk_khz / 3;
+			case 0x1: return (uint32_t)(lcpll_source_for_cdclk_khz / 2.5);
+			case 0x2: return lcpll_source_for_cdclk_khz / 4;
+			case 0x3: return lcpll_source_for_cdclk_khz / 2;
 		}
-		TRACE("Clocks: HSW CDCLK_CTL unknown value 0x%x, defaulting to 450MHz\n", cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK);
-		return 450000; // Fallback
+		TRACE("Clocks: HSW CDCLK_CTL unknown divisor sel 0x%x, defaulting CDCLK to LCPLL_src/3\n", cdclk_divisor_sel);
+		return lcpll_source_for_cdclk_khz / 3; // Fallback divisor
+
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_IVB);
-		switch (cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) {
-			case CDCLK_FREQ_337_5_MHZ_IVB_M: return 337500; // Matches HSW 337.5
-			case CDCLK_FREQ_450_MHZ_IVB_M:   return 450000; // Matches HSW 450
-			case CDCLK_FREQ_540_MHZ_IVB_M:   return 540000; // Matches HSW 540
-			case CDCLK_FREQ_675_MHZ_IVB_M:   return 675000; // Matches HSW 675
-			// IVB also has other values not directly matching HSW names
-			// e.g. 333, 400, 444, 533, 667. The defines need to be specific for IVB.
-			// For now, assume the HSW-like values if defines match.
-			default: // This path taken if IVB specific defines for 333/400/etc are used
-				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) == CDCLK_FREQ_333_IVB) return 333330;
-				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) == CDCLK_FREQ_400_IVB) return 400000;
-				// Add other IVB specific values if their defines exist and are distinct
-				TRACE("Clocks: IVB CDCLK_CTL unknown value 0x%x\n", cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK);
+		switch (cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) { // Bits 28:26 for Mobile IVB
+			case CDCLK_FREQ_337_5_MHZ_IVB_M: return 337500;
+			case CDCLK_FREQ_450_MHZ_IVB_M:   return 450000;
+			case CDCLK_FREQ_540_MHZ_IVB_M:   return 540000;
+			case CDCLK_FREQ_675_MHZ_IVB_M:   return 675000;
+			// These defines (CDCLK_FREQ_XXX_IVB) are for Desktop/Server IVB using different bits
+			// This part needs careful review of CDCLK_CTL_IVB bit meanings for different SKUs
+			// For now, assume the _IVB_M defines are for Mobile and others are distinct.
+			default:
+				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK_DESKTOP) == CDCLK_FREQ_333_IVB) return 333330; // Example, assuming _MASK_DESKTOP
+				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK_DESKTOP) == CDCLK_FREQ_400_IVB) return 400000;
+				TRACE("Clocks: IVB CDCLK_CTL unknown value 0x%x\n", cdclk_ctl);
 				return 400000; // Fallback for IVB
 		}
 	}
@@ -119,9 +117,7 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 
 	uint32_t vco_min = WRPLL_VCO_MIN_KHZ;
 	uint32_t vco_max = WRPLL_VCO_MAX_KHZ;
-	if (is_dp && ref_clk_khz > 2000000 && target_clk_khz > 2700000) { // e.g. HSW DP using LCPLL ref
-		// For HSW DP using LCPLL, VCO can go higher.
-		// If LCPLL is 2.7GHz, WRPLL VCO can be 5.4GHz.
+	if (is_dp && ref_clk_khz > 2000000 && target_clk_khz > 2700000) {
 		// vco_max = 5400000; // Already default
 	}
 
@@ -170,8 +166,8 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 		}
 		if (best_error == 0 && !is_dp) break;
 	}
-	long allowed_error = min_c(target_clk_khz / 1000, 500); // 0.1% or 500kHz
-	if (params->dpll_vco_khz > 0 && best_error <= allowed_error) { // Ensure a solution was found
+	long allowed_error = min_c(target_clk_khz / 1000, 500);
+	if (params->dpll_vco_khz > 0 && best_error <= allowed_error) {
 		TRACE("WRPLL calc: target_clk %u, ref %u -> VCO %u, N %u, M2_int %u, FracEn %d, Frac %u, P1_fld %u, P2_fld %u (err %ld)\n",
 			target_clk_khz, ref_clk_khz, params->dpll_vco_khz, params->wrpll_n, params->wrpll_m2,
 			params->wrpll_m2_frac_en, params->wrpll_m2_frac,
@@ -421,62 +417,48 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 			clocks->lcpll_freq_khz = get_hsw_lcpll_link_rate_khz(devInfo);
 			ref_clk_khz = clocks->lcpll_freq_khz; // WRPLL ref is LCPLL output on HSW DP/eDP
 			if (is_dp_type) {
-				// For DP on HSW, WRPLL VCO is typically fixed (e.g., 5.4GHz or 2.7GHz),
-				// and WRPLL_CTL selects the actual link rate.
-				// The dp_link_rate_khz should have been determined by EDID/DisplayID parsing.
-				// If not, set a common default.
-				if (clocks->dp_link_rate_khz == 0) { // Example: Default to 2.7 Gbps if not set
-					clocks->dp_link_rate_khz = 270000; // 2.7 GHz link symbol clock
-					TRACE("calculate_clocks: DP link rate not set, defaulting to 2.7GHz.\n");
+				// Determine dp_link_rate_khz based on sink capabilities (port_state) and mode requirements.
+				// This is a simplified selection. A full calculation would consider bandwidth.
+				if (port_state->dp_max_link_rate == DPCD_LINK_BW_5_4) {
+					clocks->dp_link_rate_khz = 540000; // 5.4 Gbps per lane
+				} else if (port_state->dp_max_link_rate == DPCD_LINK_BW_2_7) {
+					clocks->dp_link_rate_khz = 270000; // 2.7 Gbps per lane
+				} else { // Default or DPCD_LINK_BW_1_62
+					clocks->dp_link_rate_khz = 162000; // 1.62 Gbps per lane
 				}
-				// Target VCO for find_gen7_wrpll_dividers.
-				// Common HSW VCO for DP is 5.4GHz, or 2.7GHz if link rate is lower.
-				if (clocks->dp_link_rate_khz <= 270000 && clocks->lcpll_freq_khz < 5400000) {
-					// If link rate is <= 2.7G and LCPLL is not 5.4G, target 2.7G VCO
-					// This logic might need refinement based on how LCPLL output relates to WRPLL VCO options.
-					// For now, let's simplify: always target a high VCO like 5.4GHz if possible,
-					// or a VCO that matches the highest link rate.
-					// The WRPLL_CTL DP link rate bits will then divide this down.
-					// Let find_gen7_wrpll_dividers target the highest practical VCO,
-					// e.g., 5.4GHz or 2.7GHz based on LCPLL.
-					// For HSW DP, WRPLL VCO is ideally 5.4GHz.
-					// The WRPLL_CTL register's DP_LINK_RATE bits then select 1.62, 2.7, or 5.4.
-					find_wrpll_target_khz = 5400000; // Target 5.4GHz VCO for HSW DP WRPLL
-					// dp_link_rate_khz should already be set (e.g. 1.62M, 2.7M, 5.4M)
-					if (clocks->dp_link_rate_khz == 0) { // Fallback if not determined
-						clocks->dp_link_rate_khz = 270000;
-						TRACE("calculate_clocks: HSW DP link rate not set, defaulting to 2.7GHz for WRPLL_CTL config.\n");
-					}
-				} else { // Non-DP on HSW WRPLL (e.g. LVDS, or HDMI if not on SPLL using WRPLL)
-					find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz; // Target is pixel clock
-					ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Use SSC for non-DP on HSW WRPLL
-					clocks->lcpll_freq_khz = 0; // Indicate SSC ref for WRPLL
-				}
-			} else { // IVB WRPLL (used for DP, eDP, HDMI, LVDS)
-				ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Default SSC ref for IVB WRPLL
-				if (is_dp_type) {
-					// For IVB DP, WRPLL output is the link clock.
-					// dp_link_rate_khz should be set (e.g. 1.62M, 2.7M).
-					if (clocks->dp_link_rate_khz == 0) clocks->dp_link_rate_khz = 270000;
-					find_wrpll_target_khz = clocks->dp_link_rate_khz;
-				} else { // HDMI/LVDS on IVB
-					find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz;
-				}
+				// TODO: This should also consider if the *source* DDI port supports these rates.
+				//       And if the mode actually *needs* this high a rate with available lanes.
+				//       For now, we pick the highest sink-supported rate up to HBR2.
+				TRACE("calculate_clocks: Determined DP link rate: %u kHz based on sink max 0x%x\n",
+					clocks->dp_link_rate_khz, port_state->dp_max_link_rate);
+
+				// Target VCO for find_gen7_wrpll_dividers for HSW DP.
+				// HSW DP WRPLL VCO is ideally 5.4GHz.
+				find_wrpll_target_khz = 5400000; // Target 5.4GHz VCO for HSW DP WRPLL
+			} else { // Non-DP on HSW WRPLL (e.g. LVDS, or HDMI if not on SPLL using WRPLL)
+				find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz; // Target is pixel clock
+				ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Use SSC for non-DP on HSW WRPLL
+				clocks->lcpll_freq_khz = 0; // Indicate SSC ref for WRPLL
 			}
-		} else {
-			// This case should ideally not be reached if IS_HASWELL or IS_IVYBRIDGE covers Gen7 WRPLL path.
-			// Fallback for generic Gen7 WRPLL if device ID didn't match HSW/IVB specifically
-			// but was identified as needing WRPLL path.
-			ref_clk_khz = REF_CLOCK_SSC_120000_KHZ;
+		} else { // IVB WRPLL (used for DP, eDP, HDMI, LVDS)
+			ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Default SSC ref for IVB WRPLL
 			if (is_dp_type) {
-				if (clocks->dp_link_rate_khz == 0) clocks->dp_link_rate_khz = 270000;
+				// For IVB DP, WRPLL output is the link clock.
+				// dp_link_rate_khz should be set based on sink capabilities.
+				if (port_state->dp_max_link_rate == DPCD_LINK_BW_2_7) {
+					clocks->dp_link_rate_khz = 270000;
+				} else { // Default or 1.62
+					clocks->dp_link_rate_khz = 162000;
+				}
+				// IVB does not support HBR2 (5.4G) directly on these DPLLs.
+				TRACE("calculate_clocks: Determined IVB DP link rate: %u kHz based on sink max 0x%x\n",
+					clocks->dp_link_rate_khz, port_state->dp_max_link_rate);
 				find_wrpll_target_khz = clocks->dp_link_rate_khz;
-			} else {
+			} else { // HDMI/LVDS on IVB
 				find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz;
 			}
 		}
 
-		clocks->is_dp_or_edp = is_dp_type;
 		if (IS_IVYBRIDGE(devInfo->device_id)) {
 			if (!find_ivb_dpll_dividers(find_wrpll_target_khz, ref_clk_khz, is_dp_type, clocks)) {
 				TRACE("IVB DPLL calculation FAILED for target %u kHz.\n", find_wrpll_target_khz);
@@ -722,31 +704,34 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 
 	// TODO: Implement proper FDI M/N calculation based on pixel clock, BPC, and desired FDI link speed (e.g., 2.7 GHz).
 	// This should populate clocks->fdi_params.data_m, .data_n, .link_m, .link_n, .fdi_lanes, .tu_size.
-	// For now, using placeholder/default values.
-	if (clocks->fdi_params.fdi_lanes == 0) clocks->fdi_params.fdi_lanes = 2; // Default to 2 lanes for IVB FDI
-	if (clocks->fdi_params.tu_size == 0) clocks->fdi_params.tu_size = 64;   // Default TU size
+	// For now, using placeholder/default values in clocks->fdi_params.
+	// The caller (intel_i915_calculate_display_clocks) should ideally fill fdi_params.
+	// If fdi_lanes is 0, we use a default.
+	if (clocks->fdi_params.fdi_lanes == 0) {
+		clocks->fdi_params.fdi_lanes = 2; // Default to 2 lanes for IVB FDI if not specified
+		TRACE("FDI: fdi_lanes not set in clock_params, defaulting to 2.\n");
+	}
+	// TU size: default to 64 if not specified. VBT might provide optimal.
+	uint16_t tu_val_for_reg = FDI_TX_CTL_TU_SIZE_64_IVB; // Default field value for TU 64
+	if (clocks->fdi_params.tu_size == 32) tu_val_for_reg = FDI_TX_CTL_TU_SIZE_32_IVB;
+	else if (clocks->fdi_params.tu_size == 48) tu_val_for_reg = FDI_TX_CTL_TU_SIZE_48_IVB;
+	else if (clocks->fdi_params.tu_size == 56) tu_val_for_reg = FDI_TX_CTL_TU_SIZE_56_IVB;
+	// else default to 64 (0) is already set.
 
-	// Example M/N values (these are highly dependent on the actual calculation)
-	// For a 162MHz pixel clock, 24bpp, 2 FDI lanes to get ~2.7GHz FDI clock:
-	// FDI_CLOCK = PIXEL_CLOCK * BITS_PER_PIXEL / (NUM_FDI_LANES * BITS_PER_FDI_LANE_SYMBOL (10 for 8b10b))
-	// This formula is conceptual. Real M/N calculation is more direct.
-	// Target FDI_TX_CLK = 270MHz. Pixel clock comes from mode.
-	// (FDI_TX_CLK * N) / M = Pixel Clock.
-	// Assume common values for now if calculation is not done.
-	if (clocks->fdi_params.data_m == 0) clocks->fdi_params.data_m = 22; // Example
-	if (clocks->fdi_params.data_n == 0) clocks->fdi_params.data_n = 24; // Example
+	// Example M/N values if not calculated and passed in clocks->fdi_params
+	uint16_t data_m = clocks->fdi_params.data_m != 0 ? clocks->fdi_params.data_m : 22; // Example
+	uint16_t data_n = clocks->fdi_params.data_n != 0 ? clocks->fdi_params.data_n : 24; // Example
 	// Link M/N usually same as Data M/N for FDI
-	clocks->fdi_params.link_m = clocks->fdi_params.data_m;
-	clocks->fdi_params.link_n = clocks->fdi_params.data_n;
+	uint16_t link_m = clocks->fdi_params.link_m != 0 ? clocks->fdi_params.link_m : data_m;
+	uint16_t link_n = clocks->fdi_params.link_n != 0 ? clocks->fdi_params.link_n : data_n;
 
 	// Program M/N values
-	intel_i915_write32(devInfo, FDI_TX_MVAL_IVB_REG(pipe), clocks->fdi_params.data_m);
-	intel_i915_write32(devInfo, FDI_TX_NVAL_IVB_REG(pipe), clocks->fdi_params.data_n);
-	intel_i915_write32(devInfo, FDI_RX_MVAL_IVB_REG(pipe), clocks->fdi_params.link_m);
-	intel_i915_write32(devInfo, FDI_RX_NVAL_IVB_REG(pipe), clocks->fdi_params.link_n);
-	TRACE("FDI: Programmed M/N values for pipe %d: DataM/N=%u/%u, LinkM/N=%u/%u (placeholders)\n",
-		pipe, clocks->fdi_params.data_m, clocks->fdi_params.data_n,
-		clocks->fdi_params.link_m, clocks->fdi_params.link_n);
+	intel_i915_write32(devInfo, FDI_TX_MVAL_IVB_REG(pipe), data_m);
+	intel_i915_write32(devInfo, FDI_TX_NVAL_IVB_REG(pipe), data_n);
+	intel_i915_write32(devInfo, FDI_RX_MVAL_IVB_REG(pipe), link_m);
+	intel_i915_write32(devInfo, FDI_RX_NVAL_IVB_REG(pipe), link_n);
+	TRACE("FDI: Programmed M/N values for pipe %d: DataM/N=%u/%u, LinkM/N=%u/%u (placeholders/defaults)\n",
+		pipe, data_m, data_n, link_m, link_n);
 
 	// Program FDI_TX_CTL / FDI_RX_CTL
 	uint32_t fdi_tx_ctl_reg = FDI_TX_CTL(pipe);
@@ -763,9 +748,7 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 
 	// TU Size (Training Unit)
 	fdi_tx_val &= ~FDI_TX_CTL_TU_SIZE_MASK_IVB; // Mask: (0x7U << 24)
-	if (clocks->fdi_params.tu_size == 64) fdi_tx_val |= FDI_TX_CTL_TU_SIZE_64_IVB;
-	else if (clocks->fdi_params.tu_size == 32) fdi_tx_val |= FDI_TX_CTL_TU_SIZE_32_IVB;
-	// Add other TU sizes if necessary, default to 64.
+	fdi_tx_val |= tu_val_for_reg; // Use determined TU size field value
 
 	// Set initial training pattern (Pattern 1)
 	fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB; // Mask: (0xFU << 8)
@@ -804,12 +787,6 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 	uint32_t fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
 
 	if (enable) {
-		fdi_tx_val |= FDI_TX_ENABLE;
-		fdi_rx_val |= FDI_RX_ENABLE;
-		// TODO: Start actual link training sequence here:
-		// 1. Enable TX with training pattern.
-		// 2. Enable RX.
-		// TODO: Start actual link training sequence here:
 		// 1. Ensure FDI_TX_CTL is set for training pattern 1 (done in program_fdi).
 		// 2. Enable FDI_RX_PLL.
 		fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB;
@@ -838,14 +815,21 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 				break;
 			}
 			// TODO: 4. If fail, adjust FDI_TX_CTL voltage/pre-emphasis and retry.
-				// This would involve:
-				//    - Selecting next VS/PE level (e.g., from VBT table or a predefined sequence).
-				//    - Disabling FDI TX (fdi_tx_val &= ~FDI_TX_ENABLE; intel_i915_write32).
-				//    - Programming new VS/PE into FDI_TX_CTL (bits 18:16 for VS, 15:14 for PE).
-				//    - Re-enabling FDI TX (fdi_tx_val |= FDI_TX_ENABLE; intel_i915_write32).
-				//    - Waiting a short delay before next poll.
-				// For now, we just retry without changing VS/PE.
-				TRACE("FDI: Link training attempt %d for pipe %d failed to get bit lock (IIR=0x%08x). VS/PE adjustment STUBBED.\n",
+			// This requires a strategy for VS/PE iteration (e.g., from VBT or predefined sequence).
+			// Placeholder: Increment a conceptual level or use a small set of predefined pairs.
+			// For now, we only try the initial VS/PE set by intel_i915_program_fdi.
+			// A real implementation would modify fdi_tx_val's VS/PE bits here and rewrite FDI_TX_CTL.
+			// Example of cycling through a few (hypothetical) VS/PE settings:
+			if (retries > 0) { // Only adjust after the first try
+				uint32_t current_vs_pe_val = (fdi_tx_val & (FDI_TX_CTL_VOLTAGE_SWING_MASK_IVB | FDI_TX_CTL_PRE_EMPHASIS_MASK_IVB));
+				// This is a placeholder for a real iteration strategy.
+				// It just toggles some bits or increments, which is not how it should be done.
+				// A proper implementation would cycle through known good VS/PE pairs.
+				// For now, this stub won't actually change VS/PE effectively.
+				TRACE("FDI: Link training attempt %d for pipe %d failed. VS/PE adjustment would happen here (currently STUBBED).\n",
+					retries + 1, pipe);
+			}
+			TRACE("FDI: Link training poll %d for pipe %d, IIR=0x%08x (BitLock not set).\n",
 				retries + 1, pipe, iir_val);
 			retries++;
 		}
@@ -880,5 +864,7 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 
 	return B_OK;
 }
+
+[end of src/add-ons/kernel/drivers/graphics/intel_i915/clocks.c]
 
 [end of src/add-ons/kernel/drivers/graphics/intel_i915/clocks.c]

@@ -417,32 +417,49 @@ parse_bdb_lfp_data(intel_i915_device_info* devInfo, const uint8_t* block_data, u
 			}
 
 			if (lfp_port != NULL) {
-				// Placeholder: Actual VBT structure for these fields is needed.
-				// These might be in entry itself, or in a block indexed by panel_type_idx.
-				// Example: (assuming fields exist in bdb_lfp_data_entry_v155 or similar)
-				// lfp_port->panel_bits_per_color = entry->bits_per_color_field;
-				// lfp_port->panel_is_dual_channel = (entry->misc_flags_field & LVDS_DUAL_CHANNEL_FLAG_VBT) != 0;
-				// lfp_port->backlight_control_source = entry->backlight_control_field; // Map to VBT_BACKLIGHT_ defines
-
-				// For now, use global VBT parsed values if they exist, or defaults.
-				// These global VBT values should ideally be parsed from this LFP entry too.
-				lfp_port->panel_bits_per_color = devInfo->vbt->lfp_bits_per_color; // Which should be parsed here
-				lfp_port->panel_is_dual_channel = devInfo->vbt->lfp_is_dual_channel; // Same
-
-				// TODO: Parse actual backlight_control_source from VBT LFP data or panel type block.
-				// For eDP, backlight is often via AUX (DPCD) or PP_CONTROL. For LVDS, CPU or PCH PWM.
-				if (lfp_port->type == PRIV_OUTPUT_EDP) {
-					lfp_port->backlight_control_source = VBT_BACKLIGHT_EDP_AUX; // Default assumption for eDP
-				} else { // LVDS
-					lfp_port->backlight_control_source = VBT_BACKLIGHT_CPU_PWM; // Default assumption for LVDS
+				// Parse BPC from bits_per_color_idx (e.g. 0=18bpp (6BPC), 1=24bpp (8BPC))
+				// This mapping is VBT specific.
+				switch (entry->bits_per_color_idx & 0x0F) { // Assuming lower nibble is BPC index
+					case 0: lfp_port->panel_bits_per_color = 6; break;
+					case 1: lfp_port->panel_bits_per_color = 8; break;
+					// Add other cases for 10, 12 BPC if defined by VBT
+					default: lfp_port->panel_bits_per_color = 6; // Default to 6 BPC for LVDS
 				}
-				TRACE("VBT LFP Port %d: BPC %u, DualChan %d, BL_Src %u (defaults/placeholders)\n",
-					(int)(lfp_port - devInfo->ports),
+				// Parse dual channel from lvds_panel_misc_bits (e.g., bit 0)
+				// #define LVDS_DUAL_CHANNEL_VBT_FLAG (1 << 0) // Hypothetical
+				// lfp_port->panel_is_dual_channel = (entry->lvds_panel_misc_bits & LVDS_DUAL_CHANNEL_VBT_FLAG) != 0;
+				// For now, use a global default or what might have been set earlier
+				lfp_port->panel_is_dual_channel = devInfo->vbt->lfp_is_dual_channel; // Placeholder
+
+				// Parse backlight control type from backlight_control_type_raw
+				// This mapping (raw value to VBT_BACKLIGHT_ defines) is VBT specific.
+				switch (entry->backlight_control_type_raw) {
+					case 0: // Example: Raw value 0 in VBT means CPU PWM
+						lfp_port->backlight_control_source = VBT_BACKLIGHT_CPU_PWM;
+						break;
+					case 1: // Example: Raw value 1 in VBT means PCH PWM
+						lfp_port->backlight_control_source = VBT_BACKLIGHT_PCH_PWM;
+						break;
+					case 2: // Example: Raw value 2 in VBT means eDP AUX/PP_CONTROL
+						lfp_port->backlight_control_source = VBT_BACKLIGHT_EDP_AUX;
+						break;
+					default: // Fallback if VBT value is unknown or field not present
+						if (lfp_port->type == PRIV_OUTPUT_EDP) {
+							lfp_port->backlight_control_source = VBT_BACKLIGHT_EDP_AUX;
+						} else {
+							lfp_port->backlight_control_source = VBT_BACKLIGHT_CPU_PWM;
+						}
+						TRACE("VBT LFP: Unknown backlight_control_type_raw 0x%x, using default %u\n",
+							entry->backlight_control_type_raw, lfp_port->backlight_control_source);
+				}
+
+				TRACE("VBT LFP Port %d (panel_type_idx %u): Parsed BPC %u, DualChan %d, BL_Src %u\n",
+					(int)(lfp_port - devInfo->ports), header->panel_type,
 					lfp_port->panel_bits_per_color, lfp_port->panel_is_dual_channel, lfp_port->backlight_control_source);
 
-				// Also update the global VBT struct if this is considered the primary LFP
-				// devInfo->vbt->lfp_bits_per_color = lfp_port->panel_bits_per_color;
-				// devInfo->vbt->lfp_is_dual_channel = lfp_port->panel_is_dual_channel;
+				// Update global VBT struct if this is the primary LFP and these fields are global
+				devInfo->vbt->lfp_bits_per_color = lfp_port->panel_bits_per_color;
+				// devInfo->vbt->lfp_is_dual_channel = lfp_port->panel_is_dual_channel; // Already global
 			}
 		}
 

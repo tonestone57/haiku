@@ -33,6 +33,9 @@ void intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_po
 status_t intel_lvds_configure_panel_fitter(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
     bool enable, const display_mode* panel_mode, const display_mode* scaled_mode);
 
+// Backlight control
+status_t intel_lvds_set_backlight(intel_i915_device_info* devInfo, intel_output_port_state* port, bool on);
+
 
 #ifdef __cplusplus
 }

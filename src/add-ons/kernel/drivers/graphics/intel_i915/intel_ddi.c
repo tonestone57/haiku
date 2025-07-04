@@ -856,4 +856,105 @@ intel_ddi_setup_audio(intel_i915_device_info* devInfo, intel_output_port_state* 
 	//    This part requires interaction with the HDA driver.
 
 	TRACE("DDI: HDMI Audio setup is largely a TODO.\n");
+
+	// Basic Audio InfoFrame (AIF) for 2-channel LPCM, 48kHz
+	// Type 0x84, Version 0x01, Length 0x0A (10 bytes payload)
+	uint8_t aif_data[3 + 1 + 10]; // Header(3), Checksum(1), Payload(10)
+	memset(aif_data, 0, sizeof(aif_data));
+
+	// Header
+	aif_data[0] = 0x84; // Type: Audio
+	aif_data[1] = 0x01; // Version
+	aif_data[2] = 0x0A; // Length of payload (10 bytes)
+	// aif_data[3] is Checksum
+
+	// Payload
+	// PB1: Channel Count (CC2-0), Coding Type (CT3-0)
+	//      CC = 1 (2 channels). CT = 0 (Refer to Stream Header / LPCM)
+	aif_data[4] = (0x0 << 4) | (0x1 << 0);
+	// PB2: Sample Frequency (SF2-0), Sample Size (SS1-0)
+	//      SF = 010b (48kHz). SS = 00b (Refer to Stream Header / 16-bit)
+	aif_data[5] = (0x0 << 3) | (0x2 << 0); // SF uses bits 2:0, SS uses bits 4:3
+	                                      // Corrected: SS (bits 4:3), SF (bits 2:0)
+	                                      // SS=00 (16bit), SF=010 (48kHz)
+	aif_data[5] = (0x00 << 4) /* SS=16bit */ | (0x02 << 0) /* SF=48kHz */;
+	// PB3: Channel/Speaker Allocation (CA7-0)
+	//      0x00 = Stereo Front L/R
+	aif_data[6] = 0x00;
+	// PB4: Level Shift (LSV3-0), LFE Playback (LFEPBL1-0)
+	//      LSV = 0 (0dB). LFEPBL = 0 (0dB or no LFE).
+	aif_data[7] = (0x0 << 3);
+	// PB5-PB10 are 0 for basic LPCM.
+
+	// Calculate Checksum
+	aif_data[3] = _calculate_infoframe_checksum(&aif_data[0], 3 + 10);
+
+	// Write to DIP registers (similar to AVI)
+	uint32_t dip_ctl_reg, dip_data_reg_base;
+	uint32_t dip_enable_bit = VIDEO_DIP_ENABLE_AUDIO_HSW; // Placeholder, needs real define
+	uint32_t dip_type_val = VIDEO_DIP_TYPE_AUDIO_HSW;   // Placeholder
+
+	if (IS_HASWELL(devInfo->device_id)) {
+		dip_ctl_reg = HSW_TVIDEO_DIP_CTL_DDI(port->hw_port_index);
+		dip_data_reg_base = HSW_TVIDEO_DIP_DATA_DDI(port->hw_port_index);
+		// Ensure VIDEO_DIP_ENABLE_AUDIO_HSW and VIDEO_DIP_TYPE_AUDIO_HSW are correctly defined.
+	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+		dip_ctl_reg = VIDEO_DIP_CTL(pipe); // IVB uses pipe-based DIP
+		dip_data_reg_base = VIDEO_DIP_DATA(pipe);
+		// IVB might have different enable/type bits for Audio DIP.
+		// For now, assume similar to HSW conceptual bits.
+		// dip_enable_bit = VIDEO_DIP_ENABLE_AUDIO_IVB; // Needs define
+		// dip_type_val = VIDEO_DIP_TYPE_AUDIO_IVB;   // Needs define
+		// These are often the same bits as AVI but a different TYPE field value.
+		// For IVB, VIDEO_DIP_CTL has enable bits per type (AVI, SPD, AUDIO, etc.)
+		// e.g. VIDEO_DIP_ENABLE_AVI_IVB, VIDEO_DIP_ENABLE_AUDIO_GENERIC_IVB etc.
+		// Let's assume a generic VIDEO_DIP_ENABLE_AUDIO_IVB and TYPE_AUDIO for now.
+		dip_enable_bit = (1U << 18); // Example: Bit 18 for Audio Info Frame Enable on IVB VIDEO_DIP_CTL
+		dip_type_val = 0x01; // Example: Type value for Audio for IVB if it's different from HSW's type field meaning
+		                     // The TYPE field in VIDEO_DIP_CTL might be implicit if separate enable bits exist.
+		                     // For IVB, there are separate enable bits: GCP, AVI, SPD, VS, AUDIO.
+		                     // So, dip_type_val might not be needed for IVB, just the enable bit.
+	} else {
+		TRACE("DDI: Audio InfoFrame sending not supported for this Gen.\n");
+		return;
+	}
+
+	// Disable DIP for Audio before programming data
+	uint32_t dip_ctl_val = intel_i915_read32(devInfo, dip_ctl_reg);
+	if (IS_IVYBRIDGE(devInfo->device_id)) { // IVB has separate enable bits
+		dip_ctl_val &= ~dip_enable_bit;
+	} else { // HSW uses type field and a common enable bit for that type
+		dip_ctl_val &= ~VIDEO_DIP_ENABLE_HSW_GENERIC; // Clear generic enable for selected port/type
+	}
+	intel_i915_write32(devInfo, dip_ctl_reg, dip_ctl_val);
+
+
+	uint32_t temp_dip_buffer[ (sizeof(aif_data) + 3) / 4 ];
+	memset(temp_dip_buffer, 0, sizeof(temp_dip_buffer));
+	memcpy(temp_dip_buffer, aif_data, sizeof(aif_data));
+
+	for (int i = 0; i < (sizeof(aif_data) + 3) / 4; ++i) {
+		intel_i915_write32(devInfo, dip_data_reg_base + i * 4, temp_dip_buffer[i]);
+	}
+
+	// Enable DIP for Audio
+	dip_ctl_val = intel_i915_read32(devInfo, dip_ctl_reg);
+	if (IS_IVYBRIDGE(devInfo->device_id)) {
+		dip_ctl_val |= dip_enable_bit; // Set specific audio enable bit
+		// Frequency (once, every vsync, etc.) might also be here.
+	} else { // HSW
+		dip_ctl_val &= ~(VIDEO_DIP_TYPE_MASK_HSW | VIDEO_DIP_FREQ_MASK_HSW | VIDEO_DIP_ENABLE_AVI_HSW | VIDEO_DIP_ENABLE_GCP_HSW); // Clear other types/enables
+		dip_ctl_val |= dip_type_val | VIDEO_DIP_FREQ_VSYNC_HSW | VIDEO_DIP_ENABLE_HSW_GENERIC; // Set type, freq, and generic enable for this port
+	}
+	intel_i915_write32(devInfo, dip_ctl_reg, dip_ctl_val);
+	TRACE("DDI: Sent Audio InfoFrame. DIP_CTL(0x%x) = 0x%08lx\n", dip_ctl_reg, dip_ctl_val);
+
+	// Program Transcoder Audio Control
+	uint32_t trans_aud_ctl_reg = TRANS_AUD_CTL(pipe); // Needs correct pipe mapping
+	uint32_t aud_val = intel_i915_read32(devInfo, trans_aud_ctl_reg);
+	aud_val |= TRANS_AUD_CTL_ENABLE;
+	// TODO: Set sample rate, channel count etc. in TRANS_AUD_CTL based on AIF or system audio settings.
+	// For now, just enable.
+	intel_i915_write32(devInfo, trans_aud_ctl_reg, aud_val);
+	TRACE("DDI: Enabled audio on Transcoder %d (Reg 0x%x Val 0x%08lx)\n", pipe, trans_aud_ctl_reg, aud_val);
 }

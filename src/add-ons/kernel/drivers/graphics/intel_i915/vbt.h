@@ -39,8 +39,10 @@ struct bdb_lfp_data_entry_v155 { // For BDB version 155+
 	// uint16_t t3_backlight_off_to_panel_ms_offset;
 	// uint16_t t4_panel_off_to_vdd_off_ms_offset;
 	// uint16_t t5_vdd_off_to_reset_ms_offset;
-	// uint8_t  lvds_bpc; // Bits per color
-	// uint8_t  lvds_misc_flags; // e.g. dual channel
+	uint8_t  bits_per_color_idx; // Index or direct value for BPC
+	uint8_t  lvds_panel_misc_bits; // e.g., bit 0 for dual channel
+	uint8_t  backlight_control_type_raw; // Hypothetical field: 0=CPU PWM, 1=PCH PWM, 2=eDP AUX/PP_CTL
+	uint8_t  reserved1;
 } __attribute__((packed));
 
 // eDP specific power sequencing (often in BDB_DRIVER_FEATURES or a dedicated eDP block)

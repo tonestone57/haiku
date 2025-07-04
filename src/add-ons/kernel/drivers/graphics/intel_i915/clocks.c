@@ -115,57 +115,90 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 			uint32_t p2_div = gen7_wrpll_p2_eff_div[p2_idx]; // Effective divisor for P2 field
 			uint32_t p = p1 * p2_div; // Total P divisor
 
-			if (is_dp) { // For DisplayPort, P is fixed based on link rate vs pixel clock
-				// VCO = LinkRate * SymbolSize (10 for 8b10b)
-				// PixelClock = VCO / P_dp_post_div (P_dp_post_div is 1,2,3,4 based on link rate)
-				// This simplified WRPLL calc doesn't fit DP well directly.
-				// We'll assume P=10 for DP 1.62/2.7G, P=5 for 5.4G.
-				// This logic should be separate for DP.
-				// For now, let's skip complex DP P factor logic and use a common P if possible.
-				if (target_clk_khz * 5 < vco_min && target_clk_khz * 10 > vco_max) continue; // Rough filter
-				if (p != 5 && p != 10 && p != 20) continue; // Only allow common DP effective P values
-			}
+			// For non-DP, p is the post-divider from VCO to pixel clock.
+			// For DP, the interpretation of P1/P2 from WRPLL_TARGET_COUNT is part of VCO generation.
+			// The WRPLL output itself is the link clock, which is then potentially further divided by
+			// WRPLL_CTL's DP link rate selection bits for HSW.
+			// The current loop structure iterates P1/P2 values.
+			// The previous filter "if (p != 5 && p != 10 && p != 20) continue;" for DP was incorrect
+			// if target_clk_khz is the link rate and P1/P2 are part of VCO gen.
+			// Removing that specific filter for DP. The VCO range check below is the main constraint.
 
-			uint32_t target_vco = target_clk_khz * p;
+			uint32_t target_vco = target_clk_khz * p; // If target_clk_khz is pixel/link clock, and p is post-divider.
+			                                        // If target_clk_khz is target VCO, then p should be 1 here.
+			                                        // The current structure implies p is a post-divider.
+			                                        // This will need further refinement for HSW DP VCO strategy.
 			if (target_vco < vco_min || target_vco > vco_max) continue;
 
-			// VCO = Ref * M / N  (where M for WRPLL is 2 * M2_integer + M2_fractional / 2^22)
+			// VCO = Ref * M / N  (where M for WRPLL is 2 * M2_integer + M2_fractional_part)
 			// For simplicity, ignore fractional M2 for now. M1 is fixed as 2 for programming model.
 			// So, target_vco = ref_clk_khz * (2 * M2_int) / N
 			// M2_int / N = target_vco / (2 * ref_clk_khz)
 			// Iterate N (1 to 15 for WRPLL), calculate M2_int.
 			for (uint32_t n_val = 1; n_val <= 15; n_val++) { // N field is N-1 or N-2. Actual N is 2 to 14/15.
-				uint64_t m2_num = (uint64_t)target_vco * n_val;
-				uint32_t m2_den = ref_clk_khz * 2;
-				uint32_t m2_int = (m2_num + m2_den / 2) / m2_den; // Rounded
+				// Calculate ideal M_effective = target_vco * N / (2 * Ref)
+				// M_effective = M2_integer + M2_fractional_decimal
+				double m_effective = (double)target_vco * n_val / (2.0 * ref_clk_khz);
+				uint32_t m2_int = (uint32_t)floor(m_effective);
+				double m2_frac_decimal = m_effective - m2_int;
 
-				if (m2_int < 20 || m2_int > 120) continue; // Approx M2_int range for WRPLL
+				// M2_FRAC_DIV is a 10-bit field (0-1023) representing the fractional part.
+				// M2_FRAC_DIV / 1024.0 is the fractional value.
+				uint32_t m2_frac_val_to_program = (uint32_t)round(m2_frac_decimal * 1024.0);
+				if (m2_frac_val_to_program > 1023) m2_frac_val_to_program = 1023;
 
-				uint32_t actual_vco = (ref_clk_khz * 2 * m2_int) / n_val;
+				// M2 integer part constraints (approximate, from various sources for WRPLLs)
+				if (m2_int < 16 || m2_int > 127) continue; // Adjusted M2_int range
+
+				uint32_t actual_vco;
+				bool use_frac = (m2_frac_val_to_program > 0 && m2_frac_val_to_program < 1024);
+				// Only enable fractional part if it's non-zero and significantly contributes.
+				// A very small m2_frac_val_to_program might be better off as 0 if error is similar.
+				// For now, enable if m2_frac_val_to_program is not 0.
+
+				if (use_frac) {
+					// VCO = Ref * 2 * (M2_int + M2_FRAC_DIV/1024.0) / N
+					// To avoid floating point in final calculation if possible:
+					// VCO = Ref * (2048 * M2_int + 2 * M2_FRAC_DIV) / (1024 * N)
+					// This might overflow standard uint32 if ref_clk_khz is large.
+					// Using double for intermediate actual_vco calculation for precision.
+					double temp_vco = (double)ref_clk_khz * 2.0 * (m2_int + (double)m2_frac_val_to_program / 1024.0) / n_val;
+					actual_vco = (uint32_t)round(temp_vco);
+				} else {
+					actual_vco = (ref_clk_khz * 2 * m2_int) / n_val;
+				}
+
 				long error = abs((long)actual_vco - (long)target_vco);
 
 				if (error < best_error) {
 					best_error = error;
 					params->dpll_vco_khz = actual_vco;
-					params->wrpll_n = n_val; // This is the actual N (e.g. 2-15)
-					params->wrpll_m2 = m2_int; // This is M2_UDI / M2 integer part
-					params->wrpll_p1 = p1_idx; // Store register field value
-					params->wrpll_p2 = p2_idx; // Store register field value
+					params->wrpll_n = n_val;
+					params->wrpll_m2 = m2_int;
+					params->wrpll_m2_frac_en = use_frac;
+					params->wrpll_m2_frac = use_frac ? m2_frac_val_to_program : 0;
+					params->wrpll_p1 = p1_idx;
+					params->wrpll_p2 = p2_idx;
 				}
-				if (best_error == 0 && !is_dp) break; // For non-DP, first exact is fine
+				if (best_error == 0 && !is_dp) break;
 			}
 			if (best_error == 0 && !is_dp) break;
 		}
 		if (best_error == 0 && !is_dp) break;
 	}
-	// Allow some error margin, e.g. 0.1% of target_clk_khz
-	if (best_error < (target_clk_khz / 1000)) {
-		TRACE("WRPLL calc: target_pxclk %u, ref %u -> VCO %u, N %u, M2_int %u, P1_fld %u, P2_fld %u (err %ld)\n",
+
+	// Allow some error margin, e.g. 0.1% of target_clk_khz, or a few kHz absolute.
+	// Let's use a 500kHz absolute error margin as an example, or 0.1% if smaller.
+	long allowed_error = min_c(target_clk_khz / 1000, 500);
+	if (best_error <= allowed_error) {
+		TRACE("WRPLL calc: target_pxclk %u, ref %u -> VCO %u, N %u, M2_int %u, M2_frac_en %d, M2_frac %u, P1_fld %u, P2_fld %u (err %ld)\n",
 			target_clk_khz, ref_clk_khz, params->dpll_vco_khz, params->wrpll_n, params->wrpll_m2,
+			params->wrpll_m2_frac_en, params->wrpll_m2_frac,
 			params->wrpll_p1, params->wrpll_p2, best_error);
 		return true;
 	}
-	TRACE("WRPLL calc: FAILED for target_pxclk %u, ref %u. Best err %ld\n", target_clk_khz, ref_clk_khz, best_error);
+	TRACE("WRPLL calc: FAILED for target_pxclk %u, ref %u. Best err %ld (allowed %ld)\n",
+		  target_clk_khz, ref_clk_khz, best_error, allowed_error);
 	return false;
 }
 
@@ -303,18 +336,68 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 
 		clocks->is_wrpll = true;
 		uint32_t ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Default SSC ref for WRPLL on IVB
+		uint32_t find_wrpll_target_khz;
 		if (IS_HASWELL(devInfo->device_id)) {
-			// HSW WRPLL can use LCPLL (e.g. 1350 or 2700 MHz) or SSC (96/120MHz)
-			// This selection depends on port type and desired output clock.
-			// For DP > 2.7Gbps, LCPLL is often used. For HDMI/DVI via WRPLL, SSC.
-			// Defaulting to LCPLL source for HSW WRPLL as it's common for DP/eDP.
-			// The LCPLL output itself needs to be configured.
-			clocks->lcpll_freq_khz = get_hsw_lcpll_link_rate_khz(devInfo); // e.g. 1350 or 2700
-			ref_clk_khz = clocks->lcpll_freq_khz;
-			// The WRPLL_CTL register will need WRPLL_REF_LCPLL_HSW set.
+			clocks->lcpll_freq_khz = get_hsw_lcpll_link_rate_khz(devInfo);
+			ref_clk_khz = clocks->lcpll_freq_khz; // WRPLL ref is LCPLL output on HSW DP/eDP
+			if (is_dp_type) {
+				// For DP on HSW, WRPLL VCO is typically fixed (e.g., 5.4GHz or 2.7GHz),
+				// and WRPLL_CTL selects the actual link rate.
+				// The dp_link_rate_khz should have been determined by EDID/DisplayID parsing.
+				// If not, set a common default.
+				if (clocks->dp_link_rate_khz == 0) { // Example: Default to 2.7 Gbps if not set
+					clocks->dp_link_rate_khz = 270000; // 2.7 GHz link symbol clock
+					TRACE("calculate_clocks: DP link rate not set, defaulting to 2.7GHz.\n");
+				}
+				// Target VCO for find_gen7_wrpll_dividers.
+				// Common HSW VCO for DP is 5.4GHz, or 2.7GHz if link rate is lower.
+				if (clocks->dp_link_rate_khz <= 270000 && clocks->lcpll_freq_khz < 5400000) {
+					// If link rate is <= 2.7G and LCPLL is not 5.4G, target 2.7G VCO
+					// This logic might need refinement based on how LCPLL output relates to WRPLL VCO options.
+					// For now, let's simplify: always target a high VCO like 5.4GHz if possible,
+					// or a VCO that matches the highest link rate.
+					// The WRPLL_CTL DP link rate bits will then divide this down.
+					// Let find_gen7_wrpll_dividers target the highest practical VCO,
+					// e.g., 5.4GHz or 2.7GHz based on LCPLL.
+					// For HSW DP, WRPLL VCO is ideally 5.4GHz.
+					// The WRPLL_CTL register's DP_LINK_RATE bits then select 1.62, 2.7, or 5.4.
+					find_wrpll_target_khz = 5400000; // Target 5.4GHz VCO for HSW DP WRPLL
+					// dp_link_rate_khz should already be set (e.g. 1.62M, 2.7M, 5.4M)
+					if (clocks->dp_link_rate_khz == 0) { // Fallback if not determined
+						clocks->dp_link_rate_khz = 270000;
+						TRACE("calculate_clocks: HSW DP link rate not set, defaulting to 2.7GHz for WRPLL_CTL config.\n");
+					}
+				} else { // Non-DP on HSW WRPLL (e.g. LVDS, or HDMI if not on SPLL using WRPLL)
+					find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz; // Target is pixel clock
+					ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Use SSC for non-DP on HSW WRPLL
+					clocks->lcpll_freq_khz = 0; // Indicate SSC ref for WRPLL
+				}
+			} else { // IVB WRPLL (used for DP, eDP, HDMI, LVDS)
+				ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Default SSC ref for IVB WRPLL
+				if (is_dp_type) {
+					// For IVB DP, WRPLL output is the link clock.
+					// dp_link_rate_khz should be set (e.g. 1.62M, 2.7M).
+					if (clocks->dp_link_rate_khz == 0) clocks->dp_link_rate_khz = 270000;
+					find_wrpll_target_khz = clocks->dp_link_rate_khz;
+				} else { // HDMI/LVDS on IVB
+					find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz;
+				}
+			}
+		} else {
+			// This case should ideally not be reached if IS_HASWELL or IS_IVYBRIDGE covers Gen7 WRPLL path.
+			// Fallback for generic Gen7 WRPLL if device ID didn't match HSW/IVB specifically
+			// but was identified as needing WRPLL path.
+			ref_clk_khz = REF_CLOCK_SSC_120000_KHZ;
+			if (is_dp_type) {
+				if (clocks->dp_link_rate_khz == 0) clocks->dp_link_rate_khz = 270000;
+				find_wrpll_target_khz = clocks->dp_link_rate_khz;
+			} else {
+				find_wrpll_target_khz = clocks->adjusted_pixel_clock_khz;
+			}
 		}
-		params->is_dp_or_edp = is_dp_type;
-		if (!find_gen7_wrpll_dividers(clocks->adjusted_pixel_clock_khz, ref_clk_khz, clocks, is_dp_type)) {
+
+		clocks->is_dp_or_edp = is_dp_type;
+		if (!find_gen7_wrpll_dividers(find_wrpll_target_khz, ref_clk_khz, clocks, is_dp_type)) {
 			return B_ERROR;
 		}
 	}
@@ -338,41 +421,56 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 			if (dpll_idx < 0 || dpll_idx > 1) { status = B_BAD_INDEX; goto hsw_dpll_done; }
 
 			uint32_t wrpll_ctl_val = intel_i915_read32(devInfo, WRPLL_CTL(dpll_idx));
-			wrpll_ctl_val &= ~(WRPLL_REF_LCPLL_HSW | WRPLL_REF_SSC_HSW | WRPLL_DP_LINKRATE_SHIFT_HSW); // Clear relevant fields
-			// Also clear MNP fields if they are in this register (they are not for HSW WRPLL)
+			// Clear reference select and DP link rate bits. Preserve other bits (like PLL enable if already on for some reason).
+			wrpll_ctl_val &= ~(WRPLL_REF_LCPLL_HSW | WRPLL_REF_SSC_HSW | (0x7U << WRPLL_DP_LINKRATE_SHIFT_HSW) /* Clear all DP link rate bits */);
 
-			// Assume ref_clk_khz in find_best_wrpll_dividers decided LCPLL vs SSC
-			if (clocks->lcpll_freq_khz > 0) { // Indicates LCPLL is the reference
+			if (clocks->lcpll_freq_khz > 0) { // Indicates LCPLL is the WRPLL reference
 				wrpll_ctl_val |= WRPLL_REF_LCPLL_HSW;
-				// Set DP link rate bits based on clocks->dp_link_rate_khz if DP
-				if (clocks->is_dp_or_edp) {
-					if (clocks->dp_link_rate_khz == 540000) wrpll_ctl_val |= WRPLL_DP_LINKRATE_5_4;
-					else if (clocks->dp_link_rate_khz == 270000) wrpll_ctl_val |= WRPLL_DP_LINKRATE_2_7;
-					else wrpll_ctl_val |= WRPLL_DP_LINKRATE_1_62;
-				}
-			} else {
+			} else { // SSC is the WRPLL reference
 				wrpll_ctl_val |= WRPLL_REF_SSC_HSW;
 			}
 
-			// HSW WRPLL MNP are in WRPLL_DIV_FRACx registers (e.g., WRPLL_DIV_FRAC1 0x6C040)
-			uint32_t wrpll_div_frac_reg = (dpll_idx == 0) ? WRPLL_DIV_FRAC1_HSW : WRPLL_DIV_FRAC2_HSW;
-			uint32_t mnp_val = 0;
-			// N field: bits 14-8 (N-2 encoding typically)
-			mnp_val |= (((clocks->wrpll_n - 2) & 0x7F) << WRPLL_N_DIV_SHIFT_HSW);
-			// M2 Integer: bits 6-0
-			mnp_val |= (clocks->wrpll_m2 & 0x7F) << WRPLL_M2_INT_DIV_SHIFT_HSW;
-			// P1: bits 20-18 (field value)
-			mnp_val |= (clocks->wrpll_p1 & 0x7) << WRPLL_P1_SHIFT_HSW;
-			// P2: bits 22-21 (field value)
-			mnp_val |= (clocks->wrpll_p2 & 0x3) << WRPLL_P2_SHIFT_HSW;
-			// TODO: M2 Fractional part if used (WRPLL_M2_FRAC_EN_HSW, WRPLL_M2_FRAC_DIV_SHIFT_HSW)
-			// mnp_val |= WRPLL_M2_FRAC_EN_HSW;
-			// mnp_val |= (clocks->wrpll_m2_frac & 0xFF) << WRPLL_M2_FRAC_DIV_SHIFT_HSW;
+			// Set DP link rate bits in WRPLL_CTL based on clocks->dp_link_rate_khz.
+			// This assumes clocks->dpll_vco_khz (programmed by MNP) is 5.4GHz for DP.
+			if (clocks->is_dp_or_edp) {
+				if (clocks->dp_link_rate_khz >= 540000) { // Requesting 5.4 Gbps
+					wrpll_ctl_val |= WRPLL_DP_LINKRATE_5_4;
+				} else if (clocks->dp_link_rate_khz >= 270000) { // Requesting 2.7 Gbps
+					wrpll_ctl_val |= WRPLL_DP_LINKRATE_2_7;
+				} else { // Default to 1.62 Gbps
+					wrpll_ctl_val |= WRPLL_DP_LINKRATE_1_62;
+				}
+				TRACE("HSW DP: WRPLL_CTL DP Link Rate set for %u kHz target (VCO assumed 5.4GHz).\n", clocks->dp_link_rate_khz);
+			}
 
-			intel_i915_write32(devInfo, wrpll_div_frac_reg, mnp_val);
-			TRACE("HSW WRPLL_CTL(idx %d) set to 0x%08" B_PRIx32 ", WRPLL_DIV_FRAC(idx %d, reg 0x%x) to 0x%08" B_PRIx32 "\n",
-				dpll_idx, wrpll_ctl_val, dpll_idx, wrpll_div_frac_reg, mnp_val);
-			intel_i915_write32(devInfo, WRPLL_CTL(dpll_idx), wrpll_ctl_val);
+			// HSW WRPLL MNP are split into WRPLL_DIV_FRAC_REG_HSW and WRPLL_TARGET_COUNT_REG_HSW
+			uint32_t wrpll_div_frac_reg = WRPLL_DIV_FRAC_REG_HSW(dpll_idx);
+			uint32_t wrpll_target_count_reg = WRPLL_TARGET_COUNT_REG_HSW(dpll_idx);
+			uint32_t div_frac_val = 0;
+			uint32_t target_count_val = 0;
+
+			// Populate WRPLL_DIV_FRAC_REG_HSW value
+			if (clocks->wrpll_m2_frac_en && clocks->wrpll_m2_frac > 0) {
+				div_frac_val |= HSW_WRPLL_M2_FRAC_ENABLE;
+				div_frac_val |= (clocks->wrpll_m2_frac << HSW_WRPLL_M2_FRAC_SHIFT) & HSW_WRPLL_M2_FRAC_MASK;
+			}
+			div_frac_val |= (clocks->wrpll_m2 << HSW_WRPLL_M2_INT_SHIFT) & HSW_WRPLL_M2_INT_MASK;
+			// N_DIV is N-2 encoded, params->wrpll_n stores actual N.
+			div_frac_val |= (((clocks->wrpll_n - 2)) << HSW_WRPLL_N_DIV_SHIFT) & HSW_WRPLL_N_DIV_MASK;
+
+			// Populate WRPLL_TARGET_COUNT_REG_HSW value
+			// params->wrpll_p1 and p2 store the direct field values
+			target_count_val |= (clocks->wrpll_p1 << HSW_WRPLL_P1_DIV_SHIFT) & HSW_WRPLL_P1_DIV_MASK;
+			target_count_val |= (clocks->wrpll_p2 << HSW_WRPLL_P2_DIV_SHIFT) & HSW_WRPLL_P2_DIV_MASK;
+
+			intel_i915_write32(devInfo, wrpll_div_frac_reg, div_frac_val);
+			intel_i915_write32(devInfo, wrpll_target_count_reg, target_count_val);
+			intel_i915_write32(devInfo, WRPLL_CTL(dpll_idx), wrpll_ctl_val); // Write WRPLL_CTL last for atomicity
+
+			TRACE("HSW WRPLL Prog: CTL(idx %d)=0x%08" B_PRIx32 ", DIV_FRAC(0x%x)=0x%08" B_PRIx32 ", TGT_COUNT(0x%x)=0x%08" B_PRIx32 "\n",
+				dpll_idx, wrpll_ctl_val,
+				wrpll_div_frac_reg, div_frac_val,
+				wrpll_target_count_reg, target_count_val);
 
 		} else { // SPLL for HDMI (HSW)
 			uint32_t spll_ctl_val = intel_i915_read32(devInfo, SPLL_CTL_HSW);
@@ -488,35 +586,59 @@ intel_i915_enable_dpll_for_pipe(intel_i915_device_info* devInfo,
 	if (IS_HASWELL(devInfo->device_id)) {
 		if (clocks->is_wrpll) {
 			reg_ctl = WRPLL_CTL(clocks->selected_dpll_id);
-			enable_bit = WRPLL_PLL_ENABLE; lock_bit = WRPLL_PLL_LOCK;
-		} else {
+			enable_bit = WRPLL_PLL_ENABLE;
+			lock_bit = WRPLL_PLL_LOCK;
+		} else { // SPLL
 			reg_ctl = SPLL_CTL_HSW;
-			enable_bit = SPLL_PLL_ENABLE_HSW; lock_bit = SPLL_PLL_LOCK_HSW;
+			enable_bit = SPLL_PLL_ENABLE_HSW;
+			lock_bit = SPLL_PLL_LOCK_HSW;
 		}
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-		// IVB uses older DPLL_A/B registers (0x6014/0x6018) or PCH PLLs.
-		// This needs specific IVB PLL enable logic. For now, use WRPLL conceptual bits.
-		reg_ctl = (pipe == PRIV_PIPE_A) ? 0x6014 : 0x6018; // Placeholder
-		enable_bit = (1U << 31); // DPLLVCOENABLE (bit 31 on some older DPLLs)
-		lock_bit = (1U << 30);   // DPLLLOCK (bit 30 on some older DPLLs)
-		TRACE("IVB enable_dpll using placeholder DPLL_A/B_REG\n");
-	} else { intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); return B_ERROR; }
+		// Assuming IVB always uses its main DPLLs (DPLL_A/B) for display outputs
+		// that require a DPLL from this function (LVDS, HDMI, DP/eDP).
+		// PCH PLLs are handled separately if needed (e.g. for some LVDS or analog).
+		reg_ctl = (pipe == PRIV_PIPE_A || pipe == PRIV_PIPE_C) ? DPLL_A_IVB : DPLL_B_IVB;
+		enable_bit = DPLL_VCO_ENABLE_IVB;
+		lock_bit = DPLL_LOCK_IVB;
+		TRACE("IVB enable_dpll using DPLL_A/B_IVB (Reg 0x%x)\n", reg_ctl);
+	} else {
+		TRACE("enable_dpll: Unsupported device generation.\n");
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_ERROR;
+	}
 
 	val = intel_i915_read32(devInfo, reg_ctl);
-	if (enable) val |= enable_bit; else val &= ~enable_bit;
-	intel_i915_write32(devInfo, reg_ctl, val);
-	(void)intel_i915_read32(devInfo, reg_ctl); snooze(20);
 	if (enable) {
+		val |= enable_bit;
+	} else {
+		val &= ~enable_bit;
+	}
+	intel_i915_write32(devInfo, reg_ctl, val);
+	(void)intel_i915_read32(devInfo, reg_ctl); // Posting read
+
+	if (enable) {
+		// Wait for PLL lock
+		snooze(20); // Small delay before polling lock, as per some recommendations
 		bigtime_t startTime = system_time();
-		while (system_time() - startTime < 5000) {
+		while (system_time() - startTime < 5000) { // 5ms timeout for PLL lock
 			if (intel_i915_read32(devInfo, reg_ctl) & lock_bit) {
-				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); return B_OK;
+				TRACE("DPLL (Reg 0x%x) locked.\n", reg_ctl);
+				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+				return B_OK;
 			}
 			snooze(100);
 		}
-		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); return B_TIMED_OUT;
+		TRACE("DPLL (Reg 0x%x) lock TIMEOUT. Value: 0x%08" B_PRIx32 "\n", reg_ctl, intel_i915_read32(devInfo, reg_ctl));
+		// If timed out, try to disable the PLL again to leave it in a safe state
+		val &= ~enable_bit;
+		intel_i915_write32(devInfo, reg_ctl, val);
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_TIMED_OUT;
 	}
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); return B_OK;
+
+	// If disabling, no lock check needed.
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return B_OK;
 }
 
 status_t intel_i915_program_fdi(intel_i915_device_info* d, enum pipe_id_priv p, const intel_clock_params_t* cl) { return B_OK; }

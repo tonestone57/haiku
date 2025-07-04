@@ -183,13 +183,36 @@ intel_i915_propose_display_mode(display_mode *target, const display_mode *low, c
 			current->timing.pixel_clock >= low->timing.pixel_clock &&
 			current->timing.pixel_clock <= high->timing.pixel_clock) {
 
-			// This mode is valid, score it (e.g., width * height + refresh_rate_proxy)
-			// Refresh rate proxy: pixel_clock / (htotal * vtotal)
-			uint32_t current_refresh_proxy = 0;
-			if (current->timing.h_total > 0 && current->timing.v_total > 0) {
-				current_refresh_proxy = current->timing.pixel_clock * 1000 / (current->timing.h_total * current->timing.v_total);
+			// This mode is valid, score it.
+			// Prioritize matching target aspect ratio if provided, then resolution, then refresh rate.
+			uint32_t score = 0;
+			uint32_t target_aspect_score = 0;
+			if (target->virtual_width > 0 && target->virtual_height > 0 && current->virtual_width > 0 && current->virtual_height > 0) {
+				// Simple aspect matching: 10000 - abs(target_aspect_ratio_scaled - current_aspect_ratio_scaled)
+				// To avoid floats, compare cross-products: target_w * current_h vs target_h * current_w
+				uint64_t target_aspect_val = (uint64_t)target->virtual_width * current->virtual_height;
+				uint64_t current_aspect_val = (uint64_t)target->virtual_height * current->virtual_width;
+				if (target_aspect_val == current_aspect_val) {
+					target_aspect_score = 10000; // Perfect aspect match
+				}
+				// This scoring can be refined, but for now, exact match is a good start.
 			}
-			uint32_t score = current->virtual_width * current->virtual_height + current_refresh_proxy;
+
+			uint32_t resolution_score = current->virtual_width * current->virtual_height;
+
+			uint32_t current_refresh_proxy = 0;
+			if (current->timing.h_total > 0 && current->timing.v_total > 0 && current->timing.pixel_clock > 0) {
+				// refresh_proxy = (pixel_clock_hz) / (h_total * v_total)
+				// pixel_clock is in kHz, so multiply by 1000 for Hz.
+				current_refresh_proxy = (current->timing.pixel_clock * 1000) / (current->timing.h_total * current->timing.v_total);
+			} else if (current->timing.pixel_clock > 0) { // Fallback if total timings are zero
+				current_refresh_proxy = current->timing.pixel_clock / 160; // Very rough proxy if totals missing
+			}
+
+			// Composite score: prioritize aspect, then resolution, then refresh.
+			// Higher score is better.
+			score = (target_aspect_score * 1000) + (resolution_score / 1000) + current_refresh_proxy;
+
 
 			if (best_mode == NULL || score > best_score) {
 				best_mode = current;
@@ -221,25 +244,54 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
 	if (status == B_OK) {
 		TRACE("SET_DISPLAY_MODE: IOCTL successful.\n");
-		// Update the accelerant's copy of current_mode from shared_info,
-		// as the kernel is the source of truth and might have adjusted the mode.
-		// A full refresh of shared_info might be needed if area IDs could change.
-		gInfo->shared_info->current_mode = *mode_to_set; // Reflect what was requested
-		                                                // Ideally, re-read from actual shared_info if kernel modified it.
+		// Kernel updates shared_info, including current_mode and potentially framebuffer_area.
+		// We need to check if framebuffer_area has changed and re-clone if necessary.
 
-		// Framebuffer config might have changed, update local pointer if area is still valid
-		// This assumes the framebuffer_area ID in shared_info does NOT change.
-		// If it could, accelerant would need to re-clone it.
-		if (gInfo->shared_info->framebuffer_area >= B_OK) {
-			if (gInfo->framebuffer_base == NULL || area_for(gInfo->framebuffer_base) != gInfo->shared_info->framebuffer_area) {
-				// If we didn't have a mapping or the area ID changed (unlikely for modeset without driver reload)
-				// we would need to delete old clone and re-clone. For now, assume area ID is stable.
-				// This part is simplified.
-			}
-			// The base address within the cloned area should remain valid if area ID is same.
+		area_id current_fb_clone_id = -1;
+		if (gInfo->framebuffer_base != NULL) {
+			current_fb_clone_id = area_for(gInfo->framebuffer_base);
 		}
-		// gInfo->shared_info already points to the cloned shared memory,
-		// so its fields (bytes_per_row, framebuffer_size) are "live" from kernel.
+
+		// Check if the kernel's framebuffer area ID has changed or if we need to clone it initially.
+		if (gInfo->shared_info->framebuffer_area >= B_OK &&
+			(gInfo->framebuffer_base == NULL || current_fb_clone_id != gInfo->shared_info->framebuffer_area)) {
+
+			// If we had a previous clone, delete it.
+			if (gInfo->framebuffer_base != NULL && current_fb_clone_id >= B_OK) {
+				delete_area(current_fb_clone_id);
+				gInfo->framebuffer_base = NULL;
+				TRACE("SET_DISPLAY_MODE: Deleted old framebuffer clone (area %" B_PRId32 ").\n", current_fb_clone_id);
+			}
+
+			// Clone the new framebuffer area from shared_info
+			area_id new_kernel_fb_area = gInfo->shared_info->framebuffer_area;
+			void* new_fb_base = NULL;
+			area_id new_cloned_fb_area = clone_area("i915_accel_fb_clone_new", &new_fb_base,
+				B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, new_kernel_fb_area);
+
+			if (new_cloned_fb_area >= B_OK) {
+				gInfo->framebuffer_base = new_fb_base;
+				TRACE("SET_DISPLAY_MODE: Successfully cloned new framebuffer area %" B_PRId32 " as %" B_PRId32 ", base %p.\n",
+					new_kernel_fb_area, new_cloned_fb_area, gInfo->framebuffer_base);
+			} else {
+				gInfo->framebuffer_base = NULL;
+				TRACE("SET_DISPLAY_MODE: Failed to clone new framebuffer area %" B_PRId32 ": %s\n",
+					new_kernel_fb_area, strerror(new_cloned_fb_area));
+				// This is problematic, as drawing will fail.
+				// The mode was set, but accelerant can't access FB.
+				// Consider if this should return an error or set a flag.
+				// For now, log and continue; drawing hooks will use NULL fb_base.
+			}
+		} else if (gInfo->shared_info->framebuffer_area < B_OK && gInfo->framebuffer_base != NULL) {
+			// Kernel indicates no valid framebuffer area, but we have an old clone. Delete it.
+			if (current_fb_clone_id >= B_OK) {
+				delete_area(current_fb_clone_id);
+				TRACE("SET_DISPLAY_MODE: Kernel FB area invalid, deleted old clone %" B_PRId32 ".\n", current_fb_clone_id);
+			}
+			gInfo->framebuffer_base = NULL;
+		}
+		// gInfo->shared_info->current_mode is already updated by the kernel in the shared area.
+		// No need to set it here from mode_to_set.
 	} else {
 		TRACE("SET_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
 	}
@@ -296,10 +348,85 @@ intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *low_khz, uint32 *hig
 
 static status_t intel_i915_move_display(uint16 x, uint16 y) { TRACE("MOVE_DISPLAY (stub)\n"); return B_UNSUPPORTED;}
 static void     intel_i915_set_indexed_colors(uint c, uint8 f, uint8 *d, uint32 fl) { TRACE("SET_INDEXED_COLORS (stub)\n");}
-static uint32   intel_i915_dpms_capabilities(void) { TRACE("DPMS_CAPABILITIES (stub)\n"); return 0;}
-static uint32   intel_i915_dpms_mode(void) { TRACE("DPMS_MODE (stub)\n"); return B_DPMS_ON;}
-static status_t intel_i915_set_dpms_mode(uint32 flags) { TRACE("SET_DPMS_MODE (stub)\n"); return B_UNSUPPORTED;}
-static status_t intel_i915_get_preferred_display_mode(display_mode* pdm) { TRACE("GET_PREFERRED_DISPLAY_MODE (stub)\n"); if(gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0){*pdm = gInfo->mode_list[0]; return B_OK;} return B_ERROR;}
+
+static uint32
+intel_i915_dpms_capabilities(void)
+{
+	TRACE("DPMS_CAPABILITIES\n");
+	// Most modern displays/controllers support On, Suspend, and Off.
+	// Standby is often mapped to Suspend or Off.
+	return B_DPMS_ON | B_DPMS_SUSPEND | B_DPMS_OFF;
+}
+
+static uint32
+intel_i915_dpms_mode(void)
+{
+	TRACE("DPMS_MODE (query)\n");
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE("DPMS_MODE: Accelerant not initialized.\n");
+		return B_DPMS_ON; // Default or error indicator
+	}
+
+	intel_i915_get_dpms_mode_args args;
+	args.pipe = 0; // Assume pipe 0 for now
+	args.mode = B_DPMS_ON; // Default if ioctl fails
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_GET_DPMS_MODE, &args, sizeof(args)) == 0) {
+		TRACE("DPMS_MODE: Kernel returned mode 0x%lx for pipe %lu\n", args.mode, args.pipe);
+		gInfo->cached_dpms_mode = args.mode; // Update cache with successfully queried mode
+		return args.mode;
+	} else {
+		TRACE("DPMS_MODE: IOCTL to get DPMS mode failed. Returning cached mode: 0x%lx\n", gInfo->cached_dpms_mode);
+		return gInfo->cached_dpms_mode; // Return cached mode as fallback
+	}
+}
+
+static status_t
+intel_i915_set_dpms_mode(uint32 dpms_flags)
+{
+	TRACE("SET_DPMS_MODE to 0x%lx\n", dpms_flags);
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE("SET_DPMS_MODE: Accelerant not initialized.\n");
+		return B_NO_INIT;
+	}
+
+	intel_i915_set_dpms_mode_args args;
+	args.pipe = 0; // Assume pipe 0 for now
+	args.mode = dpms_flags;
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DPMS_MODE, &args, sizeof(args));
+	if (status == B_OK) {
+		TRACE("SET_DPMS_MODE: IOCTL successful for mode 0x%lx on pipe %lu\n", args.mode, args.pipe);
+		gInfo->cached_dpms_mode = args.mode; // Cache successfully set mode
+	} else {
+		TRACE("SET_DPMS_MODE: IOCTL failed: %s\n", strerror(status));
+	}
+	return status;
+}
+
+static status_t
+intel_i915_get_preferred_display_mode(display_mode* preferred_mode)
+{
+	TRACE("GET_PREFERRED_DISPLAY_MODE\n");
+	if (!gInfo || !gInfo->shared_info || !preferred_mode)
+		return B_BAD_VALUE;
+
+	if (gInfo->shared_info->preferred_mode_suggestion.timing.pixel_clock > 0) {
+		*preferred_mode = gInfo->shared_info->preferred_mode_suggestion;
+		TRACE("GET_PREFERRED_DISPLAY_MODE: Using kernel suggestion: %dx%d @ %u kHz.\n",
+			preferred_mode->virtual_width, preferred_mode->virtual_height, preferred_mode->timing.pixel_clock);
+		return B_OK;
+	} else if (gInfo->shared_info->mode_count > 0 && gInfo->mode_list != NULL) {
+		// Fallback to first mode in the list if kernel suggestion is invalid
+		*preferred_mode = gInfo->mode_list[0];
+		TRACE("GET_PREFERRED_DISPLAY_MODE: Kernel suggestion invalid, using first mode from list: %dx%d @ %u kHz.\n",
+			preferred_mode->virtual_width, preferred_mode->virtual_height, preferred_mode->timing.pixel_clock);
+		return B_OK;
+	}
+
+	TRACE("GET_PREFERRED_DISPLAY_MODE: No preferred mode available.\n");
+	return B_ERROR;
+}
 
 static status_t
 intel_i915_get_monitor_info(monitor_info* mon_info)
@@ -434,22 +561,16 @@ static void
 intel_i915_move_cursor(uint16 x, uint16 y)
 {
 	// TRACE("MOVE_CURSOR to %u,%u\n", x, y);
-	if (!gInfo || gInfo->device_fd < 0 || !gInfo->shared_info) return;
+	if (!gInfo || gInfo->device_fd < 0) return;
 
-	// Assume cursor is for pipe 0 for now. Multi-monitor cursor needs more thought.
-	// Also, need to know current visibility state to pass to IOCTL.
-	// For simplicity, assume we have a cached visibility state or read it.
-	// Let's assume kernel keeps track of visibility per pipe if we just send pos.
-	// The IOCTL SET_CURSOR_STATE takes visibility. So we need to cache it in accelerant_info.
-	// This requires adding cursor_visible_cached[MAX_PIPES] to accelerant_info.
-	// For now, assume it's visible if moved. A better way is to get current state.
+	gInfo->cursor_current_x = x;
+	gInfo->cursor_current_y = y;
 
 	intel_i915_set_cursor_state_args args;
-	args.pipe = 0; // Default to Pipe A
-	args.x = x;
-	args.y = y;
-	args.is_visible = gInfo->shared_info->primary_edid_valid; // Hack: use edid_valid as proxy for visible
-	                                       // This needs proper state tracking in accelerant_info
+	args.pipe = 0; // Default to Pipe A for now
+	args.x = gInfo->cursor_current_x;
+	args.y = gInfo->cursor_current_y;
+	args.is_visible = gInfo->cursor_is_visible;
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args)) != 0) {
 		// TRACE("MOVE_CURSOR: IOCTL failed.\n");
@@ -460,21 +581,19 @@ static void
 intel_i915_show_cursor(bool is_visible)
 {
 	TRACE("SHOW_CURSOR: %s\n", is_visible ? "true" : "false");
-	if (!gInfo || gInfo->device_fd < 0 || !gInfo->shared_info) return;
+	if (!gInfo || gInfo->device_fd < 0) return;
 
-	// Assume cursor is for pipe 0.
-	// Need current X, Y to pass to IOCTL. Assume (0,0) or cache previous.
-	// This also needs proper state tracking in accelerant_info.
+	gInfo->cursor_is_visible = is_visible;
+
 	intel_i915_set_cursor_state_args args;
-	args.pipe = 0; // Default to Pipe A
-	args.x = 0; // TODO: Get current/last known X from accelerant_info cache
-	args.y = 0; // TODO: Get current/last known Y
-	args.is_visible = is_visible;
+	args.pipe = 0; // Default to Pipe A for now
+	args.x = gInfo->cursor_current_x; // Use cached position
+	args.y = gInfo->cursor_current_y;
+	args.is_visible = gInfo->cursor_is_visible;
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args)) != 0) {
 		TRACE("SHOW_CURSOR: IOCTL failed.\n");
 	}
-	// TODO: Cache args.is_visible in accelerant_info if used by MOVE_CURSOR
 }
 
 static status_t
@@ -484,15 +603,18 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 h
 	TRACE("SET_CURSOR_BITMAP: %ux%u, hot (%u,%u), space 0x%x\n", width, height, hot_x, hot_y, cs);
 	if (!gInfo || gInfo->device_fd < 0) return B_BAD_VALUE;
 
-	// We expect ARGB32 for Gen7+ hardware cursors
-	if (cs != B_RGBA32 && cs != B_RGB32) { // B_RGB32 might be acceptable if alpha is assumed 0xFF
+	if (cs != B_RGBA32 && cs != B_RGB32) {
 		TRACE("SET_CURSOR_BITMAP: Unsupported color space 0x%x (expected RGBA32/RGB32).\n", cs);
 		return B_BAD_VALUE;
 	}
-	if (width == 0 || height == 0 || width > 256 || height > 256) // Max 256x256 for Gen7
+	if (width == 0 || height == 0 || width > 256 || height > 256)
 		return B_BAD_VALUE;
 	if (hot_x >= width || hot_y >= height)
 		return B_BAD_VALUE;
+	if (bytes_per_row != width * 4) {
+		TRACE("SET_CURSOR_BITMAP: bytes_per_row (%u) does not match width * 4 (%u).\n", bytes_per_row, width*4);
+		return B_BAD_VALUE;
+	}
 
 	intel_i915_set_cursor_bitmap_args args;
 	args.pipe = 0; // Default to Pipe A for now
@@ -500,15 +622,8 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 h
 	args.height = height;
 	args.hot_x = hot_x;
 	args.hot_y = hot_y;
-	args.user_bitmap_ptr = (uint64_t)(uintptr_t)bitmap_data; // Cast to uint64_t for IOCTL struct
-	args.bitmap_size = width * height * 4; // ARGB is 4 bytes per pixel
-
-	// It's important that bytes_per_row from app_server matches width * 4 for a packed ARGB bitmap.
-	if (bytes_per_row != width * 4) {
-		TRACE("SET_CURSOR_BITMAP: bytes_per_row (%u) does not match width * 4 (%u).\n", bytes_per_row, width*4);
-		// We could handle non-packed bitmaps by copying row-by-row, but simpler to require packed.
-		return B_BAD_VALUE;
-	}
+	args.user_bitmap_ptr = (uint64_t)(uintptr_t)bitmap_data;
+	args.bitmap_size = width * height * 4;
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_BITMAP, &args, sizeof(args));
 	if (status != B_OK) {
@@ -516,13 +631,23 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 h
 		return status;
 	}
 
-	// After setting a new bitmap, also ensure its state (pos, visibility) is applied.
-	// This might require caching current x,y,visible in accelerant_info.
-	// For now, assume kernel will show it at (0,0) or keep previous state if possible.
-	// A call to show_cursor(true) and move_cursor(current_x,current_y) might be needed here.
-	intel_i915_show_cursor(true); // Make it visible by default after setting shape
-	// intel_i915_move_cursor(gInfo->cached_cursor_x, gInfo->cached_cursor_y); // If we cached
+	// Update cached hotspot
+	gInfo->cursor_hot_x = hot_x;
+	gInfo->cursor_hot_y = hot_y;
 
+	// After setting a new bitmap, ensure its state (pos, visibility) is applied using cached values.
+	// If it was previously invisible, this won't show it unless show_cursor(true) is called by app_server.
+	// If it was visible, this re-applies its position with the new hotspot.
+	intel_i915_set_cursor_state_args state_args;
+	state_args.pipe = 0; // Default to Pipe A
+	state_args.x = gInfo->cursor_current_x;
+	state_args.y = gInfo->cursor_current_y;
+	state_args.is_visible = gInfo->cursor_is_visible; // Use cached visibility
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &state_args, sizeof(state_args)) != 0) {
+		TRACE("SET_CURSOR_BITMAP: Failed to re-apply cursor state after bitmap change.\n");
+		// Not fatal for set_cursor_bitmap itself, but cursor might not appear correctly.
+	}
 	return B_OK;
 }
 

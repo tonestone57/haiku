@@ -194,6 +194,103 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	// TODO: Perform an initial modeset to a preferred mode on a connected display?
 	// This is often done by the accelerant later, or by bootloader.
 	// For now, kernel driver just prepares the list.
+	// --- Attempt initial modeset ---
+	intel_output_port_state* preferred_port_for_initial_modeset = NULL;
+	display_mode initial_mode_to_set;
+	bool found_initial_mode = false;
+
+	// Try to find a connected port with a preferred mode from EDID or VBT LFP
+	for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+		intel_output_port_state* port = &devInfo->ports[i];
+		if (port->connected && port->preferred_mode.timing.pixel_clock > 0) {
+			preferred_port_for_initial_modeset = port;
+			initial_mode_to_set = port->preferred_mode;
+			found_initial_mode = true;
+			TRACE("display_init: Found preferred port %u (type %d) and mode %dx%d for initial modeset.\n",
+				i, port->type, initial_mode_to_set.virtual_width, initial_mode_to_set.virtual_height);
+			break;
+		}
+	}
+
+	if (!found_initial_mode && global_mode_count > 0) {
+		// No specific preferred mode on a connected port, try first mode from global list
+		// and find any connected port to light up.
+		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+			intel_output_port_state* port = &devInfo->ports[i];
+			// Heuristic: prefer eDP/LVDS, then DP, then HDMI for first auto-modeset if no explicit preference.
+			if (port->connected && (port->type == PRIV_OUTPUT_EDP || port->type == PRIV_OUTPUT_LVDS)) {
+				preferred_port_for_initial_modeset = port;
+				break;
+			}
+			if (port->connected && preferred_port_for_initial_modeset == NULL && port->type == PRIV_OUTPUT_DP) {
+				preferred_port_for_initial_modeset = port; // Keep searching for LVDS/eDP though
+			}
+			if (port->connected && preferred_port_for_initial_modeset == NULL && port->type == PRIV_OUTPUT_HDMI) {
+				preferred_port_for_initial_modeset = port;
+			}
+		}
+		if (preferred_port_for_initial_modeset != NULL) {
+			initial_mode_to_set = global_mode_list[0]; // Use first global mode
+			found_initial_mode = true;
+			TRACE("display_init: No EDID preferred mode, using first global mode %dx%d on port %u (type %d).\n",
+				initial_mode_to_set.virtual_width, initial_mode_to_set.virtual_height,
+				(int)(preferred_port_for_initial_modeset - devInfo->ports), preferred_port_for_initial_modeset->type);
+		}
+	}
+
+	if (found_initial_mode && preferred_port_for_initial_modeset != NULL) {
+		// Default to Pipe A for initial modeset
+		enum pipe_id_priv initial_pipe = PRIV_PIPE_A;
+		// Ensure the selected port is assigned a logical ID if it wasn't already
+		// This mapping should ideally come from VBT parsing based on DDI index or similar.
+		// For now, assume logical_port_id is somewhat meaningful or maps to hw_port_index.
+		if (preferred_port_for_initial_modeset->logical_port_id == PRIV_PORT_ID_NONE) {
+			// Assign a temporary logical ID for the modeset call if necessary.
+			// This part is tricky without a solid port_id scheme from VBT.
+			// Let's assume logical_port_id is already set if port is valid.
+		}
+
+		if (preferred_port_for_initial_modeset->logical_port_id != PRIV_PORT_ID_NONE) {
+			TRACE("display_init: Attempting initial modeset to %dx%d on pipe %d, port_id %d (hw_idx %d).\n",
+				initial_mode_to_set.virtual_width, initial_mode_to_set.virtual_height,
+				initial_pipe, preferred_port_for_initial_modeset->logical_port_id,
+				preferred_port_for_initial_modeset->hw_port_index);
+
+			status_t modeset_status = intel_i915_display_set_mode_internal(devInfo,
+				&initial_mode_to_set, initial_pipe, preferred_port_for_initial_modeset->logical_port_id);
+
+			if (modeset_status == B_OK) {
+				TRACE("display_init: Initial modeset successful.\n");
+				// Update shared_info with this mode as current
+				devInfo->shared_info->current_mode = initial_mode_to_set;
+				// Other shared_info fields (fb_phys, bpr, fb_size) are set by set_mode_internal.
+			} else {
+				TRACE("display_init: Initial modeset FAILED: %s\n", strerror(modeset_status));
+				// Clear current_mode in shared_info if modeset failed, so accelerant knows.
+				memset(&devInfo->shared_info->current_mode, 0, sizeof(display_mode));
+			}
+		} else {
+			TRACE("display_init: Preferred port for initial modeset has no valid logical_port_id.\n");
+		}
+	} else {
+		TRACE("display_init: No suitable mode or port found for initial modeset.\n");
+		memset(&devInfo->shared_info->current_mode, 0, sizeof(display_mode));
+		memset(&devInfo->shared_info->preferred_mode_suggestion, 0, sizeof(display_mode));
+	}
+	if (found_initial_mode) {
+		devInfo->shared_info->preferred_mode_suggestion = initial_mode_to_set;
+	} else {
+		// If no specific initial mode was found, but we have a global mode list,
+		// suggest the first one from there as a fallback.
+		if (global_mode_count > 0 && global_mode_list != NULL) {
+			devInfo->shared_info->preferred_mode_suggestion = global_mode_list[0];
+			TRACE("display_init: Setting preferred_mode_suggestion to first global mode.\n");
+		} else {
+			memset(&devInfo->shared_info->preferred_mode_suggestion, 0, sizeof(display_mode));
+			TRACE("display_init: No modes available to suggest as preferred.\n");
+		}
+	}
+
 
 	// Populate primary EDID block in shared_info from the first connected port
 	devInfo->shared_info->primary_edid_valid = false;
@@ -556,16 +653,53 @@ intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum trans
 		conf_val |= TRANS_CONF_PROGRESSIVE_IVB; // Explicitly set progressive
 	}
 
-	// Set Bits Per Color (BPC) if applicable from bits_per_pixel
-	// Example: (This needs actual register bit definitions for BPC)
-	// conf_val &= ~TRANS_CONF_BPC_MASK_IVB;
-	// switch (bits_per_pixel) {
-	// 	case 18: conf_val |= TRANS_CONF_BPC_6_IVB; break; // 6bpc
-	// 	case 24: conf_val |= TRANS_CONF_BPC_8_IVB; break; // 8bpc
-	// 	case 30: conf_val |= TRANS_CONF_BPC_10_IVB; break; // 10bpc
-	// 	case 36: conf_val |= TRANS_CONF_BPC_12_IVB; break; // 12bpc
-	// 	default: conf_val |= TRANS_CONF_BPC_8_IVB; break; // Default to 8bpc
-	// }
+	// Set Bits Per Color (BPC)
+	conf_val &= ~TRANSCONF_PIPE_BPC_MASK; // Clear existing BPC bits
+
+	// Prioritize VBT for LVDS/eDP if available and matches current pipe's output
+	// This requires knowing which port is connected to this transcoder/pipe.
+	// For simplicity, assume if it's an LVDS/eDP mode, VBT BPC might apply.
+	// A more robust way is to check the port type associated with this transcoder.
+	bool bpc_from_vbt = false;
+	if (devInfo->vbt && devInfo->vbt->has_lfp_data) {
+		// Check if this pipe is driving the LFP
+		// This is a simplification; a proper mapping from pipe to port type is needed.
+		// For now, assume if an LFP exists, its BPC might be relevant.
+		if (devInfo->vbt->lfp_bits_per_color == 6) {
+			conf_val |= TRANSCONF_PIPE_BPC_6; bpc_from_vbt = true;
+		} else if (devInfo->vbt->lfp_bits_per_color == 8) {
+			conf_val |= TRANSCONF_PIPE_BPC_8; bpc_from_vbt = true;
+		}
+		if (bpc_from_vbt) TRACE("BPC for pipe %d from VBT LFP: %d\n", trans, devInfo->vbt->lfp_bits_per_color);
+	}
+
+	if (!bpc_from_vbt) { // If VBT didn't set it, use bits_per_pixel from mode
+		if (bits_per_pixel >= 30) { // 10 BPC (30bpp RGB101010) or 12 BPC (36bpp RGB121212)
+			// Check EDID/port capabilities for 10/12 BPC support if HDMI/DP
+			// For now, default to 8 BPC if > 24, unless explicitly 10/12 BPC mode.
+			// This part needs more context from display_mode or port capabilities.
+			// Assuming bits_per_pixel directly reflects a desire for higher BPC.
+			if (bits_per_pixel >= 36) { // Check for 12 BPC
+				conf_val |= TRANSCONF_PIPE_BPC_12;
+				TRACE("BPC for pipe %d from bpp (%u): 12 BPC\n", trans, bits_per_pixel);
+			} else if (bits_per_pixel >= 30) { // Check for 10 BPC
+				conf_val |= TRANSCONF_PIPE_BPC_10;
+				TRACE("BPC for pipe %d from bpp (%u): 10 BPC\n", trans, bits_per_pixel);
+			} else { // Fallback for >=24 but not clearly 30/36
+				conf_val |= TRANSCONF_PIPE_BPC_8;
+				TRACE("BPC for pipe %d from bpp (%u): 8 BPC (fallback)\n", trans, bits_per_pixel);
+			}
+		} else if (bits_per_pixel >= 24) { // 8 BPC (24bpp RGB888 or 32bpp ARGB8888)
+			conf_val |= TRANSCONF_PIPE_BPC_8;
+			TRACE("BPC for pipe %d from bpp (%u): 8 BPC\n", trans, bits_per_pixel);
+		} else if (bits_per_pixel >= 18) { // 6 BPC (e.g. 18bpp RGB666, or 16bpp RGB565 often uses 6BPC panel)
+			conf_val |= TRANSCONF_PIPE_BPC_6;
+			TRACE("BPC for pipe %d from bpp (%u): 6 BPC\n", trans, bits_per_pixel);
+		} else { // Default or < 18bpp (e.g. 15bpp RGB555 might use 6BPC or specific 5BPC mode if supported)
+			conf_val |= TRANSCONF_PIPE_BPC_8; // Safest default
+			TRACE("BPC for pipe %d from bpp (%u): 8 BPC (default for <18bpp)\n", trans, bits_per_pixel);
+		}
+	}
 
 	intel_i915_write32(devInfo, reg_trans_conf, conf_val);
 	TRACE("configure_transcoder_pipe: Transcoder %d (Reg 0x%x) configured. Value: 0x%08" B_PRIx32 "\n",
@@ -718,8 +852,29 @@ intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	intel_i915_write32(devInfo, reg_trans_conf, trans_conf_val);
 	intel_i915_read32(devInfo, reg_trans_conf); // Posting read
 
-	// TODO: FDI Training for PCH display (older gens or specific configurations)
-	// if (clock_params->needs_fdi) { ... }
+	// FDI Training for PCH display (e.g., IVB driving PCH ports)
+	if (clock_params != NULL && clock_params->needs_fdi) {
+		TRACE("pipe_enable: Pipe %d needs FDI. Programming FDI link.\n", pipe);
+		status_t fdi_status = intel_i915_program_fdi(devInfo, pipe, clock_params);
+		if (fdi_status != B_OK) {
+			TRACE("pipe_enable: intel_i915_program_fdi failed: %s\n", strerror(fdi_status));
+			// Attempt to disable transcoder and return
+			trans_conf_val = intel_i915_read32(devInfo, reg_trans_conf);
+			trans_conf_val &= ~(TRANSCONF_ENABLE | TRANSCONF_STATE_ENABLE_IVB);
+			intel_i915_write32(devInfo, reg_trans_conf, trans_conf_val);
+			return fdi_status;
+		}
+		fdi_status = intel_i915_enable_fdi(devInfo, pipe, true);
+		if (fdi_status != B_OK) {
+			TRACE("pipe_enable: intel_i915_enable_fdi failed: %s\n", strerror(fdi_status));
+			// Attempt to disable transcoder and return
+			trans_conf_val = intel_i915_read32(devInfo, reg_trans_conf);
+			trans_conf_val &= ~(TRANSCONF_ENABLE | TRANSCONF_STATE_ENABLE_IVB);
+			intel_i915_write32(devInfo, reg_trans_conf, trans_conf_val);
+			return fdi_status;
+		}
+		TRACE("pipe_enable: FDI link for pipe %d should be active.\n", pipe);
+	}
 
 	// 2. Enable Pipe
 	uint32_t pipe_conf_val = intel_i915_read32(devInfo, reg_pipe_conf);

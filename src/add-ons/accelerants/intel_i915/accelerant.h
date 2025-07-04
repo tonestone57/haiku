@@ -26,6 +26,9 @@ enum {
 	INTEL_I915_IOCTL_GEM_CONTEXT_CREATE, // For Step 2 of Phase C.2
 	INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY, // For Step 2 of Phase C.2
 	INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO, // For Step 3 of Phase C.2
+
+	INTEL_I915_GET_DPMS_MODE,
+	INTEL_I915_SET_DPMS_MODE,
 };
 
 typedef struct {
@@ -112,6 +115,17 @@ typedef struct {
 	uint32_t	pipe;            // Which pipe this cursor is primarily for (can be shown on multiple)
 } intel_i915_set_cursor_bitmap_args;
 
+// Args for DPMS IOCTLs
+typedef struct {
+	uint32_t pipe; // Input: which pipe/display to query (e.g., 0 for Pipe A)
+	uint32_t mode; // Output: current DPMS mode (B_DPMS_ON, etc.)
+} intel_i915_get_dpms_mode_args;
+
+typedef struct {
+	uint32_t pipe; // Input: which pipe/display to set
+	uint32_t mode; // Input: new DPMS mode (B_DPMS_ON, etc.)
+} intel_i915_set_dpms_mode_args;
+
 
 typedef struct {
 	area_id			regs_clone_area;
@@ -137,6 +151,7 @@ typedef struct {
 	// For GET_PIXEL_CLOCK_LIMITS hook
 	uint32			min_pixel_clock; // In kHz
 	uint32			max_pixel_clock; // In kHz
+	display_mode	preferred_mode_suggestion; // Kernel's suggestion for preferred mode
 } intel_i915_shared_info;
 
 typedef struct {
@@ -147,6 +162,18 @@ typedef struct {
 	display_mode*				mode_list;
 	area_id						mode_list_area;
 	void*                       framebuffer_base;
+	char						device_path_suffix[B_PATH_NAME_LENGTH]; // For GET_ACCELERANT_CLONE_INFO
+
+	// Cached cursor state
+	bool						cursor_is_visible;
+	uint16_t					cursor_current_x;
+	uint16_t					cursor_current_y;
+	uint16_t					cursor_hot_x; // Last set hotspot
+	uint16_t					cursor_hot_y; // Last set hotspot
+	// We assume cursor operations target pipe 0 for now.
+	// If multiple cursors/pipes were supported by accelerant, these would be arrays.
+
+	uint32_t					cached_dpms_mode; // Last successfully set DPMS mode
 } accelerant_info;
 
 extern accelerant_info *gInfo;

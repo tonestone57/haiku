@@ -95,10 +95,27 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	memset(scratch_virt_addr_temp, 0, B_PAGE_SIZE);
 
 	uint32 hws_pga_val = intel_i915_read32(devInfo, HWS_PGA);
-	devInfo->gtt_table_physical_address = hws_pga_val & ~0xFFF;
-	devInfo->gtt_entries_count = 512 * 1024; // Default 2MB GTT table for Gen7
+	devInfo->gtt_table_physical_address = hws_pga_val & ~0xFFF; // Base address of GTT PTEs
+
+	if (IS_IVYBRIDGE(devInfo->device_id) && !IS_IVYBRIDGE_MOBILE(devInfo->device_id)) {
+		// Ivy Bridge Desktop/Server can have 1MB or 2MB GTT
+		uint32_t ggtt_size_bits = (devInfo->pgtbl_ctl >> 1) & 0x3; // PGTBL_CTL[2:1]
+		if (ggtt_size_bits == 1) { // 01b = 1MB GGTT
+			devInfo->gtt_entries_count = (1024 * 1024) / B_PAGE_SIZE; // 256 pages
+		} else { // 00b = 2MB GGTT (or other values default to 2MB)
+			devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE; // 512 pages
+		}
+		TRACE("GTT: Ivy Bridge Desktop/Server, PGTBL_CTL[2:1]=%u, GTT size %lu KB, %u entries\n",
+			ggtt_size_bits, devInfo->gtt_entries_count * B_PAGE_SIZE / 1024, devInfo->gtt_entries_count);
+	} else {
+		// Haswell, IVB Mobile, and others default to 2MB GTT (512 entries)
+		devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE; // 512 pages
+		TRACE("GTT: Defaulting/Mobile GTT size to %lu KB, %u entries\n",
+			devInfo->gtt_entries_count * B_PAGE_SIZE / 1024, devInfo->gtt_entries_count);
+	}
+
 	devInfo->gtt_aperture_actual_size = (size_t)devInfo->gtt_entries_count * B_PAGE_SIZE;
-	size_t gtt_table_alloc_size = devInfo->gtt_entries_count * I915_GTT_ENTRY_SIZE;
+	size_t gtt_table_alloc_size = devInfo->gtt_entries_count * I915_GTT_ENTRY_SIZE; // Size of the PTE table itself
 	if (devInfo->gtt_table_physical_address == 0) { status = B_ERROR; goto err_scratch_area; }
 
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_table", devInfo->device_id);

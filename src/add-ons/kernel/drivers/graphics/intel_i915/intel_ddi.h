@@ -68,6 +68,10 @@ status_t intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_por
 // Disable DDI port
 void intel_ddi_port_disable(intel_i915_device_info* devInfo, intel_output_port_state* port);
 
+// HDMI Audio setup
+void intel_ddi_setup_audio(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	enum pipe_id_priv pipe, const display_mode* mode);
+
 // --- DP Specific ---
 // Basic DPCD read/write via AUX channel (stubs for now)
 status_t intel_dp_aux_read_dpcd(intel_i915_device_info* devInfo, intel_output_port_state* port,

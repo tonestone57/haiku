@@ -63,7 +63,8 @@ parse_dtd(const uint8_t* dtd, display_mode* mode)
 	// Haiku's B_POSITIVE_VSYNC / B_POSITIVE_HSYNC match this if set.
 	if (dtd[17] & 0x04) mode->timing.flags |= B_POSITIVE_VSYNC; // (Bit 2 of flags, not bit 4 of DTD[17])
 	if (dtd[17] & 0x02) mode->timing.flags |= B_POSITIVE_HSYNC; // (Bit 1 of flags, not bit 3 of DTD[17])
-	// TODO: Map other DTD flags (stereo, sync type) if necessary.
+	// TODO: Map other DTD flags (stereo, detailed sync type beyond H/V polarity) if necessary
+	//       and if Haiku API supports them. Currently, only interlace and H/V sync polarity are handled.
 
 	// Set common display_mode fields
 	mode->virtual_width = mode->timing.h_display;
@@ -299,16 +300,22 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 		//   display_mode* new_mode = &modes[mode_count];
 		//   memset(new_mode, 0, sizeof(display_mode));
 		//   new_mode->virtual_width = h_active;
-		//   new_mode->virtual_height = v_active;
+		//   new_mode->virtual_height = v_active; // This is an approximation from aspect ratio
 		//   new_mode->space = B_RGB32_LITTLE;
-		//   // TODO: Populate new_mode->timing using GTF or CVT formula based on h_active, v_active, v_refresh
-		//   // This is complex and not implemented here.
-		//   // For now, we don't increment mode_count for these.
+		//   // TODO: Populate new_mode->timing using GTF or CVT formula based on h_active, v_active, v_refresh.
+		//   // This is a complex calculation and requires implementing the respective standards.
+		//   // Without it, these Standard Timing Identifiers cannot be used to form a complete display_mode.
+		//   // Example: new_mode->timing.pixel_clock = calculate_gtf_pixel_clock(h_active, v_active, v_refresh); etc.
+		//   // For now, these modes are effectively skipped.
+		//   // mode_count++; // Do not increment mode_count until GTF/CVT is implemented.
 		// }
 	}
 
 
-	// TODO: Handle EDID extensions if edid->extension_flag > 0
+	// TODO: Handle EDID extensions if edid->extension_flag > 0.
+	// This would involve reading subsequent 128-byte blocks (e.g., CEA-861 for HDMI audio/video data blocks,
+	// DisplayID for more detailed monitor capabilities). Each extension type has its own parser.
+	// Example: if (edid->extension_flag > 0) { read_and_parse_cea_extension(...); }
 
 	if (mode_count == 0) {
 		TRACE("EDID: No DTDs found or parsed.\n");

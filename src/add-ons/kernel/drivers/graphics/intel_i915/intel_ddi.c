@@ -77,17 +77,35 @@ intel_ddi_send_avi_infoframe(intel_i915_device_info* devInfo,
 	// Payload Byte 4 (PB4): Video Identification Code (VIC)
 	uint8_t vic = 0; // If 0, receiver uses DTD.
 	// Map common modes to VICs (CEA-861-D/E/F)
+	// This is a simplified mapping. A full implementation would be more extensive.
+	float refresh = mode->timing.pixel_clock * 1000.0f / (mode->timing.h_total * mode->timing.v_total);
+	bool is_interlaced = (mode->timing.flags & B_TIMING_INTERLACED) != 0;
+
 	if (mode->virtual_width == 1920 && mode->virtual_height == 1080) {
-		float refresh = mode->timing.pixel_clock * 1000.0f / (mode->timing.h_total * mode->timing.v_total);
-		if (refresh > 59 && refresh < 61) vic = 16; // 1080p60
-		else if (refresh > 49 && refresh < 51) vic = 31; // 1080p50
-		// TODO: Add more VICs (e.g. 24Hz, 25Hz, 30Hz, interlaced modes)
+		if (is_interlaced) {
+			if (refresh > 59.9 && refresh < 60.1) vic = 5;  // 1080i60
+			else if (refresh > 49.9 && refresh < 50.1) vic = 20; // 1080i50
+		} else { // Progressive
+			if (refresh > 59.9 && refresh < 60.1) vic = 16; // 1080p60
+			else if (refresh > 49.9 && refresh < 50.1) vic = 31; // 1080p50
+			else if (refresh > 23.9 && refresh < 24.1) vic = 32; // 1080p24
+			else if (refresh > 24.9 && refresh < 25.1) vic = 33; // 1080p25
+			else if (refresh > 29.9 && refresh < 30.1) vic = 34; // 1080p30
+		}
 	} else if (mode->virtual_width == 1280 && mode->virtual_height == 720) {
-		float refresh = mode->timing.pixel_clock * 1000.0f / (mode->timing.h_total * mode->timing.v_total);
-		if (refresh > 59 && refresh < 61) vic = 4;  // 720p60
-		else if (refresh > 49 && refresh < 51) vic = 19; // 720p50
+		if (refresh > 59.9 && refresh < 60.1) vic = 4;  // 720p60
+		else if (refresh > 49.9 && refresh < 50.1) vic = 19; // 720p50
+	} else if (mode->virtual_width == 720 && mode->virtual_height == 576) { // PAL
+		if (!is_interlaced && refresh > 49.9 && refresh < 50.1) vic = 17; // 576p50
+		// Interlaced 576i50 (VIC 22 for 16:9, 21 for 4:3) - needs aspect ratio check
+	} else if (mode->virtual_width == 720 && mode->virtual_height == 480) { // NTSC
+		if (!is_interlaced && refresh > 59.9 && refresh < 60.1) vic = 2; // 480p60
+		// Interlaced 480i60 (VIC 7 for 16:9, 6 for 4:3) - needs aspect ratio check
+	} else if (mode->virtual_width == 640 && mode->virtual_height == 480) {
+		if (!is_interlaced && refresh > 59.9 && refresh < 60.1) vic = 1; // VGA / 480p60
 	}
-	frame_data[7] = vic & 0x7F;
+	// TODO: Add more VICs, especially considering aspect ratio for some.
+	frame_data[7] = vic & 0x7F; // VIC is 7 bits in AVI InfoFrame PB4
 
 	// Payload Byte 5 (PB5): Pixel Repetition. (Value - 1). 0 means no repetition.
 	frame_data[8] = 0;
@@ -163,14 +181,39 @@ intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* po
 			TRACE("DDI: DP/eDP port %d has invalid hw_port_index %d\n", port->logical_port_id, port->hw_port_index);
 			return B_BAD_VALUE;
 		}
-		// TODO: Read DPCD revision and basic capabilities using AUX channel
-		// uint8_t dpcd_rev;
-		// if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_DPCD_REV, &dpcd_rev, 1) == B_OK) {
-		//    TRACE("DDI: Port %d DPCD Rev %d.%d\n", port->logical_port_id, dpcd_rev >> 4, dpcd_rev & 0xF);
-		// } else {
-		//    TRACE("DDI: Port %d Failed to read DPCD Rev via AUX.\n", port->logical_port_id);
-		//    port->connected = false; // If AUX fails, likely not connected or issue
-		// }
+		uint8_t dpcd_rev;
+		if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_DPCD_REV, &dpcd_rev, 1) == B_OK) {
+			TRACE("DDI: Port %d (hw_idx %d) DPCD Rev %d.%d\n",
+				port->logical_port_id, port->hw_port_index, dpcd_rev >> 4, dpcd_rev & 0xF);
+			// Store dpcd_rev in port_state if needed for later decisions
+			// port->dpcd_revision = dpcd_rev;
+
+			// Example: Read Max Link Rate and Max Lane Count
+			uint8_t max_link_rate, max_lane_count;
+			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LINK_RATE, &max_link_rate, 1) == B_OK) {
+				TRACE("  DPCD: Max Link Rate: 0x%02x (%s Gbps)\n", max_link_rate,
+					max_link_rate == DPCD_LINK_BW_5_4 ? "5.4" :
+					max_link_rate == DPCD_LINK_BW_2_7 ? "2.7" :
+					max_link_rate == DPCD_LINK_BW_1_62 ? "1.62" : "Unknown");
+				// port->dp_max_link_rate = max_link_rate;
+			}
+			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LANE_COUNT, &max_lane_count, 1) == B_OK) {
+				TRACE("  DPCD: Max Lane Count: %d, Enhanced Frame Cap: %s\n",
+					max_lane_count & DPCD_MAX_LANE_COUNT_MASK,
+					(max_lane_count & DPCD_ENHANCED_FRAME_CAP) ? "Yes" : "No");
+				// port->dp_max_lane_count = max_lane_count & DPCD_MAX_LANE_COUNT_MASK;
+				// port->dp_enhanced_framing_capable = (max_lane_count & DPCD_ENHANCED_FRAME_CAP) != 0;
+			}
+
+		} else {
+			TRACE("DDI: Port %d (hw_idx %d) Failed to read DPCD Rev via AUX.\n",
+				port->logical_port_id, port->hw_port_index);
+			// If AUX fails, port is likely not connected or there's a hardware issue.
+			// The 'connected' flag is typically set by EDID parsing later.
+			// If EDID also fails, it will remain false.
+			// Forcing port->connected = false here might be premature if EDID could still succeed via GMBUS
+			// (though DP typically uses AUX for DDC/EDID).
+		}
 	}
 	return B_OK;
 }
@@ -349,8 +392,22 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 	                        // e.g. from clocks->dp_actual_lane_count if populated
 
 	// Initial VS/PE settings (level 0 or VBT default)
-	uint8_t train_lane_set[4] = {0, 0, 0, 0}; // VS=0, PE=0 for each lane
-	// TODO: Apply VBT default VS/PE if available.
+	uint8_t train_lane_set[4] = {0, 0, 0, 0}; // VS=0, PE=0 for each lane (level 0)
+
+	// TODO: Get actual lane_count from link configuration (e.g. max common lanes from DPCD & source caps)
+	// For now, assume a common case like 4 lanes if supported, or 2.
+	// uint8_t lane_count = (port->dp_max_lane_count >= 4) ? 4 : (port->dp_max_lane_count >= 2 ? 2 : 1);
+	// This requires port->dp_max_lane_count to be populated from DPCD read in intel_ddi_init_port.
+	// For the stub, let's stick to the previous hardcoded 4 lanes.
+	// uint8_t lane_count = 4; // Already defined later, removing this line.
+
+	// Apply VBT default VS/PE if eDP and available
+	if (port->type == PRIV_OUTPUT_EDP && devInfo->vbt && devInfo->vbt->has_edp_data) { // Assuming has_edp_data and edp_vs/pe fields in vbt_data
+		// train_lane_set[0] = (devInfo->vbt->edp_pe_level << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
+		//                     (devInfo->vbt->edp_vs_level << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
+		// for (int l = 1; l < 4; l++) train_lane_set[l] = train_lane_set[0]; // Apply to all lanes
+		TRACE("  DP Link Training: VBT eDP VS/PE application STUBBED.\n");
+	}
 	// For now, all start at level 0.
 	// train_lane_set[0] = (PE_LEVEL_0 << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) | (VS_LEVEL_0 << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT); ...
 
@@ -574,7 +631,8 @@ intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* 
 		if (port->type == PRIV_OUTPUT_HDMI) {
 			// Send a default AVI InfoFrame for HDMI
 			intel_ddi_send_avi_infoframe(devInfo, port, pipe, adjusted_mode);
-			// TODO: Setup audio (configure audio DIPs, enable audio path)
+			// Setup audio for HDMI
+			intel_ddi_setup_audio(devInfo, port, pipe, adjusted_mode);
 		}
 	} else {
 		TRACE("DDI: Unsupported port type %d for DDI enable.\n", port->type);
@@ -633,4 +691,35 @@ intel_ddi_port_disable(intel_i915_device_info* devInfo, intel_output_port_state*
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	TRACE("DDI Port %d (hw_idx %d) disabled. DDI_BUF_CTL: 0x%08x\n",
 		port->logical_port_id, port->hw_port_index, intel_i915_read32(devInfo, ddi_buf_ctl_reg));
+}
+
+void
+intel_ddi_setup_audio(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	enum pipe_id_priv pipe, const display_mode* mode)
+{
+	TRACE("DDI: Setup HDMI Audio for port %d (hw_idx %d) on pipe %d - STUBBED\n",
+		port->logical_port_id, port->hw_port_index, pipe);
+
+	if (port->type != PRIV_OUTPUT_HDMI)
+		return;
+
+	// 1. Construct and send Audio InfoFrame (AIF)
+	//    - Similar to AVI InfoFrame, use DIP registers.
+	//    - AIF contains channel count, speaker mapping, sample rate/size.
+	//    - This would need a helper like _intel_ddi_send_audio_infoframe(...)
+
+	// 2. Configure Transcoder for audio sample packets (e.g., TRANS_AUD_CTL)
+	//    uint32_t trans_aud_ctl_reg = TRANS_AUD_CTL(pipe);
+	//    uint32_t aud_ctl_val = intel_i915_read32(devInfo, trans_aud_ctl_reg);
+	//    aud_ctl_val |= TRANS_AUD_CTL_ENABLE;
+	//    // Set sample rate, channel count bits based on desired audio format.
+	//    intel_i915_write32(devInfo, trans_aud_ctl_reg, aud_ctl_val);
+
+	// 3. Enable audio output on the DDI port buffer if separate bits exist
+	//    (Sometimes DDI_BUF_CTL implicitly enables audio path for HDMI mode).
+
+	// 4. Notify HDA controller about HDMI audio sink (ELD - EDID Like Data)
+	//    This part requires interaction with the HDA driver.
+
+	TRACE("DDI: HDMI Audio setup is largely a TODO.\n");
 }

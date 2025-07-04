@@ -117,10 +117,16 @@ intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_sta
 	snooze(pp_on_delay_ms * 1000);
 
 	if (port->type == PRIV_OUTPUT_EDP) {
-		TRACE("LVDS/eDP: eDP AUX channel power up (DPCD writes) STUBBED.\n");
-		// uint8_t dpcd_val = DPCD_POWER_D0;
-		// intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
-		// snooze(vbt_edp_t3_aux_on_ms * 1000);
+		TRACE("LVDS/eDP: eDP AUX CH: Powering on panel (DPCD SET_POWER D0).\n");
+		uint8_t dpcd_val = DPCD_POWER_D0;
+		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+		if (aux_status != B_OK) {
+			TRACE("LVDS/eDP: Failed to power on eDP panel via AUX: %s\n", strerror(aux_status));
+			// Consider if this is fatal for panel_power_on
+		}
+		// Add T3 delay from VBT (AUX ON to BL ON) if available, e.g. vbt->edp_t3_aux_on_to_bl_on_ms
+		// This is part of the more complex eDP power sequencing from VBT.
+		// For now, using existing backlight_on_delay_ms.
 	}
 
 	snooze(backlight_on_delay_ms * 1000);
@@ -135,24 +141,30 @@ intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_sta
 		// uint32 blc_reg = IS_HASWELL(devInfo->device_id) ? BLC_PWM_CPU_CTL2_HSW : BLC_PWM_CTL_IVB;
 		// For PCH LVDS, it's often PCH_BLC_PWM_CTL1 (0xC8250) and PCH_BLC_PWM_CTL2 (0xC8254)
 		// For CPU eDP/LVDS on IVB/HSW, it can be BLC_PWM_CPU_CTL (0x48250) and BLC_PWM_CPU_CTL2 (0x48254)
-		// This needs to be correctly selected based on VBT (is panel PCH or CPU connected).
-		// For now, assume PCH LVDS if type is LVDS, and CPU PWM for eDP if not using PP_CONTROL for eDP BLC.
-		// This is a simplification.
-		bool is_pch_blc = (port->type == PRIV_OUTPUT_LVDS); // Crude assumption
+		// TODO: This needs to be correctly selected based on VBT data indicating
+		//       if the panel's backlight is controlled by PCH or CPU PWM.
+		//       (e.g. devInfo->vbt->lfp_backlight_type == VBT_BACKLIGHT_PCH_PWM or VBT_BACKLIGHT_CPU_PWM)
+		// For now, using the previous crude assumption.
+		bool is_pch_blc = (port->type == PRIV_OUTPUT_LVDS);
 		uint32_t blc_pwm_ctl1_reg, blc_pwm_ctl2_reg;
 		uint32_t blm_pwm_enable_bit;
 
 		if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) { // Gens with both CPU and PCH PWM
-			if (is_pch_blc) { // Assume LVDS is PCH connected
-				blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1; // e.g., 0xC8250
-				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // e.g., 0xC8254
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW; // Placeholder, might be different for IVB PCH
-			} else { // Assume eDP or CPU LVDS uses CPU PWM controller
-				blc_pwm_ctl1_reg = BLC_PWM_CPU_CTL;   // e.g., 0x48250 (Gen7 naming)
-				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2; // e.g., 0x48254
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB; // Placeholder
+			// Refined selection based on VBT if that data was parsed and stored in port state
+			// if (port->backlight_control_source == VBT_BACKLIGHT_PCH_PWM) is_pch_blc = true;
+			// else if (port->backlight_control_source == VBT_BACKLIGHT_CPU_PWM) is_pch_blc = false;
+			// else { /* fallback to crude assumption or error */ }
+
+			if (is_pch_blc) {
+				blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1;
+				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW;
+			} else {
+				blc_pwm_ctl1_reg = BLC_PWM_CPU_CTL;
+				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2;
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB;
 			}
-		} else { // Older gens might only have one type or different registers
+		} else {
 			TRACE("LVDS: Backlight PWM registers for this Gen not fully defined. Using PCH as placeholder.\n");
 			blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1;
 			blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
@@ -230,9 +242,14 @@ intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_st
 	snooze(backlight_off_delay_ms * 1000);
 
 	if (port->type == PRIV_OUTPUT_EDP) {
-		// uint8_t dpcd_val = DPCD_POWER_D3_AUX_OFF; // Or D3 with AUX on if needed
-		// intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
-		TRACE("LVDS/eDP: eDP AUX channel power down (DPCD SET_POWER D3) STUBBED.\n");
+		uint8_t dpcd_val = DPCD_POWER_D3_AUX_OFF; // Request D3 state (power off, AUX typically remains on unless explicitly D3_AUX_OFF)
+		                                         // Using D3_AUX_OFF for a more complete power down.
+		TRACE("LVDS/eDP: eDP AUX CH: Powering down panel (DPCD SET_POWER to 0x%x).\n", dpcd_val);
+		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+		if (aux_status != B_OK) {
+			TRACE("LVDS/eDP: Failed to power down eDP panel via AUX: %s\n", strerror(aux_status));
+		}
+		// Add T10/T11 delays from VBT for eDP if available.
 	}
 
 	snooze(vdd_off_delay_ms * 1000);

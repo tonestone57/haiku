@@ -141,30 +141,9 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 		if (ctx->hw_image_obj->size >= 0x1000) { // Ensure at least one page for context image
 			uint32_t* lrca = (uint32_t*)hw_image_cpu_addr;
 
-			// These are conceptual offsets within the LRCA for Gen7 RCS.
-			// Real offsets are sparse and defined in PRM (e.g., Register State anD Context).
-			// Example LRCA structure (highly simplified, real one is sparse and larger):
-			// DW0: Reserved / Flags / Context ID
-			// DW1: CTX_RING_HEAD (Ring Head Pointer)
-			// Standard Gen7 RCS LRCA DWord Offsets (from start of context image)
-			// These should ideally be macros from a header shared with engine.c if it parses these.
-			#define CTX_LR_CONTEXT_CONTROL            0x01 // Logical Ring Context Control
-			#define CTX_RING_HEAD                     0x02 // Logical Ring Head Pointer
-			#define CTX_RING_TAIL                     0x03 // Logical Ring Tail Pointer
-			#define CTX_RING_BUFFER_START_REGISTER    0x04 // Logical Ring Buffer Start Address
-			#define CTX_RING_BUFFER_CONTROL_REGISTER  0x05 // Logical Ring Buffer Control
-			#define CTX_BB_CURRENT_HEAD_UDW           0x10 // Batch Buffer Current Head Upper DW
-			#define CTX_BB_CURRENT_HEAD_LDW           0x11 // Batch Buffer Current Head Lower DW
-			#define CTX_BB_STATE                      0x12 // Batch Buffer State
-			#define CTX_SECOND_BB_HEAD_UDW            0x13 // Second Level BB Head Upper DW
-			#define CTX_SECOND_BB_HEAD_LDW            0x14 // Second Level BB Head Lower DW
-			#define CTX_SECOND_BB_STATE               0x15 // Second Level BB State
-			#define CTX_INSTRUCTION_STATE_POINTER     0x0D // Indirect State Pointers
-			#define CTX_STATE_BASE_ADDRESS            0x0E // General State Base Address
-			// PDP registers for PPGTT would also be here (e.g., 0x20-0x27 for PDP3-0)
-
 			// The context image is already zeroed by I915_BO_ALLOC_CPU_CLEAR.
 			// We only need to set non-zero default values.
+			// LRCA DWord offsets are defined in registers.h
 
 			struct intel_engine_cs* rcs0 = devInfo->rcs0;
 			if (rcs0 && rcs0->ring_buffer_obj && rcs0->ring_cpu_map) {

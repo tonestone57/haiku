@@ -200,18 +200,15 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 
 			// XY_COLOR_BLT command (Gen7 example)
 			// DW0: Command (Opcode, Length, Flags)
-			//      Opcode: 0x50 (XY_COLOR_BLT), Length: 0x2 (4 DWs total), ColorDepth, ROP
-			cmd_buffer_cpu[current_dword++] = (0x50 << 22) | (2 << 0) /* length */
+			//      Opcode: 0x50 (XY_COLOR_BLT), Length: 3 (5 DWs total: DW0-DW4), ColorDepth, ROP
+			cmd_buffer_cpu[current_dword++] = (0x50 << 22) | (3 << 0) /* length = 5 DWs - 2 */
 				| (1 << 20) /* 32bpp, needs to match framebuffer */
 				| (0xF0 << 16); /* ROP: PATCOPY (for solid fill) */
-			// DW1: Clipping rectangle (if any, or full screen) - for now, no clipping
-			//      For solid fill with no clipping, this is often just pitch.
-			//      If clipping: (Right << 16) | Top
-			//      Here using pitch. This needs to match framebuffer pitch.
+			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
 			cmd_buffer_cpu[current_dword++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16);
-			// DW3: Destination X2, Y2 (exclusive)
+			// DW3: Destination X2 (exclusive), Y2 (exclusive)
 			cmd_buffer_cpu[current_dword++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16);
 			// DW4: Color (BGRA for Gen7 often)
 			cmd_buffer_cpu[current_dword++] = color;
@@ -272,9 +269,9 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 			if (rect->right < rect->left || rect->bottom < rect->top) continue;
 
 			// XY_COLOR_BLT command (Gen7 example)
-			// DW0: Opcode (0x50), Length (0x03 for 5 DWs total), ColorDepth, ROP
+			// DW0: Opcode (0x50), Length (3 for 5 DWs total: DW0-DW4), ColorDepth, ROP
 			cmd_buffer_cpu[current_dword++] = (0x50 << 22) /* XY_COLOR_BLT */
-				| (cmd_dwords_per_rect - 2) /* Command length (payload DWs) */
+				| (3 << 0) /* length = 5 DWs - 2 */
 				| (1 << 20) /* 32bpp, needs to match framebuffer */
 				| (0x55 << 16); /* ROP: DSTINVERT (0x5555) */
 			// DW1: Destination Pitch
@@ -346,11 +343,11 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
 			cmd_buffer_cpu[current_dword++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
-			// DW3: Destination X2, Y2 (exclusive: X1+Width, Y1+Height)
-			cmd_buffer_cpu[current_dword++] = ((blit->dest_left + blit->width + 1) & 0xFFFF)
-				| (((blit->dest_top + blit->height + 1) & 0xFFFF) << 16);
-			// DW4: Source Pitch (bytes_per_row)
-			//      (If source clipping: (Src Right << 16) | Src Top) - not used here
+			// DW3: Destination X2, Y2 (exclusive end coordinates: X1 + Width, Y1 + Height)
+			cmd_buffer_cpu[current_dword++] = ((blit->dest_left + blit->width) & 0xFFFF)
+				| (((blit->dest_top + blit->height) & 0xFFFF) << 16);
+			// DW4: Source GTT Offset (base of the source surface, which is the framebuffer)
+			//      The command uses this as the base, and DW5 (SrcX1, SrcY1) is relative to this.
 			//      For screen-to-screen this is GTT offset of source.
 			//      Since we assume blit within same FB, offset is 0 relative to FB start.
 			//      If framebuffer_physical is GTT offset, this is it.

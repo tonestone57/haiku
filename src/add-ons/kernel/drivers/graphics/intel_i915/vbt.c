@@ -324,7 +324,9 @@ parse_bdb_general_definitions(intel_i915_device_info* devInfo, const uint8_t* bl
 	// For now, just acknowledge it's found.
 	// struct bdb_general_definitions_block* defs = (struct bdb_general_definitions_block*)block_data;
 	// Example: devInfo->vbt->boot_display = defs->boot_display_bits;
-	TRACE("VBT: Parsing General Definitions block (ID %u, size %u) - STUBBED\n", BDB_GENERAL_DEFINITIONS, block_size);
+	TRACE("VBT: Parsing General Definitions block (ID %u, BDB ver %u, size %u) - STUBBED\n",
+		BDB_GENERAL_DEFINITIONS, devInfo->vbt->bdb_header->version, block_size);
+	// Actual parsing depends heavily on BDB version.
 }
 
 static void
@@ -412,7 +414,50 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 	//    devInfo->vbt->power_t5_vdd_cycle_ms = edp_seq->t12_vdd_off_ms;
 	//    TRACE("VBT: Parsed eDP power delays from Driver Features.\n");
 	// }
-	TRACE("VBT: Parsing Driver Features block (ID 57) - Power Seq STUBBED\n");
+	TRACE("VBT: Parsing Driver Features block (ID %u, BDB ver %u, size %u)\n",
+		BDB_DRIVER_FEATURES, devInfo->vbt->bdb_header->version, block_size);
+
+	// This block contains sub-blocks. Iterate through them.
+	// The first byte of block_data for BDB_DRIVER_FEATURES is often a header size for this block itself.
+	// Let's assume block_data points directly to the start of sub-block entries.
+	// Each sub-block might be: <uint8_t sub_block_id, uint16_t sub_block_size, uint8_t data[...]>.
+	const uint8_t* current_sub_ptr = block_data;
+	const uint8_t* end_of_block = block_data + block_size;
+
+	// TODO: Define VBT_EDP_POWER_SEQ_SUB_BLOCK_ID and struct bdb_edp_power_seq
+	//       based on actual VBT specification for the target hardware.
+	// #define VBT_EDP_POWER_SEQ_SUB_BLOCK_ID 0x03 // Example ID
+	// struct bdb_edp_power_seq { uint16_t t1_ms; uint16_t t2_ms; ... };
+
+	while (current_sub_ptr + 3 <= end_of_block) { // Need at least ID (1) + Size (2)
+		uint8_t sub_id = *current_sub_ptr;
+		uint16_t sub_size = *(uint16_t*)(current_sub_ptr + 1);
+		const uint8_t* sub_data = current_sub_ptr + 3;
+
+		if (sub_id == 0 || sub_id == 0xFF) { // End of list marker or invalid
+			TRACE("VBT Driver Features: End of sub-blocks (id 0x%x).\n", sub_id);
+			break;
+		}
+		if (sub_data + sub_size > end_of_block) {
+			TRACE("VBT Driver Features: Sub-block id 0x%x size %u exceeds parent block boundary.\n", sub_id, sub_size);
+			break;
+		}
+
+		TRACE("VBT Driver Features: Found sub-block ID 0x%02x, size %u.\n", sub_id, sub_size);
+
+		// if (sub_id == VBT_EDP_POWER_SEQ_SUB_BLOCK_ID && sub_size >= sizeof(struct bdb_edp_power_seq)) {
+		//    const struct bdb_edp_power_seq* edp_seq = (const struct bdb_edp_power_seq*)sub_data;
+		//    devInfo->vbt->power_t1_vdd_to_panel_ms = edp_seq->t1_val; // Map fields correctly
+		//    devInfo->vbt->power_t2_panel_to_backlight_ms = edp_seq->t2_val;
+		//    // ... and so on for T3, T4, T5 (or T1-T12 for full eDP seq)
+		//    TRACE("VBT: Parsed eDP power sequence from Driver Features sub-block.\n");
+		//    devInfo->vbt->has_edp_power_seq = true; // Add this flag to intel_vbt_data
+		// }
+		// TODO: Add parsing for other useful sub-blocks if any (e.g., backlight type, DP max link rate overrides).
+
+		current_sub_ptr += 3 + sub_size;
+	}
+	TRACE("VBT: Finished parsing Driver Features sub-blocks (or stubbed).\n");
 }
 
 

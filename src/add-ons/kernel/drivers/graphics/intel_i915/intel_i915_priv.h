@@ -86,6 +86,8 @@ typedef struct intel_clock_params_t {
 	// For WRPLL (Gen7: IVB/HSW):
 	uint32_t wrpll_n;
 	uint32_t wrpll_m2; // M is split into M1 (fixed, often 2) and M2 (programmable)
+	bool     wrpll_m2_frac_en; // Enable for fractional M2
+	uint32_t wrpll_m2_frac;    // 22-bit fractional part for M2
 	uint32_t wrpll_p1;
 	uint32_t wrpll_p2;
 	// For SPLL (Gen7: HSW for HDMI):
@@ -128,6 +130,8 @@ typedef struct intel_i915_device_info {
 	struct intel_engine_cs* rcs0; struct rps_info* rps_state;
 	uint32_t current_cdclk_freq_khz;
 	uint32_t open_count; int32_t irq_line; sem_id vblank_sem_id; void* irq_cookie;
+
+	display_mode preferred_mode_suggestion; // Kernel's suggestion for preferred mode
 
 	// Cursor state per pipe
 	struct intel_i915_gem_object* cursor_bo[PRIV_MAX_PIPES];

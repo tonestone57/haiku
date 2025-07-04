@@ -136,26 +136,47 @@ intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_sta
 		// For PCH LVDS, it's often PCH_BLC_PWM_CTL1 (0xC8250) and PCH_BLC_PWM_CTL2 (0xC8254)
 		// For CPU eDP/LVDS on IVB/HSW, it can be BLC_PWM_CPU_CTL (0x48250) and BLC_PWM_CPU_CTL2 (0x48254)
 		// This needs to be correctly selected based on VBT (is panel PCH or CPU connected).
-		// Assuming PCH connected LVDS for this example, or a generic BLC_PWM_CTL.
-		uint32_t blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1; // Example, needs correct register from registers.h
-		uint32_t blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // Example
+		// For now, assume PCH LVDS if type is LVDS, and CPU PWM for eDP if not using PP_CONTROL for eDP BLC.
+		// This is a simplification.
+		bool is_pch_blc = (port->type == PRIV_OUTPUT_LVDS); // Crude assumption
+		uint32_t blc_pwm_ctl1_reg, blc_pwm_ctl2_reg;
+		uint32_t blm_pwm_enable_bit;
 
-		// Read VBT for backlight frequency, or use a default.
-		uint32_t pwm_cycle_vbt = 20000; // Placeholder in Hz, e.g. 200Hz from VBT
+		if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) { // Gens with both CPU and PCH PWM
+			if (is_pch_blc) { // Assume LVDS is PCH connected
+				blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1; // e.g., 0xC8250
+				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // e.g., 0xC8254
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW; // Placeholder, might be different for IVB PCH
+			} else { // Assume eDP or CPU LVDS uses CPU PWM controller
+				blc_pwm_ctl1_reg = BLC_PWM_CPU_CTL;   // e.g., 0x48250 (Gen7 naming)
+				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2; // e.g., 0x48254
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB; // Placeholder
+			}
+		} else { // Older gens might only have one type or different registers
+			TRACE("LVDS: Backlight PWM registers for this Gen not fully defined. Using PCH as placeholder.\n");
+			blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1;
+			blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
+			blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW;
+		}
+
+		// Get backlight frequency from VBT if available
+		uint32_t pwm_freq_hz = 200; // Default 200 Hz
+		if (devInfo->vbt && devInfo->vbt->lvds_pwm_freq_hz > 0) { // Assuming lvds_pwm_freq_hz is populated in vbt_data
+			pwm_freq_hz = devInfo->vbt->lvds_pwm_freq_hz;
+		}
+		TRACE("LVDS: Using PWM frequency %u Hz for backlight.\n", pwm_freq_hz);
+
 		uint32_t core_clock_khz = devInfo->current_cdclk_freq_khz; // Or a fixed reference for PWM
-		if (core_clock_khz == 0) core_clock_khz = 450000; // Fallback if CDCLK not read
+		if (core_clock_khz == 0) core_clock_khz = IS_HASWELL(devInfo->device_id) ? 450000 : 400000; // Gen specific fallback
 
-		// Cycle length = CoreClock / PWM_Freq
-		uint32_t cycle_len = core_clock_khz * 1000 / pwm_cycle_vbt;
-		uint32_t duty_len = cycle_len / 2; // 50% brightness
+		uint32_t cycle_len = core_clock_khz * 1000 / pwm_freq_hz;
+		uint32_t duty_len = cycle_len / 2; // Default to 50% brightness
 
-		// Program frequency (cycle length) and duty cycle
 		intel_i915_write32(devInfo, blc_pwm_ctl1_reg, (cycle_len << 16) | duty_len);
 
-		// Enable PWM
 		uint32_t blc_ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
-		blc_ctl2_val |= BLM_PWM_ENABLE_PCH_HSW; // Use HSW bit name as example
-		// blc_ctl2_val &= ~BLM_OVERRIDE_ENABLE_PCH_HSW; // Ensure override is off for PWM control
+		blc_ctl2_val |= blm_pwm_enable_bit;
+		// blc_ctl2_val &= ~BLM_OVERRIDE_ENABLE_BIT; // Ensure override is off for PWM control
 		intel_i915_write32(devInfo, blc_pwm_ctl2_reg, blc_ctl2_val);
 		TRACE("LVDS: Backlight enabled via PWM CTL1=0x%x (val 0x%x), CTL2=0x%x (val 0x%x).\n",
 			blc_pwm_ctl1_reg, intel_i915_read32(devInfo, blc_pwm_ctl1_reg),
@@ -184,9 +205,25 @@ intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_st
 		intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
 		TRACE("LVDS/eDP: Backlight disabled via PP_CONTROL (eDP assumption).\n");
 	} else if (port->type == PRIV_OUTPUT_LVDS) {
-		uint32_t blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // Example, needs correct register
+		bool is_pch_blc = (port->type == PRIV_OUTPUT_LVDS); // Same crude assumption as above
+		uint32_t blc_pwm_ctl2_reg;
+		uint32_t blm_pwm_enable_bit;
+
+		if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) {
+			if (is_pch_blc) {
+				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW;
+			} else {
+				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2;
+				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB;
+			}
+		} else {
+			blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // Fallback
+			blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW;
+		}
+
 		uint32_t blc_ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
-		blc_ctl2_val &= ~BLM_PWM_ENABLE_PCH_HSW; // Use HSW bit name as example
+		blc_ctl2_val &= ~blm_pwm_enable_bit;
 		intel_i915_write32(devInfo, blc_pwm_ctl2_reg, blc_ctl2_val);
 		TRACE("LVDS: Backlight disabled via PWM CTL2=0x%x.\n", blc_pwm_ctl2_reg);
 	}

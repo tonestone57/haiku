@@ -68,12 +68,12 @@ static status_t intel_i915_sync_to_token(sync_token *st);
 // For now, assume they are available via linking if not static.
 void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
 void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
-void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count); // Now implemented in accel_2d.c
+void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
+void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count); // Now implemented in accel_2d.c
 
 static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count);
 static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count);
-static void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
-// Removed static forward declaration for intel_i915_invert_rectangle as it's now implemented externally
+// Removed static forward declaration for intel_i915_invert_rectangle and intel_i915_fill_span
 
 
 extern "C" void*
@@ -541,9 +541,10 @@ static status_t intel_i915_sync_to_token(sync_token *st) { TRACE("SYNC_TO_TOKEN 
 // Assuming they are now non-static and declared elsewhere (e.g. a new accel_2d.h or in accelerant_protos.h)
 // void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
 // void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
-// void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count); // Now implemented in accel_2d.c
+// void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
+// void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count); // Now implemented in accel_2d.c
 
 static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 tc, blit_params *l, uint32 c) { TRACE("S2S_TRANSPARENT_BLIT (stub)\n");}
 static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *l, uint32 c) { TRACE("S2S_SCALED_FILTERED_BLIT (stub)\n");}
-static void intel_i915_fill_span(engine_token* et, uint32 col, uint16* lst, uint32 cnt) { TRACE("FILL_SPAN (stub)\n");}
+// Removed the stub implementation of intel_i915_fill_span as it's now in accel_2d.c
 // Removed the stub implementation of intel_i915_invert_rectangle as it's now in accel_2d.c

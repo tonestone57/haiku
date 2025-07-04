@@ -81,6 +81,87 @@ destroy_cmd_buffer(uint32 handle, area_id cloned_cmd_area, void* cpu_addr)
 }
 
 
+void
+intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
+{
+	// Each span is (y, x1, x2), so 3 uint16_t values.
+	// We'll treat each span as a 1-pixel high rectangle for XY_COLOR_BLT.
+	// list items are: y, x1, x2, y, x1, x2 ...
+	// TRACE("fill_span: count %lu, color 0x%08lx\n", count, color);
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
+		return;
+
+	size_t max_spans_per_batch = 64;
+	size_t num_batches = (count + max_spans_per_batch - 1) / max_spans_per_batch;
+
+	for (size_t batch = 0; batch < num_batches; batch++) {
+		size_t current_batch_count = min_c(count - (batch * max_spans_per_batch), max_spans_per_batch);
+		size_t cmd_dwords_per_span = 5; // XY_COLOR_BLT uses 5 DWORDS
+		size_t cmd_dwords = current_batch_count * cmd_dwords_per_span + 1; // +1 for MI_BATCH_BUFFER_END
+		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
+
+		uint32 cmd_handle;
+		area_id cmd_area_kernel_id;
+		area_id cmd_area_clone_id = -1;
+		uint32* cmd_buffer_cpu;
+
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &cmd_area_kernel_id, (void**)&cmd_buffer_cpu) != B_OK) {
+			TRACE("fill_span: Failed to create command buffer.\n");
+			return;
+		}
+		cmd_area_clone_id = area_for(cmd_buffer_cpu);
+
+		uint32 current_cmd_dword_idx = 0;
+		for (size_t i = 0; i < current_batch_count; i++) {
+			uint16 y  = list[(batch * max_spans_per_batch + i) * 3 + 0];
+			uint16 x1 = list[(batch * max_spans_per_batch + i) * 3 + 1];
+			uint16 x2 = list[(batch * max_spans_per_batch + i) * 3 + 2];
+
+			if (x1 >= x2) continue; // Skip zero-width or invalid spans
+
+			// XY_COLOR_BLT command (Gen7 example)
+			// DW0: Opcode (0x50), Length (0x03 for 5 DWs total), ColorDepth, ROP
+			cmd_buffer_cpu[current_cmd_dword_idx++] = (0x50 << 22) /* XY_COLOR_BLT */
+				| (cmd_dwords_per_span - 2) /* Command length (payload DWs) */
+				| (1 << 20) /* 32bpp */
+				| (0xF0 << 16); /* ROP: PATCOPY (solid fill) */
+			// DW1: Destination Pitch
+			cmd_buffer_cpu[current_cmd_dword_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1, Y1 (top-left)
+			cmd_buffer_cpu[current_cmd_dword_idx++] = (x1 & 0xFFFF) | ((y & 0xFFFF) << 16);
+			// DW3: Destination X2, Y2 (bottom-right, exclusive for X2, inclusive for Y2 if height is 1)
+			// For a 1-pixel high rect (span): Y2_exclusive = y + 1
+			cmd_buffer_cpu[current_cmd_dword_idx++] = (x2 & 0xFFFF) | (((y + 1) & 0xFFFF) << 16);
+			// DW4: Color
+			cmd_buffer_cpu[current_cmd_dword_idx++] = color;
+		}
+
+		if (current_cmd_dword_idx == 0) { // All spans in batch were invalid
+			destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+			continue;
+		}
+
+		cmd_buffer_cpu[current_cmd_dword_idx++] = 0x0A000000; // MI_BATCH_BUFFER_END
+
+		intel_i915_gem_execbuffer_args exec_args;
+		exec_args.cmd_buffer_handle = cmd_handle;
+		// Adjust cmd_buffer_length if some spans were skipped
+		exec_args.cmd_buffer_length = current_cmd_dword_idx * sizeof(uint32);
+		exec_args.engine_id = RCS0;
+		exec_args.flags = 0;
+		exec_args.relocation_count = 0;
+		exec_args.relocations_ptr = 0;
+		exec_args.context_handle = 0;
+
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
+			TRACE("fill_span: GEM_EXECBUFFER failed.\n");
+		}
+
+		destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+	}
+}
+
+
 // ---- 2D Acceleration Hooks ----
 
 void

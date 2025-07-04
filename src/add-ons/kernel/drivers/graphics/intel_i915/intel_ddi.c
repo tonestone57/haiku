@@ -14,9 +14,143 @@
 
 #include <KernelExport.h>
 #include <string.h>
+#include <video_configuration.h> // For video_cea_data_block_collection, etc. (conceptual)
 
 #define AUX_TIMEOUT_US 10000 // 10ms for an AUX transaction
 
+// AVI InfoFrame constants (CEA-861D)
+#define AVI_INFOFRAME_TYPE    0x82
+#define AVI_INFOFRAME_VERSION 0x02
+#define AVI_INFOFRAME_LENGTH  13    // Max length for version 2 (payload bytes)
+#define AVI_INFOFRAME_SIZE    (3 + 1 + AVI_INFOFRAME_LENGTH) // Header(3) + Checksum(1) + Payload
+
+// Helper to calculate InfoFrame checksum
+static uint8_t
+_calculate_infoframe_checksum(const uint8_t* data, size_t num_header_payload_bytes)
+{
+	// Checksum is over Type, Version, Length, and Payload bytes.
+	// Sum all these bytes and the checksum byte itself should be 0.
+	uint8_t sum = 0;
+	for (size_t i = 0; i < num_header_payload_bytes; i++) {
+		sum += data[i];
+	}
+	return (uint8_t)(0x100 - sum);
+}
+
+// Populates and sends a default AVI InfoFrame for HDMI
+static void
+intel_ddi_send_avi_infoframe(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, enum pipe_id_priv pipe,
+	const display_mode* mode)
+{
+	if (port->type != PRIV_OUTPUT_HDMI || !mode)
+		return;
+
+	uint8_t frame_data[AVI_INFOFRAME_SIZE];
+	memset(frame_data, 0, sizeof(frame_data));
+
+	// Header
+	frame_data[0] = AVI_INFOFRAME_TYPE;
+	frame_data[1] = AVI_INFOFRAME_VERSION;
+	frame_data[2] = AVI_INFOFRAME_LENGTH;
+	// frame_data[3] is Checksum, calculated later.
+
+	// Payload Byte 1 (PB1): Scan Info (S1,S0), Bar Info (B1,B0), Active Fmt Info (A0), YCbCr/RGB (Y1,Y0)
+	uint8_t y_val = 0; // 00: RGB
+	if (mode->space == B_YCbCr422) y_val = 1; // 01: YCbCr 4:2:2
+	else if (mode->space == B_YCbCr444) y_val = 2; // 10: YCbCr 4:4:4
+	frame_data[4] = (y_val << 5) | (1 << 4); // A0=1 (Active Format Present)
+
+	// Payload Byte 2 (PB2): Colorimetry (C1,C0), Picture Aspect (M1,M0), Active Format Aspect (R3-R0)
+	uint8_t m_val = 0; // 00: No data. 01: 4:3. 10: 16:9
+	if (mode->virtual_width * 9 == mode->virtual_height * 16) m_val = 2; // 16:9
+	else if (mode->virtual_width * 3 == mode->virtual_height * 4) m_val = 1; // 4:3
+	uint8_t c_val = 0; // 00: No data. For HD modes (>=720p), usually BT.709 (C1C0=10)
+	if (mode->virtual_height >= 720) c_val = 2; // ITU-R BT.709
+	frame_data[5] = (c_val << 6) | (m_val << 4) | (8 << 0); // R[3-0]=1000 (Same as Picture Aspect)
+
+	// Payload Byte 3 (PB3): Extended Colorimetry(EC2-EC0), Quantization Range(Q1,Q0), Non-Uniform Scaling(SC1,SC0)
+	uint8_t q_val = 0; // 00: Default (depends on YCbCr/RGB). For RGB, usually Full Range.
+	if (y_val != 0) q_val = 1; // For YCbCr, usually Limited Range.
+	frame_data[6] = (0 << 4) /* EC=No Data/xvYCC P0 */ | (q_val << 2) | (0 << 0) /* SC=No Data */;
+
+	// Payload Byte 4 (PB4): Video Identification Code (VIC)
+	uint8_t vic = 0; // If 0, receiver uses DTD.
+	// Map common modes to VICs (CEA-861-D/E/F)
+	if (mode->virtual_width == 1920 && mode->virtual_height == 1080) {
+		float refresh = mode->timing.pixel_clock * 1000.0f / (mode->timing.h_total * mode->timing.v_total);
+		if (refresh > 59 && refresh < 61) vic = 16; // 1080p60
+		else if (refresh > 49 && refresh < 51) vic = 31; // 1080p50
+		// TODO: Add more VICs (e.g. 24Hz, 25Hz, 30Hz, interlaced modes)
+	} else if (mode->virtual_width == 1280 && mode->virtual_height == 720) {
+		float refresh = mode->timing.pixel_clock * 1000.0f / (mode->timing.h_total * mode->timing.v_total);
+		if (refresh > 59 && refresh < 61) vic = 4;  // 720p60
+		else if (refresh > 49 && refresh < 51) vic = 19; // 720p50
+	}
+	frame_data[7] = vic & 0x7F;
+
+	// Payload Byte 5 (PB5): Pixel Repetition. (Value - 1). 0 means no repetition.
+	frame_data[8] = 0;
+
+	// PB6-PB13 are bar info, all 0 for no bars. (Already zeroed by memset).
+
+	// Calculate Checksum (sum of HB0,HB1,HB2 and PB1-PB13)
+	frame_data[3] = _calculate_infoframe_checksum(&frame_data[0], 3 + AVI_INFOFRAME_LENGTH);
+
+	// Write to DIP (Data Island Packet) registers
+	uint32_t dip_ctl_reg, dip_data_reg_base;
+	uint32_t dip_enable_bit = VIDEO_DIP_ENABLE_AVI_IVB;
+	uint32_t dip_port_sel_mask = 0, dip_port_sel_val = 0;
+	uint32_t dip_type_val = VIDEO_DIP_TYPE_AVI_IVB;
+
+	if (IS_HASWELL(devInfo->device_id)) {
+		dip_ctl_reg = HSW_TVIDEO_DIP_CTL_DDI(port->hw_port_index); // Needs macro in registers.h
+		dip_data_reg_base = HSW_TVIDEO_DIP_DATA_DDI(port->hw_port_index); // Needs macro
+		dip_enable_bit = VIDEO_DIP_ENABLE_AVI_HSW;
+		dip_port_sel_mask = VIDEO_DIP_PORT_SELECT_MASK_HSW;
+		dip_port_sel_val = VIDEO_DIP_PORT_SELECT_HSW(port->hw_port_index);
+		dip_type_val = VIDEO_DIP_TYPE_AVI_HSW;
+	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+		dip_ctl_reg = VIDEO_DIP_CTL(pipe); // Pipe-based for IVB
+		dip_data_reg_base = VIDEO_DIP_DATA(pipe);
+	} else {
+		TRACE("DDI: AVI InfoFrame sending not supported for Gen %d.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+		return;
+	}
+
+	// Disable DIP before programming data
+	uint32_t dip_ctl_val = intel_i915_read32(devInfo, dip_ctl_reg);
+	intel_i915_write32(devInfo, dip_ctl_reg, dip_ctl_val & ~dip_enable_bit);
+
+	// Write data. DIP data registers are typically loaded with DWords.
+	// HDMI Spec: Packet bytes are sent starting with HB0, HB1, HB2, Checksum, PB1, ...
+	// Intel DIP Data Registers: Usually expect data packed into DWords.
+	// For example, DATA0 might be {Checksum, Length, Version, Type}.
+	// DATA1 might be {PB3, PB2, PB1, YCS_AC_BA_SI_PB0}.
+	// This mapping is crucial and hardware-specific.
+	// For now, write raw frame_data in 4-byte chunks. This likely needs byte swapping per DWORD.
+	uint32_t temp_dip_buffer[ (AVI_INFOFRAME_SIZE + 3) / 4 ]; // Rounded up DWords
+	memset(temp_dip_buffer, 0, sizeof(temp_dip_buffer));
+	// The first 4 bytes are Type, Version, Length, Checksum.
+	// This is often what goes into the first DIP data register, possibly byte-swapped.
+	// For simplicity, this direct memcpy might not match HW byte order in DWORDs.
+	// A proper implementation would pack bytes into DWORDS according to HW spec.
+	// e.g. DATA_REG[0] = (frame_data[3]<<24)|(frame_data[2]<<16)|(frame_data[1]<<8)|frame_data[0]
+	memcpy(temp_dip_buffer, frame_data, AVI_INFOFRAME_SIZE);
+
+	for (int i = 0; i < (AVI_INFOFRAME_SIZE + 3) / 4; ++i) {
+		intel_i915_write32(devInfo, dip_data_reg_base + i * 4, temp_dip_buffer[i]);
+	}
+
+	// Enable DIP
+	dip_ctl_val = intel_i915_read32(devInfo, dip_ctl_reg);
+	dip_ctl_val &= ~(dip_port_sel_mask | VIDEO_DIP_TYPE_MASK_HSW | VIDEO_DIP_FREQ_MASK_HSW | VIDEO_DIP_ENABLE_GCP_HSW); // Also clear GCP enable
+	dip_ctl_val |= dip_port_sel_val | dip_type_val | VIDEO_DIP_FREQ_VSYNC_HSW | dip_enable_bit;
+	intel_i915_write32(devInfo, dip_ctl_reg, dip_ctl_val);
+
+	TRACE("DDI: Sent AVI InfoFrame for HDMI on pipe %d / port hw_idx %d. CTL=0x%x\n",
+		pipe, port->hw_port_index, dip_ctl_val);
+}
 
 status_t
 intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* port)
@@ -320,18 +454,40 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 		uint32_t temp_ddi_buf_ctl_val = original_ddi_buf_ctl_val;
 		// Conceptual update:
 		// temp_ddi_buf_ctl_val = (original_ddi_buf_ctl_val & ~0x0000006E) // Clear bits 1,2,3,4,5,6 example
-		//                        | ((max_vs_req & 0x3) << 1)             // VS bits 2:1 example
-		//                        | ((max_pe_req & 0x3) << 4);            // PE bits 5:4 example
+		// This is where the source DDI_BUF_CTL register would be updated.
+		// For HSW/IVB, DDI_BUF_CTL has common VS/PE bits.
+		// These are placeholder bit definitions. Actual definitions are needed from PRM.
+		#define HSW_DDI_BUF_CTL_VS_LEVEL_MASK  (0x3 << 1) // Example: Bits 2:1 for Voltage Swing
+		#define HSW_DDI_BUF_CTL_VS_LEVEL_SHIFT 1
+		#define HSW_DDI_BUF_CTL_PE_LEVEL_MASK  (0x3 << 4) // Example: Bits 5:4 for Pre-Emphasis
+		#define HSW_DDI_BUF_CTL_PE_LEVEL_SHIFT 4
 
-		if (temp_ddi_buf_ctl_val != original_ddi_buf_ctl_val) {
-			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original: 0x%08" B_PRIx32 ", would change to 0x%08" B_PRIx32 " (VS_max=%u, PE_max=%u)\n",
-				ddi_buf_ctl_reg, original_ddi_buf_ctl_val, temp_ddi_buf_ctl_val, max_vs_req, max_pe_req);
-			// intel_i915_write32(devInfo, ddi_buf_ctl_reg, temp_ddi_buf_ctl_val); // Not writing yet
+		uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+		uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		uint32_t new_ddi_buf_ctl_val = ddi_buf_ctl_val;
+
+		// Clear current common VS/PE (using placeholder masks)
+		new_ddi_buf_ctl_val &= ~(HSW_DDI_BUF_CTL_VS_LEVEL_MASK | HSW_DDI_BUF_CTL_PE_LEVEL_MASK);
+
+		// Set new common VS/PE based on max requested (assuming direct mapping of levels 0-3)
+		new_ddi_buf_ctl_val |= (max_vs_req << HSW_DDI_BUF_CTL_VS_LEVEL_SHIFT) & HSW_DDI_BUF_CTL_VS_LEVEL_MASK;
+		new_ddi_buf_ctl_val |= (max_pe_req << HSW_DDI_BUF_CTL_PE_LEVEL_SHIFT) & HSW_DDI_BUF_CTL_PE_LEVEL_MASK;
+
+		if (new_ddi_buf_ctl_val != ddi_buf_ctl_val) {
+			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original: 0x%08" B_PRIx32 ", new: 0x%08" B_PRIx32 " (VS_max=%u, PE_max=%u)\n",
+				ddi_buf_ctl_reg, ddi_buf_ctl_val, new_ddi_buf_ctl_val, max_vs_req, max_pe_req);
+// #define I915_DDI_BUF_CTL_VS_PE_KNOWN // Define this if bits are confirmed
+#ifdef I915_DDI_BUF_CTL_VS_PE_KNOWN
+			intel_i915_write32(devInfo, ddi_buf_ctl_reg, new_ddi_buf_ctl_val);
+			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) UPDATED to 0x%08" B_PRIx32 "\n",
+				ddi_buf_ctl_reg, new_ddi_buf_ctl_val);
+#else
+			TRACE("  DP Link Training: Actual DDI_BUF_CTL VS/PE update SKIPPED (I915_DDI_BUF_CTL_VS_PE_KNOWN not defined).\n");
+#endif
 		} else {
 			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) value 0x%08" B_PRIx32 " sufficient for VS_max=%u, PE_max=%u (no change needed).\n",
-				ddi_buf_ctl_reg, original_ddi_buf_ctl_val, max_vs_req, max_pe_req);
+				ddi_buf_ctl_reg, ddi_buf_ctl_val, max_vs_req, max_pe_req);
 		}
-		TRACE("  DP Link Training: Actual DDI_BUF_CTL VS/PE update is STUBBED (no write performed).\n");
 	}
 
 	if (!cr_done) {

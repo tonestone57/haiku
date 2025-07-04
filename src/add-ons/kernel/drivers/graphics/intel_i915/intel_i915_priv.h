@@ -38,20 +38,166 @@ struct rps_info;
 #define IS_IVYBRIDGE_MOBILE(devid)  ((devid) == 0x0156 || (devid) == 0x0166)
 #define IS_IVYBRIDGE_SERVER(devid)  ((devid) == 0x015a || (devid) == 0x016a)
 #define IS_IVYBRIDGE(devid) (IS_IVYBRIDGE_DESKTOP(devid) || IS_IVYBRIDGE_MOBILE(devid) || IS_IVYBRIDGE_SERVER(devid))
+
 #define IS_HASWELL_DESKTOP(devid) ((devid) == 0x0402 || (devid) == 0x0412 || (devid) == 0x0422)
 #define IS_HASWELL_MOBILE(devid)  ((devid) == 0x0406 || (devid) == 0x0416 || (devid) == 0x0426)
 #define IS_HASWELL_ULT(devid)     ((devid) == 0x0A06 || (devid) == 0x0A16 || (devid) == 0x0A26 || (devid) == 0x0A2E)
 #define IS_HASWELL_SERVER(devid)  ((devid) == 0x0D22 || (devid) == 0x0D26)
 #define IS_HASWELL(devid) (IS_HASWELL_DESKTOP(devid) || IS_HASWELL_MOBILE(devid) || IS_HASWELL_ULT(devid) || IS_HASWELL_SERVER(devid))
+
 #define IS_GEN7(devid) (IS_IVYBRIDGE(devid) || IS_HASWELL(devid))
-static inline int INTEL_GRAPHICS_GEN(uint16_t devid) { if (IS_GEN7(devid)) return 7; return 0; }
+
+#define IS_SANDYBRIDGE_DESKTOP(devid) ((devid) == 0x0102 || (devid) == 0x0112 || (devid) == 0x0122)
+#define IS_SANDYBRIDGE_MOBILE(devid)  ((devid) == 0x0106 || (devid) == 0x0116 || (devid) == 0x0126)
+#define IS_SANDYBRIDGE_SERVER(devid)  ((devid) == 0x010a)
+#define IS_SANDYBRIDGE(devid) (IS_SANDYBRIDGE_DESKTOP(devid) || IS_SANDYBRIDGE_MOBILE(devid) || IS_SANDYBRIDGE_SERVER(devid))
+
+#define IS_GEN6(devid) (IS_SANDYBRIDGE(devid))
+
+#define IS_BROADWELL_GT1(devid) ((devid) == 0x1606 || (devid) == 0x160b || (devid) == 0x160e || (devid) == 0x1602 || (devid) == 0x160a || (devid) == 0x160d)
+#define IS_BROADWELL_GT2(devid) ((devid) == 0x1616 || (devid) == 0x161b || (devid) == 0x161e || (devid) == 0x1612 || (devid) == 0x161a || (devid) == 0x161d)
+#define IS_BROADWELL_GT3(devid) ((devid) == 0x1626 || (devid) == 0x162b || (devid) == 0x162e || (devid) == 0x1622 || (devid) == 0x162a || (devid) == 0x162d)
+#define IS_BROADWELL(devid) (IS_BROADWELL_GT1(devid) || IS_BROADWELL_GT2(devid) || IS_BROADWELL_GT3(devid))
+
+#define IS_GEN8(devid) (IS_BROADWELL(devid))
+
+#define IS_SKYLAKE_GT1(devid) ((devid) == 0x1902 || (devid) == 0x1906 || (devid) == 0x190a || (devid) == 0x190b || (devid) == 0x190e)
+#define IS_SKYLAKE_GT2(devid) ((devid) == 0x1912 || (devid) == 0x1916 || (devid) == 0x191a || (devid) == 0x191b || (devid) == 0x191d || (devid) == 0x191e || (devid) == 0x1921)
+#define IS_SKYLAKE_GT3(devid) ((devid) == 0x1926 || (devid) == 0x192a || (devid) == 0x192b)
+#define IS_SKYLAKE(devid) (IS_SKYLAKE_GT1(devid) || IS_SKYLAKE_GT2(devid) || IS_SKYLAKE_GT3(devid))
+
+#define IS_KABYLAKE_ULT_GT1(devid) ((devid) == 0x5906)
+#define IS_KABYLAKE_DT_GT1(devid)  ((devid) == 0x5902)
+#define IS_KABYLAKE_ULT_GT2(devid) ((devid) == 0x5916 || (devid) == 0x5921) // GT2F included
+#define IS_KABYLAKE_ULX_GT2(devid) ((devid) == 0x591c || (devid) == 0x591e)
+#define IS_KABYLAKE_DT_GT2(devid)  ((devid) == 0x5912)
+#define IS_KABYLAKE_MOBILE_GT2(devid) ((devid) == 0x5917 || (devid) == 0x591b) // Halo GT2
+#define IS_KABYLAKE_WKS_GT2(devid) ((devid) == 0x591d)
+#define IS_KABYLAKE_ULT_GT3(devid) ((devid) == 0x5926 || (devid) == 0x5927)
+#define IS_KABYLAKE(devid) (IS_KABYLAKE_ULT_GT1(devid) || IS_KABYLAKE_DT_GT1(devid) || IS_KABYLAKE_ULT_GT2(devid) || \
+                            IS_KABYLAKE_ULX_GT2(devid) || IS_KABYLAKE_DT_GT2(devid) || IS_KABYLAKE_MOBILE_GT2(devid) || \
+                            IS_KABYLAKE_WKS_GT2(devid) || IS_KABYLAKE_ULT_GT3(devid))
+
+#define IS_GEMINILAKE(devid) ((devid) == 0x3185 || (devid) == 0x3184)
+
+#define IS_COFFEELAKE_GT1(devid) ((devid) == 0x3e90 || (devid) == 0x3e93)
+#define IS_COFFEELAKE_GT2(devid) ((devid) == 0x3e91 || (devid) == 0x3e92 || (devid) == 0x3e96 || (devid) == 0x3e98 || (devid) == 0x3e9a || (devid) == 0x3e9b || (devid) == 0x3eab)
+#define IS_COFFEELAKE_GT3(devid) ((devid) == 0x3ea5 || (devid) == 0x3ea6)
+#define IS_COFFEELAKE(devid) (IS_COFFEELAKE_GT1(devid) || IS_COFFEELAKE_GT2(devid) || IS_COFFEELAKE_GT3(devid))
+
+#define IS_COMETLAKE_GT1(devid) ((devid) == 0x9ba4 || (devid) == 0x9ba8 || (devid) == 0x9b21 || (devid) == 0x9baa)
+#define IS_COMETLAKE_GT2(devid) ((devid) == 0x9bc4 || (devid) == 0x9bc5 || (devid) == 0x9bc6 || (devid) == 0x9bc8 || (devid) == 0x9be6 || (devid) == 0x9bf6 || (devid) == 0x9b41 || (devid) == 0x9bca || (devid) == 0x9bcc)
+#define IS_COMETLAKE(devid) (IS_COMETLAKE_GT1(devid) || IS_COMETLAKE_GT2(devid))
+
+#define IS_GEN9(devid) (IS_SKYLAKE(devid) || IS_KABYLAKE(devid) || IS_GEMINILAKE(devid) || IS_COFFEELAKE(devid) || IS_COMETLAKE(devid))
+
+#define IS_ICELAKE(devid) ((devid) == 0x8a56 || (devid) == 0x8a5c || (devid) == 0x8a5a || (devid) == 0x8a51 || (devid) == 0x8a52 || (devid) == 0x8a53)
+#define IS_JASPERLAKE(devid) ((devid) == 0x4e55 || (devid) == 0x4e61 || (devid) == 0x4e71)
+#define IS_GEN11(devid) (IS_ICELAKE(devid) || IS_JASPERLAKE(devid))
+
+#define IS_TIGERLAKE(devid) ((devid) == 0x9a49 || (devid) == 0x9a78 || (devid) == 0x9a40 || (devid) == 0x9a60 || (devid) == 0x9a68 || (devid) == 0x9a70)
+#define IS_ALDERLAKE_P(devid) ((devid) == 0x46a6) // Example for Alder Lake P
+#define IS_ALDERLAKE_N(devid) ((devid) == 0x46d1) // Example for Alder Lake N
+#define IS_ALDERLAKE(devid) (IS_ALDERLAKE_P(devid) || IS_ALDERLAKE_N(devid)) // Add more as needed
+#define IS_GEN12(devid) (IS_TIGERLAKE(devid) || IS_ALDERLAKE(devid)) // Add DG1, DG2 etc. if supported
+
+// Fallback for older generations from intel_extreme, less likely for i915 but for completeness
+#define IS_I965(devid) ((devid) == 0x2972 || (devid) == 0x2982 || (devid) == 0x2992 || (devid) == 0x29a2 || (devid) == 0x2a02 || (devid) == 0x2a12)
+#define IS_G33(devid)  ((devid) == 0x29b2 || (devid) == 0x29c2 || (devid) == 0x29d2)
+#define IS_G4X(devid)  ((devid) == 0x2a42 || (devid) == 0x2e02 || (devid) == 0x2e12 || (devid) == 0x2e22 || (devid) == 0x2e32 || (devid) == 0x2e42 || (devid) == 0x2e92)
+#define IS_IRONLAKE(devid) ((devid) == 0x0042 || (devid) == 0x0046)
+#define IS_GEN5(devid) (IS_IRONLAKE(devid))
+
+#define IS_I945(devid) ((devid) == 0x2772 || (devid) == 0x27a2 || (devid) == 0x27ae)
+#define IS_I915(devid) ((devid) == 0x2582 || (devid) == 0x258a || (devid) == 0x2592 || (devid) == 0x2792)
+#define IS_GEN4(devid) (IS_I965(devid) || IS_G33(devid) || IS_G4X(devid)) // G4X is Gen4.5
+#define IS_GEN3(devid) (IS_I945(devid) || IS_I915(devid))
+
+
+static inline int INTEL_GRAPHICS_GEN(uint16_t devid) {
+	if (IS_GEN12(devid)) return 12;
+	if (IS_GEN11(devid)) return 11;
+	// Gen10 is typically Cannon Lake, not in the list explicitly, but some CFL/CML are Gen9.5
+	if (IS_GEN9(devid)) return 9; // Includes SKL, KBL, CFL, CML, GLK
+	if (IS_GEN8(devid)) return 8; // BDW
+	if (IS_GEN7(devid)) return 7; // IVB, HSW
+	if (IS_GEN6(devid)) return 6; // SNB
+	if (IS_GEN5(devid)) return 5; // ILK
+	if (IS_GEN4(devid)) return 4; // I965, G4X
+	if (IS_GEN3(devid)) return 3; // I915, I945
+	// Add IS_GEN2 for i8xx if needed
+	return 0; // Unknown or older
+}
+
+#define INTEL_INFO_GEN_FROM_DEVICE_ID(devid) INTEL_GRAPHICS_GEN(devid)
 #define INTEL_DISPLAY_GEN(devInfoPtr) INTEL_GRAPHICS_GEN((devInfoPtr)->device_id)
+
+// MMIO Access (Forcewake must be handled by caller)
+static inline uint32
+intel_i915_read32(intel_i915_device_info* devInfo, uint32 offset)
+{
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) {
+		// This case should ideally not happen if driver is initialized correctly.
+		// Consider a panic or strong warning. For now, return a known "bad" value.
+		TRACE("intel_i915_read32: ERROR: devInfo or mmio_regs_addr is NULL! offset=0x%lx\n", offset);
+		return 0xFFFFFFFF;
+	}
+	return *(volatile uint32_t*)(devInfo->mmio_regs_addr + offset);
+}
+
+static inline void
+intel_i915_write32(intel_i915_device_info* devInfo, uint32 offset, uint32 value)
+{
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) {
+		TRACE("intel_i915_write32: ERROR: devInfo or mmio_regs_addr is NULL! offset=0x%lx, value=0x%lx\n", offset, value);
+		return;
+	}
+	*(volatile uint32_t*)(devInfo->mmio_regs_addr + offset) = value;
+}
 
 
 enum pipe_id_priv { PRIV_PIPE_A = 0, PRIV_PIPE_B, PRIV_PIPE_C, PRIV_PIPE_INVALID = -1, PRIV_MAX_PIPES = PRIV_PIPE_C + 1 };
-enum transcoder_id_priv { PRIV_TRANSCODER_A=0, PRIV_TRANSCODER_B, PRIV_TRANSCODER_C, PRIV_TRANSCODER_EDP, PRIV_TRANSCODER_INVALID=-1, PRIV_MAX_TRANSCODERS=PRIV_TRANSCODER_EDP+1};
-enum intel_port_id_priv { PRIV_PORT_ID_NONE = 0, /* ... */ PRIV_MAX_PORTS = 5 }; // Adjusted for DDI A-E example
-enum intel_output_type_priv { PRIV_OUTPUT_NONE = 0, /* ... */ };
+enum transcoder_id_priv { PRIV_TRANSCODER_A=0, PRIV_TRANSCODER_B, PRIV_TRANSCODER_C, PRIV_TRANSCODER_EDP, PRIV_TRANSCODER_DSI0, PRIV_TRANSCODER_DSI1, PRIV_TRANSCODER_INVALID=-1, PRIV_MAX_TRANSCODERS=PRIV_TRANSCODER_DSI1+1};
+enum intel_port_id_priv {
+	PRIV_PORT_ID_NONE = 0,
+	PRIV_PORT_A, // Typically eDP or DP
+	PRIV_PORT_B, // DP/HDMI/DVI
+	PRIV_PORT_C, // DP/HDMI/DVI
+	PRIV_PORT_D, // DP/HDMI/DVI
+	PRIV_PORT_E, // DP/HDMI/DVI (HSW+)
+	PRIV_PORT_F, // (ICL+)
+	PRIV_PORT_G, // (XE_LPD+)
+	// Add more for Type-C ports if needed, up to ICL_PORT_TC6
+	PRIV_MAX_PORTS
+};
+
+enum intel_output_type_priv {
+	PRIV_OUTPUT_NONE = 0,
+	PRIV_OUTPUT_ANALOG,    // VGA
+	PRIV_OUTPUT_LVDS,
+	PRIV_OUTPUT_TMDS_DVI,  // DVI (can also be HDMI)
+	PRIV_OUTPUT_TMDS_HDMI, // HDMI (distinct from DVI for audio etc)
+	PRIV_OUTPUT_DP,        // DisplayPort
+	PRIV_OUTPUT_EDP,       // Embedded DisplayPort
+	PRIV_OUTPUT_DSI,       // MIPI DSI
+};
+
+// PCH Types (simplified from intel_extreme for now, expand as needed)
+enum pch_info_priv {
+	PCH_NONE = 0, // No PCH, e.g. Ironlake and older
+	PCH_IBX,      // Ibex Peak (Ironlake PCH)
+	PCH_CPT,      // Cougar Point (SandyBridge PCH) / Panther Point (IvyBridge PCH)
+	PCH_LPT,      // Lynx Point (Haswell PCH) / Wildcat Point (Broadwell PCH)
+	PCH_SPT,      // Sunrise Point (Skylake PCH) / Kaby Lake PCH
+	PCH_CNP,      // Cannon Point (Cannon/Coffee/Comet/Gemini Lake PCH)
+	PCH_ICP,      // Ice Lake PCH
+	PCH_MCC,      // Mule Creek Canyon (Elkhart Lake PCH)
+	PCH_TGP,      // Tiger Lake PCH
+	PCH_JSP,      // Jasper Lake PCH (subset of TGP-like)
+	PCH_ADP,      // Alder Lake PCH
+	// Add more as new PCH generations are supported
+};
+
 
 #define PRIV_MAX_EDID_MODES_PER_PORT 32
 #define PRIV_EDID_BLOCK_SIZE 128
@@ -180,9 +326,31 @@ typedef struct intel_i915_device_info {
 	int16_t  cursor_y[PRIV_MAX_PIPES];        // Current screen Y (can be negative)
 	uint32_t cursor_format[PRIV_MAX_PIPES];   // CURSOR_MODE_SELECT value
 
+	enum pch_info_priv pch_type; // Detected PCH type
+
 } intel_i915_device_info;
 
-static inline uint32 intel_i915_read32(intel_i915_device_info* d, uint32 o) { /* ... */ return 0; }
-static inline void intel_i915_write32(intel_i915_device_info* d, uint32 o, uint32 v) { /* ... */ }
+// MMIO Access (Forcewake must be handled by caller)
+static inline uint32
+intel_i915_read32(intel_i915_device_info* devInfo, uint32 offset)
+{
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) {
+		// This case should ideally not happen if driver is initialized correctly.
+		// Consider a panic or strong warning. For now, return a known "bad" value.
+		TRACE("intel_i915_read32: ERROR: devInfo or mmio_regs_addr is NULL! offset=0x%lx\n", offset);
+		return 0xFFFFFFFF;
+	}
+	return *(volatile uint32_t*)(devInfo->mmio_regs_addr + offset);
+}
+
+static inline void
+intel_i915_write32(intel_i915_device_info* devInfo, uint32 offset, uint32 value)
+{
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) {
+		TRACE("intel_i915_write32: ERROR: devInfo or mmio_regs_addr is NULL! offset=0x%lx, value=0x%lx\n", offset, value);
+		return;
+	}
+	*(volatile uint32_t*)(devInfo->mmio_regs_addr + offset) = value;
+}
 
 #endif /* INTEL_I915_PRIV_H */

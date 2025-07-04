@@ -82,15 +82,20 @@ intel_i915_gmbus_cleanup(intel_i915_device_info* devInfo)
 
 static status_t
 _gmbus_xfer(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, uint8_t* buffer, uint8_t length, bool is_read)
+	uint8_t i2c_addr, uint8_t* buffer, uint16_t length, bool is_read) // length changed to uint16_t for > 255
 {
 	status_t status;
 
 	if (devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
-	if (length == 0 || length > 4) { // GMBUS3 is 4 bytes. For >4 bytes, need indexed or multiple xfers.
-		TRACE("GMBUS: Invalid length %d for simple xfer (max 4).\n", length);
+	if (length == 0 || length > 511) { // GMBUS byte count is 9 bits (0-511)
+		TRACE("GMBUS: Invalid length %u for xfer (max 511).\n", length);
 		return B_BAD_VALUE;
 	}
+	if (!is_read && length > 4) {
+		TRACE("GMBUS: Burst write not supported by this simplified xfer (max 4 bytes for write).\n");
+		return B_NOT_ALLOWED;
+	}
+
 
 	status = _gmbus_wait_bus_idle(devInfo);
 	if (status != B_OK) return status;
@@ -118,12 +123,43 @@ _gmbus_xfer(intel_i915_device_info* devInfo, uint8_t pin_select,
 	if (status != B_OK) {
 		TRACE("GMBUS: xfer failed waiting for HW ready. GMBUS1=0x%x GMBUS2=0x%x\n",
 			intel_i915_read32(devInfo, GMBUS1), intel_i915_read32(devInfo, GMBUS2));
+		// SATOER is already checked in _gmbus_wait_hw_ready
 		goto_xfer_done;
 	}
 
+	// After HW_RDY, check for other errors like NAK (HW_BUS_ERR)
+	uint32 statusReg = intel_i915_read32(devInfo, GMBUS2);
+	if (statusReg & GMBUS_HW_BUS_ERR) {
+		TRACE("GMBUS: HW Bus Error (NAK) detected. GMBUS2=0x%x\n", statusReg);
+		status = B_IO_ERROR; // Or a more specific I2C error code
+		// It's important to still clear SW_RDY and release the bus.
+		// Write 1 to clear HW_BUS_ERR if it's sticky
+		intel_i915_write32(devInfo, GMBUS2, GMBUS_HW_BUS_ERR);
+		goto_xfer_done;
+	}
+	if (statusReg & GMBUS_SATOER) { // Should have been caught by _gmbus_wait_hw_ready, but double check
+		TRACE("GMBUS: SATOER error detected after HW Ready. GMBUS2=0x%x\n", statusReg);
+		status = B_IO_ERROR;
+		intel_i915_write32(devInfo, GMBUS2, GMBUS_SATOER);
+		goto_xfer_done;
+	}
+
+
 	if (is_read) {
-		uint32 data = intel_i915_read32(devInfo, GMBUS3);
-		memcpy(buffer, &data, length);
+		// For burst reads, read GMBUS3 multiple times.
+		// Assuming each read of GMBUS3 provides 4 bytes if available, or fewer on last read.
+		// Hardware handles I2C ACK/NACK and byte gathering.
+		for (uint16_t i = 0; i < length; ) {
+			uint32 data_dword = intel_i915_read32(devInfo, GMBUS3);
+			uint8_t bytes_to_copy = min_c(4, length - i);
+			memcpy(buffer + i, &data_dword, bytes_to_copy);
+			i += bytes_to_copy;
+			// Small delay might be needed between GMBUS3 reads if HW is slow,
+			// but usually GMBUS_HW_RDY indicates entire transaction is done.
+			// The GMBUS_HW_RDY should ideally only signal once all 'length' bytes are in FIFO and read by CPU.
+			// However, simpler GMBUS controllers might require polling HW_RDY for each segment of burst.
+			// For now, assume HW_RDY after command issue means data is ready to be burst read.
+		}
 	}
 
 goto_xfer_done:
@@ -137,20 +173,19 @@ goto_xfer_done:
 
 status_t
 intel_i915_gmbus_read(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, uint8_t* buf, uint8_t len)
+	uint8_t i2c_addr, uint8_t* buf, uint16_t len) // length changed to uint16_t
 {
-	// This stub only handles single transactions up to 4 bytes.
-	// Real EDID needs indexed reads or multiple transactions.
-	if (len > 4) return B_NOT_ALLOWED; // For this simplified stub
 	return _gmbus_xfer(devInfo, pin_select, i2c_addr, buf, len, true);
 }
 
 status_t
 intel_i915_gmbus_write(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, const uint8_t* buf, uint8_t len)
+	uint8_t i2c_addr, const uint8_t* buf, uint8_t len) // Write remains uint8_t for len, max 4 bytes
 {
-	// This stub only handles single transactions up to 4 bytes.
-	if (len > 4) return B_NOT_ALLOWED; // For this simplified stub
+	if (len > 4) {
+		TRACE("GMBUS: intel_i915_gmbus_write does not support burst write (len %u > 4).\n", len);
+		return B_NOT_ALLOWED;
+	}
 	return _gmbus_xfer(devInfo, pin_select, i2c_addr, (uint8_t*)buf, len, false);
 }
 
@@ -166,15 +201,14 @@ _gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
 	status = _gmbus_wait_bus_idle(devInfo);
 	if (status != B_OK) return status;
 
-	intel_i915_write32(devInfo, GMBUS0, pin_select | GMBUS_RATE_100KHZ); // Select pin and rate
-	intel_i915_write32(devInfo, GMBUS4, index); // Set the index/offset register
-	intel_i915_write32(devInfo, GMBUS3, data);  // Set the data register
+	intel_i915_write32(devInfo, GMBUS0, pin_select | GMBUS_RATE_100KHZ);
+	intel_i915_write32(devInfo, GMBUS4, index);
+	intel_i915_write32(devInfo, GMBUS3, data);
 
-	// GMBUS1: command for indexed write
-	uint32 gmbus1Cmd = (1 << GMBUS_BYTE_COUNT_SHIFT) // Length is 1 byte
+	uint32 gmbus1Cmd = (1 << GMBUS_BYTE_COUNT_SHIFT)
 		| ((i2c_addr >> 1) << GMBUS_SLAVE_ADDR_SHIFT)
 		| GMBUS_SLAVE_WRITE
-		| GMBUS_CYCLE_INDEX // Use INDEX register
+		| GMBUS_CYCLE_INDEX
 		| GMBUS_CYCLE_WAIT
 		| GMBUS_CYCLE_STOP
 		| GMBUS_SW_RDY;
@@ -182,13 +216,20 @@ _gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
 	intel_i915_write32(devInfo, GMBUS1, gmbus1Cmd);
 
 	status = _gmbus_wait_hw_ready(devInfo);
-	if (status != B_OK) {
-		TRACE("GMBUS Indexed Write: xfer failed waiting for HW ready. GMBUS1=0x%x GMBUS2=0x%x\n",
+	if (status == B_OK) {
+		uint32 statusReg = intel_i915_read32(devInfo, GMBUS2);
+		if (statusReg & GMBUS_HW_BUS_ERR) {
+			TRACE("GMBUS Indexed Write: NAK/Bus Error. GMBUS2=0x%x\n", statusReg);
+			intel_i915_write32(devInfo, GMBUS2, GMBUS_HW_BUS_ERR); // Clear error
+			status = B_IO_ERROR;
+		}
+	} else {
+		TRACE("GMBUS Indexed Write: Wait HW Ready failed. GMBUS1=0x%x GMBUS2=0x%x\n",
 			intel_i915_read32(devInfo, GMBUS1), intel_i915_read32(devInfo, GMBUS2));
 	}
 
-	intel_i915_write32(devInfo, GMBUS1, 0); // Clear SW_RDY
-	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED); // Release bus
+	intel_i915_write32(devInfo, GMBUS1, 0);
+	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
 	return status;
 }
 
@@ -197,49 +238,39 @@ status_t
 intel_i915_gmbus_read_edid_block(intel_i915_device_info* devInfo, uint8_t pin_select,
 	uint8_t* edid_buffer, uint8_t block_num)
 {
-	const uint8_t edid_segment_pointer_addr = 0x60; // E-DDC segment pointer I2C address
-	const uint8_t edid_data_addr = EDID_I2C_SLAVE_ADDR;    // Standard EDID I2C address (0xA0)
+	const uint8_t edid_segment_pointer_addr = 0x60;
+	const uint8_t edid_data_addr = EDID_I2C_SLAVE_ADDR;
 	status_t status = B_OK;
-	int i;
 
 	TRACE("gmbus_read_edid_block: pin_select %u, block_num %u\n", pin_select, block_num);
 
 	if (block_num > 0) {
-		// For EDID extension block N, write N to I2C slave 0x60 at offset/index 0x00.
-		TRACE("GMBUS: Setting EDID segment pointer to %u for extension block.\n", block_num);
+		TRACE("GMBUS: Setting EDID segment pointer to %u.\n", block_num);
 		status = _gmbus_indexed_write_byte(devInfo, pin_select,
-			edid_segment_pointer_addr, 0x00 /*index*/, block_num /*data*/);
+			edid_segment_pointer_addr, 0x00, block_num);
 		if (status != B_OK) {
-			TRACE("GMBUS: Failed to set EDID segment pointer for block %u: %s\n", block_num, strerror(status));
+			TRACE("GMBUS: Failed to set EDID segment pointer: %s\n", strerror(status));
 			return status;
 		}
-		// Add a small delay as per some E-DDC recommendations after segment pointer write
-		snooze(1000); // 1ms
+		snooze(1000); // 1ms delay after segment write
 	}
 
-	// Step 1: Set the EDID data offset to 0 for the target block.
-	// This is done by writing a single byte (0x00) to the EDID data slave (0xA0).
 	uint8_t edid_offset = 0;
-	status = _gmbus_xfer(devInfo, pin_select, edid_data_addr, &edid_offset, 1, false /* is_write */);
+	status = intel_i915_gmbus_write(devInfo, pin_select, edid_data_addr, &edid_offset, 1);
 	if (status != B_OK) {
-		TRACE("GMBUS: Failed to write EDID data offset 0 for block %d: %s\n", block_num, strerror(status));
+		TRACE("GMBUS: Failed to write EDID data offset 0: %s\n", strerror(status));
 		return status;
 	}
 
-	// Step 2: Read 128 bytes from EDID data slave (0xA0).
-	// The I2C slave should auto-increment its internal address pointer for sequential reads.
-	// We read one byte at a time as _gmbus_xfer currently only reliably supports small transfers.
-	TRACE("GMBUS: Reading EDID block %d (128 bytes), one byte at a time.\n", block_num);
-	for (i = 0; i < EDID_BLOCK_SIZE; i++) {
-		status = _gmbus_xfer(devInfo, pin_select, edid_data_addr, &edid_buffer[i], 1, true /* is_read */);
-		if (status != B_OK) {
-			TRACE("GMBUS: Failed to read byte %d of EDID block %d: %s\n", i, block_num, strerror(status));
-			// Invalidate partially read buffer by zeroing it.
-			memset(edid_buffer, 0, EDID_BLOCK_SIZE);
-			return status;
-		}
+	// Now read 128 bytes in a single burst transaction
+	TRACE("GMBUS: Reading EDID block %d (128 bytes) using burst read.\n", block_num);
+	status = intel_i915_gmbus_read(devInfo, pin_select, edid_data_addr, edid_buffer, EDID_BLOCK_SIZE);
+	if (status != B_OK) {
+		TRACE("GMBUS: Burst read for EDID block %d failed: %s\n", block_num, strerror(status));
+		memset(edid_buffer, 0, EDID_BLOCK_SIZE); // Invalidate buffer on error
+		return status;
 	}
 
-	TRACE("GMBUS: Successfully read EDID block %d.\n", block_num);
+	TRACE("GMBUS: Successfully read EDID block %d via burst.\n", block_num);
 	return B_OK;
 }

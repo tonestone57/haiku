@@ -120,6 +120,13 @@ rule TargetBootLibsupc++ asPath
 	# Invoking with <asPath> = true will return the full library path.
 
 	if $(TARGET_PLATFORM) = haiku {
+		if $(TARGET_PACKAGING_ARCH) = ppc {
+			# For PPC bootloader, rely on LDFLAGS for C++ support if needed.
+			# This avoids linking the potentially old libsupc++-kernel.a
+			# If C++ support IS needed by the bootloader, then LDFLAGS for PPC
+			# OpenFirmware should also include -L<gcc13_path> -lsupc++
+			return ;
+		}
 		if $(TARGET_PACKAGING_ARCH) = x86_64 {
 			if $(TARGET_BOOT_PLATFORM) = efi {
 				# we need to use the 64-bit libsupc++.a built by the cross-compiler
@@ -242,6 +249,11 @@ rule TargetBootLibgcc architecture : asPath
 	# Invoking with <asPath> = true will return the full library path.
 
 	if $(TARGET_PLATFORM) = haiku {
+		if $(architecture) = ppc {
+			# For PPC bootloader, rely on LDFLAGS to provide libgcc via -L... -lgcc
+			# This avoids linking the potentially old libgcc-kernel.a from gcc_syslibs_devel
+			return ;
+		}
 		if $(architecture) = x86_64 {
 			if $(TARGET_BOOT_PLATFORM) = efi {
 				# we need to use the 64-bit libgcc.a built by the cross-compiler

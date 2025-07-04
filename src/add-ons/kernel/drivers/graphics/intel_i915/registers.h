@@ -9,49 +9,28 @@
 #define INTEL_I915_REGISTERS_H
 
 // --- Pipe & Transcoder Registers (Gen7 Focus - IvyBridge/Haswell) ---
+// ... (Pipe, Transcoder, Plane, Port, GTT, GMBUS, Clocking registers as before) ...
 #define _PIPE_A_BASE			0x70000
 #define _PIPE_B_BASE			0x71000
 #define _PIPE_C_BASE			0x72000
 #define _TRANSCODER_EDP_BASE	0x7F000
-
 #define PIPECONF(pipe)			(_PIPE(pipe) + 0x0008)
 #define TRANSCONF(trans)		(_TRANSCODER(trans) + 0x0008)
 	#define TRANSCONF_ENABLE				(1U << 31)
-// ... (other TRANSCONF bits)
-
 #define PIPESRC(pipe)			(_PIPE(pipe) + 0x000C)
-// ... (PIPESRC bits)
-
 #define HTOTAL(trans)			(_TRANSCODER(trans) + 0x0000)
-// ... (Timing registers)
 #define HBLANK(trans)			(_TRANSCODER(trans) + 0x0004)
 #define TRANS_HSYNC_OFFSET      0x000C
 #define TRANS_HSYNC(trans)      (_TRANSCODER(trans) + TRANS_HSYNC_OFFSET)
 #define VTOTAL(trans)			(_TRANSCODER(trans) + 0x0010)
 #define VBLANK(trans)			(_TRANSCODER(trans) + 0x0014)
 #define VSYNC(trans)			(_TRANSCODER(trans) + 0x0018)
-
 #define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
 #define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE : \
                            ((trans) == 1 ? _PIPE_B_BASE : \
                            ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
-
-// --- Plane Registers (Gen7 Focus - Primary Planes A, B, C) ---
 #define DSPCNTR(pipe)			(_PIPE(pipe) + 0x0180)
-// ... (DSPCNTR bits)
-#define DSPLINOFF(pipe)			(_PIPE(pipe) + 0x0184)
-#define DSPSTRIDE(pipe)			(_PIPE(pipe) + 0x0188)
-#define DSPSURF(pipe)			(_PIPE(pipe) + 0x019C)
-#define DSPTILEOFF(pipe)		(_PIPE(pipe) + 0x01A4)
-
-// --- Port Control Registers (Gen7 - IVB/HSW examples) ---
-#define ADPA					0x61100
-#define LVDS					0x61180
-#define DDI_BUF_CTL(port)		(0x64000 + (port) * 0x100)
-#define DP_TP_CTL(port)			(0x64040 + (port) * 0x100)
-
-// --- Interrupt Registers ---
-// Display Engine Interrupts
+	#define DISPPLANE_ENABLE			(1U << 31)
 #define DEIMR			0x4400c
 #define DEIER			0x44008
 #define DEIIR			0x44004
@@ -62,29 +41,13 @@
 	#define DE_PIPEB_VBLANK_IVB			(1U << 15)
 	#define DE_PIPEA_VBLANK_IVB			(1U << 7)
 	#define DE_PIPEC_VBLANK_IVB			(1U << 3)
-
-// GT Interrupts (Render/Media/Blitter) - Gen specific base addresses
-// For Gen7, often start around 0x20A0 for GT0, 0x120A0 for GT1 etc.
-// These are simplified examples, real GT IMR/IER/IIR are per-engine or per-slice.
-// Using common defines from Linux/FreeBSD for conceptual GT interrupts.
-#define GT_INTR_DW				0x44010 // Example: A common GT interrupt status/identity (not a real reg)
-	#define GT_RENDER_USER_INTERRUPT    (1U << 0)  // MI_USER_INTERRUPT from RCS
-	#define GT_RENDER_CTX_SWITCH_INTERRUPT (1U << 1) // Context switch completion
-	#define GT_RENDER_WATCHDOG_EXCEEDED (1U << 2)
-	#define GT_BLITTER_USER_INTERRUPT   (1U << 8)  // MI_USER_INTERRUPT from BCS
-	// RC6 interrupts are often part of PM (Power Management) interrupt group
-	#define GT_PM_INTERRUPT             (1U << 4) // Placeholder for general PM group
-		// Specific bits within a PM_IIR/PM_ISR would indicate RC6 events.
-		// For Gen7, often related to RPS interrupts.
-
-// For Gen7, PM interrupts are often handled via specific RPS/RC6 registers or GT_FIFO_FREE.
-// A common register for PM interrupt control on Gen6+ (including Gen7) is:
-#define GEN6_PMINTRMSK			0xA168 // PM Interrupt Mask (Gen6+) / Also called GTFIFOMA (Gen8+)
-	// Bits in PMINTRMSK are specific to events like RP_UP/DOWN_THRESHOLD, RC6_THRESHOLD etc.
-	// Example bit, actual meaning varies:
-	#define ARAT_EXPIRED_INTRMSK	(1U << 9) // "Render P-state ratio timer expired" - can trigger RC6 logic
-
-// GTT Registers
+#define SDEIMR			0xC4004
+#define SDEIER			0xC4000
+#define SDEIIR			0xC4008
+#define SDEISR			0xC400C
+	#define SDE_PORTB_HOTPLUG_HSW		(1U << 3)
+	#define SDE_PORTC_HOTPLUG_HSW		(1U << 4)
+	#define SDE_PORTD_HOTPLUG_HSW		(1U << 5)
 #define PGTBL_CTL		0x02020
 	#define PGTBL_ENABLE			(1U << 0)
 	#define GTT_ENTRY_VALID         (1U << 0)
@@ -92,81 +55,116 @@
 	#define GTT_PTE_CACHE_UC_GEN7   (1U << 2)
 	#define GTT_PTE_CACHE_WB_GEN7   0
 #define HWS_PGA			0x02080
-
-// --- GMBUS Registers ---
 #define GMBUS0				0x5100
-// ... (GMBUS defines) ...
 #define GMBUS1				0x5104
 #define GMBUS2				0x5108
 #define GMBUS3				0x510C
-
-// --- Clocking Registers (Gen7 Focus) ---
-#define LCPLL_CTL				0x130040
-	#define LCPLL_PLL_ENABLE		(1U << 31)
+#define LCPLL_CTL				0x130040 // HSW LCPLL1_CTL. IVB South Display PLL is different.
 #define CDCLK_CTL_HSW           0x46000
-    #define HSW_CDCLK_FREQ_450      (0U << 0)
-#define DPLL_CTL_A				0x6C058
-	#define DPLL_CTRL_ENABLE_PLL	(1U << 31)
+#define DPLL_CTL_A				0x6C058 // HSW WRPLL_CTL1. IVB DPLL_A is 0x6014.
+
+// --- Power Management: RC6 and RPS Registers (Gen7 - IVB/HSW Focus) ---
+
+// Render C-State (RCx) Control & Status
+#define RENDER_C_STATE_CONTROL_HSW	0x83D0 // Haswell specific for Render Well RC state
+	#define HSW_RC_CTL_RC6_ENABLE		(1U << 0)
+	#define HSW_RC_CTL_RC_STATE_MASK	(7U << 8) // Read current state bits
+	#define HSW_RC_CTL_TO_RC0			(0 << 8)
+	#define HSW_RC_CTL_TO_RC3			(1 << 8)
+	#define HSW_RC_CTL_TO_RC6			(2 << 8)
+
+#define RC_STATE_IVB			0xA094 // Ivy Bridge Render C-State Status (similar to GEN6_RC_STATE)
+	#define RC_STATE_RC6_IVB_MASK	(7U << 0) // Current RC state
+
+#define RC_CONTROL_IVB			0xA090 // Ivy Bridge Render C-State Control (similar to GEN6_RC_CONTROL)
+	#define RC_CTL_RC6_ENABLE_IVB	(1U << 0)
+	// Bits for RC6p, RC6pp might exist but depend on SKU/platform config
+
+// GPMGR (GT Power Management Controller) - common for Gen7+ but registers vary
+// These are conceptual, exact registers for RC6 events via GPMGR need PRM lookup
+#define GPMGR_INTERRUPT_ENABLE_REG  0x138024 // Example: GT Core Interrupt Enable (HSW: GFX_FLISPARM)
+#define GPMGR_INTERRUPT_MASK_REG    0x138028 // Example: GT Core Interrupt Mask
+#define GPMGR_INTERRUPT_IDENTITY_REG 0x13802C // Example: GT Core Interrupt Identity
+	// Bits within these would signal RC6 entry/exit or other PM events.
+	// For Gen7, often PM events are routed to general GT interrupt registers.
+
+// Render P-State (Frequency Scaling / RPS) - Mostly common Gen6 through Gen8
+#define RPNSWREQ				0xA008 // Render P-State Non-Software Request
+	#define RPNSWREQ_TARGET_PSTATE_SHIFT 0
+	#define RPNSWREQ_TARGET_PSTATE_MASK	(0xFF << RPNSWREQ_TARGET_PSTATE_SHIFT)
+	// Other bits for request type, urgency etc.
+
+#define RP_CONTROL				0xA024 // Render P-State Control
+	#define RP_CONTROL_RPS_ENABLE		(1U << 31)
+	#define RP_CONTROL_MODE_HW_AUTONOMOUS (0U << 29) // Hardware autonomous mode
+	#define RP_CONTROL_MODE_SW_SEMI_AUTO (1U << 29) // Software semi-autonomous mode
+	#define RP_CONTROL_MODE_SW_MANUAL (2U << 29) // Software manual mode
+
+#define RP_UP_THRESHOLD			0xA01C // Cycles above threshold to increase freq
+#define RP_DOWN_THRESHOLD		0xA018 // Cycles below threshold to decrease freq
+#define RP_UP_EI				0xA00C // Upward Evaluation Interval (us)
+#define RP_DOWN_EI				0xA010 // Downward Evaluation Interval (us)
+#define RP_INTERRUPT_LIMITS		0xA02C // P-state limits for interrupt generation
+
+#define RPM_CONFIG0				0xA030 // Render P-State Measurement Config 0 (HSW: Not primary for limits)
+#define RPM_CONFIG1				0xA034 // Render P_state Measurement Config 1 (HSW: Not primary for limits)
+
+#define RP_STATE_CAP			0xA038 // P-State Capabilities (Read-Only)
+	// Bits indicate min/max P-states supported. For Gen7, this is often an MSR.
+	// MSR_RP_STATE_CAP (0x138098 on HSW, 0x65E on IVB) is more common for these.
+
+#define RP_CUR_UP_EI_STATUS		0xA050 // Current Upward EI Counter (Read-Only)
+#define RP_CUR_DOWN_EI_STATUS	0xA054 // Current Downward EI Counter (Read-Only)
+#define RP_PREV_UP_EI_STATUS	0xA058 // Previous Upward EI Counter (Read-Only)
+#define RP_PREV_DOWN_EI_STATUS	0xA05C // Previous Downward EI Counter (Read-Only)
+
+// Force Wake (important for accessing GT registers when it might be in RC6)
+// Gen7 uses GTFIFOFWor GFX_FLISPARM for some forcewake control.
+// Simplified:
+#define FORCEWAKE_MT_HSW		0xA188 // Multithreaded Force Wake (Haswell)
+	#define FORCEWAKE_RENDER_HSW	(1U << 0)
+	#define FORCEWAKE_MEDIA_HSW		(1U << 1)
+#define FORCEWAKE_ACK_HSW		0x1300B0 // Force Wake Acknowledge (Haswell)
+	#define FORCEWAKE_ACK_RENDER_HSW (1U << 0)
+
+// Ivy Bridge Force Wake is typically via MCHBAR registers like GFX_FLSHF_G3 (0x102000)
+// and GFX_F উভয়ের_G3_ACK (0x102004) - these are not GMBAR offsets.
+// For simplicity, the HSW defines might be used conceptually.
+
+// GT Interrupt Registers (Primary ones, some PM events route here)
+#define GT_IIR					0x2064 // GT Interrupt Identity Register (Gen6+)
+#define GT_IMR					0x2068 // GT Interrupt Mask Register
+#define GT_IER					0x206C // GT Interrupt Enable Register
+	// Example bits within GT_IIR/IMR/IER relevant to PM:
+	#define GT_RENDER_RC6_EXIT_INTERRUPT	(1U << 30) // Example, may vary
+	#define GT_RPS_UP_INTERRUPT				(1U << 28) // Example
+	#define GT_RPS_DOWN_INTERRUPT			(1U << 27) // Example
+
+#define GEN6_PMINTRMSK			0xA168 // PM Interrupt Mask (for events that can trigger GT_PM_INTERRUPT)
+	#define ARAT_EXPIRED_INTRMSK	(1U << 9)  // Render P-state Avg Ratio Timer Expired
+	// Other bits for specific RPS up/down threshold events etc.
 
 
-// --- Power Management: RC6 and RPS Registers (Gen7 - IVB/HSW) ---
-// Note: Many Gen6 registers are reused or have similar names/concepts on Gen7.
-// Consult PRM for precise Gen7 register names and bitfields.
+// MSRs (Model Specific Registers) - Accessed via rdmsr/wrmsr
+#define MSR_IA32_PERF_CTL		0x199 // For controlling core P-states (Turbo)
+#define MSR_IA32_PERF_STATUS	0x198 // For reading core P-states
 
-#define GEN6_RC_CONTROL			0xA090 // Render C-state Control (Name may vary for Gen7, e.g. RC_CTL)
-	#define GEN6_RC_CTL_RC6_ENABLE		(1U << 0)
-	#define GEN6_RC_CTL_RC6p_ENABLE		(1U << 1)  // Deeper sleep state
-	#define GEN6_RC_CTL_RC6pp_ENABLE	(1U << 2) // Deepest sleep state (often platform dependent)
-	#define GEN6_RC_CTL_HW_ENABLE		(1U << 15) // Enable HW control of RC states
-	// Other bits for selecting specific RC states, wake events, etc.
+// Gen7 specific MSRs for Graphics P-states / RC6
+#define MSR_IVB_RP_STATE_CAP	0x0000065E // Ivy Bridge RP State Capabilities
+#define MSR_HSW_RP_STATE_CAP	0x00138098 // Haswell RP State Capabilities
+	// Layout: [15:8] Max P-state, [7:0] Min P-state (higher value = lower freq)
 
-#define GEN6_RC_STATE			0xA094 // Render C-state Status (Read-only)
-	#define RC_STATE_RC6_MASK		(7U << 0) // Current RC state (0=RC0, 1=RC1, ..., 6=RC6)
-	#define RC_STATE_HW_CONTROL_MASK (1U << 15) // HW is controlling RC state
+#define MSR_CORE_C_STATE_CTL_IVB	0x0000065F // Ivy Bridge Core C-State Control (for deeper RC6)
+#define MSR_GFX_C_STATE_CTL_HSW		0x0013809C // Haswell Graphics C-State Control (for deeper RC6)
 
-#define GEN6_RC_CONFIG			0xA098 // Render C-state Configuration (Thresholds etc.)
-	// Various fields for idle thresholds, wakeup timers for RC6 entry/exit.
-
-// Render P-State (Frequency Scaling) Control - often called RPS
-#define GEN6_RP_DOWN_TIMEOUT	0xA010 // RPS: Time before trying to lower frequency
-#define GEN6_RP_UP_TIMEOUT		0xA014 // RPS: Time before trying to raise frequency
-#define GEN6_RP_INTERRUPT_LIMITS 0xA02C // RPS: Interrupt limits for frequency changes
-#define GEN6_RP_CONTROL			0xA024 // RPS: Control register
-	#define RP_CONTROL_ENABLE			(1U << 31) // Enable RPS
-	#define RP_CONTROL_MODE_MASK		(3U << 29) // 00=HW mode, 01=SW mode
-	#define RP_CONTROL_UP_EI_MASK		(0xFF << 16) // Upward Eval Interval
-	#define RP_CONTROL_DOWN_EI_MASK		(0xFF << 0)  // Downward Eval Interval
-
-#define GEN6_RPNSWREQ			0xA008 // RPNSW Request (Non-Software Request)
-	#define RPNSWREQ_FREQUENCY_MASK		(0xFF << 0) // Target frequency (HW units)
-	#define RPNSWREQ_REQ_TYPE_MASK		(3U << 24)  // Request type (up, down, fixed)
-	#define RPNSWREQ_REQ_STATE_IDLE		(0 << 24)
-	#define RPNSWREQ_REQ_STATE_ACTIVE	(1 << 24)
-
-#define GEN6_CUR_FREQ			0xA004 // Current Frequency Status (Read-only)
-	#define CUR_FREQ_PSTATE_MASK		(0xFF << 0) // Current P-state (HW units)
-
-// Gen7 specific register for Render/Media C-state control might be different,
-// e.g., using PM_CTL in the GT Power Management Controller (GPMGR) space.
-// For Gen7, RC6 is often tied into the GPMGR. Example for GPMGR registers (conceptual):
-#define GPMGR_INTERRUPT_ENABLE  0x138000 // Example base for GPMGR interrupts
-#define GPMGR_INTERRUPT_MASK    0x138004
-#define GPMGR_INTERRUPT_STATUS  0x138008
-	#define GPMGR_INT_RC6_EXIT      (1U << 0) // Example bit for RC6 exit event
-	#define GPMGR_INT_RC6_ENTRY     (1U << 1) // Example bit for RC6 entry event
-
-// Actual Gen7 RC6 enable is often through MSRs (like MSR_CORE_C6_RESIDENCY) and specific
-// GT Power Management registers that are more fine-grained than Gen6_RC_CONTROL.
-// The registers above (GEN6_RC_*) are good starting points for concepts.
-// The driver needs to use the correct Gen7 equivalents.
-// For example, on Haswell:
-#define HSW_PWR_WELL_CTL_DRIVER  0xA080 // Driver specific power well control
-#define HSW_PWR_WELL_CTL_BIOS    0xA084 // BIOS power well control
-	// Bits in these control render/media power wells, which gate clocks for RC6.
-
-#define FORCEWAKE_GT_GEN9       0x1300B0 // Force Wake GT (Gen9+, but similar concept for Gen7 forcewake)
-	#define FORCEWAKE_KERNEL_FALLBACK (1U << 15)
-	#define FORCEWAKE_ACK_HSW       (1U << 0)
+// MSRs for residency counters (useful for heuristics)
+#define MSR_CORE_C3_RESIDENCY	0x3FC
+#define MSR_CORE_C6_RESIDENCY	0x3FD
+#define MSR_CORE_C7_RESIDENCY	0x3FE // Not all CPUs have C7
+#define MSR_PKG_C2_RESIDENCY	0x60D // Sandy Bridge+
+#define MSR_PKG_C3_RESIDENCY	0x3F8 // Nehalem+
+#define MSR_PKG_C6_RESIDENCY	0x3F9 // Nehalem+
+#define MSR_PKG_C7_RESIDENCY	0x3FA // Nehalem+
 
 
 #endif /* INTEL_I915_REGISTERS_H */

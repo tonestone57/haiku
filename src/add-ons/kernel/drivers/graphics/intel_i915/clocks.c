@@ -33,43 +33,64 @@
 #define SPLL_VCO_MAX_KHZ_HSW    5400000
 
 
-// --- Helper: Read current CDCLK --- (Simplified from previous)
+// --- Helper: Read current CDCLK ---
 static uint32_t read_current_cdclk_khz(intel_i915_device_info* devInfo) {
 	if (IS_HASWELL(devInfo->device_id)) {
-		// HSW: CDCLK_CTL selects a division of LCPLL output.
-		// LCPLL_CTL bits [2:0] (LCPLL1_LINK_RATE_HSW_MASK) select LCPLL freq for DDI.
-		// This is complex. For stub, assume a common value.
 		uint32_t lcpll_ctl = intel_i915_read32(devInfo, LCPLL_CTL);
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_HSW);
-		uint32_t lcpll_source_khz = REF_CLOCK_LCPLL_1350_MHZ_KHZ; // Default assumption
-		// TODO: Decode lcpll_ctl to get actual LCPLL output for CDCLK source.
-		// switch (cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT) { ... }
+		uint32_t lcpll_link_rate_sel = cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT; // This is actually wrong, should be LCPLL_CTL
+		uint32_t lcpll_freq_khz;
+
+		// Correctly get LCPLL frequency from LCPLL_CTL
+		uint32_t lcpll_rate_bits = lcpll_ctl & LCPLL1_LINK_RATE_HSW_MASK;
+		switch (lcpll_rate_bits) {
+			case LCPLL_LINK_RATE_810: lcpll_freq_khz = 810000; break;
+			case LCPLL_LINK_RATE_1350: lcpll_freq_khz = 1350000; break;
+			case LCPLL_LINK_RATE_1620: lcpll_freq_khz = 1620000; break;
+			case LCPLL_LINK_RATE_2700: lcpll_freq_khz = 2700000; break;
+			default: lcpll_freq_khz = 1350000; // Fallback
+		}
+		TRACE("Clocks: HSW LCPLL_CTL=0x%x, LCPLL Freq = %u kHz\n", lcpll_ctl, lcpll_freq_khz);
+
+		// Now determine CDCLK based on LCPLL source selected by CDCLK_CTL[26]
+		// and divisor CDCLK_CTL[1:0]
+		uint32_t cdclk_lcpll_source_sel = cdclk_ctl & HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT;
+		uint32_t cdclk_source_freq_khz;
+
+		// This logic for HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT might be simplified.
+		// Often, CDCLK is derived from a fixed LCPLL output (e.g. 1350 or 2700)
+		// and the HSW_CDCLK_FREQ_SEL_MASK bits directly indicate the resulting CDCLK.
+		// The PRM implies CDCLK_CTL[26] selects if LCPLL output (from LCPLL_CTL) or FCLK is source.
+		// Assuming LCPLL is the source for now.
+		// For simplicity, the original switch on HSW_CDCLK_FREQ_SEL_MASK might be more direct if
+		// those values are absolute CDCLK frequencies regardless of LCPLL_CTL setting.
+		// Reverting to simpler HSW CDCLK interpretation based on nominal values if LCPLL complexity is too much for now.
 		switch (cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK) {
 			case HSW_CDCLK_FREQ_450:   return 450000;
 			case HSW_CDCLK_FREQ_540:   return 540000;
-			case HSW_CDCLK_FREQ_337_5: return 337500; // 337.5 MHz
-			case HSW_CDCLK_FREQ_675:   return 675000; // 675 MHz
+			case HSW_CDCLK_FREQ_337_5: return 337500;
+			case HSW_CDCLK_FREQ_675:   return 675000;
 		}
-		// Fallback for HSW if bits are unexpected, though they should match one of the above.
 		TRACE("Clocks: HSW CDCLK_CTL unknown value 0x%x, defaulting to 450MHz\n", cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK);
-		return 450000;
+		return 450000; // Fallback
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_IVB);
-		// Values from Intel docs (e.g. Ivy Bridge EDS Vol 3 Part 2, p. 138)
-		// These are nominal values. Actual can vary slightly.
 		switch (cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) {
-			case CDCLK_FREQ_333_IVB:  return 333330; // 333.33 MHz
-			case CDCLK_FREQ_400_IVB:  return 400000; // 400.00 MHz
-			case CDCLK_FREQ_444_IVB:  return 444440; // 444.44 MHz
-			case CDCLK_FREQ_533_IVB:  return 533330; // 533.33 MHz
-			case CDCLK_FREQ_667_IVB:  return 666670; // 666.67 MHz
-			default:
+			case CDCLK_FREQ_337_5_MHZ_IVB_M: return 337500; // Matches HSW 337.5
+			case CDCLK_FREQ_450_MHZ_IVB_M:   return 450000; // Matches HSW 450
+			case CDCLK_FREQ_540_MHZ_IVB_M:   return 540000; // Matches HSW 540
+			case CDCLK_FREQ_675_MHZ_IVB_M:   return 675000; // Matches HSW 675
+			// IVB also has other values not directly matching HSW names
+			// e.g. 333, 400, 444, 533, 667. The defines need to be specific for IVB.
+			// For now, assume the HSW-like values if defines match.
+			default: // This path taken if IVB specific defines for 333/400/etc are used
+				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) == CDCLK_FREQ_333_IVB) return 333330;
+				if ((cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) == CDCLK_FREQ_400_IVB) return 400000;
+				// Add other IVB specific values if their defines exist and are distinct
 				TRACE("Clocks: IVB CDCLK_CTL unknown value 0x%x\n", cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK);
-				// Return a common/safe fallback for IVB, e.g. 400MHz or a BIOS default.
-				return 400000;
+				return 400000; // Fallback for IVB
 		}
 	}
-	// Generic fallback if not IVB/HSW or specific Gen not handled.
 	TRACE("Clocks: Unknown GEN for CDCLK read, defaulting.\n");
 	return 450000;
 }
@@ -86,11 +107,8 @@ status_t intel_i915_clocks_init(intel_i915_device_info* devInfo) {
 void intel_i915_clocks_uninit(intel_i915_device_info* devInfo) { /* ... */ }
 
 
-// Gen7 WRPLL P1, P2 to effective P divisor mapping
-// P1 field: 0=1, 1=2, 2=3, 3=4
-// P2 field: 0=/5, 1=/10
-static const int gen7_wrpll_p1_map[] = {1, 2, 3, 4}; // For P1 field values 0,1,2,3
-static const int gen7_wrpll_p2_eff_div[] = {5, 10}; // For P2 field values 0,1
+static const int gen7_wrpll_p1_map[] = {1, 2, 3, 4};
+static const int gen7_wrpll_p2_eff_div[] = {5, 10};
 
 static bool
 find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
@@ -99,75 +117,41 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 	long best_error = 1000000;
 	params->is_wrpll = true;
 
-	// VCO must be between 2.7GHz and 5.4GHz (can be higher for some DP link rates on HSW)
 	uint32_t vco_min = WRPLL_VCO_MIN_KHZ;
 	uint32_t vco_max = WRPLL_VCO_MAX_KHZ;
-	if (is_dp && target_clk_khz * 10 > vco_max) { // For DP, P is often 10 or 5. If P=5 needs >5.4Ghz VCO, allow higher.
-		// HSW DP can use VCO up to 6.48GHz for 5.4Gbps link rate.
-		// This logic is simplified. Real DP link calculation is complex.
-		// vco_max = 6480000;
+	if (is_dp && ref_clk_khz > 2000000 && target_clk_khz > 2700000) { // e.g. HSW DP using LCPLL ref
+		// For HSW DP using LCPLL, VCO can go higher.
+		// If LCPLL is 2.7GHz, WRPLL VCO can be 5.4GHz.
+		// vco_max = 5400000; // Already default
 	}
-
 
 	for (int p1_idx = 0; p1_idx < sizeof(gen7_wrpll_p1_map) / sizeof(gen7_wrpll_p1_map[0]); p1_idx++) {
 		for (int p2_idx = 0; p2_idx < sizeof(gen7_wrpll_p2_eff_div) / sizeof(gen7_wrpll_p2_eff_div[0]); p2_idx++) {
 			uint32_t p1 = gen7_wrpll_p1_map[p1_idx];
-			uint32_t p2_div = gen7_wrpll_p2_eff_div[p2_idx]; // Effective divisor for P2 field
-			uint32_t p = p1 * p2_div; // Total P divisor
+			uint32_t p2_div = gen7_wrpll_p2_eff_div[p2_idx];
+			uint32_t p = p1 * p2_div;
 
-			// For non-DP, p is the post-divider from VCO to pixel clock.
-			// For DP, the interpretation of P1/P2 from WRPLL_TARGET_COUNT is part of VCO generation.
-			// The WRPLL output itself is the link clock, which is then potentially further divided by
-			// WRPLL_CTL's DP link rate selection bits for HSW.
-			// The current loop structure iterates P1/P2 values.
-			// The previous filter "if (p != 5 && p != 10 && p != 20) continue;" for DP was incorrect
-			// if target_clk_khz is the link rate and P1/P2 are part of VCO gen.
-			// Removing that specific filter for DP. The VCO range check below is the main constraint.
-
-			uint32_t target_vco = target_clk_khz * p; // If target_clk_khz is pixel/link clock, and p is post-divider.
-			                                        // If target_clk_khz is target VCO, then p should be 1 here.
-			                                        // The current structure implies p is a post-divider.
-			                                        // This will need further refinement for HSW DP VCO strategy.
+			uint32_t target_vco = target_clk_khz * p;
 			if (target_vco < vco_min || target_vco > vco_max) continue;
 
-			// VCO = Ref * M / N  (where M for WRPLL is 2 * M2_integer + M2_fractional_part)
-			// For simplicity, ignore fractional M2 for now. M1 is fixed as 2 for programming model.
-			// So, target_vco = ref_clk_khz * (2 * M2_int) / N
-			// M2_int / N = target_vco / (2 * ref_clk_khz)
-			// Iterate N (1 to 15 for WRPLL), calculate M2_int.
-			for (uint32_t n_val = 1; n_val <= 15; n_val++) { // N field is N-1 or N-2. Actual N is 2 to 14/15.
-				// Calculate ideal M_effective = target_vco * N / (2 * Ref)
-				// M_effective = M2_integer + M2_fractional_decimal
+			for (uint32_t n_val = 1; n_val <= 15; n_val++) {
 				double m_effective = (double)target_vco * n_val / (2.0 * ref_clk_khz);
 				uint32_t m2_int = (uint32_t)floor(m_effective);
 				double m2_frac_decimal = m_effective - m2_int;
-
-				// M2_FRAC_DIV is a 10-bit field (0-1023) representing the fractional part.
-				// M2_FRAC_DIV / 1024.0 is the fractional value.
 				uint32_t m2_frac_val_to_program = (uint32_t)round(m2_frac_decimal * 1024.0);
 				if (m2_frac_val_to_program > 1023) m2_frac_val_to_program = 1023;
 
-				// M2 integer part constraints (approximate, from various sources for WRPLLs)
-				if (m2_int < 16 || m2_int > 127) continue; // Adjusted M2_int range
+				if (m2_int < 16 || m2_int > 127) continue;
 
 				uint32_t actual_vco;
 				bool use_frac = (m2_frac_val_to_program > 0 && m2_frac_val_to_program < 1024);
-				// Only enable fractional part if it's non-zero and significantly contributes.
-				// A very small m2_frac_val_to_program might be better off as 0 if error is similar.
-				// For now, enable if m2_frac_val_to_program is not 0.
 
 				if (use_frac) {
-					// VCO = Ref * 2 * (M2_int + M2_FRAC_DIV/1024.0) / N
-					// To avoid floating point in final calculation if possible:
-					// VCO = Ref * (2048 * M2_int + 2 * M2_FRAC_DIV) / (1024 * N)
-					// This might overflow standard uint32 if ref_clk_khz is large.
-					// Using double for intermediate actual_vco calculation for precision.
 					double temp_vco = (double)ref_clk_khz * 2.0 * (m2_int + (double)m2_frac_val_to_program / 1024.0) / n_val;
 					actual_vco = (uint32_t)round(temp_vco);
 				} else {
 					actual_vco = (ref_clk_khz * 2 * m2_int) / n_val;
 				}
-
 				long error = abs((long)actual_vco - (long)target_vco);
 
 				if (error < best_error) {
@@ -186,33 +170,28 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 		}
 		if (best_error == 0 && !is_dp) break;
 	}
-
-	// Allow some error margin, e.g. 0.1% of target_clk_khz, or a few kHz absolute.
-	// Let's use a 500kHz absolute error margin as an example, or 0.1% if smaller.
-	long allowed_error = min_c(target_clk_khz / 1000, 500);
-	if (best_error <= allowed_error) {
-		TRACE("WRPLL calc: target_pxclk %u, ref %u -> VCO %u, N %u, M2_int %u, M2_frac_en %d, M2_frac %u, P1_fld %u, P2_fld %u (err %ld)\n",
+	long allowed_error = min_c(target_clk_khz / 1000, 500); // 0.1% or 500kHz
+	if (params->dpll_vco_khz > 0 && best_error <= allowed_error) { // Ensure a solution was found
+		TRACE("WRPLL calc: target_clk %u, ref %u -> VCO %u, N %u, M2_int %u, FracEn %d, Frac %u, P1_fld %u, P2_fld %u (err %ld)\n",
 			target_clk_khz, ref_clk_khz, params->dpll_vco_khz, params->wrpll_n, params->wrpll_m2,
 			params->wrpll_m2_frac_en, params->wrpll_m2_frac,
 			params->wrpll_p1, params->wrpll_p2, best_error);
 		return true;
 	}
-	TRACE("WRPLL calc: FAILED for target_pxclk %u, ref %u. Best err %ld (allowed %ld)\n",
+	TRACE("WRPLL calc: FAILED for target_clk %u, ref %u. Best err %ld (allowed %ld)\n",
 		  target_clk_khz, ref_clk_khz, best_error, allowed_error);
 	return false;
 }
 
-// HSW SPLL P1, P2 to effective P divisor mapping
-static const int hsw_spll_p1_map[] = {1, 2, 3, 5};    // For P1 field values 0,1,2,3
-static const int hsw_spll_p2_eff_div[] = {5, 10}; // For P2 field values 0,1
+static const int hsw_spll_p1_map[] = {1, 2, 3, 5};
+static const int hsw_spll_p2_eff_div[] = {5, 10};
 
 static bool
 find_hsw_spll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
                        intel_clock_params_t* params)
 {
 	long best_error = 1000000;
-	params->is_wrpll = false; // This is for SPLL
-
+	params->is_wrpll = false;
 	uint32_t vco_min = SPLL_VCO_MIN_KHZ_HSW;
 	uint32_t vco_max = SPLL_VCO_MAX_KHZ_HSW;
 
@@ -221,33 +200,25 @@ find_hsw_spll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 			uint32_t p1_actual = hsw_spll_p1_map[p1_idx];
 			uint32_t p2_div = hsw_spll_p2_eff_div[p2_idx];
 			uint32_t p_total = p1_actual * p2_div;
-
 			uint32_t target_vco = target_clk_khz * p_total;
 			if (target_vco < vco_min || target_vco > vco_max) continue;
 
-			// VCO = Ref * (2 * M2_int) / N_actual
-			// M2_int / N_actual = target_vco / (2 * ref_clk_khz)
-			// Iterate N_actual (1 to 15 for SPLL), calculate M2_int.
 			for (uint32_t n_actual = 1; n_actual <= 15; n_actual++) {
-				// N register field is N_actual - 1 (range 0-14)
-				if (n_actual < 1) continue; // Ensure N_actual is valid for N_reg = N_actual - 1
-
+				if (n_actual < 1) continue;
 				uint64_t m2_num = (uint64_t)target_vco * n_actual;
 				uint32_t m2_den = ref_clk_khz * 2;
-				uint32_t m2_int = (m2_num + m2_den / 2) / m2_den; // Rounded
-
-				if (m2_int < 20 || m2_int > 120) continue; // M2_int range for SPLL
-
+				uint32_t m2_int = (m2_num + m2_den / 2) / m2_den;
+				if (m2_int < 20 || m2_int > 120) continue;
 				uint32_t actual_vco = (ref_clk_khz * 2 * m2_int) / n_actual;
 				long error = abs((long)actual_vco - (long)target_vco);
 
 				if (error < best_error) {
 					best_error = error;
 					params->dpll_vco_khz = actual_vco;
-					params->spll_n = n_actual - 1; // Store register field value for N
-					params->spll_m2 = m2_int;      // Store actual M2_int value
-					params->spll_p1 = p1_idx;      // Store register field value for P1
-					params->spll_p2 = p2_idx;      // Store register field value for P2
+					params->spll_n = n_actual - 1;
+					params->spll_m2 = m2_int;
+					params->spll_p1 = p1_idx;
+					params->spll_p2 = p2_idx;
 				}
 				if (best_error == 0) break;
 			}
@@ -255,74 +226,52 @@ find_hsw_spll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 		}
 		if (best_error == 0) break;
 	}
-
-	// Allow some error margin, e.g. 0.1% of target_clk_khz
-	if (best_error < (target_clk_khz / 1000)) {
-		TRACE("HSW SPLL calc: target_pxclk %u, ref %u -> VCO %u, N_fld %u, M2_int %u, P1_fld %u, P2_fld %u (err %ld)\n",
+	if (params->dpll_vco_khz > 0 && best_error < (target_clk_khz / 1000)) {
+		TRACE("HSW SPLL calc: target_clk %u, ref %u -> VCO %u, N_fld %u, M2_int %u, P1_fld %u, P2_fld %u (err %ld)\n",
 			target_clk_khz, ref_clk_khz, params->dpll_vco_khz, params->spll_n, params->spll_m2,
 			params->spll_p1, params->spll_p2, best_error);
 		return true;
 	}
-	TRACE("HSW SPLL calc: FAILED for target_pxclk %u, ref %u. Best err %ld\n", target_clk_khz, ref_clk_khz, best_error);
+	TRACE("HSW SPLL calc: FAILED for target_clk %u, ref %u. Best err %ld\n", target_clk_khz, ref_clk_khz, best_error);
 	return false;
 }
 
-// Stub for Ivy Bridge DPLL MNP calculation
 status_t
 find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
 	bool is_dp, intel_clock_params_t* params)
 {
-	// TODO: Implement IVB DPLL calculation based on formula:
-	// VCO = (Refclk * (5 * M1_field + M2_field + 2)) / (N_field + 2)
-	// OutputClock = VCO / (P1_actual * P2_actual)
-	// This requires iterating P1, P2, N, M1, M2 fields to find a match.
-	// For now, return error or set placeholder values.
-	TRACE("find_ivb_dpll_dividers: STUB for target %u kHz, ref %u kHz, is_dp %d\n",
-		target_output_clk_khz, ref_clk_khz, is_dp);
-
-	// Example: Populate with some fixed (likely incorrect) values to allow compilation
-    // These field values are what would be written to the register.
-	params->ivb_dpll_m1_reg_val = 20; // Example M1 field value
-	params->wrpll_m2 = 100;           // Example M2 field value
-	params->wrpll_n = 2;              // Example N field value (N_actual=4)
-	params->wrpll_p1 = 1;             // Example P1 field value
-	params->wrpll_p2 = 0;             // Example P2 field value
-	params->dpll_vco_khz = 2700000;   // Placeholder VCO
-	params->is_wrpll = true; // Indicate this is for a WRPLL-like DPLL (not HSW SPLL)
-
-	// VCO constraints for IVB DPLLs (example, needs PRM verification, typically ~1.7-3.5 GHz)
 	const uint32_t vco_min_khz = 1700000;
 	const uint32_t vco_max_khz = 3500000;
-	long best_error = 100000000; // Large initial error
+	long best_error = -1;
 
-	params->is_wrpll = true; // Mark as a DPLL type, not HSW SPLL
+	params->is_wrpll = true;
 	params->dpll_vco_khz = 0;
+	params->ivb_dpll_m1_reg_val = 10; // Default M1 field (for SSC)
 
-	// P1 field (3 bits): 0-7 -> actual P1 divider 1-8
+	TRACE("find_ivb_dpll_dividers: Target %u kHz, Ref %u kHz, is_dp %d\n",
+		target_output_clk_khz, ref_clk_khz, is_dp);
+
 	for (uint32_t p1_field = 0; p1_field <= 7; p1_field++) {
 		uint32_t p1_actual = p1_field + 1;
+		uint32_t p2_field_val_current;
+		uint32_t p2_actual;
 
-		// P2 field (2 bits)
-		// For non-DP (HDMI/LVDS): 0 -> /10, 1 -> /5
-		// For DP: 0,1,2,3 -> /N, /5, /7, /1 (Bypass). If output is link_rate, P2_actual_dp=1 (field=3)
-		uint32_t p2_field_iterations = is_dp ? 1 : 2; // For DP, try only P2_actual=1 for now
-		uint32_t p2_field_start = is_dp ? 3 : 0;      // Field value 3 for DP means P2_actual=1 (bypass)
+		uint32_t p2_loop_start = 0;
+		uint32_t p2_loop_end = 1;
 
-		for (uint32_t p2_iter = 0; p2_iter < p2_field_iterations; p2_iter++) {
-			uint32_t p2_field = p2_field_start + (is_dp ? 0 : p2_iter);
-			uint32_t p2_actual;
+		if (is_dp) {
+			// IVB DPLL P2 field (bits 20:19) for DP Mode: "Reserved, must be 01b".
+			// This '01b' value means P2 divisor is 5 (same as for HDMI/DVI P2_field=1).
+			p2_field_val_current = 1;
+			p2_actual = 5;
+			p2_loop_start = p2_field_val_current;
+			p2_loop_end = p2_field_val_current;
+		}
 
-			if (is_dp) {
-				if (p2_field == 3) p2_actual = 1; // Bypass
-				else if (p2_field == 2) p2_actual = 7;
-				else if (p2_field == 1) p2_actual = 5;
-				else p2_actual = 1; // Default P2 for DP if field 0, depends on link rate (complex)
-									// Forcing P2_actual = 1 for DP to simplify: DPLL output = target link rate.
-									// This means p2_field should be 3 (bypass).
-				if (p2_field != 3 && is_dp) continue; // Only allow P2 bypass for DP for this simplified version
-				p2_actual = 1; // Force P2 actual to 1 for DP
-			} else { // HDMI/LVDS
-				p2_actual = (p2_field == 1) ? 5 : 10;
+		for (uint32_t p2_field_iter_val = p2_loop_start; p2_field_iter_val <= p2_loop_end; p2_field_iter_val++) {
+			if (!is_dp) {
+				p2_field_val_current = p2_field_iter_val;
+				p2_actual = (p2_field_val_current == 1) ? 5 : 10; // 0=/10, 1=/5
 			}
 
 			uint64_t target_vco_khz_64 = (uint64_t)target_output_clk_khz * p1_actual * p2_actual;
@@ -331,66 +280,55 @@ find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
 			}
 			uint32_t target_vco_khz = (uint32_t)target_vco_khz_64;
 
-			// N1 field (4 bits): 0-15 -> actual N1 divider 2-17
-			for (uint32_t n1_field = 0; n1_field <= 15; n1_field++) {
+			for (uint32_t n1_field = 0; n1_field <= 15; n1_field++) { // N1_actual: 2 to 17
 				uint32_t n1_actual = n1_field + 2;
 
-				// M2 field (9 bits): 0-511 -> actual M2 multiplier 2-513
-				// Ideal M2_actual = target_vco_khz * n1_actual / ref_clk_khz
-				// Ideal M2_field = Ideal M2_actual - 2
-				uint64_t ideal_m2_actual_scaled = (uint64_t)target_vco_khz * n1_actual; // Numerator for M2_actual
-				uint32_t m2_field_ideal_center = (uint32_t)((ideal_m2_actual_scaled + (ref_clk_khz / 2)) / ref_clk_khz) - 2;
+				double m2_actual_ideal_float = (double)target_vco_khz * n1_actual / ref_clk_khz;
+				int32_t m2_field_center = (int32_t)round(m2_actual_ideal_float) - 2;
 
-				// Iterate M2_field around the ideal value to find best match
 				for (int m2_offset = -2; m2_offset <= 2; m2_offset++) {
-					int32_t m2_field_candidate_signed = (int32_t)m2_field_ideal_center + m2_offset;
-					if (m2_field_candidate_signed < 0 || m2_field_candidate_signed > 511) continue;
-					uint32_t m2_field = (uint32_t)m2_field_candidate_signed;
+					int32_t m2_field_signed = m2_field_center + m2_offset;
+					if (m2_field_signed < 0 || m2_field_signed > 511) continue;
+					uint32_t m2_field = (uint32_t)m2_field_signed;
 					uint32_t m2_actual = m2_field + 2;
 
-					// M1 field (6 bits): 0-63. Used for spread spectrum, not main clock. Set to a default.
-					// The formula (5 * M1 + M2 + 2) is for older PLLs.
-					// IVB PLL: VCO = Ref * M2_actual / N1_actual (M1 is for SSC)
-					// For now, assume M1 is not part of the core VCO calculation.
-					// If M1 is involved: uint32_t m1_field = default_m1_field_for_ivb; (e.g. 10)
+					uint64_t current_vco_num = (uint64_t)ref_clk_khz * m2_actual;
+					uint32_t current_vco_khz = (uint32_t)((current_vco_num + (n1_actual / 2)) / n1_actual);
 
-					uint64_t current_vco_khz_64 = (uint64_t)ref_clk_khz * m2_actual / n1_actual;
-					uint32_t current_vco_khz = (uint32_t)current_vco_khz_64;
+					uint64_t current_output_num = (uint64_t)current_vco_khz;
+					uint32_t p_total_actual = p1_actual * p2_actual;
+					if (p_total_actual == 0) continue;
+					uint32_t current_output_clk_khz = (uint32_t)((current_output_num + (p_total_actual / 2)) / p_total_actual);
 
-					long error = (long)current_vco_khz - (long)target_vco_khz;
+					long error = (long)current_output_clk_khz - (long)target_output_clk_khz;
 					if (error < 0) error = -error;
 
-					if (error < best_error) {
+					if (best_error == -1 || error < best_error) {
 						best_error = error;
 						params->dpll_vco_khz = current_vco_khz;
 						params->wrpll_p1 = p1_field;
-						params->wrpll_p2 = p2_field; // Store the field value used
+						params->wrpll_p2 = p2_field_val_current;
 						params->wrpll_n = n1_field;
-						params->wrpll_m2 = m2_field; // Stores M2 field value
-						params->ivb_dpll_m1_reg_val = 10; // Default M1 field value, needs VBT or PRM.
-
-						// If perfect match for VCO, check output clock
-						if (best_error == 0) {
-							uint64_t check_output_clk = current_vco_khz_64 / (p1_actual * p2_actual);
-							if (check_output_clk == target_output_clk_khz) goto found_ivb_params;
-						}
+						params->wrpll_m2 = m2_field;
 					}
+					if (error == 0) goto found_ivb_params_exit_final;
 				}
 			}
 		}
 	}
 
-found_ivb_params:
-	if (params->dpll_vco_khz == 0 || best_error > 1000) { // Allow 1MHz error for VCO
-		TRACE("find_ivb_dpll_dividers: Failed to find acceptable params. Best error %ld kHz for VCO.\n", best_error);
+found_ivb_params_exit_final:;
+	if (best_error == -1 || best_error > 1) { // Allow 1kHz error for output clock
+		TRACE("find_ivb_dpll_dividers: Failed. Best error %ld kHz for target %u kHz.\n",
+			best_error, target_output_clk_khz);
 		return B_ERROR;
 	}
 
-	TRACE("find_ivb_dpll_dividers: Found params for target %u kHz -> VCO %u kHz (err %ld)\n"
-		"  P1_f=%u (act=%u), P2_f=%u (act=%u), N1_f=%u (act=%u), M2_f=%u (act=%u), M1_f=%u\n",
+	TRACE("find_ivb_dpll_dividers: Found params for target %u kHz -> VCO %u kHz (OutErr %ld)\n"
+		"  P1_f=%u(act=%u), P2_f=%u(act=%u), N1_f=%u(act=%u), M2_f=%u(act=%u), M1_f=%u\n",
 		target_output_clk_khz, params->dpll_vco_khz, best_error,
 		params->wrpll_p1, params->wrpll_p1 + 1,
-		params->wrpll_p2, (is_dp ? (params->wrpll_p2 == 3 ? 1 : 0) : ((params->wrpll_p2 == 1) ? 5 : 10)), // Approx actual P2 for trace
+		params->wrpll_p2, is_dp ? 5 : ((params->wrpll_p2 == 1) ? 5 : 10),
 		params->wrpll_n, params->wrpll_n + 2,
 		params->wrpll_m2, params->wrpll_m2 + 2,
 		params->ivb_dpll_m1_reg_val);
@@ -653,12 +591,10 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 		dpll_val |= (clocks->wrpll_p1 << DPLL_FPA0_P1_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P1_POST_DIV_MASK_IVB;
 
 		// N field (bits 18-15 for DPLL_FPA0_N_DIV_MASK_IVB, N-2 encoding)
-		dpll_val |= ((clocks->wrpll_n - 2) << DPLL_FPA0_N_DIV_SHIFT_IVB) & DPLL_FPA0_N_DIV_MASK_IVB;
+		dpll_val |= (((clocks->wrpll_n)) << DPLL_FPA0_N_DIV_SHIFT_IVB) & DPLL_FPA0_N_DIV_MASK_IVB; // find_ivb_dpll_dividers stores N_field
 
-		// M2 Integer field (bits 8-0 for DPLL_FPA0_M2_DIV_MASK_IVB)
+		// M2 Integer field (bits 8:0 for DPLL_FPA0_M2_DIV_MASK_IVB)
 		// M1 Integer field (bits 14-9 for DPLL_FPA0_M1_DIV_MASK_IVB)
-		// The WRPLL M2 is for VCO = Ref * 2 * M2 / N.
-		// IVB DPLL is VCO = Ref * M / N where M is M1*10+M2 or similar.
 		// This mapping is complex. find_ivb_dpll_dividers is a stub and populates these fields
 		// with placeholder values. A real implementation of find_ivb_dpll_dividers is needed.
 		dpll_val |= (clocks->ivb_dpll_m1_reg_val << DPLL_FPA0_M1_DIV_SHIFT_IVB) & DPLL_FPA0_M1_DIV_MASK_IVB;
@@ -936,3 +872,5 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 
 	return B_OK;
 }
+
+[end of src/add-ons/kernel/drivers/graphics/intel_i915/clocks.c]

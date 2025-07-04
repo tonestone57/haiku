@@ -291,6 +291,35 @@ parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8_t* block_da
 			// This value might be pre-shifted or needs shifting by GMBUS_PIN_SHIFT.
 			// For simplicity, assume vbt_to_gmbus_pin returns the raw GMBUS_PIN_* value.
 			port_state->gmbus_pin_pair = vbt_to_gmbus_pin(dev_type, vbt_child->ddc_pin_mapping, vbt_child->dp_aux_ch_mapping);
+			port_state->is_pch_port = false; // Default to CPU port
+
+			// Placeholder logic for identifying PCH-connected ports from VBT device_type.
+			// This is highly VBT-specific. Actual VBTs might have explicit flags or different type encodings.
+			// Example: if some bits in device_type indicate "PCH" or "South Display Engine".
+			// For IVB, certain DVO port types or child devices configured for CRT/LVDS/DP/HDMI via PCH.
+			// This example assumes a hypothetical bit or type range.
+			// if ((vbt_child->device_type & 0xF000) == 0x8000) { // Hypothetical "PCH connected" flag
+			//     port_state->is_pch_port = true;
+			// }
+			// Another common way: specific device types imply PCH connection on IVB.
+			// e.g. if it's a CRT output, it's typically PCH. LVDS can be CPU or PCH. DP/HDMI can be CPU or PCH.
+			// This needs careful VBT analysis. For now, let's assume non-eDP DP/HDMI/DVI might be PCH.
+			if (port_state->type == PRIV_OUTPUT_ANALOG ||
+			    (port_state->type == PRIV_OUTPUT_LVDS /* && some_vbt_flag_indicates_pch_lvds */) ||
+			    ((port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_DVI) &&
+			     port_state->type != PRIV_OUTPUT_EDP /* eDP is always CPU direct */ &&
+			     (vbt_child->device_type & 0x00F0) != 0 /* Example: If port index bits are non-zero, assume CPU DDI, else PCH DDI? Needs real VBT spec.*/
+			     /* A more reliable way is an explicit "is_pch_ddi" flag in VBT child struct */
+			   )) {
+				// This is a very rough guess and likely incorrect.
+				// For now, let's assume only CRT is PCH for IVB to avoid breaking CPU DDI paths.
+				// Real PCH DDI identification is complex.
+				if (port_state->type == PRIV_OUTPUT_ANALOG) {
+					port_state->is_pch_port = true;
+					TRACE("VBT: Port type %d (Analog) assumed PCH-connected.\n", port_state->type);
+				}
+			}
+
 
 			// For DP, also store AUX channel if distinct from GMBUS pin
 			if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
@@ -302,8 +331,8 @@ parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8_t* block_da
 				// For now, gmbus_pin_pair is assumed to also identify the AUX channel for GMBUS access.
 			}
 
-			TRACE("VBT: Found child device: handle 0x%04x, type 0x%04x (decoded as %d), gmbus_pin 0x%02x\n",
-				vbt_child->handle, vbt_child->device_type, port_state->type, port_state->gmbus_pin_pair);
+			TRACE("VBT: Found child device: handle 0x%04x, type 0x%04x (decoded as %d), gmbus_pin 0x%02x, is_pch: %d\n",
+				vbt_child->handle, vbt_child->device_type, port_state->type, port_state->gmbus_pin_pair, port_state->is_pch_port);
 
 			devInfo->vbt->children[devInfo->vbt->num_child_devices] = *(const struct bdb_child_device_entry*)vbt_child; // Risky cast if structs differ
 			devInfo->vbt->num_child_devices++;
@@ -372,8 +401,49 @@ parse_bdb_lfp_data(intel_i915_device_info* devInfo, const uint8_t* block_data, u
 		// A VBT might have multiple DTDs for different panel types/refresh rates.
 		if (parse_dtd(entry->dtd, &devInfo->vbt->lfp_panel_dtd)) {
 			devInfo->vbt->has_lfp_data = true;
-			TRACE("VBT: Parsed LFP DTD: %dx%d\n",
-				devInfo->vbt->lfp_panel_dtd.timing.h_display, devInfo->vbt->lfp_panel_dtd.timing.v_display);
+			TRACE("VBT: Parsed LFP DTD: %dx%d for panel_type_idx %u\n",
+				devInfo->vbt->lfp_panel_dtd.timing.h_display, devInfo->vbt->lfp_panel_dtd.timing.v_display,
+				header->panel_type);
+
+			// Try to find the LFP port and update its specific properties
+			intel_output_port_state* lfp_port = NULL;
+			for (int i = 0; i < devInfo->num_ports_detected; i++) {
+				if (devInfo->ports[i].type == PRIV_OUTPUT_LVDS || devInfo->ports[i].type == PRIV_OUTPUT_EDP) {
+					// This assumes the first LVDS/eDP port found is the one this LFP data applies to.
+					// A more robust mapping would use panel_type_idx or child device handle if possible.
+					lfp_port = &devInfo->ports[i];
+					break;
+				}
+			}
+
+			if (lfp_port != NULL) {
+				// Placeholder: Actual VBT structure for these fields is needed.
+				// These might be in entry itself, or in a block indexed by panel_type_idx.
+				// Example: (assuming fields exist in bdb_lfp_data_entry_v155 or similar)
+				// lfp_port->panel_bits_per_color = entry->bits_per_color_field;
+				// lfp_port->panel_is_dual_channel = (entry->misc_flags_field & LVDS_DUAL_CHANNEL_FLAG_VBT) != 0;
+				// lfp_port->backlight_control_source = entry->backlight_control_field; // Map to VBT_BACKLIGHT_ defines
+
+				// For now, use global VBT parsed values if they exist, or defaults.
+				// These global VBT values should ideally be parsed from this LFP entry too.
+				lfp_port->panel_bits_per_color = devInfo->vbt->lfp_bits_per_color; // Which should be parsed here
+				lfp_port->panel_is_dual_channel = devInfo->vbt->lfp_is_dual_channel; // Same
+
+				// TODO: Parse actual backlight_control_source from VBT LFP data or panel type block.
+				// For eDP, backlight is often via AUX (DPCD) or PP_CONTROL. For LVDS, CPU or PCH PWM.
+				if (lfp_port->type == PRIV_OUTPUT_EDP) {
+					lfp_port->backlight_control_source = VBT_BACKLIGHT_EDP_AUX; // Default assumption for eDP
+				} else { // LVDS
+					lfp_port->backlight_control_source = VBT_BACKLIGHT_CPU_PWM; // Default assumption for LVDS
+				}
+				TRACE("VBT LFP Port %d: BPC %u, DualChan %d, BL_Src %u (defaults/placeholders)\n",
+					(int)(lfp_port - devInfo->ports),
+					lfp_port->panel_bits_per_color, lfp_port->panel_is_dual_channel, lfp_port->backlight_control_source);
+
+				// Also update the global VBT struct if this is considered the primary LFP
+				// devInfo->vbt->lfp_bits_per_color = lfp_port->panel_bits_per_color;
+				// devInfo->vbt->lfp_is_dual_channel = lfp_port->panel_is_dual_channel;
+			}
 		}
 
 		// Power Sequencing Delays from LFP Data Block
@@ -424,10 +494,8 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 	const uint8_t* current_sub_ptr = block_data;
 	const uint8_t* end_of_block = block_data + block_size;
 
-	// TODO: Define VBT_EDP_POWER_SEQ_SUB_BLOCK_ID and struct bdb_edp_power_seq
-	//       based on actual VBT specification for the target hardware.
-	// #define VBT_EDP_POWER_SEQ_SUB_BLOCK_ID 0x03 // Example ID
-	// struct bdb_edp_power_seq { uint16_t t1_ms; uint16_t t2_ms; ... };
+	// VBT_EDP_POWER_SEQ_SUB_BLOCK_ID is defined as BDB_SUB_BLOCK_EDP_POWER_SEQ in vbt.h
+	// struct bdb_edp_power_seq_entry is also defined in vbt.h
 
 	while (current_sub_ptr + 3 <= end_of_block) { // Need at least ID (1) + Size (2)
 		uint8_t sub_id = *current_sub_ptr;
@@ -445,15 +513,45 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 
 		TRACE("VBT Driver Features: Found sub-block ID 0x%02x, size %u.\n", sub_id, sub_size);
 
-		// if (sub_id == VBT_EDP_POWER_SEQ_SUB_BLOCK_ID && sub_size >= sizeof(struct bdb_edp_power_seq)) {
-		//    const struct bdb_edp_power_seq* edp_seq = (const struct bdb_edp_power_seq*)sub_data;
-		//    devInfo->vbt->power_t1_vdd_to_panel_ms = edp_seq->t1_val; // Map fields correctly
-		//    devInfo->vbt->power_t2_panel_to_backlight_ms = edp_seq->t2_val;
-		//    // ... and so on for T3, T4, T5 (or T1-T12 for full eDP seq)
-		//    TRACE("VBT: Parsed eDP power sequence from Driver Features sub-block.\n");
-		//    devInfo->vbt->has_edp_power_seq = true; // Add this flag to intel_vbt_data
+		if (sub_id == BDB_SUB_BLOCK_EDP_POWER_SEQ && sub_size >= sizeof(struct bdb_edp_power_seq_entry)) {
+			const struct bdb_edp_power_seq_entry* edp_seq = (const struct bdb_edp_power_seq_entry*)sub_data;
+			// Map parsed eDP T-values to the generic panel_power_tX_ms fields.
+			// This mapping is an interpretation. VBTs might combine T-values differently.
+			// T1 (VDD on to AUX on) + T3 (AUX on to Panel Signals on)
+			devInfo->vbt->panel_power_t1_ms = edp_seq->t1_vdd_on_to_aux_on_ms + edp_seq->t3_aux_on_to_panel_on_ms;
+			// T8 (Panel Signals on to Backlight On)
+			devInfo->vbt->panel_power_t2_ms = edp_seq->t8_panel_on_to_bl_on_ms;
+			// T9 (Backlight Off to Panel Signals Off)
+			devInfo->vbt->panel_power_t3_ms = edp_seq->t9_bl_off_to_panel_off_ms;
+			// T10 (Panel Signals Off to AUX off) + T12 (AUX off to VDD off)
+			devInfo->vbt->panel_power_t4_ms = edp_seq->t10_panel_off_to_aux_off_ms + edp_seq->t12_aux_off_to_vdd_off_ms;
+			// T5 (VDD cycle time) is not directly in this eDP struct, use default or parse elsewhere if available.
+			// For now, default T5 remains.
+			devInfo->vbt->has_edp_power_seq = true;
+			TRACE("VBT: Parsed eDP power sequence from Driver Features sub-block:\n");
+			TRACE("     T1(VDD->Panel) = %u (t1_raw=%u, t3_raw=%u)\n",
+				devInfo->vbt->panel_power_t1_ms, edp_seq->t1_vdd_on_to_aux_on_ms, edp_seq->t3_aux_on_to_panel_on_ms);
+			TRACE("     T2(Panel->BL)  = %u\n", devInfo->vbt->panel_power_t2_ms);
+			TRACE("     T3(BL->Panel)  = %u\n", devInfo->vbt->panel_power_t3_ms);
+			TRACE("     T4(Panel->VDD) = %u (t10_raw=%u, t12_raw=%u)\n",
+				devInfo->vbt->panel_power_t4_ms, edp_seq->t10_panel_off_to_aux_off_ms, edp_seq->t12_aux_off_to_vdd_off_ms);
+		}
+		// TODO: Add parsing for other useful sub-blocks if any:
+		//       - Backlight type (PWM vs AUX, CPU vs PCH source for PWM)
+		//       - DP max link rate overrides from VBT
+		//       - eDP default Voltage Swing / Pre-Emphasis levels
+		// Example for eDP VS/PE (assuming a hypothetical sub-block ID and structure):
+		// #define BDB_SUB_BLOCK_EDP_CONFIG 0x04 // Hypothetical
+		// struct bdb_edp_config_entry { uint8_t default_vs; uint8_t default_pe; ... };
+		// if (sub_id == BDB_SUB_BLOCK_EDP_CONFIG && sub_size >= sizeof(struct bdb_edp_config_entry)) {
+		//    const struct bdb_edp_config_entry* edp_conf = (const struct bdb_edp_config_entry*)sub_data;
+		//    devInfo->vbt->edp_default_vs_level = edp_conf->default_vs & 0x3; // Ensure it's 0-3
+		//    devInfo->vbt->edp_default_pe_level = edp_conf->default_pe & 0x3;
+		//    devInfo->vbt->has_edp_vbt_settings = true;
+		//    TRACE("VBT: Parsed eDP default VS=%u, PE=%u from Driver Features.\n",
+		//          devInfo->vbt->edp_default_vs_level, devInfo->vbt->edp_default_pe_level);
 		// }
-		// TODO: Add parsing for other useful sub-blocks if any (e.g., backlight type, DP max link rate overrides).
+
 
 		current_sub_ptr += 3 + sub_size;
 	}
@@ -472,6 +570,10 @@ intel_i915_vbt_init(intel_i915_device_info* devInfo)
 		devInfo->vbt->power_t3_backlight_to_panel_ms = DEFAULT_T3_BL_PANEL_MS;
 		devInfo->vbt->power_t4_panel_to_vdd_ms = DEFAULT_T4_PANEL_VDD_MS;
 		devInfo->vbt->power_t5_vdd_cycle_ms = DEFAULT_T5_VDD_CYCLE_MS;
+		devInfo->vbt->has_edp_power_seq = false;
+		devInfo->vbt->has_edp_vbt_settings = false;
+		devInfo->vbt->edp_default_vs_level = 0; // Default to level 0
+		devInfo->vbt->edp_default_pe_level = 0; // Default to level 0
 	} else if (devInfo) {
 		// This case should be handled by malloc check later if vbt is NULL.
 	}

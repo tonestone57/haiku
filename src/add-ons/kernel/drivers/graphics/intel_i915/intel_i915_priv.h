@@ -61,7 +61,22 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	bool connected; bool edid_valid; uint8_t edid_data[PRIV_EDID_BLOCK_SIZE * 2];
 	display_mode modes[PRIV_MAX_EDID_MODES_PER_PORT]; int num_modes; display_mode preferred_mode;
 	enum pipe_id_priv current_pipe;
+	// VBT-derived panel properties
+	uint8_t  panel_bits_per_color; // From LFP data or general panel type
+	bool     panel_is_dual_channel; // For LVDS
+	uint8_t  backlight_control_source; // 0=CPU PWM, 1=PCH PWM, 2=eDP AUX (conceptual values)
+	// DPCD-derived properties (for DP/eDP ports)
+	uint8_t  dpcd_revision;
+	uint8_t  dp_max_link_rate; // Value from DPCD_MAX_LINK_RATE (e.g., 0x06, 0x0A, 0x14)
+	uint8_t  dp_max_lane_count; // Max lanes from DPCD_MAX_LANE_COUNT
+	bool     dp_enhanced_framing_capable;
+	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
 } intel_output_port_state;
+
+// Define backlight control source enum (conceptual)
+#define VBT_BACKLIGHT_CPU_PWM 0
+#define VBT_BACKLIGHT_PCH_PWM 1
+#define VBT_BACKLIGHT_EDP_AUX 2 // eDP backlight often controlled via AUX or PP_CONTROL
 
 
 // Clock parameters for a specific mode/pipe combination
@@ -88,8 +103,10 @@ typedef struct intel_clock_params_t {
 	uint32_t wrpll_m2; // M is split into M1 (fixed, often 2) and M2 (programmable)
 	bool     wrpll_m2_frac_en; // Enable for fractional M2
 	uint32_t wrpll_m2_frac;    // 22-bit fractional part for M2
-	uint32_t wrpll_p1;
-	uint32_t wrpll_p2;
+	uint32_t wrpll_p1; // For HSW WRPLL P1 field, or IVB DPLL P1 field
+	uint32_t wrpll_p2; // For HSW WRPLL P2 field, or IVB DPLL P2 field
+	// IVB specific DPLL M1 field value
+	uint32_t ivb_dpll_m1_reg_val;
 	// For SPLL (Gen7: HSW for HDMI):
 	uint32_t spll_n;
 	uint32_t spll_m1; // For SPLL, M1 is not used, M2 is the main M value

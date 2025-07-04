@@ -53,6 +53,8 @@ struct bdb_edp_power_seq { // Conceptual, VBT spec has details
 	uint16_t t12_vdd_off_ms; // Time for VDD to ramp down
 } __attribute__((packed));
 
+#define BDB_SUB_BLOCK_EDP_POWER_SEQ 0x03 // Common sub-block ID for eDP power sequence in BDB_DRIVER_FEATURES
+
 
 struct bdb_general_features {
 	uint8_t panel_fitting;
@@ -81,6 +83,12 @@ struct intel_vbt_data {
 	uint16_t panel_power_t3_ms; // Backlight Off to Panel Port disable
 	uint16_t panel_power_t4_ms; // Panel Port disable to VDD Off
 	uint16_t panel_power_t5_ms; // VDD Off to allow VDD On again (cycle time)
+	bool     has_edp_power_seq; // True if eDP-specific power sequences were parsed
+	// eDP specific VBT settings
+	bool     has_edp_vbt_settings;
+	uint8_t  edp_default_vs_level;  // Voltage Swing Level (0-3)
+	uint8_t  edp_default_pe_level;  // Pre-Emphasis Level (0-3)
+	// Add other eDP specific things like max link rate override from VBT if needed
 };
 
 #ifdef __cplusplus

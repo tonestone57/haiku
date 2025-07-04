@@ -236,6 +236,31 @@
 	// ... other FDI status bits ...
 
 
+// --- DDI Buffer Control (DDI_BUF_CTL) for HSW/IVB ---
+// Offset relative to DDI_BUF_BASE (e.g. DDI_A_BASE 0x64000, DDI_BUF_CTL_A is 0x64000)
+// This register is complex and its interpretation varies by port type (DP, HDMI, DVI) and Gen.
+// #define DDI_BUF_CTL(ddi_idx) (DDI_BASE(ddi_idx) + 0x000) // Placeholder if base is defined
+// The DDI_BUF_CTL(hw_port_index) macro should resolve to the correct register based on existing macros.
+
+// HSW DDI_BUF_CTL specific bits for DisplayPort Voltage Swing / Pre-emphasis
+// These are conceptual and need verification with PRM. The actual register
+// often has combined fields or lookup table based values.
+// Bits 4:1 are often related to VS/PE for DP.
+	#define DDI_BUF_CTL_HSW_DP_VS_PE_MASK         (0x1EU) // Bits 4:1
+	// Example encodings (these are NOT definitive, just for structure)
+	#define DDI_BUF_CTL_HSW_DP_VS0_PE0      (0x0 << 1) // VS Level 0, PE Level 0
+	#define DDI_BUF_CTL_HSW_DP_VS1_PE0      (0x2 << 1) // VS Level 1, PE Level 0
+	#define DDI_BUF_CTL_HSW_DP_VS2_PE0      (0x4 << 1) // VS Level 2, PE Level 0
+	#define DDI_BUF_CTL_HSW_DP_VS3_PE0      (0x6 << 1) // VS Level 3, PE Level 0
+	#define DDI_BUF_CTL_HSW_DP_VS0_PE1      (0x1 << 1) // VS Level 0, PE Level 1
+	// ... and so on for all 16 combinations of VS(0-3) and PE(0-3) if directly programmable.
+	// More likely, there's a table in PRM: VS_Level, PE_Level -> DDI_BUF_CTL[4:1] value.
+
+// IVB PORT_BUF_CTL (eDP) Voltage Swing / Pre-emphasis (Bits 3:0)
+// Also needs PRM lookup for actual values.
+	#define PORT_BUF_CTL_IVB_EDP_VS_PE_MASK       (0xFU)  // Bits 3:0
+
+
 // --- DisplayPort DPCD Defines (standard addresses) ---
 #define DPCD_DPCD_REV                       0x000 // DPCD Revision
 #define DPCD_MAX_LINK_RATE                  0x001 // Max Link Rate

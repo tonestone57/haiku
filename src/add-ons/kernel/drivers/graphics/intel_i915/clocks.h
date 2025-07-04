@@ -21,7 +21,11 @@ status_t intel_i915_clocks_init(intel_i915_device_info* devInfo);
 void intel_i915_clocks_uninit(intel_i915_device_info* devInfo);
 
 status_t intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
-	const display_mode* mode, enum pipe_id_priv pipe, intel_clock_params_t* clocks); // Use enum pipe_id_priv
+	const display_mode* mode, enum pipe_id_priv pipe, enum intel_port_id_priv targetPortId, intel_clock_params_t* clocks);
+
+// Helper function for Ivy Bridge DPLL calculation
+status_t find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
+	bool is_dp, intel_clock_params_t* params);
 
 status_t intel_i915_program_cdclk(intel_i915_device_info* devInfo,
 	const intel_clock_params_t* clocks);

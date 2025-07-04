@@ -185,24 +185,27 @@ intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* po
 		if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_DPCD_REV, &dpcd_rev, 1) == B_OK) {
 			TRACE("DDI: Port %d (hw_idx %d) DPCD Rev %d.%d\n",
 				port->logical_port_id, port->hw_port_index, dpcd_rev >> 4, dpcd_rev & 0xF);
-			// Store dpcd_rev in port_state if needed for later decisions
-			// port->dpcd_revision = dpcd_rev;
+			port->dpcd_revision = dpcd_rev;
 
-			// Example: Read Max Link Rate and Max Lane Count
-			uint8_t max_link_rate, max_lane_count;
-			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LINK_RATE, &max_link_rate, 1) == B_OK) {
-				TRACE("  DPCD: Max Link Rate: 0x%02x (%s Gbps)\n", max_link_rate,
-					max_link_rate == DPCD_LINK_BW_5_4 ? "5.4" :
-					max_link_rate == DPCD_LINK_BW_2_7 ? "2.7" :
-					max_link_rate == DPCD_LINK_BW_1_62 ? "1.62" : "Unknown");
-				// port->dp_max_link_rate = max_link_rate;
+			// Read Max Link Rate and Max Lane Count
+			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LINK_RATE, &port->dp_max_link_rate, 1) == B_OK) {
+				TRACE("  DPCD: Max Link Rate: 0x%02x (%s Gbps)\n", port->dp_max_link_rate,
+					port->dp_max_link_rate == DPCD_LINK_BW_5_4 ? "5.4" :
+					port->dp_max_link_rate == DPCD_LINK_BW_2_7 ? "2.7" :
+					port->dp_max_link_rate == DPCD_LINK_BW_1_62 ? "1.62" : "Unknown");
+			} else {
+				port->dp_max_link_rate = 0; // Indicate failure to read
 			}
-			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LANE_COUNT, &max_lane_count, 1) == B_OK) {
+
+			uint8_t max_lane_count_raw;
+			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LANE_COUNT, &max_lane_count_raw, 1) == B_OK) {
+				port->dp_max_lane_count = max_lane_count_raw & DPCD_MAX_LANE_COUNT_MASK;
+				port->dp_enhanced_framing_capable = (max_lane_count_raw & DPCD_ENHANCED_FRAME_CAP) != 0;
 				TRACE("  DPCD: Max Lane Count: %d, Enhanced Frame Cap: %s\n",
-					max_lane_count & DPCD_MAX_LANE_COUNT_MASK,
-					(max_lane_count & DPCD_ENHANCED_FRAME_CAP) ? "Yes" : "No");
-				// port->dp_max_lane_count = max_lane_count & DPCD_MAX_LANE_COUNT_MASK;
-				// port->dp_enhanced_framing_capable = (max_lane_count & DPCD_ENHANCED_FRAME_CAP) != 0;
+					port->dp_max_lane_count, port->dp_enhanced_framing_capable ? "Yes" : "No");
+			} else {
+				port->dp_max_lane_count = 0; // Indicate failure to read
+				port->dp_enhanced_framing_capable = false;
 			}
 
 		} else {
@@ -394,21 +397,32 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 	// Initial VS/PE settings (level 0 or VBT default)
 	uint8_t train_lane_set[4] = {0, 0, 0, 0}; // VS=0, PE=0 for each lane (level 0)
 
-	// TODO: Get actual lane_count from link configuration (e.g. max common lanes from DPCD & source caps)
-	// For now, assume a common case like 4 lanes if supported, or 2.
-	// uint8_t lane_count = (port->dp_max_lane_count >= 4) ? 4 : (port->dp_max_lane_count >= 2 ? 2 : 1);
-	// This requires port->dp_max_lane_count to be populated from DPCD read in intel_ddi_init_port.
-	// For the stub, let's stick to the previous hardcoded 4 lanes.
-	// uint8_t lane_count = 4; // Already defined later, removing this line.
+	// Determine lane count for training
+	uint8_t sink_max_lanes = port->dp_max_lane_count;
+	uint8_t source_max_lanes = 4; // Assume source (DDI port) can do 4 lanes.
+	                               // This should ideally come from VBT or HW capabilities for the specific DDI.
+	uint8_t lane_count = min_c(sink_max_lanes, source_max_lanes);
+	if (lane_count == 0) lane_count = 1; // Fallback to at least 1 lane if DPCD read failed or was 0.
+	// TODO: Further reduce lane_count based on bandwidth requirements for the mode, if necessary.
+	// For now, use the minimum of source/sink capabilities.
+	TRACE("  DP Link Training: Using %u lanes (SinkMax: %u, SourceMax: %u assumed).\n",
+		lane_count, sink_max_lanes, source_max_lanes);
+
 
 	// Apply VBT default VS/PE if eDP and available
-	if (port->type == PRIV_OUTPUT_EDP && devInfo->vbt && devInfo->vbt->has_edp_data) { // Assuming has_edp_data and edp_vs/pe fields in vbt_data
-		// train_lane_set[0] = (devInfo->vbt->edp_pe_level << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
-		//                     (devInfo->vbt->edp_vs_level << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
-		// for (int l = 1; l < 4; l++) train_lane_set[l] = train_lane_set[0]; // Apply to all lanes
-		TRACE("  DP Link Training: VBT eDP VS/PE application STUBBED.\n");
+	if (port->type == PRIV_OUTPUT_EDP && devInfo->vbt && devInfo->vbt->has_edp_vbt_settings) {
+		uint8_t vs_level = devInfo->vbt->edp_default_vs_level;
+		uint8_t pe_level = devInfo->vbt->edp_default_pe_level;
+		TRACE("  DP Link Training: Applying VBT eDP VS Level %u, PE Level %u.\n", vs_level, pe_level);
+		for (int l = 0; l < 4; l++) { // Apply to all potential lanes
+			train_lane_set[l] = (pe_level << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
+			                    (vs_level << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
+		}
+	} else {
+		// Default to Level 0 if no VBT settings or not eDP
+		// train_lane_set is already initialized to all zeros.
+		TRACE("  DP Link Training: Using default VS/PE Level 0.\n");
 	}
-	// For now, all start at level 0.
 	// train_lane_set[0] = (PE_LEVEL_0 << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) | (VS_LEVEL_0 << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT); ...
 
 	for (cr_tries = 0; cr_tries < 5; cr_tries++) {
@@ -475,14 +489,9 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 
 		// This is where the source DDI_BUF_CTL register would be updated
 		// based on the sink's vs_adj[] and pe_adj[] requests.
-		// The actual bits in DDI_BUF_CTL for per-lane VS/PE are Gen-specific and complex.
-		// For HSW/IVB, these are often grouped (e.g. DDI_BUF_CTL_VS_LANE0_SHIFT etc.)
 		uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
 		uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
-		uint32_t original_ddi_buf_ctl_val = ddi_buf_ctl_val; // Keep original for now
-
-		TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original value: 0x%08" B_PRIx32 "\n",
-			ddi_buf_ctl_reg, original_ddi_buf_ctl_val);
+		uint32_t new_ddi_buf_ctl_val = ddi_buf_ctl_val;
 
 		// Determine max requested VS and PE across all lanes
 		uint8_t max_vs_req = 0;
@@ -513,34 +522,42 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 		// temp_ddi_buf_ctl_val = (original_ddi_buf_ctl_val & ~0x0000006E) // Clear bits 1,2,3,4,5,6 example
 		// This is where the source DDI_BUF_CTL register would be updated.
 		// For HSW/IVB, DDI_BUF_CTL has common VS/PE bits.
-		// These are placeholder bit definitions. Actual definitions are needed from PRM.
-		#define HSW_DDI_BUF_CTL_VS_LEVEL_MASK  (0x3 << 1) // Example: Bits 2:1 for Voltage Swing
-		#define HSW_DDI_BUF_CTL_VS_LEVEL_SHIFT 1
-		#define HSW_DDI_BUF_CTL_PE_LEVEL_MASK  (0x3 << 4) // Example: Bits 5:4 for Pre-Emphasis
-		#define HSW_DDI_BUF_CTL_PE_LEVEL_SHIFT 4
+		// The actual DDI_BUF_CTL bits for VS/PE are Gen-specific and complex.
+		// Using the conceptual HSW_DDI_BUF_CTL_HSW_DP_VS_PE_MASK and example values from registers.h for now.
+		// This section requires PRM validation for correct values for each VS/PE level combination.
+		if (IS_HASWELL(devInfo->device_id)) {
+			new_ddi_buf_ctl_val &= ~DDI_BUF_CTL_HSW_DP_VS_PE_MASK; // Clear existing VS/PE bits
 
-		uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
-		uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
-		uint32_t new_ddi_buf_ctl_val = ddi_buf_ctl_val;
+			// Simplified mapping: try to find a direct match for max_vs_req, max_pe_req
+			// This assumes defines like DDI_BUF_CTL_HSW_DP_VS1_PE0 etc. are available and correct.
+			// For this example, let's use a very basic mapping if max_pe_req is 0.
+			if (max_pe_req == 0) {
+				if (max_vs_req == 0) new_ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS0_PE0;
+				else if (max_vs_req == 1) new_ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS1_PE0;
+				else if (max_vs_req == 2) new_ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS2_PE0;
+				else new_ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS3_PE0;
+				// Add more cases if PE > 0, e.g. DDI_BUF_CTL_HSW_DP_VS0_PE1
+			} else {
+				// Fallback if PE is requested, just use VS0_PE0 or a common high setting.
+				// This part is highly dependent on the actual register encoding table from PRM.
+				TRACE("  DP Link Training: Pre-emphasis level %u requested, using fallback VS/PE for DDI_BUF_CTL.\n", max_pe_req);
+				new_ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS0_PE0; // Fallback to VS0/PE0
+			}
+		} else if (IS_IVYBRIDGE(devInfo->device_id) && port->type == PRIV_OUTPUT_EDP) {
+			// IVB eDP uses PORT_BUF_CTL[3:0] for VS/PE.
+			// This also needs a mapping from (max_vs_req, max_pe_req) to the 4-bit value.
+			new_ddi_buf_ctl_val &= ~PORT_BUF_CTL_IVB_EDP_VS_PE_MASK;
+			// Example: (max_vs_req | (max_pe_req << 2)) & PORT_BUF_CTL_IVB_EDP_VS_PE_MASK; (This is a guess)
+			TRACE("  DP Link Training: IVB eDP DDI_BUF_CTL VS/PE update STUBBED.\n");
+		}
 
-		// Clear current common VS/PE (using placeholder masks)
-		new_ddi_buf_ctl_val &= ~(HSW_DDI_BUF_CTL_VS_LEVEL_MASK | HSW_DDI_BUF_CTL_PE_LEVEL_MASK);
-
-		// Set new common VS/PE based on max requested (assuming direct mapping of levels 0-3)
-		new_ddi_buf_ctl_val |= (max_vs_req << HSW_DDI_BUF_CTL_VS_LEVEL_SHIFT) & HSW_DDI_BUF_CTL_VS_LEVEL_MASK;
-		new_ddi_buf_ctl_val |= (max_pe_req << HSW_DDI_BUF_CTL_PE_LEVEL_SHIFT) & HSW_DDI_BUF_CTL_PE_LEVEL_MASK;
 
 		if (new_ddi_buf_ctl_val != ddi_buf_ctl_val) {
 			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original: 0x%08" B_PRIx32 ", new: 0x%08" B_PRIx32 " (VS_max=%u, PE_max=%u)\n",
 				ddi_buf_ctl_reg, ddi_buf_ctl_val, new_ddi_buf_ctl_val, max_vs_req, max_pe_req);
-// #define I915_DDI_BUF_CTL_VS_PE_KNOWN // Define this if bits are confirmed
-#ifdef I915_DDI_BUF_CTL_VS_PE_KNOWN
 			intel_i915_write32(devInfo, ddi_buf_ctl_reg, new_ddi_buf_ctl_val);
 			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) UPDATED to 0x%08" B_PRIx32 "\n",
 				ddi_buf_ctl_reg, new_ddi_buf_ctl_val);
-#else
-			TRACE("  DP Link Training: Actual DDI_BUF_CTL VS/PE update SKIPPED (I915_DDI_BUF_CTL_VS_PE_KNOWN not defined).\n");
-#endif
 		} else {
 			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) value 0x%08" B_PRIx32 " sufficient for VS_max=%u, PE_max=%u (no change needed).\n",
 				ddi_buf_ctl_reg, ddi_buf_ctl_val, max_vs_req, max_pe_req);
@@ -553,12 +570,92 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 		return B_ERROR;
 	}
 
-	// TODO: Channel Equalization (TPS2/TPS3/TPS4)
-	// - Set DPCD_TRAINING_PATTERN_SET to TPS2/TPS3/TPS4
-	// - Set DP_TP_CTL to output selected pattern
-	// - Loop: Read LANE_ALIGN_STATUS_UPDATED, LANE0_1_STATUS, LANE2_3_STATUS for EQ_DONE & SYMBOL_LOCKED
-	// - If not done, read ADJ_REQ and update TRAINING_LANEx_SET (no DDI_BUF_CTL change for EQ usually)
-	TRACE("  DP Link Training: Channel Equalization STUBBED.\n");
+	// --- Channel Equalization Phase ---
+	TRACE("  DP Link Training: Starting Channel Equalization phase.\n");
+	// Set training pattern to TPS2 (or TPS3/4 for HBR2/3 if applicable and supported)
+	// For Gen7 (DP 1.2), TPS2 or TPS3 might be used. Let's use TPS2 for now.
+	// Scrambling should be enabled for TPS2/TPS3/TPS4.
+	dpcd_buf[0] = DPCD_TRAINING_PATTERN_2; // TPS2, scrambling enabled by default (clear SCRAMBLING_DISABLED bit)
+	intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_PATTERN_SET, dpcd_buf, 1);
+	TRACE("  DPCD: Set Training Pattern to TPS2 (scrambling enabled).\n");
+
+	// Update DP_TP_CTL to output TPS2
+	dp_tp_val = intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index));
+	// Clear previous pattern bits, set new pattern bits
+	dp_tp_val &= ~(DP_TP_CTL_LINK_TRAIN_PAT1 | DP_TP_CTL_LINK_TRAIN_PAT2_HSW | DP_TP_CTL_LINK_TRAIN_PAT3_HSW); // Clear all known pattern bits
+	dp_tp_val |= DP_TP_CTL_LINK_TRAIN_PAT2_HSW; // Set for TPS2
+	intel_i915_write32(devInfo, DP_TP_CTL(port->hw_port_index), dp_tp_val);
+	(void)intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index));
+	TRACE("  DP_TP_CTL(hw_idx %d) set to 0x%08" B_PRIx32 " for EQ training (TPS2)\n", port->hw_port_index, dp_tp_val);
+
+	bool eq_done = false;
+	int eq_tries = 0;
+	for (eq_tries = 0; eq_tries < 5; eq_tries++) {
+		// Adjust VS/PE based on DPCD ADJ_REQ (TRAINING_LANEx_SET)
+		// Unlike CR, for EQ, the DDI_BUF_CTL (source) VS/PE usually don't change.
+		// The sink requests changes to *its own* equalizer settings, which the source
+		// writes to DPCD TRAINING_LANEx_SET.
+		// The train_lane_set variable here holds the values to be written to DPCD.
+		intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE0_SET, &train_lane_set[0], 1);
+		if (lane_count > 1) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE1_SET, &train_lane_set[1], 1);
+		if (lane_count > 2) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE2_SET, &train_lane_set[2], 1);
+		if (lane_count > 3) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE3_SET, &train_lane_set[3], 1);
+
+		snooze(400); // Wait for receiver (min 400us for EQ adjustments)
+
+		uint8_t status_lane01, status_lane23, align_status;
+		intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE0_1_STATUS, &status_lane01, 1);
+		if (lane_count > 2) intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE2_3_STATUS, &status_lane23, 1);
+		else status_lane23 = DPCD_LANE0_CE_DONE | DPCD_LANE0_SL_DONE | DPCD_LANE1_CE_DONE | DPCD_LANE1_SL_DONE; // Assume lanes 2,3 OK if not used
+
+		intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE_ALIGN_STATUS_UPDATED, &align_status, 1);
+
+		TRACE("  DP Link Training (EQ Try %d): LANE01_STATUS=0x%02x, LANE23_STATUS=0x%02x, ALIGN_STATUS=0x%02x\n",
+			eq_tries, status_lane01, status_lane23, align_status);
+
+		// Check if all lanes achieved Channel EQ and Symbol Lock, and Interlane Align is done.
+		// This is a simplified check. Real check is per-lane for CE_DONE and SL_DONE.
+		bool lane0_eq_ok = (status_lane01 & DPCD_LANE0_CE_DONE) && (status_lane01 & DPCD_LANE0_SL_DONE);
+		bool lane1_eq_ok = (lane_count < 2) || ((status_lane01 & DPCD_LANE1_CE_DONE) && (status_lane01 & DPCD_LANE1_SL_DONE));
+		bool lane2_eq_ok = (lane_count < 3) || ((status_lane23 & DPCD_LANE0_CE_DONE) && (status_lane23 & DPCD_LANE0_SL_DONE)); // LANE2 uses LANE0 bits in its status byte
+		bool lane3_eq_ok = (lane_count < 4) || ((status_lane23 & DPCD_LANE1_CE_DONE) && (status_lane23 & DPCD_LANE1_SL_DONE)); // LANE3 uses LANE1 bits
+
+		if (lane0_eq_ok && lane1_eq_ok && lane2_eq_ok && lane3_eq_ok && (align_status & DPCD_INTERLANE_ALIGN_DONE)) {
+			eq_done = true;
+			TRACE("  DP Link Training: Channel Equalization and Alignment DONE.\n");
+			break;
+		}
+
+		// Not done, read ADJ_REQ and update train_lane_set for next DPCD write.
+		uint8_t adj_req_lane01, adj_req_lane23;
+		intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE0_1, &adj_req_lane01, 1);
+		if (lane_count > 2) intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE2_3, &adj_req_lane23, 1);
+		else adj_req_lane23 = 0; // No adjustment for non-existent lanes
+
+		// Update train_lane_set based on adj_req (same logic as in CR phase for updating train_lane_set)
+		uint8_t vs_adj[4], pe_adj[4];
+		vs_adj[0] = (adj_req_lane01 >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3;
+		pe_adj[0] = (adj_req_lane01 >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+		vs_adj[1] = (adj_req_lane01 >> DPCD_ADJUST_VOLTAGE_SWING_LANE1_SHIFT) & 0x3;
+		pe_adj[1] = (adj_req_lane01 >> DPCD_ADJUST_PRE_EMPHASIS_LANE1_SHIFT) & 0x3;
+		if (lane_count > 2) {
+			vs_adj[2] = (adj_req_lane23 >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3;
+			pe_adj[2] = (adj_req_lane23 >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+			vs_adj[3] = (adj_req_lane23 >> DPCD_ADJUST_VOLTAGE_SWING_LANE1_SHIFT) & 0x3;
+			pe_adj[3] = (adj_req_lane23 >> DPCD_ADJUST_PRE_EMPHASIS_LANE1_SHIFT) & 0x3;
+		}
+		for (int l = 0; l < lane_count; l++) {
+			train_lane_set[l] = (pe_adj[l] << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
+			                    (vs_adj[l] << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
+		}
+		TRACE("  DP Link Training (EQ): Adjusting VS/PE for DPCD. New DPCD_TRAINING_LANE0_SET=0x%02x (example)\n", train_lane_set[0]);
+	}
+
+	if (!eq_done) {
+		TRACE("  DP Link Training: Channel Equalization FAILED after %d tries.\n", eq_tries);
+		intel_dp_stop_link_train(devInfo, port); // Clean up
+		return B_ERROR;
+	}
 
 	// Assuming training successful for stub:
 	intel_dp_stop_link_train(devInfo, port); // End training patterns

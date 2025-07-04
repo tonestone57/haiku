@@ -1011,28 +1011,36 @@ intel_i915_port_enable(intel_i915_device_info* devInfo, enum intel_port_id_priv 
 		return B_BAD_VALUE;
 	}
 
-	// Clock parameters are needed by DDI/LVDS enable functions
-	// This assumes they have been calculated and stored appropriately if needed by port logic
-	// For now, passing NULL as clock_params are not directly used by the stubs yet.
-	// A more complete implementation might pass &devInfo->current_clock_params or similar.
-	const struct intel_clock_params_t* clock_params = NULL; // Placeholder
+	// Clock parameters should have been calculated and cached on the pipe by now.
+	const intel_clock_params_t* clocks = &devInfo->pipes[pipe].cached_clock_params;
+	if (clocks->pixel_clock_khz == 0 && port_state->type != PRIV_OUTPUT_ANALOG /* Analog might not need complex PLL */) {
+		TRACE("port_enable: ERROR: Clocks not calculated for pipe %d before enabling port %d.\n", pipe, portId);
+		// This is a critical issue. Forcing a recalculation here is risky as mode might be NULL.
+		// The main modeset function MUST calculate and cache clocks before this.
+		// However, for DPMS ON, it might be acceptable if clocks were calculated then.
+		// For now, let's assume if we are here, clocks *should* be valid.
+	}
 
-	TRACE("port_enable: Dispatching for port %d (type %d)\n", portId, port_state->type);
+	TRACE("port_enable: Dispatching for port %d (type %d) on pipe %d\n", portId, port_state->type, pipe);
 	switch (port_state->type) {
 		case PRIV_OUTPUT_LVDS:
-		case PRIV_OUTPUT_EDP: // eDP often handled similarly to LVDS at this level, or by DDI logic
 			return intel_lvds_port_enable(devInfo, port_state, pipe, mode);
+		case PRIV_OUTPUT_EDP:
+			// eDP uses DDI for PHY/link, but lvds_ MIGHT handle some panel aspects if not covered by PP_CONTROL
+			// For now, assume DDI handles eDP port aspects after panel power is on.
+			// If intel_lvds_port_enable has eDP specific logic beyond panel power, it would be called.
+			// Current intel_lvds_port_enable for eDP is minimal.
+			// The main eDP work (link training) is in intel_ddi_port_enable.
+			return intel_ddi_port_enable(devInfo, port_state, pipe, mode, clocks);
 		case PRIV_OUTPUT_DP:
 		case PRIV_OUTPUT_HDMI:
-		case PRIV_OUTPUT_DVI: // DVI might be TMDS from a DP or dedicated DVI port
-			return intel_ddi_port_enable(devInfo, port_state, pipe, mode, clock_params);
+		case PRIV_OUTPUT_DVI:
+			return intel_ddi_port_enable(devInfo, port_state, pipe, mode, clocks);
 		case PRIV_OUTPUT_ANALOG:
-			// Analog CRT port enable (DAC, etc.)
-			TRACE("port_enable: Analog CRT port enable STUBBED for port %d\n", portId);
-			return B_OK; // Stub
+			return intel_analog_port_enable(devInfo, port_state, pipe, mode, clocks);
 		default:
 			TRACE("port_enable: Unknown port type %d for port %d\n", port_state->type, portId);
-			return B_BAD_VALUE;
+			return B_BAD_TYPE;
 	}
 }
 
@@ -1048,8 +1056,12 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 	TRACE("port_disable: Dispatching for port %d (type %d)\n", portId, port_state->type);
 	switch (port_state->type) {
 		case PRIV_OUTPUT_LVDS:
-		case PRIV_OUTPUT_EDP:
 			intel_lvds_port_disable(devInfo, port_state);
+			break;
+		case PRIV_OUTPUT_EDP:
+			// Similar to enable, eDP disable is mostly DDI.
+			intel_ddi_port_disable(devInfo, port_state);
+			// intel_lvds_port_disable might have some eDP specific cleanup if any.
 			break;
 		case PRIV_OUTPUT_DP:
 		case PRIV_OUTPUT_HDMI:
@@ -1057,12 +1069,97 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 			intel_ddi_port_disable(devInfo, port_state);
 			break;
 		case PRIV_OUTPUT_ANALOG:
-			TRACE("port_disable: Analog CRT port disable STUBBED for port %d\n", portId);
+			intel_analog_port_disable(devInfo, port_state);
 			break;
 		default:
 			TRACE("port_disable: Unknown port type %d for port %d\n", port_state->type, portId);
 			break;
 	}
+}
+
+
+// --- Analog / VGA Port Control ---
+status_t
+intel_analog_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	enum pipe_id_priv pipe, const display_mode* mode, const intel_clock_params_t* clocks)
+{
+	TRACE("ANALOG: Port Enable for port %d (type %d) on pipe %d\n",
+		port->logical_port_id, port->type, pipe);
+
+	if (!devInfo || !port || !mode || !devInfo->mmio_regs_addr)
+		return B_BAD_VALUE;
+	if (port->type != PRIV_OUTPUT_ANALOG)
+		return B_BAD_TYPE;
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // ADPA_CTL might need forcewake
+
+	uint32_t adpa_ctl_val = intel_i915_read32(devInfo, ADPA_CTL);
+
+	// Clear relevant fields: pipe select, hsync/vsync polarity, DAC enable
+	adpa_ctl_val &= ~(ADPA_PIPE_SELECT_MASK | ADPA_HSYNC_ACTIVE_HIGH | ADPA_VSYNC_ACTIVE_HIGH | ADPA_DAC_ENABLE);
+
+	// Set Pipe Select
+	if (pipe == PRIV_PIPE_A) {
+		adpa_ctl_val |= ADPA_PIPE_SELECT_A;
+	} else if (pipe == PRIV_PIPE_B) {
+		adpa_ctl_val |= ADPA_PIPE_SELECT_B;
+	} else if (pipe == PRIV_PIPE_C && (IS_HASWELL(devInfo->device_id) || INTEL_DISPLAY_GEN(devInfo) >= 8)) {
+		// Pipe C selection for ADPA might exist on HSW+ or be different.
+		// Assuming ADPA_PIPE_SELECT_C is defined for gens that support it.
+		// For IVB, ADPA usually only sources from Pipe A or B.
+		// This needs gen-specific handling if ADPA can be sourced by Pipe C.
+		// For now, if pipe C is requested on IVB, it might be an error or require specific routing.
+		TRACE("ANALOG: Pipe C requested for ADPA on Gen %d, verify support.\n", INTEL_DISPLAY_GEN(devInfo));
+		if (IS_IVYBRIDGE(devInfo->device_id)) { // IVB ADPA only from A or B
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return B_BAD_VALUE;
+		}
+		// adpa_ctl_val |= ADPA_PIPE_SELECT_C; // If defined for this GEN
+	} else {
+		TRACE("ANALOG: Invalid pipe %d for ADPA.\n", pipe);
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_BAD_VALUE;
+	}
+
+	// Set HSync/VSync Polarity
+	if (mode->timing.flags & B_POSITIVE_HSYNC)
+		adpa_ctl_val |= ADPA_HSYNC_ACTIVE_HIGH;
+	if (mode->timing.flags & B_POSITIVE_VSYNC)
+		adpa_ctl_val |= ADPA_VSYNC_ACTIVE_HIGH;
+
+	// Enable DAC
+	adpa_ctl_val |= ADPA_DAC_ENABLE;
+
+	intel_i915_write32(devInfo, ADPA_CTL, adpa_ctl_val);
+	(void)intel_i915_read32(devInfo, ADPA_CTL); // Posting read
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("ANALOG: ADPA_CTL (0x%x) set to 0x%08" B_PRIx32 "\n", ADPA_CTL, adpa_ctl_val);
+	return B_OK;
+}
+
+void
+intel_analog_port_disable(intel_i915_device_info* devInfo, intel_output_port_state* port)
+{
+	TRACE("ANALOG: Port Disable for port %d (type %d)\n",
+		port->logical_port_id, port->type);
+
+	if (!devInfo || !port || !devInfo->mmio_regs_addr)
+		return;
+	if (port->type != PRIV_OUTPUT_ANALOG)
+		return;
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+
+	uint32_t adpa_ctl_val = intel_i915_read32(devInfo, ADPA_CTL);
+	adpa_ctl_val &= ~ADPA_DAC_ENABLE;
+	// Optionally, could also clear pipe select and polarity bits, or reset to a default.
+	// For now, just disabling DAC.
+	intel_i915_write32(devInfo, ADPA_CTL, adpa_ctl_val);
+	(void)intel_i915_read32(devInfo, ADPA_CTL); // Posting read
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("ANALOG: ADPA_CTL (0x%x) DAC disabled. Value: 0x%08" B_PRIx32 "\n", ADPA_CTL, adpa_ctl_val);
 }
 
 

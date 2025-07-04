@@ -55,17 +55,19 @@ status_t
 intel_i915_gmbus_init(intel_i915_device_info* devInfo)
 {
 	TRACE("gmbus_init for device 0x%04x\n", devInfo->device_id);
-	if (devInfo->mmio_regs_addr == NULL) {
-		TRACE("GMBUS: MMIO not mapped, cannot use GMBUS.\n");
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) {
+		TRACE("GMBUS: devInfo or MMIO not mapped, cannot use GMBUS.\n");
 		return B_NO_INIT;
 	}
-	// Initial state: disable GMBUS by selecting no pin, set a default rate.
-	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
-	// Clear any stale interrupt status from GMBUS1 and errors from GMBUS2
-	intel_i915_write32(devInfo, GMBUS1, GMBUS_SW_CLR_INT);
-	intel_i915_write32(devInfo, GMBUS2, GMBUS_SATOER); // Write 1 to clear SATOER
-	(void)intel_i915_read32(devInfo, GMBUS2); // Posting read
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) return fw_status;
 
+	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
+	intel_i915_write32(devInfo, GMBUS1, GMBUS_SW_CLR_INT);
+	intel_i915_write32(devInfo, GMBUS2, GMBUS_SATOER);
+	(void)intel_i915_read32(devInfo, GMBUS2);
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }
 
@@ -73,21 +75,27 @@ void
 intel_i915_gmbus_cleanup(intel_i915_device_info* devInfo)
 {
 	TRACE("gmbus_cleanup for device 0x%04x\n", devInfo->device_id);
-	if (devInfo->mmio_regs_addr == NULL)
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL)
 		return;
-	// Disable GMBUS by selecting no pin
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Ensure powered to disable
 	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }
 
 
 static status_t
 _gmbus_xfer(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, uint8_t* buffer, uint16_t length, bool is_read) // length changed to uint16_t for > 255
+	uint8_t i2c_addr, uint8_t* buffer, uint16_t length, bool is_read)
 {
 	status_t status;
 
-	if (devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
-	if (length == 0 || length > 511) { // GMBUS byte count is 9 bits (0-511)
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
+
+	if (length == 0 || length > 511) {
 		TRACE("GMBUS: Invalid length %u for xfer (max 511).\n", length);
 		return B_BAD_VALUE;
 	}
@@ -167,20 +175,21 @@ goto_xfer_done:
 	intel_i915_write32(devInfo, GMBUS1, 0);
 	// Release bus (select disabled pin)
 	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return status;
 }
 
 
 status_t
 intel_i915_gmbus_read(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, uint8_t* buf, uint16_t len) // length changed to uint16_t
+	uint8_t i2c_addr, uint8_t* buf, uint16_t len)
 {
 	return _gmbus_xfer(devInfo, pin_select, i2c_addr, buf, len, true);
 }
 
 status_t
 intel_i915_gmbus_write(intel_i915_device_info* devInfo, uint8_t pin_select,
-	uint8_t i2c_addr, const uint8_t* buf, uint8_t len) // Write remains uint8_t for len, max 4 bytes
+	uint8_t i2c_addr, const uint8_t* buf, uint8_t len)
 {
 	if (len > 4) {
 		TRACE("GMBUS: intel_i915_gmbus_write does not support burst write (len %u > 4).\n", len);
@@ -196,10 +205,18 @@ _gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
 {
 	status_t status;
 
-	if (devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
 
-	status = _gmbus_wait_bus_idle(devInfo);
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (status != B_OK) return status;
+
+	// _gmbus_wait_bus_idle is called within _gmbus_xfer, but since we are manually
+	// constructing the GMBUS sequence here, we need to ensure bus is idle.
+	status = _gmbus_wait_bus_idle(devInfo);
+	if (status != B_OK) {
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return status;
+	}
 
 	intel_i915_write32(devInfo, GMBUS0, pin_select | GMBUS_RATE_100KHZ);
 	intel_i915_write32(devInfo, GMBUS4, index);
@@ -220,7 +237,7 @@ _gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
 		uint32 statusReg = intel_i915_read32(devInfo, GMBUS2);
 		if (statusReg & GMBUS_HW_BUS_ERR) {
 			TRACE("GMBUS Indexed Write: NAK/Bus Error. GMBUS2=0x%x\n", statusReg);
-			intel_i915_write32(devInfo, GMBUS2, GMBUS_HW_BUS_ERR); // Clear error
+			intel_i915_write32(devInfo, GMBUS2, GMBUS_HW_BUS_ERR);
 			status = B_IO_ERROR;
 		}
 	} else {
@@ -230,6 +247,7 @@ _gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
 
 	intel_i915_write32(devInfo, GMBUS1, 0);
 	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED);
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return status;
 }
 

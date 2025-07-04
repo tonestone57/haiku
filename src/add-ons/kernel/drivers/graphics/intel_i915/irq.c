@@ -22,44 +22,58 @@ status_t
 intel_i915_irq_init(intel_i915_device_info* devInfo)
 {
 	char semName[64]; status_t status;
-	if (!devInfo || !devInfo->shared_info) return B_BAD_VALUE;
+	if (!devInfo || !devInfo->shared_info || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
 
 	snprintf(semName, sizeof(semName), "i915_0x%04x_vblank_sem", devInfo->device_id);
 	devInfo->vblank_sem_id = create_sem(0, semName);
 	if (devInfo->vblank_sem_id < B_OK) return devInfo->vblank_sem_id;
 	devInfo->shared_info->vblank_sem = devInfo->vblank_sem_id;
 
-	if (devInfo->irq_line == 0 || devInfo->irq_line == 0xff) { /* ... */ return B_OK; }
+	if (devInfo->irq_line == 0 || devInfo->irq_line == 0xff) {
+		TRACE("IRQ: No IRQ line assigned or IRQ disabled.\n");
+		return B_OK; // Not an error, just means no IRQ handling.
+	}
 
 	status = install_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo, 0);
-	if (status != B_OK) { /* ... */ return status; }
+	if (status != B_OK) {
+		delete_sem(devInfo->vblank_sem_id);
+		devInfo->vblank_sem_id = -1;
+		return status;
+	}
 	devInfo->irq_cookie = devInfo;
 
-	if (devInfo->mmio_regs_addr == NULL) { /* ... */ return B_NO_INIT; }
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) {
+		// If forcewake fails, we can't configure IRQs. Uninstall handler.
+		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
+		devInfo->irq_cookie = NULL;
+		delete_sem(devInfo->vblank_sem_id);
+		devInfo->vblank_sem_id = -1;
+		return fw_status;
+	}
 
-	// Display Engine Interrupts
-	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
-	uint32 deier_val = DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | DE_PCH_EVENT_IVB;
-	if (PRIV_MAX_PIPES > 2) deier_val |= DE_PIPEC_VBLANK_IVB;
-	intel_i915_write32(devInfo, DEIER, deier_val);
-	(void)intel_i915_read32(devInfo, DEIER);
-	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 "\n", deier_val);
+	// Display Engine Interrupts: Mask all initially, then enable specific ones.
+	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF); // Mask all DE interrupts
+	devInfo->cached_deier_val = DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | DE_PCH_EVENT_IVB;
+	if (PRIV_MAX_PIPES > 2) devInfo->cached_deier_val |= DE_PIPEC_VBLANK_IVB;
+	intel_i915_write32(devInfo, DEIER, devInfo->cached_deier_val);
+	(void)intel_i915_read32(devInfo, DEIER); // Posting read
+	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 "\n", devInfo->cached_deier_val);
 
 	// GT Interrupts & PM Interrupt Mask
-	// Unmask specific PM events in PMIMR (GEN6_PMINTRMSK)
-	uint32 pmintrmsk_val = intel_i915_read32(devInfo, PMIMR);
-	pmintrmsk_val &= ~(PM_INTR_RPS_UP_THRESHOLD | PM_INTR_RPS_DOWN_THRESHOLD | PM_INTR_RC6_THRESHOLD);
-	intel_i915_write32(devInfo, PMIMR, pmintrmsk_val);
+	intel_i915_write32(devInfo, PMIMR, 0xFFFFFFFF); // Mask all PM interrupts
+	uint32 pmintrmsk_val = ~(PM_INTR_RPS_UP_THRESHOLD | PM_INTR_RPS_DOWN_THRESHOLD | PM_INTR_RC6_THRESHOLD);
+	intel_i915_write32(devInfo, PMIMR, pmintrmsk_val); // Unmask specific PM events
 	TRACE("irq_init: PMIMR (0xA168) set to 0x%08" B_PRIx32 "\n", pmintrmsk_val);
 
-	// Enable the summary PM interrupt bit in GT_IER
-	// This assumes GT_IIR_PM_INTERRUPT_GEN7 (bit 4) is the correct summary bit.
-	uint32 gt_ier_val = intel_i915_read32(devInfo, GT_IER);
-	gt_ier_val |= GT_IIR_PM_INTERRUPT_GEN7;
-	intel_i915_write32(devInfo, GT_IER, gt_ier_val);
+	intel_i915_write32(devInfo, GT_IMR, 0xFFFFFFFF); // Mask all GT interrupts
+	devInfo->cached_gt_ier_val = GT_IIR_PM_INTERRUPT_GEN7; // Enable PM summary interrupt
+	// TODO: Enable other GT interrupts if needed (e.g., User Interrupts for GEM) by ORing them to cached_gt_ier_val
+	intel_i915_write32(devInfo, GT_IER, devInfo->cached_gt_ier_val);
 	(void)intel_i915_read32(devInfo, GT_IER); // Posting read
-	TRACE("irq_init: GT_IER (0x206C) set to 0x%08" B_PRIx32 "\n", gt_ier_val);
+	TRACE("irq_init: GT_IER (0x206C) set to 0x%08" B_PRIx32 "\n", devInfo->cached_gt_ier_val);
 
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }
 
@@ -68,47 +82,66 @@ intel_i915_irq_uninit(intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL) return;
 	if (devInfo->irq_cookie != NULL) {
-		if (devInfo->mmio_regs_addr) {
-			intel_i915_write32(devInfo, DEIER, 0);
-			intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
-			intel_i915_write32(devInfo, GT_IER, 0); // Mask GT interrupts
-			intel_i915_write32(devInfo, GT_IMR, 0xFFFFFFFF);
-			intel_i915_write32(devInfo, PMIMR, 0xFFFFFFFF); // Mask all PM IRQs
+		if (devInfo->mmio_regs_addr != NULL) {
+			status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+			if (fw_status == B_OK) {
+				intel_i915_write32(devInfo, DEIER, 0); // Mask all Display Engine IRQs
+				intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
+				intel_i915_write32(devInfo, GT_IER, 0); // Mask all GT IRQs
+				intel_i915_write32(devInfo, GT_IMR, 0xFFFFFFFF);
+				intel_i915_write32(devInfo, PMIMR, 0xFFFFFFFF); // Mask all PM IRQs
+				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			} else {
+				TRACE("IRQ_uninit: Failed to get forcewake, IRQ registers not masked.\n");
+			}
 		}
 		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
+		devInfo->irq_cookie = NULL;
 	}
-	if (devInfo->vblank_sem_id >= B_OK) delete_sem(devInfo->vblank_sem_id);
+	if (devInfo->vblank_sem_id >= B_OK) {
+		delete_sem(devInfo->vblank_sem_id);
+		devInfo->vblank_sem_id = -1;
+	}
 }
 
 int32
 intel_i915_interrupt_handler(void* data)
 {
+	// Interrupt handlers should NOT acquire forcewake if it can sleep.
+	// Reading IIR/ISR and writing to ACK them is usually safe without forcewake,
+	// as the interrupt itself implies the device is somewhat powered.
+	// Reading IER/IMR directly in IRQ handler is avoided; use cached values.
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)data;
-	uint32 de_iir, de_ier, gt_iir, gt_ier, pm_isr;
+	uint32 de_iir, gt_iir, pm_isr;
 	int32 handledStatus = B_UNHANDLED_INTERRUPT;
 
 	if (!devInfo || !devInfo->mmio_regs_addr) return B_UNHANDLED_INTERRUPT;
 
-	de_ier = intel_i915_read32(devInfo, DEIER);
+	// Read Display Engine Interrupt Identity Register
 	de_iir = intel_i915_read32(devInfo, DEIIR);
-	uint32 active_de_irqs = de_iir & de_ier;
+	// Check against cached enabled interrupts
+	uint32 active_de_irqs = de_iir & devInfo->cached_deier_val;
 
-	if (active_de_irqs & DE_PIPEA_VBLANK_IVB) { /* ... */ intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (active_de_irqs & DE_PIPEB_VBLANK_IVB) { /* ... */ intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (PRIV_MAX_PIPES > 2 && (active_de_irqs & DE_PIPEC_VBLANK_IVB)) { /* ... */ intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (active_de_irqs & DE_PCH_EVENT_IVB) { /* ... */ intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); handledStatus = B_HANDLED_INTERRUPT; TRACE("IRQ: PCH Event\n");}
+	if (active_de_irqs & DE_PIPEA_VBLANK_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
+	if (active_de_irqs & DE_PIPEB_VBLANK_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
+	if (PRIV_MAX_PIPES > 2 && (active_de_irqs & DE_PIPEC_VBLANK_IVB)) { intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
+	if (active_de_irqs & DE_PCH_EVENT_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); handledStatus = B_HANDLED_INTERRUPT; TRACE("IRQ: PCH Event\n");}
+	// Ack any other handled DE IRQs by writing them back to DEIIR
+	if (active_de_irqs & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB)) {
+		intel_i915_write32(devInfo, DEIIR, active_de_irqs & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB));
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
 
 
 	// GT Interrupt Handling
-	gt_ier = intel_i915_read32(devInfo, GT_IER);
 	gt_iir = intel_i915_read32(devInfo, GT_IIR);
-	uint32 active_gt_irqs = gt_iir & gt_ier;
+	uint32 active_gt_irqs = gt_iir & devInfo->cached_gt_ier_val;
 
 	if (active_gt_irqs & GT_IIR_PM_INTERRUPT_GEN7) {
 		TRACE("IRQ: GT PM Interrupt (summary bit) detected (GT_IIR: 0x%08" B_PRIx32 ")\n", gt_iir);
-		intel_i915_write32(devInfo, GT_IIR, GT_IIR_PM_INTERRUPT_GEN7); // Ack summary bit
+		intel_i915_write32(devInfo, GT_IIR, GT_IIR_PM_INTERRUPT_GEN7); // Ack summary bit in GT_IIR
 
-		pm_isr = intel_i915_read32(devInfo, PMISR); // Read specific PM event status
+		pm_isr = intel_i915_read32(devInfo, PMISR); // Read specific PM event status from PMISR
 		uint32 pm_ack_bits = 0;
 
 		if (pm_isr & PM_INTR_RPS_UP_THRESHOLD) {
@@ -138,13 +171,11 @@ intel_i915_interrupt_handler(void* data)
 		}
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
-
-	// Acknowledge any other unhandled DE/GT interrupts that were enabled
-	uint32 unhandled_de = de_iir & de_ier & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB);
-	if (unhandled_de) { intel_i915_write32(devInfo, DEIIR, unhandled_de); handledStatus = B_HANDLED_INTERRUPT; }
-	uint32 unhandled_gt = gt_iir & gt_ier & ~(GT_IIR_PM_INTERRUPT_GEN7);
-	if (unhandled_gt) { intel_i915_write32(devInfo, GT_IIR, unhandled_gt); handledStatus = B_HANDLED_INTERRUPT; }
-
+	// Ack any other handled GT IRQs by writing them back to GT_IIR
+	if (active_gt_irqs & ~GT_IIR_PM_INTERRUPT_GEN7) {
+		intel_i915_write32(devInfo, GT_IIR, active_gt_irqs & ~GT_IIR_PM_INTERRUPT_GEN7);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
 
 	return handledStatus;
 }

@@ -35,6 +35,7 @@
 
 // --- Helper: Read current CDCLK ---
 static uint32_t read_current_cdclk_khz(intel_i915_device_info* devInfo) {
+	// Callers of this helper should handle forcewake
 	if (IS_HASWELL(devInfo->device_id)) {
 		uint32_t lcpll1_ctl = intel_i915_read32(devInfo, LCPLL_CTL); // LCPLL1_CTL for HSW
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_HSW);
@@ -96,7 +97,11 @@ static uint32_t read_current_cdclk_khz(intel_i915_device_info* devInfo) {
 
 status_t intel_i915_clocks_init(intel_i915_device_info* devInfo) {
 	if (!devInfo || !devInfo->mmio_regs_addr) return B_NO_INIT;
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	status_t status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) {
+		TRACE("Clocks_init: Failed to get forcewake: %s\n", strerror(status));
+		return status;
+	}
 	devInfo->current_cdclk_freq_khz = read_current_cdclk_khz(devInfo);
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	TRACE("Clocks: Current CDCLK read as %" B_PRIu32 " kHz.\n", devInfo->current_cdclk_freq_khz);
@@ -129,6 +134,7 @@ static uint32_t get_hsw_lcpll_link_rate_khz(intel_i915_device_info* devInfo) {
 
 	// Read LCPLL_CTL to determine its actual configured output rate.
 	// This is simplified; LCPLL_CTL bits for link rate are complex.
+	// Callers of this helper should handle forcewake
 	uint32_t lcpll_ctl = intel_i915_read32(devInfo, LCPLL_CTL);
 	uint32_t link_rate_bits = lcpll_ctl & LCPLL1_LINK_RATE_HSW_MASK; // Assuming LCPLL1 is the one
 	switch (link_rate_bits) {
@@ -480,11 +486,10 @@ intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_para
 	uint32_t target_cdclk_khz = clocks->cdclk_freq_khz;
 	if (target_cdclk_khz == 0) {
 		TRACE("Clocks: Program CDCLK called with target 0 kHz, skipping.\n");
-		return B_OK; // Or B_BAD_VALUE if 0 is invalid
+		return B_OK;
 	}
 
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // CDCLK registers might need forcewake
-
+	// Caller (intel_i915_display_set_mode_internal) is expected to hold forcewake.
 	TRACE("Clocks: Programming CDCLK to target %u kHz.\n", target_cdclk_khz);
 
 	if (IS_HASWELL(devInfo->device_id)) {
@@ -551,7 +556,7 @@ intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_para
 				cdclk_ctl_val = clocks->lcpll_cdclk_div_sel; // This should include both SELECT and DIVISOR bits
 				TRACE("Clocks: HSW: Using pre-calculated CDCLK_CTL value 0x%x from clock_params.\n", cdclk_ctl_val);
 			} else {
-				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+				// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // No, caller holds it
 				return B_ERROR; // Cannot achieve target CDCLK
 			}
 		}
@@ -580,7 +585,7 @@ intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_para
 		else if (target_cdclk_khz >= 333330 && !IS_IVYBRIDGE_MOBILE(devInfo->device_id)) cdclk_ctl_val |= CDCLK_FREQ_333_IVB; // Desktop
 		else {
 			TRACE("Clocks: IVB: Target CDCLK %u kHz not directly mappable to known settings.\n", target_cdclk_khz);
-			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // No, caller holds it
 			return B_ERROR;
 		}
 		intel_i915_write32(devInfo, CDCLK_CTL_IVB, cdclk_ctl_val);
@@ -589,16 +594,17 @@ intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_para
 			cdclk_ctl_val, target_cdclk_khz);
 	} else {
 		TRACE("Clocks: intel_i915_program_cdclk: Unsupported generation.\n");
-		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // No, caller holds it
 		return B_UNSUPPORTED;
 	}
 
 	// Wait for CDCLK to stabilize - PRMs often specify a delay or status bit.
 	// For now, a short snooze. A real driver would poll a frequency change status bit if available.
 	snooze(1000); // 1ms
-	(void)intel_i915_read32(devInfo, CDCLK_CTL_HSW); // Posting read (use HSW/IVB specific reg)
+	// Posting read - use the specific register that was written to for the current gen.
+	(void)intel_i915_read32(devInfo, IS_HASWELL(devInfo->device_id) ? CDCLK_CTL_HSW : CDCLK_CTL_IVB);
 
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Caller holds forcewake
 	return B_OK;
 }
 
@@ -607,7 +613,7 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 	enum pipe_id_priv pipe, const intel_clock_params_t* clocks)
 {
 	if (!devInfo || !clocks || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	// Caller (intel_i915_display_set_mode_internal) is expected to hold forcewake.
 	status_t status = B_OK;
 
 	if (IS_HASWELL(devInfo->device_id)) {
@@ -729,8 +735,7 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 		TRACE("program_dpll_for_pipe: Unsupported GEN\n");
 	}
 
-//hsw_dpll_done: // Label removed as it's part of the if/else
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Caller holds forcewake
 	return status;
 }
 
@@ -738,12 +743,10 @@ status_t
 intel_i915_enable_dpll_for_pipe(intel_i915_device_info* devInfo,
 	enum pipe_id_priv pipe, bool enable, const intel_clock_params_t* clocks)
 {
-	// ... (Implementation from previous step, using WRPLL_CTL/SPLL_CTL and WRPLL_PLL_ENABLE/LOCK bits) ...
-	// Ensure correct register (WRPLL_CTL(idx) vs SPLL_CTL_HSW) is used based on clocks->is_wrpll
-	// and clocks->selected_dpll_id.
 	TRACE("enable_dpll for pipe %d, enable: %s\n", pipe, enable ? "true" : "false");
 	if (!devInfo || !clocks || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	// Caller (intel_i915_display_set_mode_internal or DPMS) is expected to hold forcewake.
+
 	uint32_t reg_ctl; uint32_t val; uint32_t enable_bit, lock_bit;
 
 	if (IS_HASWELL(devInfo->device_id)) {
@@ -795,12 +798,12 @@ intel_i915_enable_dpll_for_pipe(intel_i915_device_info* devInfo,
 		// If timed out, try to disable the PLL again to leave it in a safe state
 		val &= ~enable_bit;
 		intel_i915_write32(devInfo, reg_ctl, val);
-		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Caller holds forcewake
 		return B_TIMED_OUT;
 	}
 
 	// If disabling, no lock check needed.
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Caller holds forcewake
 	return B_OK;
 }
 
@@ -811,49 +814,34 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 		return B_OK; // FDI not applicable or not needed
 	}
 
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	// Caller (intel_i915_display_set_mode_internal) is expected to hold forcewake.
 
 	// TODO: Implement actual FDI M/N calculation based on:
 	// clocks->adjusted_pixel_clock_khz
 	// pipe's BPC (e.g., from PIPECONF register or a cached value)
 	// clocks->fdi_params.fdi_lanes
 	// FDI link frequency (typically 2.7 GHz for IVB/SNB, symbol rate)
-	//
-	// For example (highly simplified, actual formulas are in PRM):
-	// uint32_t pipe_bpc = 8; // Get this from current pipe config
-	// uint32_t fdi_link_freq_khz = 270000; // 2.7 GHz FDI link symbol clock
-	//
-	// uint64_t data_rate_needed_khz = (uint64_t)clocks->adjusted_pixel_clock_khz * pipe_bpc * 3 / 10; // * 3 for RGB, /10 for 10-bit symbols
-	// uint64_t link_data_rate_per_lane_khz = (uint64_t)fdi_link_freq_khz;
-	//
-	// Find M, N such that: data_rate_needed_khz / num_lanes approx= link_data_rate_per_lane_khz * M / N
-	// Or more directly: N/M = PixelClockHz * BitsPerPixel_on_FDI / (FDI_LinkSymbolRateHz * NumLanes)
-	// BitsPerPixel_on_FDI is often 10 bits per color component (30 total for RGB) due to 8b/10b encoding
-	// so for 8bpc input, it becomes 30 bits on FDI.
-	//
-	// Example from Linux DRM i915 (intel_fdi.c for SNB/IVB):
-	// fdi_m_n->link_m = TuSize * BitsPerColor * PixelClock / ( FDI_LINK_FREQ * NumLanes )
-	// fdi_m_n->link_n = TuSize;
-	// fdi_m_n->data_m = BitsPerColor * PixelClock;
-	// fdi_m_n->data_n = FDI_LINK_FREQ * NumLanes;
-	// Then simplify M/N by GCD.
-	// This needs accurate BitsPerColor for FDI (e.g. 18, 24, 30 for 6,8,10 bpc display)
-	// and TuSize (often 64).
 
 	uint16_t data_m = clocks->fdi_params.data_m;
 	uint16_t data_n = clocks->fdi_params.data_n;
 	uint16_t link_m = clocks->fdi_params.link_m;
 	uint16_t link_n = clocks->fdi_params.link_n;
+	uint8_t fdi_lanes = clocks->fdi_params.fdi_lanes;
+	uint16_t tu_size = clocks->fdi_params.tu_size;
+
+
+	if (fdi_lanes == 0) fdi_lanes = 2; // Default
+	if (tu_size == 0) tu_size = 64; // Default
 
 	if (data_m == 0 || data_n == 0) { // Use placeholders if not calculated
-		data_m = 22; data_n = 24; // Common example values
+		data_m = 22; data_n = 24;
 		link_m = data_m; link_n = data_n;
 		TRACE("FDI: Using placeholder M/N values for pipe %d.\n", pipe);
 	}
 
-	intel_i915_write32(devInfo, FDI_TX_MVAL_IVB_REG(pipe), FDI_MVAL_TU_SIZE(clocks->fdi_params.tu_size) | data_m);
+	intel_i915_write32(devInfo, FDI_TX_MVAL_IVB_REG(pipe), FDI_MVAL_TU_SIZE(tu_size) | data_m);
 	intel_i915_write32(devInfo, FDI_TX_NVAL_IVB_REG(pipe), data_n);
-	intel_i915_write32(devInfo, FDI_RX_MVAL_IVB_REG(pipe), FDI_MVAL_TU_SIZE(clocks->fdi_params.tu_size) | link_m);
+	intel_i915_write32(devInfo, FDI_RX_MVAL_IVB_REG(pipe), FDI_MVAL_TU_SIZE(tu_size) | link_m);
 	intel_i915_write32(devInfo, FDI_RX_NVAL_IVB_REG(pipe), link_n);
 
 	uint32_t fdi_tx_ctl_reg = FDI_TX_CTL(pipe);
@@ -861,39 +849,36 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 	uint32_t fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
 	uint32_t fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
 
-	// Preserve enable bits, clear M/N related, lane count, TU size, pattern.
-	fdi_tx_val &= (FDI_TX_ENABLE | FDI_PCDCLK_CHG_STATUS_IVB); // Preserve enable and status
+	// Preserve enable bits, clear others we will set.
+	fdi_tx_val &= (FDI_TX_ENABLE | FDI_PCDCLK_CHG_STATUS_IVB);
 	fdi_rx_val &= (FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB | FDI_FS_ERRC_ENABLE_IVB | FDI_FE_ERRC_ENABLE_IVB);
 
-
+	// Lane Count
 	fdi_tx_val &= ~FDI_TX_CTL_LANE_MASK_IVB;
-	if (clocks->fdi_params.fdi_lanes == 1) fdi_tx_val |= FDI_TX_CTL_LANE_1_IVB;
-	else if (clocks->fdi_params.fdi_lanes == 2) fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB;
-	else if (clocks->fdi_params.fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_tx_val |= FDI_TX_CTL_LANE_3_IVB; // IVB supports 3 lanes
-	else if (clocks->fdi_params.fdi_lanes == 4) fdi_tx_val |= FDI_TX_CTL_LANE_4_IVB;
+	if (fdi_lanes == 1) fdi_tx_val |= FDI_TX_CTL_LANE_1_IVB;
+	else if (fdi_lanes == 2) fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB;
+	else if (fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_tx_val |= FDI_TX_CTL_LANE_3_IVB;
+	else if (fdi_lanes == 4) fdi_tx_val |= FDI_TX_CTL_LANE_4_IVB;
 	else fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB; // Default
 
-	// TU Size (already part of MVAL programming for some gens, but also in TX_CTL)
-	// For IVB, TU size is not in FDI_TX_CTL, it's part of FDI_TX_MVAL.
-	// The FDI_TX_CTL_TU_SIZE_MASK_IVB might be for older gens or a different interpretation.
-	// For now, assume MVAL handles TU for IVB.
+	// TU Size is in MVAL for IVB. FDI_TX_CTL_TU_SIZE_MASK_IVB is likely for pre-IVB or different interpretation.
+	// For now, assume MVAL handles TU.
 
-	// Set initial training pattern (Pattern 1)
+	// Training Pattern
 	fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB;
-	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB;
+	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB; // Start with Pattern 1
 
-	// Voltage Swing / Pre-emphasis (TODO: from VBT or training loop)
-	// Example: Set to default level 0 or 1.
+	// Voltage Swing / Pre-emphasis (TODO: Set from VBT or training iteration)
 	fdi_tx_val &= ~(FDI_TX_CTL_VOLTAGE_SWING_MASK_IVB | FDI_TX_CTL_PRE_EMPHASIS_MASK_IVB);
-	fdi_tx_val |= FDI_TX_CTL_VOLTAGE_SWING_LEVEL_1_IVB; // Example level 1 (0.6V)
-	fdi_tx_val |= FDI_TX_CTL_PRE_EMPHASIS_LEVEL_0_IVB;   // Example level 0 (0dB)
+	fdi_tx_val |= FDI_TX_CTL_VOLTAGE_SWING_LEVEL_1_IVB; // Default: 0.6V
+	fdi_tx_val |= FDI_TX_CTL_PRE_EMPHASIS_LEVEL_0_IVB;   // Default: 0dB
 
-
+	// FDI_RX_CTL: Match lane count
 	fdi_rx_val &= ~FDI_RX_CTL_LANE_MASK_IVB;
-	if (clocks->fdi_params.fdi_lanes == 1) fdi_rx_val |= FDI_RX_CTL_LANE_1_IVB;
-	else if (clocks->fdi_params.fdi_lanes == 2) fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
-	else if (clocks->fdi_params.fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_rx_val |= FDI_RX_CTL_LANE_3_IVB;
-	else if (clocks->fdi_params.fdi_lanes == 4) fdi_rx_val |= FDI_RX_CTL_LANE_4_IVB;
+	if (fdi_lanes == 1) fdi_rx_val |= FDI_RX_CTL_LANE_1_IVB;
+	else if (fdi_lanes == 2) fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
+	else if (fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_rx_val |= FDI_RX_CTL_LANE_3_IVB;
+	else if (fdi_lanes == 4) fdi_rx_val |= FDI_RX_CTL_LANE_4_IVB;
 	else fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
 
 	intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
@@ -902,7 +887,7 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 	TRACE("FDI: Programmed FDI_TX_CTL(pipe %d)=0x%08x, FDI_RX_CTL(pipe %d)=0x%08x\n",
 		pipe, fdi_tx_val, pipe, fdi_rx_val);
 
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Caller holds forcewake
 	return B_OK;
 }
 
@@ -912,7 +897,7 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 	if (!(IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id))) {
 		return B_OK; // FDI not applicable
 	}
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	// Caller (intel_i915_display_set_mode_internal or DPMS) is expected to hold forcewake.
 
 	uint32_t fdi_tx_ctl_reg = FDI_TX_CTL(pipe);
 	uint32_t fdi_rx_ctl_reg = FDI_RX_CTL(pipe);

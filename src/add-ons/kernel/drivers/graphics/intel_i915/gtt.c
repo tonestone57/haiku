@@ -20,9 +20,11 @@
 static void
 intel_i915_gtt_flush(intel_i915_device_info* devInfo)
 {
-	memory_write_barrier();
+	// This function is internal and assumes forcewake is held by its caller
+	// if PGTBL_CTL access requires it.
+	memory_write_barrier(); // Ensure PTE writes are visible before flush command
 	intel_i915_write32(devInfo, PGTBL_CTL, devInfo->pgtbl_ctl);
-	(void)intel_i915_read32(devInfo, PGTBL_CTL);
+	(void)intel_i915_read32(devInfo, PGTBL_CTL); // Posting read
 	TRACE("GTT flushed (PGTBL_CTL rewritten).\n");
 }
 
@@ -30,6 +32,8 @@ static status_t
 intel_i915_gtt_insert_pte(intel_i915_device_info* devInfo, uint32 pte_index,
 	uint64 phys_addr, enum gtt_caching_type cache_type)
 {
+	// This function only writes to CPU-mapped GTT table, no direct MMIO.
+	// The flush is separate.
 	if (devInfo->gtt_table_virtual_address == NULL) return B_NO_INIT;
 	if (pte_index >= devInfo->gtt_entries_count) return B_BAD_INDEX;
 
@@ -73,13 +77,26 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	status_t status = B_OK; char areaName[64];
 	devInfo->scratch_page_area = -1; devInfo->gtt_table_area = -1;
 
-	if (devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
-	devInfo->pgtbl_ctl = intel_i915_read32(devInfo, PGTBL_CTL);
-	if (!(devInfo->pgtbl_ctl & PGTBL_ENABLE)) return B_UNSUPPORTED;
+	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
 
-	status = mutex_init_etc(&devInfo->gtt_allocator_lock, "i915 GTT allocator lock", MUTEX_FLAG_CLONE_NAME);
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (status != B_OK) return status;
 
+	devInfo->pgtbl_ctl = intel_i915_read32(devInfo, PGTBL_CTL);
+	if (!(devInfo->pgtbl_ctl & PGTBL_ENABLE)) {
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_UNSUPPORTED;
+	}
+
+	// Mutex init does not need forcewake
+	mutex_destroy(&devInfo->gtt_allocator_lock); // Destroy if already inited from a failed previous attempt
+	status = mutex_init_etc(&devInfo->gtt_allocator_lock, "i915 GTT allocator lock", MUTEX_FLAG_CLONE_NAME);
+	if (status != B_OK) {
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return status;
+	}
+
+	// Scratch page allocation does not need forcewake
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_scratch", devInfo->device_id);
 	void* scratch_virt_addr_temp;
 	devInfo->scratch_page_area = create_area_etc(areaName, &scratch_virt_addr_temp,
@@ -131,12 +148,20 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	// Initialize bump allocator to start after the scratch page (which is at GTT page index 0)
 	devInfo->gtt_next_free_page = 1; // GTT page index 0 is scratch page
 
-	if (devInfo->shared_info) { /* ... populate shared_info ... */ }
+	if (devInfo->shared_info) {
+		devInfo->shared_info->gtt_aperture_size = devInfo->gtt_aperture_actual_size;
+		// Other GTT related shared_info fields if any
+	}
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 
-err_gtt_table_area: delete_area(devInfo->gtt_table_area); devInfo->gtt_table_area = -1;
-err_scratch_area: delete_area(devInfo->scratch_page_area); devInfo->scratch_page_area = -1;
-err_lock: mutex_destroy(&devInfo->gtt_allocator_lock);
+err_gtt_table_area:
+	delete_area(devInfo->gtt_table_area); devInfo->gtt_table_area = -1;
+err_scratch_area:
+	delete_area(devInfo->scratch_page_area); devInfo->scratch_page_area = -1;
+err_lock:
+	mutex_destroy(&devInfo->gtt_allocator_lock);
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Release FW on error path
 	return status;
 }
 
@@ -144,7 +169,9 @@ void
 intel_i915_gtt_cleanup(intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL) return;
-	mutex_destroy(&devInfo->gtt_allocator_lock); // Should be done only if init succeeded
+	// No MMIO access here, just area cleanup and mutex destruction.
+	// If PGTBL_CTL needed to be written to disable GTT on cleanup, that would need forcewake.
+	mutex_destroy(&devInfo->gtt_allocator_lock);
 	if (devInfo->gtt_table_area >= B_OK) delete_area(devInfo->gtt_table_area);
 	if (devInfo->scratch_page_area >= B_OK) delete_area(devInfo->scratch_page_area);
 }
@@ -205,9 +232,13 @@ intel_i915_gtt_map_memory(intel_i915_device_info* devInfo, area_id source_area,
 	TRACE("gtt_map_memory: area %" B_PRId32 ", area_offset_pages %lu, to gtt_offset 0x%lx, %lu pages, cache %d\n",
 		source_area, area_offset_pages, gtt_offset_bytes, num_pages, cache_type);
 
-	if (!devInfo || !(devInfo->pgtbl_ctl & PGTBL_ENABLE)) return B_NO_INIT;
-	if (devInfo->gtt_table_virtual_address == NULL) return B_NO_INIT;
+	if (!devInfo || !(devInfo->pgtbl_ctl & PGTBL_ENABLE) || devInfo->gtt_table_virtual_address == NULL)
+		return B_NO_INIT;
 	if (source_area < B_OK) return B_BAD_VALUE;
+
+	// GTT PTE writes are memory writes. The flush of PGTBL_CTL is MMIO.
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) return fw_status;
 
 	uint32 pte_start_index = gtt_offset_bytes / B_PAGE_SIZE;
 	if (pte_start_index + num_pages > devInfo->gtt_entries_count) return B_BAD_VALUE;
@@ -251,8 +282,12 @@ intel_i915_gtt_unmap_memory(intel_i915_device_info* devInfo,
 	for (size_t i = 0; i < num_pages; i++) {
 		status_t status = intel_i915_gtt_insert_pte(devInfo, pte_start_index + i,
 			devInfo->scratch_page_phys_addr, GTT_CACHE_UNCACHED);
-		if (status != B_OK) return status;
+		if (status != B_OK) {
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return status;
+		}
 	}
-	intel_i915_gtt_flush(devInfo);
+	intel_i915_gtt_flush(devInfo); // This helper assumes FW is held
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }

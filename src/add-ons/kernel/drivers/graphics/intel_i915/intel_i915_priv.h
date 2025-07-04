@@ -328,6 +328,10 @@ typedef struct intel_i915_device_info {
 
 	enum pch_info_priv pch_type; // Detected PCH type
 
+	// Cached Interrupt Enable Register values (to avoid MMIO reads in IRQ handler)
+	uint32_t cached_deier_val;
+	uint32_t cached_gt_ier_val;
+
 } intel_i915_device_info;
 
 // MMIO Access (Forcewake must be handled by caller)

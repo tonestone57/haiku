@@ -27,10 +27,9 @@ status_t
 intel_lvds_init_port(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
 	TRACE("LVDS/eDP: Init port %d (VBT handle 0x%04x)\n", port->logical_port_id, port->child_device_handle);
+	// No direct MMIO here, VBT data is already parsed.
 	if (devInfo->vbt && devInfo->vbt->has_lfp_data && port->num_modes == 0) {
 		port->preferred_mode = devInfo->vbt->lfp_panel_dtd;
-		// Consider adding this to port->modes if it's the only source
-		// port->modes[0] = devInfo->vbt->lfp_panel_dtd; port->num_modes = 1;
 		TRACE("LVDS/eDP: Using panel DTD from VBT for port %d.\n", port->logical_port_id);
 	}
 	return B_OK;
@@ -40,52 +39,52 @@ intel_lvds_init_port(intel_i915_device_info* devInfo, intel_output_port_state* p
 static uint32_t
 _get_pp_control_reg(intel_i915_device_info* devInfo, intel_output_port_state* port, enum pipe_id_priv pipe)
 {
+	// This helper itself does not do MMIO, just returns an offset.
+	// Caller must ensure forcewake if reading/writing the returned register.
 	if (IS_HASWELL(devInfo->device_id)) {
 		if (port->type == PRIV_OUTPUT_EDP && port->hw_port_index >= 0) {
-			// HSW DDI eDP PP_CONTROL registers are DDI-indexed, not pipe-indexed.
-			// port->hw_port_index should map to DDI A=0, B=1, C=2, D=3 (HSW non-ULT), E=4 (HSW ULT)
-			// These are defined in registers.h as PP_CONTROL_DDI_A, etc. (e.g., 0x64200)
-			switch (port->hw_port_index) {
-				case 0: return PP_CONTROL_DDI_A_HSW; // DDI A (maps to PORT_ID_DDI_A)
-				case 1: return PP_CONTROL_DDI_B_HSW; // DDI B
-				case 2: return PP_CONTROL_DDI_C_HSW; // DDI C
-				case 3: return PP_CONTROL_DDI_D_HSW; // DDI D
-				case 4: return PP_CONTROL_DDI_E_HSW; // DDI E (HSW ULT only for this index)
+			switch (port->hw_port_index) { // DDI A=0, B=1, C=2, D=3 (HSW non-ULT), E=4 (HSW ULT)
+				case 0: return PP_CONTROL_DDI_A_HSW;
+				case 1: return PP_CONTROL_DDI_B_HSW;
+				case 2: return PP_CONTROL_DDI_C_HSW;
+				case 3: return PP_CONTROL_DDI_D_HSW;
+				case 4: return PP_CONTROL_DDI_E_HSW;
 				default: TRACE("LVDS: HSW eDP unhandled hw_port_index %d for PP_CONTROL\n", port->hw_port_index);
 			}
 		} else if (port->type == PRIV_OUTPUT_LVDS) { // HSW PCH LVDS
 			return PCH_PP_CONTROL;
 		}
-	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-		// IVB eDP/LVDS is pipe-indexed. PP_CONTROL(pipe) should resolve correctly.
-		return PP_CONTROL(pipe);
+	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) { // SNB/IVB PCH LVDS or eDP
+		return PP_CONTROL(pipe); // Pipe-indexed for these gens (e.g. PCH_PP_CONTROL via _PIPE macro)
 	}
-	// Fallback or for other gens if PP_CONTROL(pipe) is appropriate
-	TRACE("LVDS: _get_pp_control_reg using fallback PP_CONTROL for pipe %d\n", pipe);
-	return PP_CONTROL(pipe);
+	TRACE("LVDS: _get_pp_control_reg using default PP_CONTROL for pipe %d (Gen %d)\n", pipe, INTEL_DISPLAY_GEN(devInfo->device_id));
+	return PP_CONTROL(pipe); // Fallback, might be incorrect for some older gens if not pipe-indexed
 }
 
 static uint32_t
 _get_pp_status_reg(intel_i915_device_info* devInfo, intel_output_port_state* port, enum pipe_id_priv pipe)
 {
-	// PP_STATUS is typically PP_CONTROL + 4
+	// This helper itself does not do MMIO.
 	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
-	// Check if pp_control_reg is one of the specific PCH or DDI base addresses,
-	// if so, their status might not be simply +4 if the PP_CONTROL macro itself adds an offset.
-	// However, assuming PP_CONTROL_DDI_A etc. are base addresses of the PP_CONTROL register itself.
-	if (pp_control_reg == PCH_PP_CONTROL) return PCH_PP_STATUS;
+	if (pp_control_reg == PCH_PP_CONTROL) return PCH_PP_STATUS; // Specific PCH status reg
 
-	// For IVB, PP_STATUS(pipe) should work.
-	// For HSW DDI eDP, it's PP_CONTROL_DDI_X + 4.
-	// If PP_CONTROL_DDI_X macros are direct register addresses, then +4 is correct.
+	// For DDI-indexed PP_CONTROL on HSW, status is usually at offset +4.
+	// For pipe-indexed PP_CONTROL on IVB/SNB, PP_STATUS(pipe) macro should resolve correctly.
+	// If PP_CONTROL(pipe) macro resolves to a base that needs +4 for status, this logic is fine.
+	// If PP_STATUS(pipe) resolves directly to the status register, this is also fine.
+	// The key is that PP_CONTROL_DDI_X_HSW are base addresses of the control register.
 	if (IS_HASWELL(devInfo->device_id) && port->type == PRIV_OUTPUT_EDP && port->hw_port_index >=0) {
-		if (pp_control_reg != PCH_PP_CONTROL && pp_control_reg != PP_CONTROL(pipe)) { // It's a DDI_X_PP_CONTROL
-			return pp_control_reg + 4; // Assuming PP_STATUS is at offset +4 from PP_CONTROL
+		// Check if it's one of the DDI_X specific PP_CONTROL registers
+		bool is_ddi_pp_control = false;
+		for(int ddi = 0; ddi < MAX_DDI_PORTS_HSW_EXAMPLE; ddi++) { // MAX_DDI_PORTS_HSW_EXAMPLE should be 5
+			if (pp_control_reg == PP_CONTROL_DDI_HSW_ALIAS(ddi)) { // Assuming PP_CONTROL_DDI_HSW_ALIAS(ddi) macro
+				is_ddi_pp_control = true;
+				break;
+			}
 		}
+		if (is_ddi_pp_control) return pp_control_reg + 4; // PP_STATUS is PP_CONTROL + 4 for DDI PP regs
 	}
-	// Fallback for IVB or if pp_control_reg was pipe-based
-	TRACE("LVDS: _get_pp_status_reg using fallback PP_STATUS for pipe %d\n", pipe);
-	return PP_STATUS(pipe);
+	return PP_STATUS(pipe); // Fallback for IVB/SNB or if not a HSW DDI specific PP_CONTROL
 }
 
 
@@ -93,14 +92,18 @@ status_t
 intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
 	TRACE("LVDS/eDP: Panel Power ON for port %d (type %d)\n", port->logical_port_id, port->type);
+	if(!devInfo || !port || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
+
 	uint32_t t1_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t1_ms > 0) ?
 		devInfo->vbt->panel_power_t1_ms : DEFAULT_T1_VDD_PANEL_MS;
 
 	enum pipe_id_priv pipe = port->current_pipe != PRIV_PIPE_INVALID ? port->current_pipe : PRIV_PIPE_A;
 	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
 	uint32_t pp_status_reg = _get_pp_status_reg(devInfo, port, pipe);
+	status_t status;
 
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
 
 	uint32_t pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
 	if (port->type == PRIV_OUTPUT_EDP) {
@@ -155,6 +158,8 @@ void
 intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
 	TRACE("LVDS/eDP: Panel Power OFF for port %d (type %d)\n", port->logical_port_id, port->type);
+	if (!devInfo || !port || !devInfo->mmio_regs_addr) return;
+
 	// VBT T3 (Backlight Off to Panel Port Disable) is handled by caller of set_backlight(off)
 	// VBT T4 (Panel Port Disable to VDD Off)
 	uint32_t t4_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t4_ms > 0) ?
@@ -165,41 +170,38 @@ intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_st
 
 	enum pipe_id_priv pipe = port->current_pipe != PRIV_PIPE_INVALID ? port->current_pipe : PRIV_PIPE_A;
 	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
-	uint32_t pp_status_reg = _get_pp_status_reg(devInfo, port, pipe); // For polling if needed
+	uint32_t pp_status_reg = _get_pp_status_reg(devInfo, port, pipe);
+	status_t fw_status;
 
-	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) {
+		TRACE("LVDS/eDP PanelPowerOff: Failed to get forcewake: %s\n", strerror(fw_status));
+		// Attempt to proceed if critical, otherwise return. For power off, usually proceed.
+	}
 
 	// Backlight is assumed to be already OFF by a call to intel_lvds_set_backlight(..., false).
 
 	if (port->type == PRIV_OUTPUT_EDP) {
-		// Power down eDP panel to D3 (AUX may or may not be kept alive for HPD)
-		// DPCD_POWER_D3_AUX_OFF powers down AUX too.
-		uint8_t dpcd_val = DPCD_POWER_D3; // Or DPCD_POWER_D3_AUX_OFF if full power down
+		uint8_t dpcd_val = DPCD_POWER_D3; // Or DPCD_POWER_D3_AUX_OFF
 		TRACE("LVDS/eDP: eDP: Setting DPCD power state to D3 (0x%x).\n", dpcd_val);
-		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
-		if (aux_status != B_OK) {
-			TRACE("LVDS/eDP: Failed to set eDP DPCD power D3: %s\n", strerror(aux_status));
+		// intel_dp_aux_write_dpcd handles its own forcewake
+		if (intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1) != B_OK) {
+			TRACE("LVDS/eDP: Failed to set eDP DPCD power D3.\n");
 		}
-		// VBT eDP T10 (Panel Signals Off/DPCD D3 to AUX Off) is part of t4_delay_ms.
 	}
 
-	// Wait T4: Panel signals are assumed off (by port_disable), now wait before cutting VDD.
 	TRACE("LVDS/eDP: Waiting T4 delay (%u ms) before VDD off.\n", t4_delay_ms);
 	snooze(t4_delay_ms * 1000);
 
-	// Turn off VDD
 	uint32_t pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
 	pp_control_val &= ~POWER_TARGET_ON;
 	if (port->type == PRIV_OUTPUT_EDP) {
 		pp_control_val &= ~EDP_FORCE_VDD;
-		// EDP_BLC_ENABLE should have been cleared by set_backlight(off) if it was used.
-		pp_control_val &= ~EDP_BLC_ENABLE;
+		pp_control_val &= ~EDP_BLC_ENABLE; // Ensure backlight control bit is also off
 	}
 	intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
-	(void)intel_i915_read32(devInfo, pp_control_reg); // Posting read
+	(void)intel_i915_read32(devInfo, pp_control_reg);
 
-	// Poll for PP_STATUS OFF if necessary, though de-asserting POWER_TARGET_ON should be enough.
-	// Some platforms might require polling.
 	bigtime_t start_time = system_time();
 	while (system_time() - start_time < 50000) { // Max 50ms wait for VDD off
 		if (!(intel_i915_read32(devInfo, pp_status_reg) & PP_ON)) break;
@@ -211,11 +213,11 @@ intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_st
 		TRACE("LVDS/eDP: Panel VDD is OFF.\n");
 	}
 
-	// Wait T5: Minimum VDD off time before it can be powered on again.
 	TRACE("LVDS/eDP: Waiting T5 VDD cycle delay (%u ms).\n", t5_delay_ms);
 	snooze(t5_delay_ms * 1000);
 
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status == B_OK)
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }
 
 status_t intel_lvds_configure_panel_fitter(intel_i915_device_info* d, enum pipe_id_priv p, bool e, const display_mode* nm, const display_mode* sm) {

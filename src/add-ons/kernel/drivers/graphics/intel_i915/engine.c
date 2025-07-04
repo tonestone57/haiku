@@ -46,15 +46,21 @@ intel_engine_init(intel_i915_device_info* devInfo,
 	struct intel_engine_cs* engine, enum intel_engine_id id, const char* name)
 {
 	status_t status; char areaName[64]; uint32_t ring_num_pages, seqno_num_pages;
-	if (!engine || !devInfo || !name) return B_BAD_VALUE;
+	if (!engine || !devInfo || !name || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
 
 	memset(engine, 0, sizeof(struct intel_engine_cs));
 	engine->dev_priv = devInfo; engine->id = id; engine->name = name;
 	engine->ring_gtt_offset_pages = (uint32_t)-1; engine->next_hw_seqno = 1;
-	engine->current_context = NULL; // Initialize current context
+	engine->current_context = NULL;
 
 	status = mutex_init_etc(&engine->lock, name, MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) return status;
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) {
+		mutex_destroy(&engine->lock);
+		return status;
+	}
 
 	engine->ring_size_bytes = DEFAULT_RING_BUFFER_SIZE;
 	ring_num_pages = engine->ring_size_bytes / B_PAGE_SIZE;
@@ -99,33 +105,44 @@ intel_engine_init(intel_i915_device_info* devInfo,
 	uint32 ring_ctl = RING_CTL_SIZE(engine->ring_size_bytes / 1024) | RING_CTL_ENABLE;
 	intel_i915_write32(devInfo, engine->ctl_reg_offset, ring_ctl);
 	if (!(intel_i915_read32(devInfo, engine->ctl_reg_offset) & RING_CTL_ENABLE)) {
-		status = B_ERROR; goto err_cleanup_seqno_gtt;
+		status = B_ERROR;
+		// Fall through to cleanup labels, which will also release forcewake
 	}
-	return B_OK;
 
+	if (status != B_OK) {
 err_cleanup_seqno_gtt:
-	intel_i915_gem_object_unmap_gtt(engine->hw_seqno_obj);
-	intel_i915_gtt_free_space(devInfo, engine->hw_seqno_gtt_offset_dwords / (B_PAGE_SIZE / sizeof(uint32_t)), seqno_num_pages);
-	intel_i915_gem_object_put(engine->hw_seqno_obj); engine->hw_seqno_obj = NULL;
+		intel_i915_gem_object_unmap_gtt(engine->hw_seqno_obj);
+		intel_i915_gtt_free_space(devInfo, engine->hw_seqno_gtt_offset_dwords / (B_PAGE_SIZE / sizeof(uint32_t)), seqno_num_pages);
+		intel_i915_gem_object_put(engine->hw_seqno_obj); engine->hw_seqno_obj = NULL;
 err_cleanup_ring:
-	intel_i915_gem_object_unmap_gtt(engine->ring_buffer_obj);
-	intel_i915_gtt_free_space(devInfo, engine->ring_gtt_offset_pages, ring_num_pages);
-	intel_i915_gem_object_put(engine->ring_buffer_obj); engine->ring_buffer_obj = NULL;
-	mutex_destroy(&engine->lock);
-	return status;
+		intel_i915_gem_object_unmap_gtt(engine->ring_buffer_obj);
+		intel_i915_gtt_free_space(devInfo, engine->ring_gtt_offset_pages, ring_num_pages);
+		intel_i915_gem_object_put(engine->ring_buffer_obj); engine->ring_buffer_obj = NULL;
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Release FW on error path after it was acquired
+		mutex_destroy(&engine->lock);
+		return status;
+	}
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return B_OK;
 }
 
 void
 intel_engine_uninit(struct intel_engine_cs* engine)
 {
 	if (!engine || !engine->dev_priv) return;
-	if (engine->current_context) { // Release engine's ref on current context
+
+	if (engine->ctl_reg_offset != 0 && engine->dev_priv->mmio_regs_addr != NULL) {
+		intel_i915_forcewake_get(engine->dev_priv, FW_DOMAIN_RENDER);
+		intel_i915_write32(engine->dev_priv, engine->ctl_reg_offset, 0);
+		intel_i915_forcewake_put(engine->dev_priv, FW_DOMAIN_RENDER);
+	}
+
+	if (engine->current_context) {
 		intel_i915_gem_context_put(engine->current_context);
 		engine->current_context = NULL;
 	}
-	if (engine->ctl_reg_offset != 0 && engine->dev_priv->mmio_regs_addr != NULL) {
-		intel_i915_write32(engine->dev_priv, engine->ctl_reg_offset, 0);
-	}
+
 	if (engine->hw_seqno_obj) {
 		intel_i915_gem_object_unmap_gtt(engine->hw_seqno_obj);
 		intel_i915_gtt_free_space(engine->dev_priv,
@@ -146,7 +163,16 @@ status_t
 intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords, uint32_t* dword_offset_out)
 {
 	// ... (implementation unchanged) ...
-	if (!engine || !engine->dev_priv || !engine->ring_cpu_map) return B_NO_INIT;
+	if (!engine || !engine->dev_priv || !engine->ring_cpu_map || !engine->dev_priv->mmio_regs_addr)
+		return B_NO_INIT;
+
+	// This function is performance sensitive, ensure forcewake is held by caller if needed for head read.
+	// However, reading HEAD is often done without explicit forcewake in Linux if it's frequent,
+	// assuming the engine activity itself keeps relevant power wells up.
+	// For safety in a less optimized driver, caller should ensure FW.
+	// status_t status = intel_i915_forcewake_get(engine->dev_priv, FW_DOMAIN_RENDER);
+	// if (status != B_OK) return status; // Or B_WOULD_BLOCK if cannot get FW
+
 	mutex_lock(&engine->lock);
 	engine->cpu_ring_head = intel_i915_read32(engine->dev_priv, engine->head_reg_offset)
 		& (engine->ring_size_bytes -1);
@@ -156,16 +182,30 @@ intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords, uint
 	} else {
 		free_space_bytes = engine->cpu_ring_head - engine->cpu_ring_tail;
 	}
-	uint32_t required_bytes = (num_dwords + 8) * sizeof(uint32_t);
+	uint32_t required_bytes = (num_dwords + 8) * sizeof(uint32_t); // +8 for MI_BATCH_BUFFER_END and padding
 	if (free_space_bytes < required_bytes) {
-		mutex_unlock(&engine->lock); return B_WOULD_BLOCK;
+		mutex_unlock(&engine->lock);
+		// intel_i915_forcewake_put(engine->dev_priv, FW_DOMAIN_RENDER); // If acquired above
+		return B_WOULD_BLOCK;
 	}
 	*dword_offset_out = engine->cpu_ring_tail / sizeof(uint32_t);
 	mutex_unlock(&engine->lock);
+	// intel_i915_forcewake_put(engine->dev_priv, FW_DOMAIN_RENDER); // If acquired above
 	return B_OK;
 }
 void intel_engine_write_dword(struct intel_engine_cs* e, uint32_t o, uint32_t v){ if(e&&e->ring_cpu_map) e->ring_cpu_map[o&((e->ring_size_bytes/4)-1)]=v;}
-void intel_engine_advance_tail(struct intel_engine_cs* e, uint32_t n){ if(!e||!e->dev_priv)return;mutex_lock(&e->lock);e->cpu_ring_tail=(e->cpu_ring_tail+n*4)&(e->ring_size_bytes-1);intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);mutex_unlock(&e->lock);}
+void intel_engine_advance_tail(struct intel_engine_cs* e, uint32_t n){
+	if(!e||!e->dev_priv || !e->dev_priv->mmio_regs_addr) return;
+	// Caller should ensure forcewake is held if TAIL write needs it.
+	// status_t status = intel_i915_forcewake_get(e->dev_priv, FW_DOMAIN_RENDER);
+	// if (status != B_OK) return;
+
+	mutex_lock(&e->lock);
+	e->cpu_ring_tail=(e->cpu_ring_tail+n*4)&(e->ring_size_bytes-1);
+	intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);
+	mutex_unlock(&e->lock);
+	// intel_i915_forcewake_put(e->dev_priv, FW_DOMAIN_RENDER);
+}
 
 void
 intel_engine_emit_mi_noop(struct intel_engine_cs* engine)

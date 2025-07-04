@@ -68,45 +68,54 @@
 #define DSPSURF(pipe)			(_PIPE(pipe) + 0x019C)
 #define DSPTILEOFF(pipe)		(_PIPE(pipe) + 0x01A4)
 
+// --- Port Control Registers (Gen7 - IVB/HSW examples) ---
+#define ADPA					0x61100
+	#define ADPA_DAC_ENABLE			(1U << 31)
+#define LVDS					0x61180
+	#define LVDS_PORT_EN			(1U << 31)
+#define DDI_BUF_CTL(port)		(0x64000 + (port) * 0x100) // port is DDI index 0..4
+	#define DDI_BUF_CTL_ENABLE		(1U << 31)
+#define DP_TP_CTL(port)			(0x64040 + (port) * 0x100)
+	#define DP_TP_CTL_ENABLE		(1U << 31)
+
 // --- Interrupt Registers ---
-#define DEIMR			0x4400c
-#define DEIER			0x44008
-#define DEIIR			0x44004
-#define DEISR			0x44000
-	#define DE_MASTER_IRQ_CONTROL		(1U << 31)
+#define DEIMR			0x4400c		// Display Engine Interrupt Mask Register
+#define DEIER			0x44008		// Display Engine Interrupt Enable Register
+#define DEIIR			0x44004		// Display Engine Interrupt Identity Register
+#define DEISR			0x44000		// Display Engine Interrupt Status Register
+	// Common DE Interrupt Bits (Gen specific positions)
+	#define DE_MASTER_IRQ_CONTROL		(1U << 31) // Global enable in DEIER
+	// IvyBridge/Haswell specific bits:
+	#define DE_ERR_IVB					(1U << 25) // Display Engine Error
+	#define DE_PCH_EVENT_IVB			(1U << 18) // Hotplug/AUX from PCH (South Display Engine on HSW)
+	#define DE_DP_A_HOTPLUG_IVB			(1U << 17) // DP Port A specific hotplug (if not via PCH_EVENT)
+	#define DE_AUX_CHANNEL_A_IVB		(1U << 17) // Also AUX Channel A (overlaps with DP_A HPD on some docs)
+	                                               // Need to check SDEIMR/SDEIER/SDEIIR for PCH hotplugs on HSW too.
 	#define DE_PIPEB_VBLANK_IVB			(1U << 15)
 	#define DE_PIPEA_VBLANK_IVB			(1U << 7)
 	#define DE_PIPEC_VBLANK_IVB			(1U << 3)
 
+// South Display Engine Interrupts (Haswell+ for PCH-based hotplug/AUX)
+#define SDEIMR			0xC4004
+#define SDEIER			0xC4000
+#define SDEIIR			0xC4008
+#define SDEISR			0xC400C
+	#define SDE_PORTB_HOTPLUG_HSW		(1U << 3)  // DP/HDMI Port B on PCH
+	#define SDE_PORTC_HOTPLUG_HSW		(1U << 4)  // DP/HDMI Port C on PCH
+	#define SDE_PORTD_HOTPLUG_HSW		(1U << 5)  // DP/HDMI Port D on PCH
+	// AUX channel done bits are also in SDE registers for HSW PCH ports
+
 // GTT Registers
 #define PGTBL_CTL		0x02020
 	#define PGTBL_ENABLE			(1U << 0)
-	// Gen7 GTT PTE bits (Ivy Bridge / Haswell)
-	#define GTT_ENTRY_VALID                 (1U << 0)
-	// For IvyBridge/Haswell, caching is typically controlled by PAT Index selected by PTE bits.
-	// These are *examples* assuming a specific PAT MSR setup.
-	// PTE[1] = PAT_IDX[0]
-	// PTE[2] = PAT_IDX[1]
-	// PTE[6] = PAT_IDX[2] (for IVB+) / PTE[11] for SNB GTT Table
-	// Assuming PAT Index 1 (001b) = WC, PAT Index 2 (010b) = UC- or UC
-	#define GTT_PTE_PAT_IDX0_IVB        (1U << 1) // LSB of PAT Index
-	#define GTT_PTE_PAT_IDX1_IVB        (1U << 2) // Middle bit of PAT Index
-	#define GTT_PTE_PAT_IDX2_IVB        (1U << 6) // MSB of PAT Index (for IVB+)
-
-	// Example combinations:
-	// To select PAT Index 1 (001b) -> set GTT_PTE_PAT_IDX0_IVB
-	#define GTT_PTE_CACHE_WC_GEN7       GTT_PTE_PAT_IDX0_IVB
-	// To select PAT Index 2 (010b) -> set GTT_PTE_PAT_IDX1_IVB
-	#define GTT_PTE_CACHE_UC_GEN7       GTT_PTE_PAT_IDX1_IVB
-	// To select PAT Index 0 (000b) -> no PAT index bits set (usually WB)
-	#define GTT_PTE_CACHE_WB_GEN7       0
-
+	#define GTT_ENTRY_VALID         (1U << 0)
+	#define GTT_PTE_PAT_IDX0_IVB    (1U << 1)
+	#define GTT_PTE_PAT_IDX1_IVB    (1U << 2)
+	#define GTT_PTE_PAT_IDX2_IVB    (1U << 6)
+	#define GTT_PTE_CACHE_WC_GEN7   GTT_PTE_PAT_IDX0_IVB
+	#define GTT_PTE_CACHE_UC_GEN7   GTT_PTE_PAT_IDX1_IVB
+	#define GTT_PTE_CACHE_WB_GEN7   0
 #define HWS_PGA			0x02080
-#define GTTMMADR_PTE_OFFSET_GEN6   0x80000
-
-	#define I915_GTT_PAGE_SHIFT		12
-	#define I915_GTT_ENTRY_SIZE		4
-
 
 // --- GMBUS Registers ---
 #define GMBUS0				0x5100

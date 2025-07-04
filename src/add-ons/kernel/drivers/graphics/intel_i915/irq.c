@@ -7,8 +7,8 @@
  */
 
 #include "irq.h"
-#include "registers.h" // For interrupt register definitions
-#include "intel_i915_priv.h" // For TRACE, intel_i915_read32/write32, intel_i915_device_info
+#include "registers.h"
+#include "intel_i915_priv.h"
 
 #include <KernelExport.h>
 #include <OS.h>
@@ -17,7 +17,7 @@
 status_t
 intel_i915_irq_init(intel_i915_device_info* devInfo)
 {
-	char semName[64]; // Increased size for longer sem name
+	char semName[64];
 	status_t status;
 
 	if (devInfo == NULL || devInfo->shared_info == NULL) {
@@ -66,12 +66,36 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 		return B_NO_INIT;
 	}
 
-	// Disable all display interrupts initially
-	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
-	// Enable Pipe A VBlank interrupt (example for IvyBridge/Haswell)
-	// Also ensure Master IRQ control is set.
-	intel_i915_write32(devInfo, DEIER, DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB);
+	// Disable all display interrupts initially, then enable specific ones.
+	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF); // Mask all display engine IRQs
+
+	uint32 deier_val = DE_MASTER_IRQ_CONTROL;
+	// Enable VBlank for all potential pipes (A, B, C for Gen7)
+	deier_val |= DE_PIPEA_VBLANK_IVB;
+	deier_val |= DE_PIPEB_VBLANK_IVB;
+	if (PRIV_MAX_PIPES > 2) { // If Pipe C is possible
+		deier_val |= DE_PIPEC_VBLANK_IVB;
+	}
+
+	// Enable PCH Hotplug events (for IVB/HSW, this is a general PCH event bit in DEIER)
+	// Specific port hotplug status is then read from SDEISR or other port status registers.
+	deier_val |= DE_PCH_EVENT_IVB;
+	// Also enable specific DP hotplug if available directly on DE (less common for Gen7 CPU, more for PCH/SDE)
+	// deier_val |= DE_DP_A_HOTPLUG_IVB; // Example if Port A had direct HPD on CPU side
+
+	intel_i915_write32(devInfo, DEIER, deier_val);
 	(void)intel_i915_read32(devInfo, DEIER); // Posting read
+
+	// For Haswell and later, PCH hotplugs are often managed via South Display Engine (SDE) interrupts
+	// if (IS_HASWELL(devInfo) || IS_BROADWELL(devInfo)) { // Assuming IS_HASWELL/IS_BROADWELL macros
+	//    intel_i915_write32(devInfo, SDEIMR, 0xFFFFFFFF); // Mask all SDE IRQs
+	//    uint32 sdeier_val = SDE_PORTB_HOTPLUG_HSW | SDE_PORTC_HOTPLUG_HSW | SDE_PORTD_HOTPLUG_HSW;
+	//    intel_i915_write32(devInfo, SDEIER, sdeier_val);
+	//    (void)intel_i915_read32(devInfo, SDEIER); // Posting read
+	//    TRACE("irq_init: SDEIER set to 0x%08" B_PRIx32 ", SDEIMR to 0x%08" B_PRIx32 "\n",
+	//        sdeier_val, intel_i915_read32(devInfo, SDEIMR));
+	// }
+
 
 	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 ", DEIMR to 0x%08" B_PRIx32 " for device 0x%04x\n",
 		intel_i915_read32(devInfo, DEIER), intel_i915_read32(devInfo, DEIMR), devInfo->device_id);
@@ -90,8 +114,12 @@ intel_i915_irq_uninit(intel_i915_device_info* devInfo)
 	if (devInfo->irq_cookie != NULL) {
 		TRACE("irq_uninit: Removing interrupt handler for IRQ %u (device 0x%04x)\n", devInfo->irq_line, devInfo->device_id);
 		if (devInfo->mmio_regs_addr) {
-			intel_i915_write32(devInfo, DEIER, 0);
-			intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
+			intel_i915_write32(devInfo, DEIER, 0); // Disable all CPU display interrupts
+			intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF); // Mask all
+			// if (IS_HASWELL(devInfo) || IS_BROADWELL(devInfo)) {
+			//    intel_i915_write32(devInfo, SDEIER, 0); // Disable PCH display interrupts
+			//    intel_i915_write32(devInfo, SDEIMR, 0xFFFFFFFF); // Mask all
+			// }
 		}
 		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
 		devInfo->irq_cookie = NULL;
@@ -109,55 +137,78 @@ int32
 intel_i915_interrupt_handler(void* data)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)data;
-	uint32 de_iir;
+	uint32 de_iir, de_ier;
 	int32 handledStatus = B_UNHANDLED_INTERRUPT;
 
 	if (!devInfo || !devInfo->mmio_regs_addr) {
 		return B_UNHANDLED_INTERRUPT;
 	}
 
-	de_iir = intel_i915_read32(devInfo, DEIIR);
+	de_ier = intel_i915_read32(devInfo, DEIER); // Get currently enabled interrupts
+	de_iir = intel_i915_read32(devInfo, DEIIR); // Get pending (and enabled) interrupts
 
-	if (de_iir == 0)
+	if (de_iir == 0) // No display interrupts relevant to us (or shared IRQ and not ours)
 		return B_UNHANDLED_INTERRUPT;
 
-	// It's important to only handle interrupts that are also enabled in DEIER
-	// and not masked in DEIMR. However, DEIIR only shows unmasked pending interrupts.
-	uint32 enabled_irqs = intel_i915_read32(devInfo, DEIER);
-	uint32 masked_pending_irqs = de_iir & enabled_irqs;
+	uint32 sde_iir = 0;
+	// if (IS_HASWELL(devInfo) || IS_BROADWELL(devInfo)) {
+	//    sde_iir = intel_i915_read32(devInfo, SDEIIR);
+	// }
 
 
-	if (masked_pending_irqs & DE_PIPEA_VBLANK_IVB) {
+	// VBlank handling
+	if (de_iir & DE_PIPEA_VBLANK_IVB) {
 		if (devInfo->vblank_sem_id >= B_OK) {
 			release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
 		}
 		intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); // Acknowledge
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
-
-	if (masked_pending_irqs & DE_PIPEB_VBLANK_IVB) {
-		// Assuming a single vblank_sem for now, or we'd need per-pipe sems
+	if (de_iir & DE_PIPEB_VBLANK_IVB) {
+		if (devInfo->vblank_sem_id >= B_OK) { // TODO: Per-pipe semaphores needed for multi-monitor
+			release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
+		}
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
+	if (PRIV_MAX_PIPES > 2 && (de_iir & DE_PIPEC_VBLANK_IVB)) {
 		if (devInfo->vblank_sem_id >= B_OK) {
 			release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
 		}
-		intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); // Acknowledge
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB);
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
-	// TODO: Add Pipe C if supported by hardware and enabled.
 
-	// Acknowledge any other pending display interrupts we might not explicitly handle yet
-	// to prevent interrupt storms, but be careful not to clear bits for IRQs handled
-	// by other parts of the driver (e.g. GuC, GT if they share DEIIR bits on some gens)
-	// For now, we only explicitly acknowledge what we handle.
-	// If DEIIR still has unhandled bits for *display engine* IRQs, and they are enabled,
-	// they should be acknowledged.
-	// A common pattern is:
-	// uint32 unhandled_de_irqs = de_iir & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB /* | other handled bits */);
-	// if (unhandled_de_irqs != 0) {
-	//    intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
-	//    // Log these unhandled but acknowledged interrupts
-	// }
+	// Hotplug Handling (stubbed)
+	if (de_iir & DE_PCH_EVENT_IVB) {
+		TRACE("IRQ: PCH Hotplug Event (DEIIR: 0x%08" B_PRIx32")\n", de_iir);
+		// Actual hotplug logic would read SDEIIR on HSW+ or specific port HPD status regs,
+		// then queue a worker to re-probe connectors.
+		intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); // Acknowledge PCH event
+		// if (IS_HASWELL(devInfo) || IS_BROADWELL(devInfo) && sde_iir != 0) {
+		//    TRACE("IRQ: SDEIIR: 0x%08" B_PRIx32"\n", sde_iir);
+		//    intel_i915_write32(devInfo, SDEIIR, sde_iir); // Acknowledge SDE events
+		// }
+		handledStatus = B_HANDLED_INTERRUPT;
+		// TODO: Schedule deferred hotplug processing work.
+	}
+	// Example for direct DP hotplug bit (if applicable and enabled)
+	if (de_iir & DE_DP_A_HOTPLUG_IVB) {
+		TRACE("IRQ: DP Port A Hotplug Event (DEIIR: 0x%08" B_PRIx32")\n", de_iir);
+		intel_i915_write32(devInfo, DEIIR, DE_DP_A_HOTPLUG_IVB);
+		handledStatus = B_HANDLED_INTERRUPT;
+		// TODO: Schedule deferred hotplug processing work for Port A.
+	}
 
+	// Acknowledge any other unexpected but enabled display interrupts to prevent storms
+	uint32 unhandled_de_irqs = de_iir & de_ier &
+		~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) |
+		  DE_PCH_EVENT_IVB | DE_DP_A_HOTPLUG_IVB);
+	if (unhandled_de_irqs != 0) {
+		TRACE("IRQ: Acknowledging unhandled DE interrupts: 0x%08" B_PRIx32 "\n", unhandled_de_irqs);
+		intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
 
 	return handledStatus;
 }

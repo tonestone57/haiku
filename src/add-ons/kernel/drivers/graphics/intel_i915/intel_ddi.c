@@ -43,45 +43,122 @@ intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* po
 
 
 // --- DP Specific Stubs ---
+// Helper for AUX channel transactions
+static status_t
+_intel_dp_aux_ch_xfer(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	bool is_write, uint32_t dpcd_addr, uint8_t* buffer, uint8_t length)
+{
+	if (port->hw_port_index < 0 || port->hw_port_index >= MAX_DDI_PORTS) return B_BAD_INDEX;
+	if (length == 0 || length > 16) return B_BAD_VALUE; // DPCD transfers max 16 bytes
+
+	uint32_t aux_ctl_reg = DDI_AUX_CH_CTL(port->hw_port_index);
+	uint32_t aux_data_reg_base = DDI_AUX_CH_DATA(port->hw_port_index, 0); // Base for DATA1
+
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // AUX CH ops might need forcewake
+
+	// 1. Wait for AUX CH idle (SEND_BUSY bit clear)
+	bigtime_t startTime = system_time();
+	while (system_time() - startTime < AUX_TIMEOUT_US) {
+		if (!(intel_i915_read32(devInfo, aux_ctl_reg) & DDI_AUX_CTL_SEND_BUSY))
+			break;
+		spin(50);
+	}
+	if (intel_i915_read32(devInfo, aux_ctl_reg) & DDI_AUX_CTL_SEND_BUSY) {
+		TRACE("DP AUX: Timeout waiting for channel idle on DDI %d\n", port->hw_port_index);
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_TIMED_OUT;
+	}
+
+	// 2. Program DDI_AUX_CH_DATA registers for writes (up to 5 dwords = 20 bytes)
+	if (is_write) {
+		for (uint8_t i = 0; i < length; i += 4) {
+			uint32_t data_val = 0;
+			uint8_t copy_len = min_c(length - i, 4);
+			memcpy(&data_val, buffer + i, copy_len);
+			intel_i915_write32(devInfo, aux_data_reg_base + (i / 4) * 4, data_val);
+		}
+	}
+
+	// 3. Program DDI_AUX_CH_CTL for the transaction
+	uint32_t aux_cmd;
+	if (is_write) { // Native AUX Write (0x8) or I2C Write (0x0). DPCD is Native AUX.
+		aux_cmd = AUX_CMD_NATIVE_WRITE;
+	} else { // Native AUX Read (0x9) or I2C Read (0x1). DPCD is Native AUX.
+		aux_cmd = AUX_CMD_NATIVE_READ;
+	}
+
+	uint32_t ctl_val = DDI_AUX_CTL_SEND_BUSY | // Trigger transaction
+	                   DDI_AUX_CTL_DONE_INTERRUPT_ENABLE_HSW | // Enable done interrupt (though we poll)
+	                   DDI_AUX_CTL_TIMEOUT_ERROR_ENABLE_HSW |
+	                   DDI_AUX_CTL_RECEIVE_ERROR_ENABLE_HSW |
+	                   DDI_AUX_CTL_MESSAGE_SIZE(length) | // Number of bytes
+	                   (aux_cmd << DDI_AUX_CTL_COMMAND_SHIFT) |
+	                   (dpcd_addr << DDI_AUX_CTL_ADDRESS_SHIFT); // DPCD address (up to 20 bits)
+	// Set timeout value (e.g., 1.6ms = 0x0, 2.0ms=0x1, etc. HSW: default 2ms, bits 11:10)
+	ctl_val |= DDI_AUX_CTL_TIMEOUT_2MS_HSW; // Placeholder for 2ms timeout value
+
+	intel_i915_write32(devInfo, aux_ctl_reg, ctl_val);
+
+	// 4. Poll for completion or error
+	status_t status = B_OK;
+	startTime = system_time();
+	while (system_time() - startTime < AUX_TIMEOUT_US) {
+		uint32_t status_val = intel_i915_read32(devInfo, aux_ctl_reg);
+		if (status_val & DDI_AUX_CTL_TIMEOUT_ERROR_HSW) {
+			TRACE("DP AUX: Transaction TIMEOUT on DDI %d (addr 0x%x)\n", port->hw_port_index, dpcd_addr);
+			status = B_TIMED_OUT; break;
+		}
+		if (status_val & DDI_AUX_CTL_RECEIVE_ERROR_HSW) {
+			TRACE("DP AUX: Transaction RCV_ERROR on DDI %d (addr 0x%x)\n", port->hw_port_index, dpcd_addr);
+			status = B_IO_ERROR; break; // Could be NACK or other error
+		}
+		if (status_val & DDI_AUX_CTL_DONE_INTERRUPT_HSW) { // Poll done bit
+			intel_i915_write32(devInfo, aux_ctl_reg, status_val | DDI_AUX_CTL_DONE_INTERRUPT_HSW); // Ack done
+			status = B_OK; break;
+		}
+		spin(50);
+	}
+	if (status == B_OK && !(intel_i915_read32(devInfo, aux_ctl_reg) & DDI_AUX_CTL_DONE_INTERRUPT_HSW)) {
+		// Loop finished but DONE bit not set (should not happen if timeout didn't trigger)
+		TRACE("DP AUX: Timeout waiting for DONE on DDI %d (addr 0x%x)\n", port->hw_port_index, dpcd_addr);
+		status = B_TIMED_OUT;
+	}
+
+
+	// 5. For reads, get data from DDI_AUX_CH_DATA registers
+	if (status == B_OK && !is_write) {
+		for (uint8_t i = 0; i < length; i += 4) {
+			uint32_t data_val = intel_i915_read32(devInfo, aux_data_reg_base + (i / 4) * 4);
+			uint8_t copy_len = min_c(length - i, 4);
+			memcpy(buffer + i, &data_val, copy_len);
+		}
+	}
+
+	// Clear SEND_BUSY if it's still set after an error, to allow next transaction.
+	// Though hardware should clear it on done/error. Check PRM.
+	// For now, assume HW clears it.
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+
 status_t
 intel_dp_aux_read_dpcd(intel_i915_device_info* devInfo, intel_output_port_state* port,
 	uint16_t address, uint8_t* data, uint8_t length)
 {
-	TRACE("DP AUX: Read DPCD 0x%03x (len %u) on DDI hw_idx %d (STUB)\n",
+	TRACE("DP AUX: Read DPCD 0x%03x (len %u) on DDI hw_idx %d\n",
 		address, length, port->hw_port_index);
-	if (length == 0 || data == NULL) return B_BAD_VALUE;
-	if (port->hw_port_index < 0) return B_BAD_INDEX; // Not a valid DDI for direct AUX
-
-	// Actual Gen7 AUX CH sequence:
-	// 1. Wait for AUX CH idle (poll DDI_AUX_CH_CTL bit InProgress/Busy)
-	// 2. Program DDI_AUX_CH_CTL: Address, Command (I2C_READ/WRITE_DPCD or NATIVE_AUX_READ/WRITE), Length, Timeout, etc.
-	// 3. For writes, load data into DDI_AUX_CH_DATA1-5.
-	// 4. Trigger transaction by setting GO bit in DDI_AUX_CH_CTL.
-	// 5. Poll DDI_AUX_CH_CTL for completion (DONE bit) or error (TIMEOUT, NACK).
-	// 6. For reads, get data from DDI_AUX_CH_DATA1-5.
-	// This is a placeholder.
-	memset(data, 0, length); // Simulate read of zeros
-	if (address == DPCD_MAX_LANE_COUNT && length >= 1) {
-		data[0] = DPCD_LANE_COUNT_4; // Pretend 4 lanes supported
-	} else if (address == DPCD_MAX_LINK_RATE && length >=1) {
-		data[0] = DPCD_LINK_BW_2_7; // Pretend 2.7Gbps supported
-	}
-
-	// Simulate success for basic probing.
-	// A real implementation would return B_IO_ERROR or B_TIMED_OUT on failure.
-	if (port->connected) return B_OK; // Only succeed if "connected" from GMBUS probe
-	return B_IO_ERROR; // Simulate failure if not GMBUS-detected as connected
+	return _intel_dp_aux_ch_xfer(devInfo, port, false, address, data, length);
 }
 
 status_t
 intel_dp_aux_write_dpcd(intel_i915_device_info* devInfo, intel_output_port_state* port,
 	uint16_t address, uint8_t* data, uint8_t length)
 {
-	TRACE("DP AUX: Write DPCD 0x%03x (len %u, data[0]=0x%x) on DDI hw_idx %d (STUB)\n",
+	TRACE("DP AUX: Write DPCD 0x%03x (len %u, data[0]=0x%x) on DDI hw_idx %d\n",
 		address, length, length > 0 ? data[0] : 0, port->hw_port_index);
-	if (port->hw_port_index < 0) return B_BAD_INDEX;
-	// See comments in aux_read.
-	return B_OK; // Stub: Pretend it worked
+	return _intel_dp_aux_ch_xfer(devInfo, port, true, address, data, length);
 }
 
 status_t
@@ -178,35 +255,65 @@ intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* 
 {
 	TRACE("DDI: Port Enable for port %d (hw_idx %d, type %d) on pipe %d\n",
 		port->logical_port_id, port->hw_port_index, port->type, pipe);
-	if (port->hw_port_index < 0) return B_BAD_INDEX;
+	if (port->hw_port_index < 0 || port->hw_port_index >= MAX_DDI_PORTS) return B_BAD_INDEX;
 
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	status_t status = B_OK;
 
-	uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index));
-	ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
-	// TODO: Set DDI_BUF_CTL bits for pipe select (e.g. DDI_BUF_TRANS_SELECT_PIPE_A/B/C),
-	// DDI mode (DP/HDMI/DVI), port width (lanes) based on VBT, port->type, and clocks->dp_link_params.
-	// This is highly Gen7 specific. Example:
-	// ddi_buf_ctl_val &= ~DDI_PORT_TRANS_SEL_MASK;
-	// ddi_buf_ctl_val |= DDI_PORT_TRANS_SEL_PIPE(pipe);
-	// if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
-	//    ddi_buf_ctl_val |= DDI_PORT_MODE_DP_SST;
-	//    ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4; // from clocks->dp_lane_count
-	// } // etc. for HDMI/DVI
-	intel_i915_write32(devInfo, DDI_BUF_CTL(port->hw_port_index), ddi_buf_ctl_val);
-	(void)intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index)); // Posting read
-	TRACE("DDI_BUF_CTL(hw_idx %d) set to 0x%08" B_PRIx32 "\n", port->hw_port_index, ddi_buf_ctl_val);
+	uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+	uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
 
-	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
-		intel_dp_start_link_train(devInfo, port, clocks);
-	} else if (port->type == PRIV_OUTPUT_TMDS_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
-		// HDMI/DVI specific DDI setup (e.g., TMDS clock ratio, HDMI infoframes if HDMI)
-		TRACE("HDMI/DVI DDI setup STUBBED for port %d\n", port->logical_port_id);
-		// For HDMI, might also need to enable audio path via AUD_CONFIG, AUD_HDMIW_STATUS etc.
+	// Clear fields first
+	ddi_buf_ctl_val &= ~(DDI_BUF_CTL_ENABLE | DDI_BUF_CTL_PORT_TRANS_SELECT_MASK_HSW | DDI_BUF_CTL_MODE_SELECT_MASK_HSW);
+
+	// Set Pipe Select (Transcoder Select for DDI on HSW)
+	switch (pipe) {
+		case PRIV_PIPE_A: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_A_HSW; break;
+		case PRIV_PIPE_B: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_B_HSW; break;
+		case PRIV_PIPE_C: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_C_HSW; break;
+		default: TRACE("DDI: Invalid pipe %d for DDI port %d\n", pipe, port->hw_port_index); status = B_BAD_VALUE; goto done;
 	}
 
+	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+		ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_SELECT_DP_SST_HSW;
+		// Port width (lane count) is usually set by link training or VBT.
+		// DDI_BUF_CTL does not directly set lane count on HSW for DP.
+		// It's implicitly determined by link training results and DP_TP_CTL.
+		TRACE("DDI: Configuring port %d for DP/eDP.\n", port->hw_port_index);
+	} else if (port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI) {
+		ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_SELECT_HDMI_HSW; // HDMI and DVI use similar DDI mode
+		// TODO: HDMI specific audio / infoframes setup.
+		// TODO: DVI specific configurations if any.
+		TRACE("DDI: Configuring port %d for HDMI/DVI. Further setup STUBBED.\n", port->hw_port_index);
+	} else {
+		TRACE("DDI: Unsupported port type %d for DDI enable.\n", port->type);
+		status = B_BAD_TYPE; goto done;
+	}
+
+	ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
+	intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+	(void)intel_i915_read32(devInfo, ddi_buf_ctl_reg); // Posting read
+	TRACE("DDI_BUF_CTL(hw_idx %d, reg 0x%x) set to 0x%08" B_PRIx32 "\n",
+		port->hw_port_index, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+
+	// Port-specific enable sequence
+	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+		status = intel_dp_start_link_train(devInfo, port, clocks);
+		if (status != B_OK) {
+			TRACE("DDI: DP Link training failed for port %d.\n", port->hw_port_index);
+			// Attempt to disable DDI_BUF_CTL
+			ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+			intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val & ~DDI_BUF_CTL_ENABLE);
+			goto done;
+		}
+	} else if (port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI) {
+		// Additional HDMI/DVI specific PHY or port enabling steps might be needed.
+		// For now, DDI_BUF_CTL enable is the main step.
+	}
+
+done:
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	return B_OK;
+	return status;
 }
 
 void
@@ -214,22 +321,25 @@ intel_ddi_port_disable(intel_i915_device_info* devInfo, intel_output_port_state*
 {
 	TRACE("DDI: Port Disable for port %d (hw_idx %d, type %d)\n",
 		port->logical_port_id, port->hw_port_index, port->type);
-	if (port->hw_port_index < 0 || !devInfo->mmio_regs_addr) return;
+	if (port->hw_port_index < 0 || port->hw_port_index >= MAX_DDI_PORTS || !devInfo->mmio_regs_addr) return;
 
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 
+	uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+	uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+
 	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
-		intel_dp_stop_link_train(devInfo, port);
-		intel_i915_write32(devInfo, DP_TP_CTL(port->hw_port_index),
-			intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index)) & ~DP_TP_CTL_ENABLE);
-		uint8_t dpcd_val = DPCD_POWER_D3_AUX_OFF;
+		intel_dp_stop_link_train(devInfo, port); // Clear training patterns from DP_TP_CTL and DPCD
+		// Power down the DP panel via DPCD
+		uint8_t dpcd_val = DPCD_POWER_D3_AUX_OFF; // Request D3 state (power off, AUX may remain on for HPD)
 		intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
 	}
 
-	uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index));
-	intel_i915_write32(devInfo, DDI_BUF_CTL(port->hw_port_index), ddi_buf_ctl_val & ~DDI_BUF_CTL_ENABLE);
-	(void)intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index)); // Posting read
+	// Disable the DDI buffer
+	intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val & ~DDI_BUF_CTL_ENABLE);
+	(void)intel_i915_read32(devInfo, ddi_buf_ctl_reg); // Posting read
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	TRACE("DDI Port %d (hw_idx %d) disabled.\n", port->logical_port_id, port->hw_port_index);
+	TRACE("DDI Port %d (hw_idx %d) disabled. DDI_BUF_CTL: 0x%08x\n",
+		port->logical_port_id, port->hw_port_index, intel_i915_read32(devInfo, ddi_buf_ctl_reg));
 }

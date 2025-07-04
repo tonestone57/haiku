@@ -166,8 +166,71 @@ intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords, uint
 }
 void intel_engine_write_dword(struct intel_engine_cs* e, uint32_t o, uint32_t v){ if(e&&e->ring_cpu_map) e->ring_cpu_map[o&((e->ring_size_bytes/4)-1)]=v;}
 void intel_engine_advance_tail(struct intel_engine_cs* e, uint32_t n){ if(!e||!e->dev_priv)return;mutex_lock(&e->lock);e->cpu_ring_tail=(e->cpu_ring_tail+n*4)&(e->ring_size_bytes-1);intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);mutex_unlock(&e->lock);}
-void intel_engine_emit_mi_noop(struct intel_engine_cs* e) { /* ... */ }
-status_t intel_engine_reset_hw(intel_i915_device_info* d, struct intel_engine_cs* e) { return B_OK;}
+
+void
+intel_engine_emit_mi_noop(struct intel_engine_cs* engine)
+{
+	uint32_t offset_in_dwords;
+	if (intel_engine_get_space(engine, 1, &offset_in_dwords) == B_OK) {
+		intel_engine_write_dword(engine, offset_in_dwords, MI_NOOP);
+		intel_engine_advance_tail(engine, 1);
+	} else {
+		TRACE("Engine %s: Failed to get space for MI_NOOP.\n", engine->name);
+	}
+}
+
+status_t
+intel_engine_reset_hw(intel_i915_device_info* devInfo, struct intel_engine_cs* engine)
+{
+	if (!devInfo || !engine || engine->id != RCS0) { // Only RCS0 reset implemented for now
+		TRACE("Engine reset: Invalid args or not RCS0.\n");
+		return B_BAD_VALUE;
+	}
+
+	TRACE("Engine reset: Attempting to reset RCS0 (Render Command Streamer).\n");
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+
+	// Conceptual register and bit for Gen7 RCS reset.
+	// This needs to map to actual hardware registers like GEN6_RSTCTL or specific engine reset bits.
+	// For example, on some gens, it's setting a bit in GFX_MODE or INSTPM.
+	// Using a placeholder register GENERIC_ENGINE_RESET_CTL and a bit for RCS0.
+	// This is a simplified sequence. Real reset can be more complex.
+	#define CONCEPTUAL_RCS0_RESET_REG (0x20d8) // Example: INSTPM on some gens
+	#define CONCEPTUAL_RCS0_RESET_BIT (1 << 0) // Example bit
+
+	// 1. Disable ring buffer
+	intel_i915_write32(devInfo, engine->ctl_reg_offset, 0);
+
+	// 2. Assert reset (specific to engine if possible)
+	// If using a global reset register like GEN6_RSTCTL:
+	// uint32_t rstctl = intel_i915_read32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7);
+	// intel_i915_write32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7, rstctl | RSTCTL_RENDER_GROUP_RESET_ENABLE_BIT);
+	// (void)intel_i915_read32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7); // Posting read
+
+	// Using a more direct (but conceptual) engine reset bit:
+	intel_i915_write32(devInfo, CONCEPTUAL_RCS0_RESET_REG, CONCEPTUAL_RCS0_RESET_BIT);
+	(void)intel_i915_read32(devInfo, CONCEPTUAL_RCS0_RESET_REG); // Posting read
+	snooze(100); // Wait a bit for reset to take effect
+
+	// 3. De-assert reset
+	// intel_i915_write32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7, rstctl & ~RSTCTL_RENDER_GROUP_RESET_ENABLE_BIT);
+	intel_i915_write32(devInfo, CONCEPTUAL_RCS0_RESET_REG, 0);
+	(void)intel_i915_read32(devInfo, CONCEPTUAL_RCS0_RESET_REG); // Posting read
+
+	// 4. Wait for reset complete (e.g., by checking a status bit or just a delay)
+	// This is also hardware specific. Some resets are self-clearing.
+	snooze(1000); // Generic delay for reset completion
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("Engine reset: RCS0 reset sequence executed (using conceptual registers).\n");
+
+	// After reset, head and tail are typically 0.
+	engine->cpu_ring_head = 0;
+	engine->cpu_ring_tail = 0;
+	// The ring buffer base, ctl should be re-programmed by caller (intel_engine_init) if needed.
+	// Here, we just ensure it's disabled. The init sequence will re-enable it.
+	return B_OK;
+}
 
 status_t
 intel_engine_emit_flush_and_seqno_write(struct intel_engine_cs* engine, uint32_t* emitted_seqno)

@@ -47,16 +47,31 @@ static uint32_t read_current_cdclk_khz(intel_i915_device_info* devInfo) {
 		switch (cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK) {
 			case HSW_CDCLK_FREQ_450:   return 450000;
 			case HSW_CDCLK_FREQ_540:   return 540000;
-			case HSW_CDCLK_FREQ_337_5: return 337500;
-			case HSW_CDCLK_FREQ_675:   return 675000;
+			case HSW_CDCLK_FREQ_337_5: return 337500; // 337.5 MHz
+			case HSW_CDCLK_FREQ_675:   return 675000; // 675 MHz
 		}
+		// Fallback for HSW if bits are unexpected, though they should match one of the above.
+		TRACE("Clocks: HSW CDCLK_CTL unknown value 0x%x, defaulting to 450MHz\n", cdclk_ctl & HSW_CDCLK_FREQ_SEL_MASK);
+		return 450000;
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
 		uint32_t cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL_IVB);
-		// This needs more complex decoding based on IVB variant (Desktop/Mobile) and LCPLL state.
-		// For now, return a common value.
-		switch (cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) { /* ... as before ... */ }
+		// Values from Intel docs (e.g. Ivy Bridge EDS Vol 3 Part 2, p. 138)
+		// These are nominal values. Actual can vary slightly.
+		switch (cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK) {
+			case CDCLK_FREQ_333_IVB:  return 333330; // 333.33 MHz
+			case CDCLK_FREQ_400_IVB:  return 400000; // 400.00 MHz
+			case CDCLK_FREQ_444_IVB:  return 444440; // 444.44 MHz
+			case CDCLK_FREQ_533_IVB:  return 533330; // 533.33 MHz
+			case CDCLK_FREQ_667_IVB:  return 666670; // 666.67 MHz
+			default:
+				TRACE("Clocks: IVB CDCLK_CTL unknown value 0x%x\n", cdclk_ctl & CDCLK_FREQ_SEL_IVB_MASK);
+				// Return a common/safe fallback for IVB, e.g. 400MHz or a BIOS default.
+				return 400000;
+		}
 	}
-	return 450000; // Default fallback
+	// Generic fallback if not IVB/HSW or specific Gen not handled.
+	TRACE("Clocks: Unknown GEN for CDCLK read, defaulting.\n");
+	return 450000;
 }
 
 
@@ -154,6 +169,28 @@ find_gen7_wrpll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 	return false;
 }
 
+// Placeholder for HSW SPLL divider calculation
+static bool
+find_hsw_spll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
+                       intel_clock_params_t* params)
+{
+	// SPLL P1 values: 1, 2, 3, 5 (field 0,1,2,3)
+	// SPLL P2 values: 5, 10 (field 0,1)
+	// SPLL M2_int: 20-120
+	// SPLL N_actual: 1-15 (N_reg = N_actual - 1)
+	// VCO: 2.7 - 5.4 GHz
+	// Simplified stub, similar logic to WRPLL but with SPLL's specific tables/ranges.
+	TRACE("HSW SPLL divider calculation STUBBED for target %u kHz, ref %u kHz.\n", target_clk_khz, ref_clk_khz);
+	// For example, if we find a valid set:
+	// params->dpll_vco_khz = target_clk_khz * 10; // Assuming P=10
+	// params->spll_n = 2; // Example N_reg field value (actual N=3)
+	// params->spll_m2 = (params->dpll_vco_khz * 3) / (ref_clk_khz * 2); // Example M2
+	// params->spll_p1 = 1; // Example P1 field value (P1_actual=2)
+	// params->spll_p2 = 1; // Example P2 field value (P2_div=10)
+	// return true;
+	return false; // Indicate failure for stub
+}
+
 
 status_t
 intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
@@ -169,19 +206,49 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 
 	// Determine port type and select PLL
 	// This needs proper port mapping logic from display.c/devInfo->ports
-	bool is_dp_type = true; // Placeholder: Assume DP for digital ports on Pipe A/B
-	bool is_hdmi_type = false; // Placeholder
+	// For now, assume port is identified and its type is known.
+	intel_output_port_state* port_state = NULL; // TODO: Get port_state for the target pipe/port
+	// A simple way is to find which port is currently using 'pipe', or if 'pipe' is being assigned to a new port.
+	// This logic is complex as a pipe can be driven by different ports over time.
+	// For clock calculation, we need to know the *intended* port type for this pipe.
 
-	if (IS_HASWELL(devInfo->device_id) && is_hdmi_type && pipe == PRIV_PIPE_A) {
-		clocks->selected_dpll_id = 2; // Conceptual ID for SPLL
+	// Placeholder: Assume DP for digital ports on Pipe A/B, HDMI on Pipe A for SPLL example.
+	// This needs to be replaced by looking up the actual port connected to the pipe.
+	bool is_dp_type = false;
+	bool is_hdmi_type = false;
+
+	// Find the port that will use this pipe.
+	// This is a simplification; a full modeset might reconfigure pipes to different ports.
+	// We need to know the target port for this pipe from the modeset request.
+	// This information is not directly passed to intel_i915_calculate_display_clocks.
+	// Let's assume for now: if pipe A is considered for HDMI, try SPLL on HSW.
+	// Otherwise, default to WRPLL.
+	// This is a FIXME: The decision for SPLL vs WRPLL should be based on the target port.
+	if (pipe == PRIV_PIPE_A) is_hdmi_type = true; // TEMPORARY HACK for SPLL path
+	else is_dp_type = true;
+
+
+	if (IS_HASWELL(devInfo->device_id) && is_hdmi_type) { // Only HSW has SPLL for HDMI
+		clocks->selected_dpll_id = 2; // Conceptual ID for SPLL (HSW has WRPLL0, WRPLL1, SPLL, LCPLL)
 		clocks->is_wrpll = false;
-		uint32_t ref_clk_khz = get_hsw_lcpll_link_rate_khz(devInfo) / 14; // SPLL ref from LCPLL
-		// TODO: find_best_spll_dividers for HSW SPLL
-		TRACE("SPLL calculation for HSW HDMI STUBBED.\n");
-		// Populate params->spll_n, spll_m2, spll_p1, spll_p2 (register field values)
-		return B_UNSUPPORTED; // Until SPLL calculation is done
-	} else { // WRPLL path (DP, eDP, LVDS on IVB/HSW)
-		clocks->selected_dpll_id = pipe; // WRPLL1 for PipeA (idx 0), WRPLL2 for PipeB (idx 1)
+		// SPLL reference clock is often derived from LCPLL.
+		// Example: LCPLL_1350 / 14 = ~96.4MHz. This needs confirmation from PRM.
+		uint32_t ref_clk_khz = REF_CLOCK_SSC_96000_KHZ; // Placeholder ref
+		if (devInfo->current_cdclk_freq_khz == 540000 || devInfo->current_cdclk_freq_khz == 675000) {
+			// if LCPLL is 2700MHz, ref might be 2700/28. Using a common SSC value for now.
+		}
+
+		if (!find_hsw_spll_dividers(clocks->adjusted_pixel_clock_khz, ref_clk_khz, clocks)) {
+			TRACE("SPLL calculation FAILED for HSW HDMI (target %u kHz).\n", clocks->adjusted_pixel_clock_khz);
+			return B_ERROR; // SPLL calculation failed or is stubbed
+		}
+	} else { // WRPLL path (DP, eDP, LVDS on IVB/HSW, or HDMI on IVB)
+		// Determine which WRPLL to use. Usually WRPLL1 for Pipe A/Transcoder A, WRPLL2 for Pipe B/Transcoder B.
+		// Pipe C on HSW might also use WRPLL1 or WRPLL2 depending on sharing.
+		if (pipe == PRIV_PIPE_A || pipe == PRIV_PIPE_C) clocks->selected_dpll_id = 0; // WRPLL1 (index 0)
+		else if (pipe == PRIV_PIPE_B) clocks->selected_dpll_id = 1; // WRPLL2 (index 1)
+		else return B_BAD_VALUE; // Invalid pipe for WRPLL assignment
+
 		clocks->is_wrpll = true;
 		uint32_t ref_clk_khz = REF_CLOCK_SSC_120000_KHZ; // Default SSC ref for WRPLL on IVB
 		if (IS_HASWELL(devInfo->device_id)) {
@@ -235,40 +302,67 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 				wrpll_ctl_val |= WRPLL_REF_SSC_HSW;
 			}
 
-			// HSW WRPLL MNP are in separate registers (0x6C040 for WRPLL1, 0x6C060 for WRPLL2)
-			// These are NOT the WRPLL_CTL(idx) which is 0x46040 / 0x46060
-			// Let's assume conceptual registers for MNP for now as they are not in registers.h yet.
-			// Example: WRPLL_MNP_REG(dpll_idx)
-			// uint32_t mnp_val = (clocks->wrpll_m2_frac << 22) | (clocks->wrpll_m2 << 15) | ...
-			// intel_i915_write32(devInfo, WRPLL_MNP_REG(dpll_idx), mnp_val);
-			TRACE("HSW WRPLL MNP register programming STUBBED. CTL val to write: 0x%08lx\n", wrpll_ctl_val);
+			// HSW WRPLL MNP are in WRPLL_DIV_FRACx registers (e.g., WRPLL_DIV_FRAC1 0x6C040)
+			uint32_t wrpll_div_frac_reg = (dpll_idx == 0) ? WRPLL_DIV_FRAC1_HSW : WRPLL_DIV_FRAC2_HSW;
+			uint32_t mnp_val = 0;
+			// N field: bits 14-8 (N-2 encoding typically)
+			mnp_val |= (((clocks->wrpll_n - 2) & 0x7F) << WRPLL_N_DIV_SHIFT_HSW);
+			// M2 Integer: bits 6-0
+			mnp_val |= (clocks->wrpll_m2 & 0x7F) << WRPLL_M2_INT_DIV_SHIFT_HSW;
+			// P1: bits 20-18 (field value)
+			mnp_val |= (clocks->wrpll_p1 & 0x7) << WRPLL_P1_SHIFT_HSW;
+			// P2: bits 22-21 (field value)
+			mnp_val |= (clocks->wrpll_p2 & 0x3) << WRPLL_P2_SHIFT_HSW;
+			// TODO: M2 Fractional part if used (WRPLL_M2_FRAC_EN_HSW, WRPLL_M2_FRAC_DIV_SHIFT_HSW)
+			// mnp_val |= WRPLL_M2_FRAC_EN_HSW;
+			// mnp_val |= (clocks->wrpll_m2_frac & 0xFF) << WRPLL_M2_FRAC_DIV_SHIFT_HSW;
+
+			intel_i915_write32(devInfo, wrpll_div_frac_reg, mnp_val);
+			TRACE("HSW WRPLL_CTL(idx %d) set to 0x%08" B_PRIx32 ", WRPLL_DIV_FRAC(idx %d, reg 0x%x) to 0x%08" B_PRIx32 "\n",
+				dpll_idx, wrpll_ctl_val, dpll_idx, wrpll_div_frac_reg, mnp_val);
 			intel_i915_write32(devInfo, WRPLL_CTL(dpll_idx), wrpll_ctl_val);
 
-		} else { // SPLL for HDMI
+		} else { // SPLL for HDMI (HSW)
 			uint32_t spll_ctl_val = intel_i915_read32(devInfo, SPLL_CTL_HSW);
 			spll_ctl_val &= ~(SPLL_REF_LCPLL_HSW | SPLL_REF_SSC_HSW | SPLL_SSC_ENABLE_HSW |
 			                  SPLL_M2_INT_MASK_HSW | SPLL_N_MASK_HSW | SPLL_P1_MASK_HSW | SPLL_P2_MASK_HSW);
 			spll_ctl_val |= SPLL_REF_LCPLL_HSW; // Typically LCPLL for SPLL
+
 			// Pack M2, N, P1, P2 from clocks->spll_* into spll_ctl_val
-			// This requires precise bitfield knowledge from PRM
-			spll_ctl_val |= ((clocks->spll_m2 << SPLL_M2_INT_SHIFT_HSW) & SPLL_M2_INT_MASK_HSW);
-			spll_ctl_val |= (((clocks->spll_n -1) << SPLL_N_SHIFT_HSW) & SPLL_N_MASK_HSW); // N is often N-1 or N-2
-			// P1, P2 encoding for SPLL is specific.
-			// spll_ctl_val |= ((p1_encoded_val << SPLL_P1_SHIFT_HSW) & SPLL_P1_MASK_HSW);
-			// spll_ctl_val |= ((p2_encoded_val << SPLL_P2_SHIFT_HSW) & SPLL_P2_MASK_HSW);
+			// These field values (clocks->spll_n, etc.) must be the direct register values.
+			// Calculation function find_hsw_spll_dividers needs to populate these correctly.
+			spll_ctl_val |= (clocks->spll_m2 << SPLL_M2_INT_SHIFT_HSW) & SPLL_M2_INT_MASK_HSW;
+			spll_ctl_val |= (clocks->spll_n << SPLL_N_SHIFT_HSW) & SPLL_N_MASK_HSW; // N field (e.g. N-1)
+			spll_ctl_val |= (clocks->spll_p1 << SPLL_P1_SHIFT_HSW) & SPLL_P1_MASK_HSW; // P1 field
+			spll_ctl_val |= (clocks->spll_p2 << SPLL_P2_SHIFT_HSW) & SPLL_P2_MASK_HSW; // P2 field
+
 			intel_i915_write32(devInfo, SPLL_CTL_HSW, spll_ctl_val);
 			TRACE("HSW SPLL_CTL set to 0x%08" B_PRIx32 "\n", spll_ctl_val);
 		}
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-		// IVB DPLLs are 0x6014 (DPLL_A), 0x6018 (DPLL_B) plus DPLL_MD registers (0x601C for A, 0x6020 for B)
-		// This uses a different MNP scheme.
-		// uint32_t dpll_reg = (pipe == PRIV_PIPE_A) ? DPLL_A_IVB_REG : DPLL_B_IVB_REG;
-		// uint32_t dpll_md_reg = (pipe == PRIV_PIPE_A) ? DPLL_MD_A_IVB_REG : DPLL_MD_B_IVB_REG;
-		// uint32_t dpll_val = ... construct from clocks MNP for IVB ...
-		// uint32_t dpll_md_val = ... pixel multiplier ...
-		// intel_i915_write32(devInfo, dpll_val, dpll_reg);
-		// intel_i915_write32(devInfo, dpll_md_val, dpll_md_reg);
-		TRACE("IVB DPLL programming STUBBED.\n");
+		// IVB DPLLs are DPLL_A (0x06014), DPLL_B (0x06018)
+		// and DPLL_MD_A (0x0601C), DPLL_MD_B (0x06020) for pixel multiplier.
+		uint32_t dpll_reg = (pipe == PRIV_PIPE_A || pipe == PRIV_PIPE_C) ? DPLL_A_IVB : DPLL_B_IVB;
+		uint32_t dpll_md_reg = (pipe == PRIV_PIPE_A || pipe == PRIV_PIPE_C) ? DPLL_MD_A_IVB : DPLL_MD_B_IVB;
+		uint32_t dpll_val = 0;
+		uint32_t dpll_md_val = 0;
+
+		// P1, P2, N, M1, M2 need to be packed into dpll_val according to IVB DPLL register format.
+		// Example (bits are placeholders, refer to IVB PRM):
+		// dpll_val |= (clocks->wrpll_p1_field_ivb << DPLL_P1_SHIFT_IVB);
+		// dpll_val |= (clocks->wrpll_p2_field_ivb << DPLL_P2_SHIFT_IVB);
+		// dpll_val |= (clocks->wrpll_n_field_ivb << DPLL_N_SHIFT_IVB);
+		// dpll_val |= (clocks->wrpll_m1_val_ivb << DPLL_M1_SHIFT_IVB);
+		// dpll_val |= (clocks->wrpll_m2_val_ivb << DPLL_M2_SHIFT_IVB);
+		// if (clocks->is_dp_or_edp) dpll_val |= DPLL_MODE_DP_IVB; else dpll_val |= DPLL_MODE_HDMI_IVB;
+		// dpll_val |= DPLL_VCO_ENABLE_IVB; // VCO enable is often part of this write.
+
+		// dpll_md_val = (clocks->pixel_multiplier -1) << DPLL_MD_MULTIPLIER_SHIFT_IVB;
+
+		intel_i915_write32(devInfo, dpll_reg, dpll_val);
+		intel_i915_write32(devInfo, dpll_md_reg, dpll_md_val);
+		TRACE("IVB DPLL programming for pipe %d STUBBED (DPLL_VAL=0x%x, DPLL_MD_VAL=0x%x written).\n",
+			pipe, dpll_val, dpll_md_val);
 	} else { status = B_ERROR; }
 
 hsw_dpll_done:

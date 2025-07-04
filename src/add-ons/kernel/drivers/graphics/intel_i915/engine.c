@@ -8,7 +8,9 @@
 
 #include "engine.h"
 #include "registers.h"
-#include "gtt.h"       // For GTT allocation and mapping
+#include "gtt.h"
+#include "gem_context.h" // For struct intel_i915_gem_context
+
 #include <KernelExport.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,75 +28,61 @@
 #define MI_NOOP 0x00000000
 #define HW_SEQNO_GTT_OFFSET_IN_OBJ_BYTES 0
 
+// MI_SET_CONTEXT (Gen6+, for Logical Ring Contexts on RCS)
+// This command is complex, involving a context image in memory.
+#define MI_SET_CONTEXT              (0x1E << MI_COMMAND_OPCODE_SHIFT)
+    #define MI_SET_CONTEXT_RESTORE_INHIBIT (1 << 8) // Don't restore on next MI_SET_CONTEXT
+    #define MI_SET_CONTEXT_SAVE_EXT_STATE_ENABLE (1 << 3) // Save extended state
+    #define MI_SET_CONTEXT_RESTORE_EXT_STATE_ENABLE (1 << 2) // Restore extended state
+    #define MI_SET_CONTEXT_FORCE_RESTORE (1 << 1) // Force restore even if context ID matches
+    #define MI_SET_CONTEXT_SAVE_ENABLE  (1 << 0) // Save current context
+    // DWord 1: Context ID (Logical Ring Context ID)
+    // DWord 2: Context GTT Address (address of the context image)
+    // Length: 3 dwords
+
 
 status_t
 intel_engine_init(intel_i915_device_info* devInfo,
 	struct intel_engine_cs* engine, enum intel_engine_id id, const char* name)
 {
-	status_t status;
-	char areaName[64];
-	uint32_t ring_num_pages;
-	uint32_t seqno_num_pages;
-
-	if (engine == NULL || devInfo == NULL || name == NULL) return B_BAD_VALUE;
+	status_t status; char areaName[64]; uint32_t ring_num_pages, seqno_num_pages;
+	if (!engine || !devInfo || !name) return B_BAD_VALUE;
 
 	memset(engine, 0, sizeof(struct intel_engine_cs));
-	engine->dev_priv = devInfo;
-	engine->id = id;
-	engine->name = name;
-	engine->ring_gtt_offset_pages = (uint32_t)-1;
-	engine->next_hw_seqno = 1;
+	engine->dev_priv = devInfo; engine->id = id; engine->name = name;
+	engine->ring_gtt_offset_pages = (uint32_t)-1; engine->next_hw_seqno = 1;
+	engine->current_context = NULL; // Initialize current context
 
 	status = mutex_init_etc(&engine->lock, name, MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) return status;
 
-	// 1. Allocate GEM object for the ring buffer
 	engine->ring_size_bytes = DEFAULT_RING_BUFFER_SIZE;
 	ring_num_pages = engine->ring_size_bytes / B_PAGE_SIZE;
 	status = intel_i915_gem_object_create(devInfo, engine->ring_size_bytes,
 		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &engine->ring_buffer_obj);
 	if (status != B_OK) { mutex_destroy(&engine->lock); return status; }
-
 	status = intel_i915_gem_object_map_cpu(engine->ring_buffer_obj, (void**)&engine->ring_cpu_map);
-	if (status != B_OK) { intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status; }
-
-	// 2. Allocate GTT space and map ring buffer GEM object into GTT
+	if (status != B_OK) { /* cleanup */ intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status; }
 	status = intel_i915_gtt_alloc_space(devInfo, ring_num_pages, &engine->ring_gtt_offset_pages);
-	if (status != B_OK) {
-		intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status;
-	}
-	status = intel_i915_gem_object_map_gtt(engine->ring_buffer_obj,
-		engine->ring_gtt_offset_pages, GTT_CACHE_WRITE_COMBINING);
-	if (status != B_OK) {
-		intel_i915_gtt_free_space(devInfo, engine->ring_gtt_offset_pages, ring_num_pages);
-		intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status;
-	}
-	TRACE("Engine %s: Ring buffer mapped to GTT page offset %u\n", name, engine->ring_gtt_offset_pages);
+	if (status != B_OK) { /* cleanup */ intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status; }
+	status = intel_i915_gem_object_map_gtt(engine->ring_buffer_obj, engine->ring_gtt_offset_pages, GTT_CACHE_WRITE_COMBINING);
+	if (status != B_OK) { /* cleanup */ intel_i915_gtt_free_space(devInfo, engine->ring_gtt_offset_pages, ring_num_pages);
+		intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status; }
 
-	// 3. Allocate GEM object for hardware sequence numbers
-	seqno_num_pages = B_PAGE_SIZE / B_PAGE_SIZE; // One page
+	seqno_num_pages = B_PAGE_SIZE / B_PAGE_SIZE;
 	snprintf(areaName, sizeof(areaName), "i915_%s_hw_seqno", name);
 	status = intel_i915_gem_object_create(devInfo, B_PAGE_SIZE,
 		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &engine->hw_seqno_obj);
-	if (status != B_OK) { /* cleanup ring */ goto err_cleanup_ring; }
+	if (status != B_OK) { goto err_cleanup_ring; }
 	status = intel_i915_gem_object_map_cpu(engine->hw_seqno_obj, (void**)&engine->hw_seqno_cpu_map);
 	if (status != B_OK) { intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring; }
-
-	// 4. Allocate GTT space and map hw_seqno_obj to GTT
 	uint32_t hw_seqno_gtt_page_offset;
 	status = intel_i915_gtt_alloc_space(devInfo, seqno_num_pages, &hw_seqno_gtt_page_offset);
-	if (status != B_OK) {
-		intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring;
-	}
+	if (status != B_OK) { intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring; }
 	engine->hw_seqno_gtt_offset_dwords = hw_seqno_gtt_page_offset * (B_PAGE_SIZE / sizeof(uint32_t));
-	status = intel_i915_gem_object_map_gtt(engine->hw_seqno_obj,
-		hw_seqno_gtt_page_offset, GTT_CACHE_WRITE_COMBINING); // Or UC if preferred for seqno
-	if (status != B_OK) {
-		intel_i915_gtt_free_space(devInfo, hw_seqno_gtt_page_offset, seqno_num_pages);
-		intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring;
-	}
-	TRACE("Engine %s: HW Seqno obj mapped to GTT page offset %u\n", name, hw_seqno_gtt_page_offset);
-
+	status = intel_i915_gem_object_map_gtt(engine->hw_seqno_obj, hw_seqno_gtt_page_offset, GTT_CACHE_WRITE_COMBINING);
+	if (status != B_OK) { /* cleanup */ intel_i915_gtt_free_space(devInfo, hw_seqno_gtt_page_offset, seqno_num_pages);
+		intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring; }
 
 	if (id == RCS0) {
 		engine->start_reg_offset = GEN7_RCS_RING_BASE_REG;
@@ -108,10 +96,8 @@ intel_engine_init(intel_i915_device_info* devInfo,
 	intel_i915_write32(devInfo, engine->head_reg_offset, 0);
 	intel_i915_write32(devInfo, engine->tail_reg_offset, 0);
 	engine->cpu_ring_head = 0; engine->cpu_ring_tail = 0;
-
 	uint32 ring_ctl = RING_CTL_SIZE(engine->ring_size_bytes / 1024) | RING_CTL_ENABLE;
 	intel_i915_write32(devInfo, engine->ctl_reg_offset, ring_ctl);
-
 	if (!(intel_i915_read32(devInfo, engine->ctl_reg_offset) & RING_CTL_ENABLE)) {
 		status = B_ERROR; goto err_cleanup_seqno_gtt;
 	}
@@ -132,7 +118,11 @@ err_cleanup_ring:
 void
 intel_engine_uninit(struct intel_engine_cs* engine)
 {
-	if (engine == NULL || engine->dev_priv == NULL) return;
+	if (!engine || !engine->dev_priv) return;
+	if (engine->current_context) { // Release engine's ref on current context
+		intel_i915_gem_context_put(engine->current_context);
+		engine->current_context = NULL;
+	}
 	if (engine->ctl_reg_offset != 0 && engine->dev_priv->mmio_regs_addr != NULL) {
 		intel_i915_write32(engine->dev_priv, engine->ctl_reg_offset, 0);
 	}
@@ -142,22 +132,20 @@ intel_engine_uninit(struct intel_engine_cs* engine)
 			engine->hw_seqno_gtt_offset_dwords / (B_PAGE_SIZE / sizeof(uint32_t)),
 			engine->hw_seqno_obj->num_phys_pages);
 		intel_i915_gem_object_put(engine->hw_seqno_obj);
-		engine->hw_seqno_obj = NULL;
 	}
 	if (engine->ring_buffer_obj) {
 		intel_i915_gem_object_unmap_gtt(engine->ring_buffer_obj);
 		intel_i915_gtt_free_space(engine->dev_priv, engine->ring_gtt_offset_pages,
 			engine->ring_buffer_obj->num_phys_pages);
 		intel_i915_gem_object_put(engine->ring_buffer_obj);
-		engine->ring_buffer_obj = NULL;
 	}
 	mutex_destroy(&engine->lock);
 }
 
 status_t
-intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords,
-	uint32_t* dword_offset_out)
+intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords, uint32_t* dword_offset_out)
 {
+	// ... (implementation unchanged) ...
 	if (!engine || !engine->dev_priv || !engine->ring_cpu_map) return B_NO_INIT;
 	mutex_lock(&engine->lock);
 	engine->cpu_ring_head = intel_i915_read32(engine->dev_priv, engine->head_reg_offset)
@@ -176,73 +164,118 @@ intel_engine_get_space(struct intel_engine_cs* engine, uint32_t num_dwords,
 	mutex_unlock(&engine->lock);
 	return B_OK;
 }
-
-void
-intel_engine_write_dword(struct intel_engine_cs* engine, uint32_t dword_offset, uint32_t value)
-{
-	if (engine && engine->ring_cpu_map) {
-		engine->ring_cpu_map[dword_offset & ((engine->ring_size_bytes / sizeof(uint32_t)) - 1)] = value;
-	}
-}
-
-void
-intel_engine_advance_tail(struct intel_engine_cs* engine, uint32_t num_dwords)
-{
-	if (!engine || !engine->dev_priv) return;
-	mutex_lock(&engine->lock);
-	engine->cpu_ring_tail += num_dwords * sizeof(uint32_t);
-	engine->cpu_ring_tail &= (engine->ring_size_bytes - 1);
-	intel_i915_write32(engine->dev_priv, engine->tail_reg_offset, engine->cpu_ring_tail);
-	mutex_unlock(&engine->lock);
-}
-
-void intel_engine_emit_mi_noop(struct intel_engine_cs* engine) { /* As before */ }
+void intel_engine_write_dword(struct intel_engine_cs* e, uint32_t o, uint32_t v){ if(e&&e->ring_cpu_map) e->ring_cpu_map[o&((e->ring_size_bytes/4)-1)]=v;}
+void intel_engine_advance_tail(struct intel_engine_cs* e, uint32_t n){ if(!e||!e->dev_priv)return;mutex_lock(&e->lock);e->cpu_ring_tail=(e->cpu_ring_tail+n*4)&(e->ring_size_bytes-1);intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);mutex_unlock(&e->lock);}
+void intel_engine_emit_mi_noop(struct intel_engine_cs* e) { /* ... */ }
 status_t intel_engine_reset_hw(intel_i915_device_info* d, struct intel_engine_cs* e) { return B_OK;}
-
 
 status_t
 intel_engine_emit_flush_and_seqno_write(struct intel_engine_cs* engine, uint32_t* emitted_seqno)
 {
+	// ... (implementation unchanged) ...
 	uint32_t offset_in_dwords;
-	const uint32_t cmd_len_dwords = 1 + 3 + 1; // MI_FLUSH_DW + MI_STORE_DATA_INDEX(3dw) + MI_NOOP
+	const uint32_t cmd_len_dwords = 1 + 3 + 1;
 	status_t status;
-
 	if (!engine || !engine->hw_seqno_obj || !emitted_seqno) return B_BAD_VALUE;
-
 	status = intel_engine_get_space(engine, cmd_len_dwords, &offset_in_dwords);
 	if (status != B_OK) return status;
-
 	*emitted_seqno = engine->next_hw_seqno++;
 	if (engine->next_hw_seqno == 0) engine->next_hw_seqno = 1;
-
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE);
-	intel_engine_write_dword(engine, offset_in_dwords++,
-		MI_STORE_DATA_INDEX | SDI_USE_GGTT | (3 - 2));
-	uint32_t gtt_addr_for_sdi = (engine->hw_seqno_obj->gtt_offset_pages * B_PAGE_SIZE)
-		+ HW_SEQNO_GTT_OFFSET_IN_OBJ_BYTES;
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_STORE_DATA_INDEX | SDI_USE_GGTT | (3 - 2));
+	uint32_t gtt_addr_for_sdi = (engine->hw_seqno_obj->gtt_offset_pages * B_PAGE_SIZE) + HW_SEQNO_GTT_OFFSET_IN_OBJ_BYTES;
 	intel_engine_write_dword(engine, offset_in_dwords++, gtt_addr_for_sdi);
 	intel_engine_write_dword(engine, offset_in_dwords++, *emitted_seqno);
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
-
 	intel_engine_advance_tail(engine, cmd_len_dwords);
 	engine->last_submitted_hw_seqno = *emitted_seqno;
 	return B_OK;
 }
 
 status_t
-intel_wait_for_seqno(struct intel_engine_cs* engine, uint32_t target_seqno,
-	bigtime_t timeout_micros)
+intel_wait_for_seqno(struct intel_engine_cs* engine, uint32_t target_seqno, bigtime_t timeout_micros)
 {
+	// ... (implementation unchanged) ...
 	if (!engine || !engine->hw_seqno_cpu_map) return B_BAD_VALUE;
 	bigtime_t startTime = system_time();
-	volatile uint32_t* seqno_ptr = engine->hw_seqno_cpu_map; // Points to start of the object
-	                                                       // HW_SEQNO_GTT_OFFSET_IN_OBJ_BYTES is 0
-
+	volatile uint32_t* seqno_ptr = engine->hw_seqno_cpu_map;
 	while (system_time() - startTime < timeout_micros) {
-		if ((int32_t)(*seqno_ptr - target_seqno) >= 0) {
-			return B_OK;
-		}
+		if ((int32_t)(*seqno_ptr - target_seqno) >= 0) return B_OK;
 		spin(100);
 	}
 	return B_TIMED_OUT;
+}
+
+status_t
+intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_gem_context* new_ctx)
+{
+	uint32_t offset_in_dwords;
+	// MI_FLUSH_DW (1 dword) + MI_SET_CONTEXT (3 dwords for restore) + MI_NOOP (1 dword)
+	const uint32_t cmd_len_dwords_flush_only = 1 + 1; // MI_FLUSH_DW + MI_NOOP
+	const uint32_t cmd_len_dwords_full_ctx = 1 + 3 + 1; // MI_FLUSH_DW + MI_SET_CONTEXT + MI_NOOP
+	status_t status;
+
+	if (!engine || !new_ctx || !new_ctx->hw_image_obj) {
+		// If new_ctx is NULL, it might mean switch to default kernel context (if any)
+		// or this is an error. If hw_image_obj is NULL, we can only do a flush.
+		TRACE("Engine %s: Switch context: new_ctx or its hw_image_obj is NULL. Only flushing.\n", engine->name);
+		status = intel_engine_get_space(engine, cmd_len_dwords_flush_only, &offset_in_dwords);
+		if (status != B_OK) return status;
+		intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE | MI_FLUSH_DEPTH_CACHE | MI_FLUSH_VF_CACHE);
+		intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
+		intel_engine_advance_tail(engine, cmd_len_dwords_flush_only);
+		return B_OK;
+	}
+
+	TRACE("Engine %s: Switching context to ID %lu (HW image GTT offset 0x%x pages)\n",
+		engine->name, new_ctx->id, new_ctx->hw_image_obj->gtt_offset_pages);
+
+	// Ensure the context image is GTT mapped
+	if (!new_ctx->hw_image_obj->gtt_mapped) {
+		TRACE("Engine %s: Context %lu HW image not GTT mapped! (This is an error)\n", engine->name, new_ctx->id);
+		// This should have been mapped during context creation or execbuf.
+		// For now, we can't proceed with MI_SET_CONTEXT.
+		// Fallback to just a flush.
+		status = intel_engine_get_space(engine, cmd_len_dwords_flush_only, &offset_in_dwords);
+		if (status != B_OK) return status;
+		intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE);
+		intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
+		intel_engine_advance_tail(engine, cmd_len_dwords_flush_only);
+		return B_ERROR; // Indicate context switch couldn't fully happen.
+	}
+
+
+	status = intel_engine_get_space(engine, cmd_len_dwords_full_ctx, &offset_in_dwords);
+	if (status != B_OK) return status;
+
+	// 1. MI_FLUSH_DW to ensure previous context's operations are done
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE | MI_FLUSH_DEPTH_CACHE | MI_FLUSH_VF_CACHE);
+
+	// 2. MI_SET_CONTEXT (Gen7: Logical Ring Context Restore)
+	// This is a simplified version. Real MI_SET_CONTEXT for Gen7 RCS requires:
+	// - Context image in memory (hw_image_obj) containing register state.
+	// - GTT address of this image.
+	// - Flags for restore, inhibit save, etc.
+	// For now, we are just TRACEing the intent. The command below is a placeholder.
+	// A real MI_SET_CONTEXT has specific bits for Gen7 logical contexts.
+	// The command format used here (MI_SET_CONTEXT_RESTORE_EXT_STATE_ENABLE etc.)
+	// might be more for Gen8+ HW contexts or GuC contexts.
+	// Gen7 MI_SET_CONTEXT for RCS is simpler: 0x1E << 23 | (Length=1 for Gen7 LRCA)
+	// Dword 1: Logical Ring Context Address (GTT offset of context image)
+
+	uint32_t context_gtt_address = new_ctx->hw_image_obj->gtt_offset_pages * B_PAGE_SIZE;
+	TRACE("Engine %s: Emitting MI_SET_CONTEXT (stubbed) for ctx ID %lu, image at GTT 0x%x\n",
+		engine->name, new_ctx->id, context_gtt_address);
+
+	// Placeholder for Gen7 MI_SET_CONTEXT (Logical Ring Context Address)
+	// This assumes a context image format and restore mechanism not fully implemented yet.
+	// Length for Gen7 LRCA MI_SET_CONTEXT is 1 (total 2 dwords).
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_SET_CONTEXT | (2 - 2)); // Length 1 for Gen7 LRCA
+	intel_engine_write_dword(engine, offset_in_dwords++, context_gtt_address);
+	// The actual context image needs to be prepared correctly in gem_context.c
+
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
+	intel_engine_advance_tail(engine, cmd_len_dwords_full_ctx -1); // -1 because Gen7 MI_SET_CONTEXT is shorter
+
+	return B_OK;
 }

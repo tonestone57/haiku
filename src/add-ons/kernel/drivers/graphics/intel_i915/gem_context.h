@@ -8,31 +8,33 @@
 #ifndef INTEL_I915_GEM_CONTEXT_H
 #define INTEL_I915_GEM_CONTEXT_H
 
-#include "intel_i915_priv.h" // For intel_i915_device_info
-#include <kernel/util/ DoublyLinkedList.h> // For struct list_node
-#include <kernel/locks/mutex.h>    // For mutex type
+#include "intel_i915_priv.h"
+#include <kernel/util/ DoublyLinkedList.h>
+#include <kernel/locks/mutex.h>
 
-// Forward declaration
-struct intel_i915_gem_object;
+struct intel_i915_gem_object; // Forward declaration
 
-// Basic GEM Context Structure
-// For Gen7, hardware contexts are more about saving/restoring state around execution.
-// Full hardware context support (like logical ring contexts or GuC contexts on newer gens)
-// is complex. This initial structure is a placeholder for software tracking.
-// If we implement PPGTTs, the context would point to its PPGTT.
+// Size of the Gen7 Logical Ring Context image for RCS (Render Command Streamer)
+// This size varies by generation and engine. For Gen7 RCS, it's around 18-20 DWORDS for essential state,
+// but can be larger if more state (e.g., pipeline state pointers) is included.
+// A common size used in Linux for the "RING_CONTEXT_SIZE" (which includes more than just LRCA) is ~20KB.
+// For a minimal LRCA, it's much smaller. Let's use a page for simplicity for the backing store.
+#define GEN7_RCS_CONTEXT_IMAGE_SIZE B_PAGE_SIZE // Placeholder, actual HW image is smaller
+
+
 typedef struct intel_i915_gem_context {
 	intel_i915_device_info* dev_priv;
-	uint32_t                id;       // A unique ID for this context
-	int32_t                 refcount; // Simple refcounting for the context itself
+	uint32_t                id;
+	int32_t                 refcount;
+
+	struct intel_i915_gem_object* hw_image_obj; // GEM object for HW context state image
 
 	// TODO: Add fields for:
-	// - Associated PPGTT (Per-Process GTT) if implemented
-	// - List of GEM objects bound to this context (for tracking residency)
-	// - Hardware context state save/restore buffer (GEM object handle)
-	// - Engine-specific state (e.g., which engines this context has been submitted to)
+	// - Associated PPGTT
+	// - List of GEM objects bound (for residency)
+	// - Engine-specific state
 
 	mutex                   lock;
-	// struct list_node link; // If contexts are kept in a global list
 } intel_i915_gem_context;
 
 
@@ -45,7 +47,6 @@ status_t intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 f
 
 void intel_i915_gem_context_get(struct intel_i915_gem_context* ctx);
 void intel_i915_gem_context_put(struct intel_i915_gem_context* ctx);
-// void intel_i915_gem_context_free(struct intel_i915_gem_context* ctx); // internal
 
 #ifdef __cplusplus
 }

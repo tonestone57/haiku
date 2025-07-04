@@ -28,6 +28,10 @@ static mutex gSimpleGenericHandleLock;
 #define HANDLE_TYPE_GEM_OBJECT 1
 #define HANDLE_TYPE_GEM_CONTEXT 2
 
+// Max number of BOs that can be GTT mapped on-demand by a single execbuf call
+#define EXECBUF_MAX_ON_DEMAND_GTT_MAPS 16
+
+
 void
 intel_i915_gem_init_handle_manager(void) {
 	mutex_init(&gSimpleGenericHandleLock, "i915 simple generic handle lock");
@@ -148,11 +152,12 @@ intel_i915_gem_close_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t
 	if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
 	struct intel_i915_gem_object* obj = (struct intel_i915_gem_object*)_generic_handle_lookup(args.handle, HANDLE_TYPE_GEM_OBJECT);
-	if (obj == NULL) return B_BAD_VALUE;
+	if (obj == NULL) return B_BAD_VALUE; // Or wrong type
 	status_t status = _generic_handle_close(args.handle, HANDLE_TYPE_GEM_OBJECT);
-	intel_i915_gem_object_put(obj); // Release our lookup ref.
+	intel_i915_gem_object_put(obj);
 	return status;
 }
+
 
 status_t
 intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
@@ -163,9 +168,18 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	struct intel_engine_cs* engine;
 	status_t status = B_OK;
 	uint32_t ring_dword_offset;
-	intel_i915_gem_relocation_entry* relocs = NULL;
+	intel_i915_gem_relocation_entry* relocs_kernel = NULL; // Kernel copy
 	void* cmd_buffer_kernel_addr = NULL;
 	struct intel_i915_gem_context* ctx = NULL;
+
+	// Keep track of objects mapped to GTT on-demand by this call for cleanup
+	struct {
+		struct intel_i915_gem_object* obj;
+		uint32_t gtt_page_offset; // To know where to free
+		size_t num_pages;
+	} on_demand_gtt_maps[EXECBUF_MAX_ON_DEMAND_GTT_MAPS];
+	uint32_t on_demand_map_count = 0;
+
 
 	if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
@@ -182,33 +196,52 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	if (args.context_handle != 0) {
 		ctx = (struct intel_i915_gem_context*)_generic_handle_lookup(args.context_handle, HANDLE_TYPE_GEM_CONTEXT);
 		if (ctx == NULL) { status = B_BAD_VALUE; goto exec_cleanup_mapped_cmd_obj; }
-		if (engine->current_context != ctx) {
-			// TRACE("EXECBUFFER: Context switch needed (stub)\n");
-			// TODO: Emit MI_SET_CONTEXT or other context switch commands.
-			// For now, just update software tracking.
-			engine->current_context = ctx; // The looked up 'ctx' has its own ref. Old one is just replaced.
+		if (engine->current_context != ctx) { // Ptr comparison
+			// TRACE("EXECBUFFER: Context switch from %p to %p (ID %lu)\n", engine->current_context, ctx, ctx ? ctx->id : 0);
+			// TODO: intel_engine_switch_context(engine, ctx);
+			// For now, just update software tracking. Old context's ref is on engine struct.
+			if(engine->current_context) intel_i915_gem_context_put(engine->current_context);
+			engine->current_context = ctx; // ctx from lookup already has a ref. Engine now owns this ref.
+			ctx = NULL; // Avoid double put later
 		}
 	}
 
 	if (args.relocation_count > 0) {
-		if (args.relocations_ptr == 0 || args.relocation_count > 256) { status = B_BAD_VALUE; goto exec_cleanup_ctx; }
-		relocs = (intel_i915_gem_relocation_entry*)malloc(args.relocation_count * sizeof(*relocs));
-		if (relocs == NULL) { status = B_NO_MEMORY; goto exec_cleanup_ctx; }
-		if (copy_from_user(relocs, (void*)args.relocations_ptr, args.relocation_count * sizeof(*relocs)) != B_OK) {
+		if (args.relocations_ptr == 0 || args.relocation_count > EXECBUF_MAX_ON_DEMAND_GTT_MAPS) { // Limit relocs
+			status = B_BAD_VALUE; goto exec_cleanup_ctx;
+		}
+		relocs_kernel = (intel_i915_gem_relocation_entry*)malloc(args.relocation_count * sizeof(*relocs_kernel));
+		if (relocs_kernel == NULL) { status = B_NO_MEMORY; goto exec_cleanup_ctx; }
+		if (copy_from_user(relocs_kernel, (void*)args.relocations_ptr, args.relocation_count * sizeof(*relocs_kernel)) != B_OK) {
 			status = B_BAD_ADDRESS; goto exec_cleanup_ctx;
 		}
+
 		for (uint32_t i = 0; i < args.relocation_count; i++) {
-			intel_i915_gem_relocation_entry* reloc = &relocs[i];
+			intel_i915_gem_relocation_entry* reloc = &relocs_kernel[i];
 			if (reloc->offset >= args.cmd_buffer_length || (reloc->offset % sizeof(uint32_t) != 0)) { status = B_BAD_VALUE; goto exec_cleanup_ctx; }
+
 			target_obj = (struct intel_i915_gem_object*)_generic_handle_lookup(reloc->target_handle, HANDLE_TYPE_GEM_OBJECT);
 			if (target_obj == NULL) { status = B_BAD_VALUE; goto exec_cleanup_ctx; }
+
 			if (!target_obj->gtt_mapped) {
-				// TODO: GTT space allocation (Step 4)
-				// For now, only framebuffer at GTT offset 0 is assumed mappable for relocs.
-				if (target_obj->backing_store_area == devInfo->framebuffer_area && devInfo->framebuffer_gtt_offset == 0) {
-					target_obj->gtt_offset_pages = 0; // Assuming FB is at GTT page 0
+				uint32_t gtt_page_offset_for_target;
+				status = intel_i915_gtt_alloc_space(devInfo, target_obj->num_phys_pages, &gtt_page_offset_for_target);
+				if (status != B_OK) {
+					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
+				}
+				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, GTT_CACHE_WRITE_COMBINING); // Default WC for now
+				if (status != B_OK) {
+					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages);
+					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
+				}
+				target_obj->gtt_mapped_by_execbuf = true; // Mark for cleanup
+				if (on_demand_map_count < EXECBUF_MAX_ON_DEMAND_GTT_MAPS) {
+					on_demand_gtt_maps[on_demand_map_count].obj = target_obj; // Store obj to unmap
+					on_demand_gtt_maps[on_demand_map_count].gtt_page_offset = gtt_page_offset_for_target;
+					on_demand_gtt_maps[on_demand_map_count].num_pages = target_obj->num_phys_pages;
+					on_demand_map_count++;
 				} else {
-					TRACE("EXECBUFFER: Reloc target handle %u GTT map failed (not FB or GTT allocator missing)\n", reloc->target_handle);
+					// Too many on-demand maps, error or handle differently
 					status = B_ERROR; intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
 				}
 			}
@@ -231,8 +264,17 @@ exec_cleanup_ctx:
 exec_cleanup_mapped_cmd_obj:
 exec_cleanup_cmd_obj:
 	if (cmd_obj) intel_i915_gem_object_put(cmd_obj);
-	if (relocs) free(relocs);
+	if (relocs_kernel) free(relocs_kernel);
 	if (target_obj) intel_i915_gem_object_put(target_obj);
+
+	// Cleanup on-demand GTT mappings for this execbuf
+	for (uint32_t i = 0; i < on_demand_map_count; i++) {
+		if (on_demand_gtt_maps[i].obj && on_demand_gtt_maps[i].obj->gtt_mapped_by_execbuf) {
+			intel_i915_gem_object_unmap_gtt(on_demand_gtt_maps[i].obj); // This will clear gtt_mapped_by_execbuf
+			intel_i915_gtt_free_space(devInfo, on_demand_gtt_maps[i].gtt_page_offset, on_demand_gtt_maps[i].num_pages);
+			// The ref from lookup was already put. The object itself might still exist if other refs exist.
+		}
+	}
 	return status;
 }
 
@@ -281,35 +323,15 @@ intel_i915_gem_context_destroy_ioctl(intel_i915_device_info* devInfo, void* buff
 status_t
 intel_i915_gem_flush_and_get_seqno_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
 {
-	intel_i915_gem_flush_and_get_seqno_args args;
-	struct intel_engine_cs* engine;
-	status_t status;
-
-	if (!devInfo || buffer == NULL || length != sizeof(intel_i915_gem_flush_and_get_seqno_args))
-		return B_BAD_VALUE;
-	// Only engine_id is input
-	if (copy_from_user(&args.engine_id, &((intel_i915_gem_flush_and_get_seqno_args*)buffer)->engine_id,
-			sizeof(args.engine_id)) != B_OK) {
+	intel_i915_gem_flush_and_get_seqno_args args; struct intel_engine_cs* engine; status_t status;
+	if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
+	if (copy_from_user(&args.engine_id, &((intel_i915_gem_flush_and_get_seqno_args*)buffer)->engine_id, sizeof(args.engine_id)) != B_OK)
 		return B_BAD_ADDRESS;
-	}
-
-	if (args.engine_id != RCS0 || devInfo->rcs0 == NULL) {
-		TRACE("FLUSH_AND_GET_SEQNO: Invalid engine_id %u or engine not initialized\n", args.engine_id);
-		return B_BAD_VALUE;
-	}
+	if (args.engine_id != RCS0 || devInfo->rcs0 == NULL) return B_BAD_VALUE;
 	engine = devInfo->rcs0;
-
 	status = intel_engine_emit_flush_and_seqno_write(engine, &args.seqno);
-	if (status != B_OK) {
-		TRACE("FLUSH_AND_GET_SEQNO: Failed to emit flush and seqno: %s\n", strerror(status));
-		return status;
-	}
-
-	if (copy_to_user(((intel_i915_gem_flush_and_get_seqno_args*)buffer)->seqno, &args.seqno,
-			sizeof(args.seqno)) != B_OK) {
+	if (status != B_OK) return status;
+	if (copy_to_user(&((intel_i915_gem_flush_and_get_seqno_args*)buffer)->seqno, &args.seqno, sizeof(args.seqno)) != B_OK)
 		return B_BAD_ADDRESS;
-	}
-
-	TRACE("FLUSH_AND_GET_SEQNO: Emitted new seqno %u for engine %u\n", args.seqno, args.engine_id);
 	return B_OK;
 }

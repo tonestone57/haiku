@@ -235,6 +235,14 @@
 	#define FDI_RX_BIT_LOCK_IVB		(1U << 1) // Training complete / Bit Lock
 	// ... other FDI status bits ...
 
+// FDI M/N Value Registers (IVB) - Offsets from Pipe Base
+#define FDI_TX_MVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x104) // FDI_TX_M: FDI Data M Value
+#define FDI_TX_NVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x108) // FDI_TX_N: FDI Data N Value
+#define FDI_RX_MVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x114) // FDI_RX_M: FDI Link M Value
+#define FDI_RX_NVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x118) // FDI_RX_N: FDI Link N Value
+	// Each of these registers holds a 16-bit M or N value.
+	// Example: FDI_DATA_M[15:0], FDI_DATA_N[15:0]
+	//          FDI_LINK_M[15:0], FDI_LINK_N[15:0]
 
 // --- DDI Buffer Control (DDI_BUF_CTL) for HSW/IVB ---
 // Offset relative to DDI_BUF_BASE (e.g. DDI_A_BASE 0x64000, DDI_BUF_CTL_A is 0x64000)

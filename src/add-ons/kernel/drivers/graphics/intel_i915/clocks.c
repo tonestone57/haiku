@@ -290,11 +290,110 @@ find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
 	params->dpll_vco_khz = 2700000;   // Placeholder VCO
 	params->is_wrpll = true; // Indicate this is for a WRPLL-like DPLL (not HSW SPLL)
 
-	// This stub should return B_ERROR until properly implemented,
-	// or if it sets valid (even if suboptimal) params, return B_OK.
-	// Forcing error for now to highlight it's a stub.
-	// return B_ERROR;
-	// For testing call path, let's return B_OK with placeholder values.
+	// VCO constraints for IVB DPLLs (example, needs PRM verification, typically ~1.7-3.5 GHz)
+	const uint32_t vco_min_khz = 1700000;
+	const uint32_t vco_max_khz = 3500000;
+	long best_error = 100000000; // Large initial error
+
+	params->is_wrpll = true; // Mark as a DPLL type, not HSW SPLL
+	params->dpll_vco_khz = 0;
+
+	// P1 field (3 bits): 0-7 -> actual P1 divider 1-8
+	for (uint32_t p1_field = 0; p1_field <= 7; p1_field++) {
+		uint32_t p1_actual = p1_field + 1;
+
+		// P2 field (2 bits)
+		// For non-DP (HDMI/LVDS): 0 -> /10, 1 -> /5
+		// For DP: 0,1,2,3 -> /N, /5, /7, /1 (Bypass). If output is link_rate, P2_actual_dp=1 (field=3)
+		uint32_t p2_field_iterations = is_dp ? 1 : 2; // For DP, try only P2_actual=1 for now
+		uint32_t p2_field_start = is_dp ? 3 : 0;      // Field value 3 for DP means P2_actual=1 (bypass)
+
+		for (uint32_t p2_iter = 0; p2_iter < p2_field_iterations; p2_iter++) {
+			uint32_t p2_field = p2_field_start + (is_dp ? 0 : p2_iter);
+			uint32_t p2_actual;
+
+			if (is_dp) {
+				if (p2_field == 3) p2_actual = 1; // Bypass
+				else if (p2_field == 2) p2_actual = 7;
+				else if (p2_field == 1) p2_actual = 5;
+				else p2_actual = 1; // Default P2 for DP if field 0, depends on link rate (complex)
+									// Forcing P2_actual = 1 for DP to simplify: DPLL output = target link rate.
+									// This means p2_field should be 3 (bypass).
+				if (p2_field != 3 && is_dp) continue; // Only allow P2 bypass for DP for this simplified version
+				p2_actual = 1; // Force P2 actual to 1 for DP
+			} else { // HDMI/LVDS
+				p2_actual = (p2_field == 1) ? 5 : 10;
+			}
+
+			uint64_t target_vco_khz_64 = (uint64_t)target_output_clk_khz * p1_actual * p2_actual;
+			if (target_vco_khz_64 < vco_min_khz || target_vco_khz_64 > vco_max_khz) {
+				continue;
+			}
+			uint32_t target_vco_khz = (uint32_t)target_vco_khz_64;
+
+			// N1 field (4 bits): 0-15 -> actual N1 divider 2-17
+			for (uint32_t n1_field = 0; n1_field <= 15; n1_field++) {
+				uint32_t n1_actual = n1_field + 2;
+
+				// M2 field (9 bits): 0-511 -> actual M2 multiplier 2-513
+				// Ideal M2_actual = target_vco_khz * n1_actual / ref_clk_khz
+				// Ideal M2_field = Ideal M2_actual - 2
+				uint64_t ideal_m2_actual_scaled = (uint64_t)target_vco_khz * n1_actual; // Numerator for M2_actual
+				uint32_t m2_field_ideal_center = (uint32_t)((ideal_m2_actual_scaled + (ref_clk_khz / 2)) / ref_clk_khz) - 2;
+
+				// Iterate M2_field around the ideal value to find best match
+				for (int m2_offset = -2; m2_offset <= 2; m2_offset++) {
+					int32_t m2_field_candidate_signed = (int32_t)m2_field_ideal_center + m2_offset;
+					if (m2_field_candidate_signed < 0 || m2_field_candidate_signed > 511) continue;
+					uint32_t m2_field = (uint32_t)m2_field_candidate_signed;
+					uint32_t m2_actual = m2_field + 2;
+
+					// M1 field (6 bits): 0-63. Used for spread spectrum, not main clock. Set to a default.
+					// The formula (5 * M1 + M2 + 2) is for older PLLs.
+					// IVB PLL: VCO = Ref * M2_actual / N1_actual (M1 is for SSC)
+					// For now, assume M1 is not part of the core VCO calculation.
+					// If M1 is involved: uint32_t m1_field = default_m1_field_for_ivb; (e.g. 10)
+
+					uint64_t current_vco_khz_64 = (uint64_t)ref_clk_khz * m2_actual / n1_actual;
+					uint32_t current_vco_khz = (uint32_t)current_vco_khz_64;
+
+					long error = (long)current_vco_khz - (long)target_vco_khz;
+					if (error < 0) error = -error;
+
+					if (error < best_error) {
+						best_error = error;
+						params->dpll_vco_khz = current_vco_khz;
+						params->wrpll_p1 = p1_field;
+						params->wrpll_p2 = p2_field; // Store the field value used
+						params->wrpll_n = n1_field;
+						params->wrpll_m2 = m2_field; // Stores M2 field value
+						params->ivb_dpll_m1_reg_val = 10; // Default M1 field value, needs VBT or PRM.
+
+						// If perfect match for VCO, check output clock
+						if (best_error == 0) {
+							uint64_t check_output_clk = current_vco_khz_64 / (p1_actual * p2_actual);
+							if (check_output_clk == target_output_clk_khz) goto found_ivb_params;
+						}
+					}
+				}
+			}
+		}
+	}
+
+found_ivb_params:
+	if (params->dpll_vco_khz == 0 || best_error > 1000) { // Allow 1MHz error for VCO
+		TRACE("find_ivb_dpll_dividers: Failed to find acceptable params. Best error %ld kHz for VCO.\n", best_error);
+		return B_ERROR;
+	}
+
+	TRACE("find_ivb_dpll_dividers: Found params for target %u kHz -> VCO %u kHz (err %ld)\n"
+		"  P1_f=%u (act=%u), P2_f=%u (act=%u), N1_f=%u (act=%u), M2_f=%u (act=%u), M1_f=%u\n",
+		target_output_clk_khz, params->dpll_vco_khz, best_error,
+		params->wrpll_p1, params->wrpll_p1 + 1,
+		params->wrpll_p2, (is_dp ? (params->wrpll_p2 == 3 ? 1 : 0) : ((params->wrpll_p2 == 1) ? 5 : 10)), // Approx actual P2 for trace
+		params->wrpll_n, params->wrpll_n + 2,
+		params->wrpll_m2, params->wrpll_m2 + 2,
+		params->ivb_dpll_m1_reg_val);
 	return B_OK;
 }
 
@@ -685,32 +784,71 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 		return B_OK; // FDI not applicable or not needed by this mode
 	}
 
-	// TODO: Implement proper FDI M/N calculation based on pixel clock and desired FDI link speed.
-	// For now, this is a placeholder.
-	// uint32_t fdiTxTrainBits = FDI_LINK_TRAIN_PATTERN_1_IVB; // Or other patterns
-	// uint32_t fdiRxTrainBits = ...;
+	// TODO: Implement proper FDI M/N calculation based on pixel clock, BPC, and desired FDI link speed (e.g., 2.7 GHz).
+	// This should populate clocks->fdi_params.data_m, .data_n, .link_m, .link_n, .fdi_lanes, .tu_size.
+	// For now, using placeholder/default values.
+	if (clocks->fdi_params.fdi_lanes == 0) clocks->fdi_params.fdi_lanes = 2; // Default to 2 lanes for IVB FDI
+	if (clocks->fdi_params.tu_size == 0) clocks->fdi_params.tu_size = 64;   // Default TU size
 
-	// Example: Basic FDI_TX_CTL / FDI_RX_CTL setup (without full M/N or training values)
+	// Example M/N values (these are highly dependent on the actual calculation)
+	// For a 162MHz pixel clock, 24bpp, 2 FDI lanes to get ~2.7GHz FDI clock:
+	// FDI_CLOCK = PIXEL_CLOCK * BITS_PER_PIXEL / (NUM_FDI_LANES * BITS_PER_FDI_LANE_SYMBOL (10 for 8b10b))
+	// This formula is conceptual. Real M/N calculation is more direct.
+	// Target FDI_TX_CLK = 270MHz. Pixel clock comes from mode.
+	// (FDI_TX_CLK * N) / M = Pixel Clock.
+	// Assume common values for now if calculation is not done.
+	if (clocks->fdi_params.data_m == 0) clocks->fdi_params.data_m = 22; // Example
+	if (clocks->fdi_params.data_n == 0) clocks->fdi_params.data_n = 24; // Example
+	// Link M/N usually same as Data M/N for FDI
+	clocks->fdi_params.link_m = clocks->fdi_params.data_m;
+	clocks->fdi_params.link_n = clocks->fdi_params.data_n;
+
+	// Program M/N values
+	intel_i915_write32(devInfo, FDI_TX_MVAL_IVB_REG(pipe), clocks->fdi_params.data_m);
+	intel_i915_write32(devInfo, FDI_TX_NVAL_IVB_REG(pipe), clocks->fdi_params.data_n);
+	intel_i915_write32(devInfo, FDI_RX_MVAL_IVB_REG(pipe), clocks->fdi_params.link_m);
+	intel_i915_write32(devInfo, FDI_RX_NVAL_IVB_REG(pipe), clocks->fdi_params.link_n);
+	TRACE("FDI: Programmed M/N values for pipe %d: DataM/N=%u/%u, LinkM/N=%u/%u (placeholders)\n",
+		pipe, clocks->fdi_params.data_m, clocks->fdi_params.data_n,
+		clocks->fdi_params.link_m, clocks->fdi_params.link_n);
+
+	// Program FDI_TX_CTL / FDI_RX_CTL
 	uint32_t fdi_tx_ctl_reg = FDI_TX_CTL(pipe);
 	uint32_t fdi_rx_ctl_reg = FDI_RX_CTL(pipe);
 	uint32_t fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
 	uint32_t fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
 
-	// Clear existing training pattern, set a default (e.g., Pattern 1 for initial training)
-	fdi_tx_val &= ~(0xFU << 8); // Clear pattern bits (assuming they are in bits 11:8)
-	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB;
-	// TODO: Set FDI lane count (e.g., FDI_TX_CTL_LANE_COUNT_4_IVB) based on link requirements.
-	// TODO: Set voltage swing / pre-emphasis from VBT if available.
+	// FDI Port Width (Lane Count) - IVB specific encoding
+	fdi_tx_val &= ~FDI_TX_CTL_LANE_MASK_IVB; // Mask: (0x7U << 19)
+	if (clocks->fdi_params.fdi_lanes == 1) fdi_tx_val |= FDI_TX_CTL_LANE_1_IVB;
+	else if (clocks->fdi_params.fdi_lanes == 2) fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB;
+	else if (clocks->fdi_params.fdi_lanes == 4) fdi_tx_val |= FDI_TX_CTL_LANE_4_IVB;
+	else fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB; // Default to 2 lanes
+
+	// TU Size (Training Unit)
+	fdi_tx_val &= ~FDI_TX_CTL_TU_SIZE_MASK_IVB; // Mask: (0x7U << 24)
+	if (clocks->fdi_params.tu_size == 64) fdi_tx_val |= FDI_TX_CTL_TU_SIZE_64_IVB;
+	else if (clocks->fdi_params.tu_size == 32) fdi_tx_val |= FDI_TX_CTL_TU_SIZE_32_IVB;
+	// Add other TU sizes if necessary, default to 64.
+
+	// Set initial training pattern (Pattern 1)
+	fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB; // Mask: (0xFU << 8)
+	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB; // Already defined (1U << 8)
+
+	// TODO: Set voltage swing / pre-emphasis from VBT if available. (Bits 18:16, 15:14 in FDI_TX_CTL)
 
 	// FDI_RX_CTL also needs configuration (PLL enable, link reverse, etc.)
-	// fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB; // Example
+	fdi_rx_val &= ~FDI_RX_CTL_LANE_MASK_IVB; // Match TX lane count
+	if (clocks->fdi_params.fdi_lanes == 1) fdi_rx_val |= FDI_RX_CTL_LANE_1_IVB;
+	else if (clocks->fdi_params.fdi_lanes == 2) fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
+	else if (clocks->fdi_params.fdi_lanes == 4) fdi_rx_val |= FDI_RX_CTL_LANE_4_IVB;
+	else fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
+	// fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB; // This is usually enabled during link training enable step.
 
-	// For this stub, just ensure the registers are touched if FDI is "programmed".
-	// Actual M/N, lane count, voltage/pre-emphasis settings are crucial.
 	intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 	intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 
-	TRACE("FDI: Programmed FDI_TX_CTL(pipe %d)=0x%08x, FDI_RX_CTL(pipe %d)=0x%08x (stubbed values)\n",
+	TRACE("FDI: Programmed FDI_TX_CTL(pipe %d)=0x%08x, FDI_RX_CTL(pipe %d)=0x%08x (M/N/Lanes set, training pattern 1)\n",
 		pipe, fdi_tx_val, pipe, fdi_rx_val);
 
 	return B_OK;
@@ -735,19 +873,64 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 		// TODO: Start actual link training sequence here:
 		// 1. Enable TX with training pattern.
 		// 2. Enable RX.
+		// TODO: Start actual link training sequence here:
+		// 1. Ensure FDI_TX_CTL is set for training pattern 1 (done in program_fdi).
+		// 2. Enable FDI_RX_PLL (often part of FDI_RX_CTL).
+		//    fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB; // Example: This bit needs to be defined.
+		//    intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
+		fdi_tx_val |= FDI_TX_ENABLE;
+		fdi_rx_val |= FDI_RX_ENABLE; // This also enables RX PLL on some gens.
+		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
+		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
+		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); // Posting read
+
 		// 3. Poll FDI_RX_IIR for bit lock.
-		// 4. If fail, adjust FDI_TX_CTL voltage/pre-emphasis and retry.
-		// 5. Once locked, set training pattern to NONE.
-		TRACE("FDI: Enabling FDI TX/RX for pipe %d. Link training STUBBED.\n", pipe);
-	} else {
-		fdi_tx_val &= ~FDI_TX_ENABLE;
+		int retries = 0;
+		bool fdi_trained = false;
+		uint32_t fdi_rx_iir_reg = FDI_RX_IIR(pipe);
+		while (retries < 5) { // Example retry count
+			snooze(1000); // Wait 1ms
+			uint32_t iir_val = intel_i915_read32(devInfo, fdi_rx_iir_reg);
+			if (iir_val & FDI_RX_BIT_LOCK_IVB) {
+				fdi_trained = true;
+				TRACE("FDI: Link training for pipe %d successful (bit lock achieved).\n", pipe);
+				// Clear the bit lock status by writing it back
+				intel_i915_write32(devInfo, fdi_rx_iir_reg, iir_val & FDI_RX_BIT_LOCK_IVB);
+				break;
+			}
+			// TODO: 4. If fail, adjust FDI_TX_CTL voltage/pre-emphasis and retry.
+			// This would involve reading VBT for VS/PE tables or iterating through values.
+			TRACE("FDI: Link training attempt %d for pipe %d failed to get bit lock (IIR=0x%08x).\n",
+				retries + 1, pipe, iir_val);
+			retries++;
+		}
+
+		if (fdi_trained) {
+			// 5. Once locked, set training pattern to NONE.
+			fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
+			fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB;
+			fdi_tx_val |= FDI_LINK_TRAIN_NONE_IVB;
+			intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
+			TRACE("FDI: Link training for pipe %d complete, pattern set to NONE.\n", pipe);
+		} else {
+			TRACE("FDI: Link training for pipe %d FAILED after all retries.\n", pipe);
+			// Disable FDI TX/RX on failure to be safe
+			fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
+			fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
+			fdi_tx_val &= ~(FDI_TX_ENABLE | FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB);
+			fdi_rx_val &= ~FDI_RX_ENABLE;
+			intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
+			intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
+			return B_ERROR; // Indicate failure
+		}
+	} else { // Disable FDI
+		fdi_tx_val &= ~(FDI_TX_ENABLE | FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB);
 		fdi_rx_val &= ~FDI_RX_ENABLE;
-		// TODO: Clear training patterns if any were active.
+		// fdi_rx_val &= ~FDI_RX_PLL_ENABLE_IVB; // Also disable RX PLL
+		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
+		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 		TRACE("FDI: Disabling FDI TX/RX for pipe %d.\n", pipe);
 	}
-
-	intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
-	intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 	(void)intel_i915_read32(devInfo, fdi_tx_ctl_reg); // Posting read
 	(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg);
 

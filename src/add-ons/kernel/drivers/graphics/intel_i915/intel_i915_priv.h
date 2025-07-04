@@ -120,9 +120,15 @@ typedef struct intel_clock_params_t {
 
 	// FDI (if PCH is used)
 	bool     needs_fdi;
-	// FDI M/N values are complex, often derived from DP M/N or pixel clock.
-	// Example: Tu size, data M/N, link M/N
-	// struct { uint16_t tu; uint32_t gmch_m, gmch_n; uint32_t link_m, link_n; } fdi_link_m_n;
+	struct {
+		uint16_t tu_size;       // Training Unit size (e.g., 64 - programmed into FDI_TX_CTL[26:24])
+		uint16_t data_m;        // FDI Data M value (GMCH)
+		uint16_t data_n;        // FDI Data N value (GMCH)
+		uint16_t link_m;        // FDI Link M value (PCH)
+		uint16_t link_n;        // FDI Link N value (PCH)
+		uint8_t  fdi_lanes;     // Number of FDI lanes (1, 2, or 4 for IVB)
+		                         // Related to FDI_DP_PORT_WIDTH in FDI_TX_CTL[22:19]
+	} fdi_params;
 } intel_clock_params_t;
 
 

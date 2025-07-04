@@ -112,6 +112,12 @@ typedef struct {
 	uint16			vendor_id;
 	uint16			device_id;
 	uint8			revision;
+	// For GET_EDID_INFO hook
+	uint8			primary_edid_block[128];
+	bool			primary_edid_valid;
+	// For GET_PIXEL_CLOCK_LIMITS hook
+	uint32			min_pixel_clock; // In kHz
+	uint32			max_pixel_clock; // In kHz
 } intel_i915_shared_info;
 
 typedef struct {

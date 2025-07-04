@@ -194,6 +194,43 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	// TODO: Perform an initial modeset to a preferred mode on a connected display?
 	// This is often done by the accelerant later, or by bootloader.
 	// For now, kernel driver just prepares the list.
+
+	// Populate primary EDID block in shared_info from the first connected port
+	devInfo->shared_info->primary_edid_valid = false;
+	for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+		intel_output_port_state* port = &devInfo->ports[i];
+		if (port->connected && port->edid_valid) {
+			memcpy(devInfo->shared_info->primary_edid_block, port->edid_data, EDID_BLOCK_SIZE);
+			devInfo->shared_info->primary_edid_valid = true;
+			TRACE("display_init: Copied EDID from port %u to shared_info primary_edid_block.\n", i);
+			break; // Found the first one
+		}
+	}
+	if (!devInfo->shared_info->primary_edid_valid && global_mode_count > 0) {
+		// No EDID, but we have fallback modes. Clear primary_edid_block.
+		memset(devInfo->shared_info->primary_edid_block, 0, EDID_BLOCK_SIZE);
+	}
+
+	// Calculate min/max pixel clocks from the global mode list
+	if (global_mode_count > 0) {
+		devInfo->shared_info->min_pixel_clock = वैश्विक_mode_list[0].timing.pixel_clock; // Initialize with the first mode's clock
+		devInfo->shared_info->max_pixel_clock = वैश्विक_mode_list[0].timing.pixel_clock;
+		for (int i = 1; i < global_mode_count; i++) {
+			if (global_mode_list[i].timing.pixel_clock < devInfo->shared_info->min_pixel_clock) {
+				devInfo->shared_info->min_pixel_clock = global_mode_list[i].timing.pixel_clock;
+			}
+			if (global_mode_list[i].timing.pixel_clock > devInfo->shared_info->max_pixel_clock) {
+				devInfo->shared_info->max_pixel_clock = global_mode_list[i].timing.pixel_clock;
+			}
+		}
+		TRACE("display_init: Min pixel clock %u kHz, Max pixel clock %u kHz.\n",
+			devInfo->shared_info->min_pixel_clock, devInfo->shared_info->max_pixel_clock);
+	} else {
+		// No modes found at all, set to 0 or some safe default range
+		devInfo->shared_info->min_pixel_clock = 0; // Or e.g., 25000
+		devInfo->shared_info->max_pixel_clock = 0; // Or e.g., 400000
+	}
+
 	return B_OK;
 }
 

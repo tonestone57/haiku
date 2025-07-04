@@ -64,12 +64,16 @@ static status_t intel_i915_get_sync_token(engine_token *et, sync_token *st);
 static status_t intel_i915_sync_to_token(sync_token *st);
 
 // 2D Acceleration (from accel_2d.c)
+// These should be declared in accelerant_protos.h and included if they are public.
+// For now, assume they are available via linking if not static.
 void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
 void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
+void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count); // Now implemented in accel_2d.c
+
 static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count);
 static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count);
 static void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
-static void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
+// Removed static forward declaration for intel_i915_invert_rectangle as it's now implemented externally
 
 
 extern "C" void*
@@ -132,22 +136,288 @@ void     intel_i915_uninit_accelerant(void) { UNINIT_ACCELERANT(); }
 status_t intel_i915_get_accelerant_device_info(accelerant_device_info *adi) { return GET_ACCELERANT_DEVICE_INFO(adi); }
 sem_id   intel_i915_accelerant_retrace_semaphore(void) { return ACCELERANT_RETRACE_SEMAPHORE(); }
 
-// Mode Configuration (Stubs - actual implementations would be in mode.c or accelerant.c)
-static uint32   intel_i915_accelerant_mode_count(void) { TRACE("ACCELERANT_MODE_COUNT (stub)\n"); if (gInfo && gInfo->shared_info) return gInfo->shared_info->mode_count; return 0; }
-static status_t intel_i915_get_mode_list(display_mode *dm) { TRACE("GET_MODE_LIST (stub)\n"); if (!gInfo || !gInfo->mode_list || !dm) return B_ERROR; memcpy(dm, gInfo->mode_list, gInfo->shared_info->mode_count * sizeof(display_mode)); return B_OK; }
-static status_t intel_i915_propose_display_mode(display_mode *t, const display_mode *l, const display_mode *h) { TRACE("PROPOSE_DISPLAY_MODE (stub)\n"); if (gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0) { *t = gInfo->mode_list[0]; return B_OK; } return B_ERROR;}
-static status_t intel_i915_set_display_mode(display_mode *m) { TRACE("SET_DISPLAY_MODE (stub)\n"); if(!gInfo || !m) return B_BAD_VALUE; gInfo->shared_info->current_mode = *m; return B_OK; } // Simplified
-static status_t intel_i915_get_display_mode(display_mode *cm) { TRACE("GET_DISPLAY_MODE (stub)\n"); if(!gInfo || !cm) return B_BAD_VALUE; *cm = gInfo->shared_info->current_mode; return B_OK; }
-static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fb) { TRACE("GET_FRAME_BUFFER_CONFIG (stub)\n"); if(!gInfo || !fb) return B_BAD_VALUE; fb->frame_buffer=gInfo->framebuffer_base; fb->bytes_per_row=gInfo->shared_info->bytes_per_row; return B_OK;}
-static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *l, uint32 *h) { TRACE("GET_PIXEL_CLOCK_LIMITS (stub)\n"); *l=25000; *h=400000; return B_OK;}
+// Mode Configuration
+static uint32
+intel_i915_accelerant_mode_count(void)
+{
+	TRACE("ACCELERANT_MODE_COUNT\n");
+	if (gInfo && gInfo->shared_info)
+		return gInfo->shared_info->mode_count;
+	return 0;
+}
+
+static status_t
+intel_i915_get_mode_list(display_mode *dm)
+{
+	TRACE("GET_MODE_LIST\n");
+	if (!gInfo || !gInfo->mode_list || !gInfo->shared_info || !dm)
+		return B_BAD_VALUE; // Changed from B_ERROR to be more specific
+	if (gInfo->shared_info->mode_count == 0) // Nothing to copy
+		return B_OK;
+	memcpy(dm, gInfo->mode_list, gInfo->shared_info->mode_count * sizeof(display_mode));
+	return B_OK;
+}
+
+static status_t
+intel_i915_propose_display_mode(display_mode *target, const display_mode *low, const display_mode *high)
+{
+	TRACE("PROPOSE_DISPLAY_MODE: Target (%dx%d) Low (%dx%d) High (%dx%d)\n",
+		target->virtual_width, target->virtual_height,
+		low->virtual_width, low->virtual_height,
+		high->virtual_width, high->virtual_height);
+
+	if (!gInfo || !gInfo->mode_list || gInfo->shared_info->mode_count == 0 || !target || !low || !high)
+		return B_BAD_VALUE;
+
+	display_mode *best_mode = NULL;
+	uint32 best_score = 0;
+
+	for (uint32 i = 0; i < gInfo->shared_info->mode_count; i++) {
+		display_mode *current = &gInfo->mode_list[i];
+
+		// Check constraints
+		if (current->virtual_width >= low->virtual_width && current->virtual_width <= high->virtual_width &&
+			current->virtual_height >= low->virtual_height && current->virtual_height <= high->virtual_height &&
+			(current->space & low->space) == current->space && // Check if current->space is a subset of low->space (colorspace constraint)
+			(current->space & high->space) == current->space && // And high->space
+			current->timing.pixel_clock >= low->timing.pixel_clock &&
+			current->timing.pixel_clock <= high->timing.pixel_clock) {
+
+			// This mode is valid, score it (e.g., width * height + refresh_rate_proxy)
+			// Refresh rate proxy: pixel_clock / (htotal * vtotal)
+			uint32_t current_refresh_proxy = 0;
+			if (current->timing.h_total > 0 && current->timing.v_total > 0) {
+				current_refresh_proxy = current->timing.pixel_clock * 1000 / (current->timing.h_total * current->timing.v_total);
+			}
+			uint32_t score = current->virtual_width * current->virtual_height + current_refresh_proxy;
+
+			if (best_mode == NULL || score > best_score) {
+				best_mode = current;
+				best_score = score;
+			}
+		}
+	}
+
+	if (best_mode != NULL) {
+		TRACE("PROPOSE_DISPLAY_MODE: Found best mode %dx%d @ %u kHz\n",
+			best_mode->virtual_width, best_mode->virtual_height, best_mode->timing.pixel_clock);
+		*target = *best_mode;
+		return B_OK;
+	}
+
+	TRACE("PROPOSE_DISPLAY_MODE: No suitable mode found.\n");
+	return B_ERROR; // Or B_BAD_VALUE if no mode fits constraints.
+}
+
+static status_t
+intel_i915_set_display_mode(display_mode *mode_to_set)
+{
+	TRACE("SET_DISPLAY_MODE: %dx%d, space 0x%x\n",
+		mode_to_set->virtual_width, mode_to_set->virtual_height, mode_to_set->space);
+
+	if (!gInfo || !mode_to_set || gInfo->device_fd < 0)
+		return B_BAD_VALUE;
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
+	if (status == B_OK) {
+		TRACE("SET_DISPLAY_MODE: IOCTL successful.\n");
+		// Update the accelerant's copy of current_mode from shared_info,
+		// as the kernel is the source of truth and might have adjusted the mode.
+		// A full refresh of shared_info might be needed if area IDs could change.
+		gInfo->shared_info->current_mode = *mode_to_set; // Reflect what was requested
+		                                                // Ideally, re-read from actual shared_info if kernel modified it.
+
+		// Framebuffer config might have changed, update local pointer if area is still valid
+		// This assumes the framebuffer_area ID in shared_info does NOT change.
+		// If it could, accelerant would need to re-clone it.
+		if (gInfo->shared_info->framebuffer_area >= B_OK) {
+			if (gInfo->framebuffer_base == NULL || area_for(gInfo->framebuffer_base) != gInfo->shared_info->framebuffer_area) {
+				// If we didn't have a mapping or the area ID changed (unlikely for modeset without driver reload)
+				// we would need to delete old clone and re-clone. For now, assume area ID is stable.
+				// This part is simplified.
+			}
+			// The base address within the cloned area should remain valid if area ID is same.
+		}
+		// gInfo->shared_info already points to the cloned shared memory,
+		// so its fields (bytes_per_row, framebuffer_size) are "live" from kernel.
+	} else {
+		TRACE("SET_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
+	}
+	return status;
+}
+
+static status_t
+intel_i915_get_display_mode(display_mode *current_mode)
+{
+	TRACE("GET_DISPLAY_MODE\n");
+	if (!gInfo || !gInfo->shared_info || !current_mode)
+		return B_BAD_VALUE;
+	*current_mode = gInfo->shared_info->current_mode;
+	return B_OK;
+}
+
+static status_t
+intel_i915_get_frame_buffer_config(frame_buffer_config *fb_config)
+{
+	TRACE("GET_FRAME_BUFFER_CONFIG\n");
+	if (!gInfo || !gInfo->shared_info || !fb_config)
+		return B_BAD_VALUE;
+
+	fb_config->frame_buffer = gInfo->framebuffer_base; // This is the accelerant's mapping
+	fb_config->frame_buffer_dma = (uint8_t*)(addr_t)gInfo->shared_info->framebuffer_physical; // GTT offset
+	fb_config->bytes_per_row = gInfo->shared_info->bytes_per_row;
+	return B_OK;
+}
+
+static status_t
+intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *low_khz, uint32 *high_khz)
+{
+	TRACE("GET_PIXEL_CLOCK_LIMITS\n");
+	if (!gInfo || !gInfo->shared_info || !low_khz || !high_khz)
+		return B_BAD_VALUE;
+
+	// Try to use values from shared_info first
+	if (gInfo->shared_info->max_pixel_clock > 0 &&
+		gInfo->shared_info->min_pixel_clock > 0 && // Ensure min_pixel_clock is also valid
+		gInfo->shared_info->min_pixel_clock <= gInfo->shared_info->max_pixel_clock) {
+		*low_khz = gInfo->shared_info->min_pixel_clock;
+		*high_khz = gInfo->shared_info->max_pixel_clock;
+		TRACE("GET_PIXEL_CLOCK_LIMITS: Using shared info: Min %u kHz, Max %u kHz\n", *low_khz, *high_khz);
+	} else {
+		// Fallback to generic safe defaults if shared_info not populated or invalid
+		*low_khz = 25000;  // 25 MHz
+		*high_khz = 400000; // 400 MHz (example, actual max depends on GPU gen and port type)
+		TRACE("GET_PIXEL_CLOCK_LIMITS: Using fallback defaults: Min %u kHz, Max %u kHz\n", *low_khz, *high_khz);
+	}
+	// The display_mode *dm parameter is for context if limits depend on other mode parameters
+	// (e.g., color depth, specific port). We currently return global limits.
+	return B_OK;
+}
+
 static status_t intel_i915_move_display(uint16 x, uint16 y) { TRACE("MOVE_DISPLAY (stub)\n"); return B_UNSUPPORTED;}
 static void     intel_i915_set_indexed_colors(uint c, uint8 f, uint8 *d, uint32 fl) { TRACE("SET_INDEXED_COLORS (stub)\n");}
 static uint32   intel_i915_dpms_capabilities(void) { TRACE("DPMS_CAPABILITIES (stub)\n"); return 0;}
 static uint32   intel_i915_dpms_mode(void) { TRACE("DPMS_MODE (stub)\n"); return B_DPMS_ON;}
 static status_t intel_i915_set_dpms_mode(uint32 flags) { TRACE("SET_DPMS_MODE (stub)\n"); return B_UNSUPPORTED;}
 static status_t intel_i915_get_preferred_display_mode(display_mode* pdm) { TRACE("GET_PREFERRED_DISPLAY_MODE (stub)\n"); if(gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0){*pdm = gInfo->mode_list[0]; return B_OK;} return B_ERROR;}
-static status_t intel_i915_get_monitor_info(monitor_info* mi) { TRACE("GET_MONITOR_INFO (stub)\n"); return B_UNSUPPORTED;}
-static status_t intel_i915_get_edid_info(void* i, size_t s, uint32* v) { TRACE("GET_EDID_INFO (stub)\n"); return B_UNSUPPORTED;}
+
+static status_t
+intel_i915_get_monitor_info(monitor_info* mon_info)
+{
+	TRACE("GET_MONITOR_INFO\n");
+	if (!gInfo || !gInfo->shared_info || !mon_info)
+		return B_BAD_VALUE;
+
+	memset(mon_info, 0, sizeof(monitor_info)); // Clear it first
+
+	if (!gInfo->shared_info->primary_edid_valid) {
+		TRACE("GET_MONITOR_INFO: No valid primary EDID data available.\n");
+		// Populate with some defaults or return error
+		strcpy(mon_info->name, "Unknown Monitor");
+		strcpy(mon_info->serial_number, "Unknown");
+		// mon_info->probed_size will be 0.
+		return B_NAME_NOT_FOUND; // No EDID to parse
+	}
+
+	// Cast to edid_v1_info, assuming this struct is defined appropriately
+	// (e.g. in a shared header like BeOS's edid.h or a local equivalent)
+	// For now, access bytes directly if struct is not available/confirmed.
+	const uint8_t* edid = gInfo->shared_info->primary_edid_block;
+
+	// Production Year/Week from EDID base block (bytes 16 and 17)
+	// EDID Byte 16: Week of manufacture (1-54, 0xFF for model year)
+	// EDID Byte 17: Year of manufacture (Year - 1990)
+	if (edid[16] != 0xFF && edid[16] >= 1 && edid[16] <= 54) {
+		mon_info->production_week = edid[16];
+		mon_info->production_year = edid[17] + 1990;
+	} else if (edid[16] == 0xFF) { // Model year instead of week
+		mon_info->production_week = 0; // Unspecified week
+		mon_info->production_year = edid[17] + 1990;
+	} else {
+		mon_info->production_week = 0;
+		mon_info->production_year = 0;
+	}
+
+	// Physical Size (from bytes 21, 22 of EDID base block) in cm
+	// This is max horizontal/vertical image size.
+	if (edid[21] > 0 && edid[22] > 0) {
+		mon_info->probed_size = true; // Indicate that physical size might be available
+		// Note: Haiku's monitor_info doesn't have direct cm fields.
+		// This info is usually used to calculate DPI with resolution.
+		// We can store them in reserved fields if needed, or just use for TRACE.
+		TRACE("GET_MONITOR_INFO: Physical size from EDID: %u cm x %u cm\n", edid[21], edid[22]);
+	}
+
+
+	// Parse Monitor Descriptors for Name and Serial Number
+	// These are within the 4x18-byte DTD blocks (offsets 54, 72, 90, 108)
+	bool name_found = false;
+	bool serial_found = false;
+
+	for (int i = 0; i < 4; i++) {
+		const uint8_t* desc_block_start = &edid[54 + i * 18];
+		// Check if it's a Monitor Descriptor (pixel clock bytes 0,1 are 0; byte 2 is 0 for some, but not all, descriptor types)
+		// A more reliable check for monitor descriptor vs DTD:
+		// If desc_block_start[0] and desc_block_start[1] are both 0, it's a monitor descriptor block.
+		// (DTD has pixel clock here, which is non-zero).
+		if (desc_block_start[0] == 0 && desc_block_start[1] == 0 /*&& desc_block_start[2] == 0*/) {
+			uint8_t desc_type_tag = desc_block_start[3]; // Descriptor type tag
+			const uint8_t* data_payload = &desc_block_start[5]; // Start of actual data payload in descriptor
+
+			if (desc_type_tag == 0xFC && !name_found) { // Monitor Name
+				int len = 0;
+				for (len = 0; len < 13 && data_payload[len] != '\n' && data_payload[len] != '\0'; len++);
+				if (len > 0 && len < B_MONITOR_NAME_LENGTH) { // B_MONITOR_NAME_LENGTH from private/interface/ScreenDefs.h
+					memcpy(mon_info->name, data_payload, len);
+					mon_info->name[len] = '\0'; // Ensure null termination
+					name_found = true;
+					TRACE("GET_MONITOR_INFO: Found Name: %s\n", mon_info->name);
+				}
+			} else if (desc_type_tag == 0xFF && !serial_found) { // Monitor Serial Number
+				int len = 0;
+				for (len = 0; len < 13 && data_payload[len] != '\n' && data_payload[len] != '\0'; len++);
+				if (len > 0 && len < B_MONITOR_SERIAL_NUMBER_LENGTH) { // B_MONITOR_SERIAL_NUMBER_LENGTH
+					memcpy(mon_info->serial_number, data_payload, len);
+					mon_info->serial_number[len] = '\0'; // Ensure null termination
+					serial_found = true;
+					TRACE("GET_MONITOR_INFO: Found Serial: %s\n", mon_info->serial_number);
+				}
+			}
+		}
+		if (name_found && serial_found) break;
+	}
+
+	if (!name_found) strcpy(mon_info->name, "Generic Monitor");
+	if (!serial_found) strcpy(mon_info->serial_number, "N/A");
+
+	// TODO: Populate other monitor_info fields if possible from EDID
+	// mon_info->gamma, mon_info->white_x, mon_info->white_y etc. from chromaticity data (bytes 25-34)
+	// mon_info->max_frequency, mon_info->min_frequency (from DTD range limits descriptor 0xFD)
+	// mon_info->checksum (EDID checksum itself)
+
+	return B_OK;
+}
+
+static status_t
+intel_i915_get_edid_info(void* edid_info, size_t size, uint32* _version)
+{
+	TRACE("GET_EDID_INFO: size %lu\n", size);
+	if (!gInfo || !gInfo->shared_info || !edid_info || size == 0 || !_version)
+		return B_BAD_VALUE;
+
+	if (!gInfo->shared_info->primary_edid_valid) {
+		TRACE("GET_EDID_INFO: No valid primary EDID data available in shared_info.\n");
+		return B_ERROR; // Or B_NAME_NOT_FOUND
+	}
+
+	// We only support returning EDID block 0 for now.
+	size_t copy_size = min_c(size, 128);
+	memcpy(edid_info, gInfo->shared_info->primary_edid_block, copy_size);
+	*_version = B_EDID_VERSION_1; // Assuming EDID 1.x
+
+	TRACE("GET_EDID_INFO: Copied %lu bytes of EDID data.\n", copy_size);
+	return B_OK;
+}
 
 // Cursor (Stubs)
 static status_t intel_i915_set_cursor_shape(uint16 w, uint16 h, uint16 hx, uint16 hy, uint8 *a, uint8 *x) { TRACE("SET_CURSOR_SHAPE (stub)\n"); return B_UNSUPPORTED;}
@@ -166,10 +436,12 @@ static status_t intel_i915_sync_to_token(sync_token *st) { TRACE("SYNC_TO_TOKEN 
 // 2D Accel (Stubs - actual implementations are in accel_2d.c, but need non-static decl or include accel_2d.c)
 // For now, provide minimal stubs here if accel_2d.c functions are static.
 // If accel_2d.c functions are non-static and declared in a header included by hooks.c, these are not needed.
-// Assuming they are now non-static and declared elsewhere (e.g. a new accel_2d.h)
-// void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count); // in accel_2d.c
-// void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count); // in accel_2d.c
+// Assuming they are now non-static and declared elsewhere (e.g. a new accel_2d.h or in accelerant_protos.h)
+// void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
+// void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
+// void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count); // Now implemented in accel_2d.c
+
 static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 tc, blit_params *l, uint32 c) { TRACE("S2S_TRANSPARENT_BLIT (stub)\n");}
 static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *l, uint32 c) { TRACE("S2S_SCALED_FILTERED_BLIT (stub)\n");}
 static void intel_i915_fill_span(engine_token* et, uint32 col, uint16* lst, uint32 cnt) { TRACE("FILL_SPAN (stub)\n");}
-static void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* lst, uint32 cnt) { TRACE("INVERT_RECTANGLE (stub)\n");}
+// Removed the stub implementation of intel_i915_invert_rectangle as it's now in accel_2d.c

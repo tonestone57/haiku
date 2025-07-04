@@ -7,9 +7,7 @@
  */
 
 #include "accelerant.h"       // For gInfo, accelerant_info, IOCTL codes and args
-#include "intel_i915_priv.h"  // For TRACE (though accelerant might have its own TRACE)
-                              // This include is problematic for accelerant; should use shared headers.
-                              // For now, assume TRACE is available or remove it for accelerant files.
+// intel_i915_priv.h should not be included by accelerants.
 #include <unistd.h>           // For ioctl
 #include <syslog.h>           // For syslog
 #include <string.h>           // For memcpy, memset
@@ -147,6 +145,79 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
 			TRACE("fill_rectangle: GEM_EXECBUFFER failed.\n");
+		}
+
+		destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+	}
+}
+
+
+void
+intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count)
+{
+	// TRACE("invert_rectangle: count %lu\n", count);
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
+		return;
+
+	// Similar to fill_rectangle, using XY_COLOR_BLT with DSTINVERT ROP
+	size_t max_rects_per_batch = 64; // Same batching as fill_rectangle
+	size_t num_batches = (count + max_rects_per_batch - 1) / max_rects_per_batch;
+
+	for (size_t batch = 0; batch < num_batches; batch++) {
+		size_t current_batch_count = min_c(count - (batch * max_rects_per_batch), max_rects_per_batch);
+		// XY_COLOR_BLT is 5 DWORDS if color is included, but for DSTINVERT, color is ignored.
+		// The command length field is for DWORDS *after* DW0. So for 4 total DW (DW0-DW3), length is 2.
+		// If we write 5 DWs (DW0-DW4) as in fill_rectangle, length is 3.
+		// For DSTINVERT, we can use the 4-DW version (length 2) if color is truly ignored,
+		// or send 5 DWs with a dummy color. Let's use 5 DWs for consistency with fill_rectangle structure.
+		size_t cmd_dwords_per_rect = 5;
+		size_t cmd_dwords = current_batch_count * cmd_dwords_per_rect + 1; // +1 for MI_BATCH_BUFFER_END
+		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
+
+		uint32 cmd_handle;
+		area_id cmd_area_kernel_id;
+		area_id cmd_area_clone_id = -1;
+		uint32* cmd_buffer_cpu;
+
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &cmd_area_kernel_id, (void**)&cmd_buffer_cpu) != B_OK) {
+			TRACE("invert_rectangle: Failed to create command buffer.\n");
+			return;
+		}
+		cmd_area_clone_id = area_for(cmd_buffer_cpu);
+
+		uint32 current_dword = 0;
+		for (size_t i = 0; i < current_batch_count; i++) {
+			fill_rect_params *rect = &list[batch * max_rects_per_batch + i];
+			if (rect->right < rect->left || rect->bottom < rect->top) continue;
+
+			// XY_COLOR_BLT command (Gen7 example)
+			// DW0: Opcode (0x50), Length (0x03 for 5 DWs total), ColorDepth, ROP
+			cmd_buffer_cpu[current_dword++] = (0x50 << 22) /* XY_COLOR_BLT */
+				| (cmd_dwords_per_rect - 2) /* Command length (payload DWs) */
+				| (1 << 20) /* 32bpp, needs to match framebuffer */
+				| (0x55 << 16); /* ROP: DSTINVERT (0x5555) */
+			// DW1: Destination Pitch
+			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1, Y1
+			cmd_buffer_cpu[current_dword++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16);
+			// DW3: Destination X2, Y2 (exclusive)
+			cmd_buffer_cpu[current_dword++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16);
+			// DW4: Color (Ignored for DSTINVERT, but command expects it if length is 3)
+			cmd_buffer_cpu[current_dword++] = 0x00000000; // Dummy color
+		}
+		cmd_buffer_cpu[current_dword++] = 0x0A000000; // MI_BATCH_BUFFER_END
+
+		intel_i915_gem_execbuffer_args exec_args;
+		exec_args.cmd_buffer_handle = cmd_handle;
+		exec_args.cmd_buffer_length = current_dword * sizeof(uint32);
+		exec_args.engine_id = RCS0;
+		exec_args.flags = 0;
+		exec_args.relocation_count = 0; // No relocations for this simple blit
+		exec_args.relocations_ptr = 0;
+		exec_args.context_handle = 0; // Use default context
+
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
+			TRACE("invert_rectangle: GEM_EXECBUFFER failed.\n");
 		}
 
 		destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);

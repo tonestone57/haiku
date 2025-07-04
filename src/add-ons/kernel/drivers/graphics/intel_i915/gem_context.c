@@ -138,21 +138,75 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 		// For now, we'll assume the context is zeroed and the hardware/MI_SET_CONTEXT
 		// will use global ring settings if these are not explicitly set in the image.
 		// This is a simplification. A real driver would populate this more thoroughly.
-		if (ctx->hw_image_obj->size >= 16) { // Ensure some minimal size for example
-			// uint32_t* ctx_regs = (uint32_t*)hw_image_cpu_addr;
-			// Example: Setting a context ID or flags within the image if HW expects it.
-			// ctx_regs[0] = ctx->id; // Example: Store context ID at offset 0
-			// ctx_regs[1] = 0xDEFC0FFE; // Example: Magic number or flags
-			TRACE("GEM Context: HW image initialized (conceptually, mostly zeroed).\n");
-		}
+		if (ctx->hw_image_obj->size >= 0x1000) { // Ensure at least one page for context image
+			uint32_t* lrca = (uint32_t*)hw_image_cpu_addr;
 
+			// These are conceptual offsets within the LRCA for Gen7 RCS.
+			// Real offsets are sparse and defined in PRM (e.g., Register State anD Context).
+			// Example LRCA structure (highly simplified, real one is sparse and larger):
+			// DW0: Reserved / Flags / Context ID
+			// DW1: CTX_RING_HEAD (Ring Head Pointer)
+			// DW2: CTX_RING_TAIL (Ring Tail Pointer)
+			// DW3: CTX_RING_BUFFER_START_REGISTER (Ring Buffer Base Address - GTT)
+			// DW4: CTX_RING_BUFFER_CONTROL_REGISTER (Ring Buffer Control)
+			// ... other registers ...
+			#define LRCA_CTX_ID_REG_OFFSET_DW      0x02 // Example: Context ID Register (Conceptual)
+			#define LRCA_RING_HEAD_REG_OFFSET_DW   0x04 // Example: Offset in DWORDS for Ring Head
+			#define LRCA_RING_TAIL_REG_OFFSET_DW   0x05 // Example
+			#define LRCA_RING_START_REG_OFFSET_DW  0x06 // Example
+			#define LRCA_RING_CTL_REG_OFFSET_DW    0x07 // Example
+			// IMPORTANT: These offsets are NOT REAL and are for demonstration of initialization.
+			// The actual context image layout is complex.
+
+			struct intel_engine_cs* rcs0 = devInfo->rcs0; // Assuming RCS0 is the target engine
+			if (rcs0 && rcs0->ring_buffer_obj) {
+				// Initialize Ring Buffer registers in the context image
+				// These should point to the global ring buffer for now (no per-context ring)
+				lrca[LRCA_RING_START_REG_OFFSET_DW] = rcs0->ring_buffer_obj->gtt_offset_pages * B_PAGE_SIZE;
+
+				uint32_t ring_ctl_val = RING_CTL_SIZE(rcs0->ring_size_bytes / 1024) | RING_CTL_ENABLE;
+				// Add any other necessary bits for context's view of RING_CTL, e.g. buffer length.
+				// It should match the global ring's control register settings.
+				lrca[LRCA_RING_CTL_REG_OFFSET_DW] = ring_ctl_val;
+
+				lrca[LRCA_RING_HEAD_REG_OFFSET_DW] = 0; // Head starts at 0 for a new context
+				lrca[LRCA_RING_TAIL_REG_OFFSET_DW] = 0; // Tail starts at 0
+
+				// Store Context ID (if HW has a register in context image for it, for debug/verify)
+				// This is conceptual. Some HW stores CONTEXT_ID in a specific context reg.
+				lrca[LRCA_CTX_ID_REG_OFFSET_DW] = ctx->id;
+
+				TRACE("GEM Context: HW image (LRCA) initialized for RCS0:\n");
+				TRACE("  LRCA.RingStart = 0x%08x (points to global ring GTT)\n", lrca[LRCA_RING_START_REG_OFFSET_DW]);
+				TRACE("  LRCA.RingCtl   = 0x%08x\n", lrca[LRCA_RING_CTL_REG_OFFSET_DW]);
+				TRACE("  LRCA.RingHead  = 0x%08x\n", lrca[LRCA_RING_HEAD_REG_OFFSET_DW]);
+				TRACE("  LRCA.RingTail  = 0x%08x\n", lrca[LRCA_RING_TAIL_REG_OFFSET_DW]);
+				TRACE("  LRCA.CtxIDReg  = 0x%08x (conceptual)\n", lrca[LRCA_CTX_ID_REG_OFFSET_DW]);
+
+			} else {
+				TRACE("GEM Context: Could not initialize LRCA, RCS0 engine or ring not available.\n");
+				// This is a critical error if we expect contexts to function.
+				status = B_NO_INIT; // Mark as error
+			}
+		} else {
+			TRACE("GEM Context: HW image object too small for LRCA initialization (size %lu).\n",
+				ctx->hw_image_obj->size);
+			status = B_BAD_VALUE;
+		}
 		// intel_i915_gem_object_unmap_cpu(ctx->hw_image_obj); // No-op for area-backed BOs
 	} else {
 		TRACE("GEM Context: Could not CPU map HW image for initialization. Status: %s\n", strerror(status));
-		// This is a critical failure if context image requires non-zero initialization.
-		// For now, proceed as if zeroed image is acceptable for basic MI_SET_CONTEXT.
+		// This is a critical failure.
+		status = (status == B_OK) ? B_ERROR : status; // Ensure status reflects an error
 	}
 
+	if (status != B_OK) { // Cleanup if initialization failed
+		intel_i915_gtt_free_space(devInfo, ctx->hw_image_obj->gtt_offset_pages, ctx->hw_image_obj->num_phys_pages);
+		intel_i915_gem_object_put(ctx->hw_image_obj); // This will free the area if refcount is 0
+		mutex_destroy(&ctx->lock);
+		free(ctx);
+		return status;
+	}
 
 	TRACE("GEM Context: Created context ID %lu, HW image handle %p (GTT offset %u pages)\n",
 		ctx->id, ctx->hw_image_obj, ctx->hw_image_obj->gtt_offset_pages);

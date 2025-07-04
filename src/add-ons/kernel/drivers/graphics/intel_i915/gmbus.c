@@ -154,6 +154,45 @@ intel_i915_gmbus_write(intel_i915_device_info* devInfo, uint8_t pin_select,
 	return _gmbus_xfer(devInfo, pin_select, i2c_addr, (uint8_t*)buf, len, false);
 }
 
+// Helper for indexed byte writes using GMBUS_CYCLE_INDEX
+static status_t
+_gmbus_indexed_write_byte(intel_i915_device_info* devInfo, uint8_t pin_select,
+	uint8_t i2c_addr, uint8_t index, uint8_t data)
+{
+	status_t status;
+
+	if (devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
+
+	status = _gmbus_wait_bus_idle(devInfo);
+	if (status != B_OK) return status;
+
+	intel_i915_write32(devInfo, GMBUS0, pin_select | GMBUS_RATE_100KHZ); // Select pin and rate
+	intel_i915_write32(devInfo, GMBUS4, index); // Set the index/offset register
+	intel_i915_write32(devInfo, GMBUS3, data);  // Set the data register
+
+	// GMBUS1: command for indexed write
+	uint32 gmbus1Cmd = (1 << GMBUS_BYTE_COUNT_SHIFT) // Length is 1 byte
+		| ((i2c_addr >> 1) << GMBUS_SLAVE_ADDR_SHIFT)
+		| GMBUS_SLAVE_WRITE
+		| GMBUS_CYCLE_INDEX // Use INDEX register
+		| GMBUS_CYCLE_WAIT
+		| GMBUS_CYCLE_STOP
+		| GMBUS_SW_RDY;
+
+	intel_i915_write32(devInfo, GMBUS1, gmbus1Cmd);
+
+	status = _gmbus_wait_hw_ready(devInfo);
+	if (status != B_OK) {
+		TRACE("GMBUS Indexed Write: xfer failed waiting for HW ready. GMBUS1=0x%x GMBUS2=0x%x\n",
+			intel_i915_read32(devInfo, GMBUS1), intel_i915_read32(devInfo, GMBUS2));
+	}
+
+	intel_i915_write32(devInfo, GMBUS1, 0); // Clear SW_RDY
+	intel_i915_write32(devInfo, GMBUS0, GMBUS_RATE_100KHZ | GMBUS_PIN_DISABLED); // Release bus
+	return status;
+}
+
+
 status_t
 intel_i915_gmbus_read_edid_block(intel_i915_device_info* devInfo, uint8_t pin_select,
 	uint8_t* edid_buffer, uint8_t block_num)
@@ -165,41 +204,17 @@ intel_i915_gmbus_read_edid_block(intel_i915_device_info* devInfo, uint8_t pin_se
 
 	TRACE("gmbus_read_edid_block: pin_select %u, block_num %u\n", pin_select, block_num);
 
-	// For EDID blocks > 0, we need to set the segment pointer for the E-DDC device.
-	// The E-DDC standard specifies that to read EDID extension block N,
-	// we write N to I2C slave 0x60 at offset 0x00.
 	if (block_num > 0) {
-		uint8_t segment_data[2] = {0x00, block_num}; // Offset 0, Data block_num
-		// This requires an "indexed write" or a "write two bytes" operation.
-		// The current _gmbus_xfer is limited. We will attempt two single-byte writes.
-		// This is not a standard I2C combined write, but might work for some simple slaves
-		// if they interpret consecutive writes appropriately or if GMBUS handles it.
-		// A more robust method would use GMBUS_CYCLE_INDEX if _gmbus_xfer supported it,
-		// or ensure _gmbus_xfer can write N bytes.
-		// For now, we'll try to write the offset, then the data, as separate operations.
-		// This is NOT how intel_i915_gmbus_write is currently implemented (it writes all bytes at once).
-		// We need a way to write a specific byte to a specific offset.
-		// The simplest GMBUS sequence for this is to use GMBUS_CYCLE_INDEX,
-		// or perform two separate GMBUS transactions if the slave address is the same.
-
-		// Let's assume we need a new helper or an enhanced _gmbus_xfer for indexed write.
-		// For now, this part remains difficult with the current _gmbus_xfer.
-		// To make progress, we'll focus on block 0 and acknowledge this limitation.
-		TRACE("GMBUS: EDID extension block %u requested. Segment pointer set is NOT YET ROBUSTLY IMPLEMENTED.\n", block_num);
-		// Placeholder for future:
-		// status = intel_i915_gmbus_write_indexed(devInfo, pin_select, edid_segment_pointer_addr, 0x00, block_num);
-		// if (status != B_OK) {
-		// TRACE("GMBUS: Failed to set EDID segment pointer for block %u: %s\n", block_num, strerror(status));
-		// return status;
-		// }
-		// For now, we are likely to fail reading extension blocks correctly.
-		// To avoid certain failure, let's restrict to block 0 for now for the read part.
-		if (block_num > 0) {
-			// Skip reading if it's an extension block until segment setting is fixed.
-			// Fill with zeros or return error. For now, let's return error.
-			 TRACE("GMBUS: Aborting read for extension block %u due to unimplemented segment pointer set.\n", block_num);
-			 return B_UNSUPPORTED;
+		// For EDID extension block N, write N to I2C slave 0x60 at offset/index 0x00.
+		TRACE("GMBUS: Setting EDID segment pointer to %u for extension block.\n", block_num);
+		status = _gmbus_indexed_write_byte(devInfo, pin_select,
+			edid_segment_pointer_addr, 0x00 /*index*/, block_num /*data*/);
+		if (status != B_OK) {
+			TRACE("GMBUS: Failed to set EDID segment pointer for block %u: %s\n", block_num, strerror(status));
+			return status;
 		}
+		// Add a small delay as per some E-DDC recommendations after segment pointer write
+		snooze(1000); // 1ms
 	}
 
 	// Step 1: Set the EDID data offset to 0 for the target block.

@@ -280,11 +280,39 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 			train_lane_set[l] = (pe_adj[l] << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
 			                    (vs_adj[l] << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
 		}
-		TRACE("  DP Link Training: Adjusting VS/PE. New DPCD_TRAINING_LANE0_SET=0x%02x (example)\n", train_lane_set[0]);
-		TRACE("  DP Link Training: DDI_BUF_CTL VS/PE update STUBBED.\n");
-		// uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index));
-		// ... modify ddi_buf_ctl_val based on vs_adj and pe_adj for each lane ...
-		// intel_i915_write32(devInfo, DDI_BUF_CTL(port->hw_port_index), ddi_buf_ctl_val);
+		TRACE("  DP Link Training: Adjusting VS/PE for DPCD. New DPCD_TRAINING_LANE0_SET=0x%02x (example)\n", train_lane_set[0]);
+
+		// This is where the source DDI_BUF_CTL register would be updated
+		// based on the sink's vs_adj[] and pe_adj[] requests.
+		// The actual bits in DDI_BUF_CTL for per-lane VS/PE are Gen-specific and complex.
+		// For HSW/IVB, these are often grouped (e.g. DDI_BUF_CTL_VS_LANE0_SHIFT etc.)
+		uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+		uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		uint32_t original_ddi_buf_ctl_val = ddi_buf_ctl_val; // Keep original for now
+
+		TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original value: 0x%08" B_PRIx32 "\n",
+			ddi_buf_ctl_reg, original_ddi_buf_ctl_val);
+
+		for (int l = 0; l < lane_count; l++) {
+			// Placeholder: TRACE what would be done.
+			// Example: ddi_buf_ctl_val &= ~DDI_BUF_CTL_VS_LANE_MASK(l);
+			// ddi_buf_ctl_val |= DDI_BUF_CTL_VS_LANE_VALUE(l, vs_adj[l]);
+			// ddi_buf_ctl_val &= ~DDI_BUF_CTL_PE_LANE_MASK(l);
+			// ddi_buf_ctl_val |= DDI_BUF_CTL_PE_LANE_VALUE(l, pe_adj[l]);
+			TRACE("  DP Link Training: Would update DDI_BUF_CTL for Lane %d: VS Level %d, PE Level %d\n",
+				l, vs_adj[l], pe_adj[l]);
+		}
+
+		// Since actual bit manipulation is not implemented, do not write back modified ddi_buf_ctl_val.
+		// If it were implemented:
+		// if (ddi_buf_ctl_val != original_ddi_buf_ctl_val) {
+		//    intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		//    TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) updated to 0x%08" B_PRIx32 "\n",
+		//		ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		// } else {
+		//    TRACE("  DP Link Training: DDI_BUF_CTL no change needed for VS/PE.\n");
+		// }
+		TRACE("  DP Link Training: Actual DDI_BUF_CTL VS/PE update is STUBBED (no write performed).\n");
 	}
 
 	if (!cr_done) {

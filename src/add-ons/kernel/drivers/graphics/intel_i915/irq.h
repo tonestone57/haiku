@@ -8,7 +8,11 @@
 #ifndef INTEL_I915_IRQ_H
 #define INTEL_I915_IRQ_H
 
-#include "intel_i915.h" // For intel_i915_device_info
+// We need the full definition of intel_i915_device_info here
+// This will be moved to intel_i915_priv.h
+struct intel_i915_device_info;
+typedef struct intel_i915_device_info intel_i915_device_info;
+
 
 #ifdef __cplusplus
 extern "C" {

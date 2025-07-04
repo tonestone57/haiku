@@ -8,16 +8,16 @@
 
 #include "irq.h"
 #include "registers.h" // For interrupt register definitions
-#include "intel_i915.h" // For TRACE, intel_i915_read32/write32
+#include "intel_i915_priv.h" // For TRACE, intel_i915_read32/write32, intel_i915_device_info
 
-#include <KernelExport.h> // For install_io_interrupt_handler, remove_io_interrupt_handler, create_sem, delete_sem, release_sem_etc
-#include <OS.h>           // For B_DO_NOT_RESCHEDULE etc.
+#include <KernelExport.h>
+#include <OS.h>
 
 
 status_t
 intel_i915_irq_init(intel_i915_device_info* devInfo)
 {
-	char semName[32];
+	char semName[64]; // Increased size for longer sem name
 	status_t status;
 
 	if (devInfo == NULL || devInfo->shared_info == NULL) {
@@ -31,40 +31,33 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 		TRACE("irq_init: Failed to create vblank semaphore: %s\n", strerror(devInfo->vblank_sem_id));
 		return devInfo->vblank_sem_id;
 	}
-	// Share the semaphore ID with the accelerant
 	devInfo->shared_info->vblank_sem = devInfo->vblank_sem_id;
-	TRACE("irq_init: VBlank semaphore %" B_PRId32 " created.\n", devInfo->vblank_sem_id);
+	TRACE("irq_init: VBlank semaphore %" B_PRId32 " created for device 0x%04x.\n", devInfo->vblank_sem_id, devInfo->device_id);
 
-	// Get the IRQ line from PCI config (should have been read in init_driver)
 	if (devInfo->irq_line == 0 || devInfo->irq_line == 0xff) {
-		TRACE("irq_init: Invalid IRQ line %d. Cannot install interrupt handler.\n", devInfo->irq_line);
-		// Not necessarily fatal if we don't strictly need interrupts for basic modesetting,
-		// but vblank sync won't work.
-		// Delete the semaphore we just created as it won't be used.
+		TRACE("irq_init: Invalid IRQ line %d. Cannot install interrupt handler for device 0x%04x.\n",
+			devInfo->irq_line, devInfo->device_id);
 		delete_sem(devInfo->vblank_sem_id);
 		devInfo->vblank_sem_id = -1;
 		devInfo->shared_info->vblank_sem = -1;
-		return B_OK; // Or B_ERROR if interrupts are critical path from the start
+		return B_OK;
 	}
 
-	// Install the interrupt handler
-	// The last argument (0) is for flags, B_NO_SHARED_IRQ could be one if applicable and safe
 	status = install_io_interrupt_handler(devInfo->irq_line,
 		intel_i915_interrupt_handler, devInfo, 0);
 	if (status != B_OK) {
-		TRACE("irq_init: Failed to install interrupt handler for IRQ %u: %s\n",
-			devInfo->irq_line, strerror(status));
+		TRACE("irq_init: Failed to install interrupt handler for IRQ %u (device 0x%04x): %s\n",
+			devInfo->irq_line, devInfo->device_id, strerror(status));
 		delete_sem(devInfo->vblank_sem_id);
 		devInfo->vblank_sem_id = -1;
 		devInfo->shared_info->vblank_sem = -1;
 		return status;
 	}
-	devInfo->irq_cookie = devInfo; // Store devInfo for remove_io_interrupt_handler
-	TRACE("irq_init: Interrupt handler installed for IRQ %u.\n", devInfo->irq_line);
+	devInfo->irq_cookie = devInfo;
+	TRACE("irq_init: Interrupt handler installed for IRQ %u (device 0x%04x).\n", devInfo->irq_line, devInfo->device_id);
 
-	// Critical: Ensure MMIO is mapped before trying to write registers
 	if (devInfo->mmio_regs_addr == NULL) {
-		TRACE("irq_init: MMIO registers not mapped! Cannot configure interrupts.\n");
+		TRACE("irq_init: MMIO registers not mapped for device 0x%04x! Cannot configure interrupts.\n", devInfo->device_id);
 		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
 		devInfo->irq_cookie = NULL;
 		delete_sem(devInfo->vblank_sem_id);
@@ -76,13 +69,12 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 	// Disable all display interrupts initially
 	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
 	// Enable Pipe A VBlank interrupt (example for IvyBridge/Haswell)
-	// Also ensure Master IRQ control is set if DEIER requires it (depends on gen)
+	// Also ensure Master IRQ control is set.
 	intel_i915_write32(devInfo, DEIER, DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB);
-	// Read back to ensure write posted (often good practice)
-	(void)intel_i915_read32(devInfo, DEIER);
+	(void)intel_i915_read32(devInfo, DEIER); // Posting read
 
-	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 ", DEIMR to 0x%08" B_PRIx32 "\n",
-		intel_i915_read32(devInfo, DEIER), intel_i915_read32(devInfo, DEIMR));
+	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 ", DEIMR to 0x%08" B_PRIx32 " for device 0x%04x\n",
+		intel_i915_read32(devInfo, DEIER), intel_i915_read32(devInfo, DEIMR), devInfo->device_id);
 
 	return B_OK;
 }
@@ -96,8 +88,7 @@ intel_i915_irq_uninit(intel_i915_device_info* devInfo)
 	TRACE("irq_uninit for device 0x%04x\n", devInfo->device_id);
 
 	if (devInfo->irq_cookie != NULL) {
-		TRACE("irq_uninit: Removing interrupt handler for IRQ %u\n", devInfo->irq_line);
-		// Disable and mask all display interrupts before removing handler
+		TRACE("irq_uninit: Removing interrupt handler for IRQ %u (device 0x%04x)\n", devInfo->irq_line, devInfo->device_id);
 		if (devInfo->mmio_regs_addr) {
 			intel_i915_write32(devInfo, DEIER, 0);
 			intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF);
@@ -122,46 +113,51 @@ intel_i915_interrupt_handler(void* data)
 	int32 handledStatus = B_UNHANDLED_INTERRUPT;
 
 	if (!devInfo || !devInfo->mmio_regs_addr) {
-		// This should ideally not happen if handler is installed only after MMIO map
 		return B_UNHANDLED_INTERRUPT;
 	}
 
-	// Read Display Engine Interrupt Identity Register
 	de_iir = intel_i915_read32(devInfo, DEIIR);
 
-	if (de_iir == 0) // No display interrupts pending for us (or shared IRQ and not ours)
+	if (de_iir == 0)
 		return B_UNHANDLED_INTERRUPT;
 
-	// Check for Pipe A VBlank (example for IvyBridge/Haswell)
-	// Adjust DE_PIPEA_VBLANK_IVB for the correct generation if needed
-	if (de_iir & DE_PIPEA_VBLANK_IVB) {
+	// It's important to only handle interrupts that are also enabled in DEIER
+	// and not masked in DEIMR. However, DEIIR only shows unmasked pending interrupts.
+	uint32 enabled_irqs = intel_i915_read32(devInfo, DEIER);
+	uint32 masked_pending_irqs = de_iir & enabled_irqs;
+
+
+	if (masked_pending_irqs & DE_PIPEA_VBLANK_IVB) {
 		if (devInfo->vblank_sem_id >= B_OK) {
 			release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
 		}
-		// Acknowledge VBlank for Pipe A by writing the bit back to DEIIR
-		intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB);
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); // Acknowledge
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
 
-	// TODO: Check and handle Pipe B VBlank (DE_PIPEB_VBLANK_IVB)
-	// if (de_iir & DE_PIPEB_VBLANK_IVB) { ... }
+	if (masked_pending_irqs & DE_PIPEB_VBLANK_IVB) {
+		// Assuming a single vblank_sem for now, or we'd need per-pipe sems
+		if (devInfo->vblank_sem_id >= B_OK) {
+			release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
+		}
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); // Acknowledge
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
+	// TODO: Add Pipe C if supported by hardware and enabled.
 
-	// TODO: Check and handle other interrupt sources (hotplug, errors, etc.)
-	// Example:
-	// if (de_iir & DE_PCH_EVENT_IVB) {
-	//    TRACE("PCH Event interrupt!\n");
-	//    intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB);
-	//    handledStatus = B_HANDLED_INTERRUPT;
-	//    // Further hotplug processing might be queued to a work thread
+	// Acknowledge any other pending display interrupts we might not explicitly handle yet
+	// to prevent interrupt storms, but be careful not to clear bits for IRQs handled
+	// by other parts of the driver (e.g. GuC, GT if they share DEIIR bits on some gens)
+	// For now, we only explicitly acknowledge what we handle.
+	// If DEIIR still has unhandled bits for *display engine* IRQs, and they are enabled,
+	// they should be acknowledged.
+	// A common pattern is:
+	// uint32 unhandled_de_irqs = de_iir & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB /* | other handled bits */);
+	// if (unhandled_de_irqs != 0) {
+	//    intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
+	//    // Log these unhandled but acknowledged interrupts
 	// }
 
-	// It's possible for multiple interrupt bits to be set in DEIIR.
-	// A robust handler would loop or check all relevant bits and acknowledge them.
-	// For now, we are only handling Pipe A VBlank.
-
-	// If any interrupt was handled, DEIIR would have been written to.
-	// A final read of DEIIR can ensure all acknowledged bits are cleared.
-	// (void)intel_i915_read32(devInfo, DEIIR); // Posting read for DEIIR writes
 
 	return handledStatus;
 }

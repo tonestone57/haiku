@@ -11,25 +11,24 @@
 #include <SupportDefs.h>
 #include <drivers/graphics.h>
 #include <graphic_driver.h>
-#include <OS.h> // For B_PRIu32 etc.
 
-#include "accelerant.h" // For intel_i915_shared_info, intel_i915_get_shared_area_info, IOCTL codes
+#include "intel_i915_priv.h" // Main private header
+#include "accelerant.h"
 #include "registers.h"
 #include "gtt.h"
-#include "irq.h" // Added for interrupt handling
+#include "irq.h"
+#include "vbt.h"
+#include "gmbus.h"
+#include "edid.h"
+#include "clocks.h"
+#include "display.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 
-#define DEVICE_NAME "intel_i915"
-#define TRACE_DRIVER
-#ifdef TRACE_DRIVER
-#	define TRACE(x...) dprintf(DEVICE_NAME ": " x)
-#else
-#	define TRACE(x...) ;
-#endif
+// Globals defined in intel_i915_priv.h via TRACE macro
 
 // Forward declarations for device hooks
 static status_t intel_i915_open(const char* name, uint32 flags, void** cookie);
@@ -53,76 +52,10 @@ static const uint16 kSupportedDevices[] = {
 };
 #define NUM_SUPPORTED_DEVICES (sizeof(kSupportedDevices) / sizeof(kSupportedDevices[0]))
 
-// Device specific information structure is now in intel_i915.h (implicitly via irq.h)
-// typedef struct { ... } intel_i915_device_info;
-// This definition should be moved to a central header like "intel_i915_priv.h" eventually.
-// For now, ensure it's compatible with what irq.h expects.
-// If intel_i915.h (which would be the private kernel header) defines it, then irq.h can include that.
-// For this step, assuming intel_i915.h would contain this:
-typedef struct intel_i915_device_info {
-	pci_info	pciinfo;
-	uint16		vendor_id;
-	uint16		device_id;
-	uint8		revision;
-
-	uintptr_t	gtt_mmio_physical_address;
-	size_t		gtt_mmio_aperture_size;
-	area_id		gtt_mmio_area_id;
-	uint8*		gtt_mmio_regs_addr;
-
-	uintptr_t	mmio_physical_address;
-	size_t		mmio_aperture_size;
-	area_id		mmio_area_id;
-	uint8*		mmio_regs_addr;
-
-	area_id		shared_info_area;
-	intel_i915_shared_info* shared_info;
-
-	phys_addr_t	gtt_table_physical_address;
-	uint32*		gtt_table_virtual_address;
-	uint32		gtt_entries_count;
-	size_t		gtt_aperture_actual_size;
-	uint32      pgtbl_ctl;
-
-	uint32		open_count;
-	// Interrupt handling
-	int32		irq_line;
-	sem_id		vblank_sem_id;
-	void*		irq_cookie;
-} intel_i915_device_info;
-
-
 intel_i915_device_info* gDeviceInfo[MAX_SUPPORTED_CARDS];
 
 
-// Register access helpers (static inline, so definition here is fine)
-static inline uint32
-intel_i915_read32(intel_i915_device_info* devInfo, uint32 offset)
-{
-	if (!devInfo || !devInfo->mmio_regs_addr) {
-		TRACE("intel_i915_read32: MMIO not mapped or devInfo invalid for offset 0x%lx!\n", offset);
-		return 0xFFFFFFFF;
-	}
-	if (offset >= devInfo->mmio_aperture_size) {
-		TRACE("intel_i915_read32: MMIO offset 0x%lx out of bounds (size 0x%lx)!\n", offset, devInfo->mmio_aperture_size);
-		return 0xFFFFFFFF;
-	}
-	return *(volatile uint32*)(devInfo->mmio_regs_addr + offset);
-}
-
-static inline void
-intel_i915_write32(intel_i915_device_info* devInfo, uint32 offset, uint32 value)
-{
-	if (!devInfo || !devInfo->mmio_regs_addr) {
-		TRACE("intel_i915_write32: MMIO not mapped or devInfo invalid for offset 0x%lx!\n", offset);
-		return;
-	}
-	if (offset >= devInfo->mmio_aperture_size) {
-		TRACE("intel_i915_write32: MMIO offset 0x%lx out of bounds (size 0x%lx)!\n", offset, devInfo->mmio_aperture_size);
-		return;
-	}
-	*(volatile uint32*)(devInfo->mmio_regs_addr + offset) = value;
-}
+// Register access helpers are in intel_i915_priv.h
 
 
 extern "C" const char**
@@ -187,7 +120,8 @@ init_driver(void)
 		}
 		if (!supported) continue;
 
-		TRACE("init_driver: Found supported device: Vendor 0x%04X, Device 0x%04X\n", info.vendor_id, info.device_id);
+		TRACE("init_driver: Found supported device: Vendor 0x%04X, Device 0x%04X, Subsystem: 0x%04X:0x%04X\n",
+			info.vendor_id, info.device_id, info.u.h0.subsystem_vendor_id, info.u.h0.subsystem_id);
 
 		gDeviceInfo[gDeviceCount] = (intel_i915_device_info*)malloc(sizeof(intel_i915_device_info));
 		if (gDeviceInfo[gDeviceCount] == NULL) {
@@ -201,13 +135,20 @@ init_driver(void)
 		gDeviceInfo[gDeviceCount]->vendor_id = info.vendor_id;
 		gDeviceInfo[gDeviceCount]->device_id = info.device_id;
 		gDeviceInfo[gDeviceCount]->revision = info.revision;
+		gDeviceInfo[gDeviceCount]->subsystem_vendor_id = info.u.h0.subsystem_vendor_id;
+		gDeviceInfo[gDeviceCount]->subsystem_id = info.u.h0.subsystem_id;
+
 		gDeviceInfo[gDeviceCount]->mmio_area_id = -1;
 		gDeviceInfo[gDeviceCount]->shared_info_area = -1;
 		gDeviceInfo[gDeviceCount]->gtt_mmio_area_id = -1;
+		gDeviceInfo[gDeviceCount]->framebuffer_area = -1; // Initialize framebuffer area
 		gDeviceInfo[gDeviceCount]->open_count = 0;
 		gDeviceInfo[gDeviceCount]->irq_line = info.u.h0.interrupt_line;
 		gDeviceInfo[gDeviceCount]->vblank_sem_id = -1;
 		gDeviceInfo[gDeviceCount]->irq_cookie = NULL;
+		gDeviceInfo[gDeviceCount]->vbt = NULL;
+		gDeviceInfo[gDeviceCount]->rom_area = -1;
+		gDeviceInfo[gDeviceCount]->rom_base = NULL;
 
 
 		gDeviceInfo[gDeviceCount]->mmio_physical_address = info.u.h0.base_registers[0]; // GMBAR
@@ -222,7 +163,7 @@ init_driver(void)
 			gDeviceInfo[gDeviceCount]->irq_line);
 
 		char deviceNameBuffer[64];
-		snprintf(deviceNameBuffer, sizeof(deviceNameBuffer), "graphics/%s/%" B_PRIu32, DEVICE_NAME, gDeviceCount);
+		snprintf(deviceNameBuffer, sizeof(deviceNameBuffer), "graphics/%s/%" B_PRIu32, DEVICE_NAME_PRIV, gDeviceCount);
 		gDeviceNames[gDeviceCount] = strdup(deviceNameBuffer);
 		if (gDeviceNames[gDeviceCount] == NULL) {
 			TRACE("init_driver: Failed to allocate memory for device name %" B_PRIu32 "\n", gDeviceCount);
@@ -249,13 +190,15 @@ uninit_driver(void)
 	TRACE("uninit_driver()\n");
 	for (uint32 i = 0; i < gDeviceCount; i++) {
 		if (gDeviceInfo[i] != NULL) {
-			// Free any resources that might have been left if free() wasn't called
-			intel_i915_irq_uninit(gDeviceInfo[i]); // Safe to call even if not inited
-			if (gDeviceInfo[i]->mmio_area_id >= B_OK) delete_area(gDeviceInfo[i]->mmio_area_id);
-			if (gDeviceInfo[i]->shared_info_area >= B_OK) delete_area(gDeviceInfo[i]->shared_info_area);
-			if (gDeviceInfo[i]->gtt_mmio_area_id >= B_OK) delete_area(gDeviceInfo[i]->gtt_mmio_area_id);
-			intel_i915_gtt_cleanup(gDeviceInfo[i]);
-			free(gDeviceInfo[i]);
+			// Call free to ensure all resources for this device_info are released
+			// This assumes free() will be robust enough if open_count is already 0
+			intel_i915_free(gDeviceInfo[i]);
+			// The free(gDeviceInfo[i]) itself is now handled inside intel_i915_free
+			// if it's the last user, or here if we need to force it.
+			// For uninit_driver, we are tearing everything down.
+			if (gDeviceInfo[i]->framebuffer_area >= B_OK) delete_area(gDeviceInfo[i]->framebuffer_area);
+			// Other areas like MMIO, shared_info are cleaned in intel_i915_free
+			free(gDeviceInfo[i]); // Free the struct itself
 		}
 		free(gDeviceNames[i]);
 		gDeviceInfo[i] = NULL;
@@ -288,7 +231,7 @@ intel_i915_open(const char* name, uint32 flags, void** cookie)
 {
 	TRACE("open(%s)\n", name);
 	intel_i915_device_info* devInfo = NULL;
-	char areaName[64]; // Increased size for potentially longer area names with device_id
+	char areaName[64];
 	status_t status;
 
 	for (uint32 i = 0; i < gDeviceCount; i++) {
@@ -302,32 +245,31 @@ intel_i915_open(const char* name, uint32 flags, void** cookie)
 		return B_BAD_VALUE;
 	}
 
-	if (devInfo->open_count == 0) {
+	if (atomic_add(&devInfo->open_count, 1) == 0) { // First open
 		snprintf(areaName, sizeof(areaName), "i915_0x%04x_gmb", devInfo->device_id);
 		devInfo->mmio_area_id = map_physical_memory(areaName,
 			devInfo->mmio_physical_address, devInfo->mmio_aperture_size,
 			B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
 			(void**)&devInfo->mmio_regs_addr);
 		if (devInfo->mmio_area_id < B_OK) {
-			TRACE("open: Failed to map MMIO registers for %s, error: %s\n", name, strerror(devInfo->mmio_area_id));
-			return devInfo->mmio_area_id;
+			TRACE("open: Failed to map MMIO for %s: %s\n", name, strerror(devInfo->mmio_area_id));
+			atomic_add(&devInfo->open_count, -1); return devInfo->mmio_area_id;
 		}
-		TRACE("open: MMIO for %s mapped to area %" B_PRId32 ", addr %p\n", name, devInfo->mmio_area_id, devInfo->mmio_regs_addr);
+		TRACE("open: MMIO for %s mapped (area %" B_PRId32 ", addr %p)\n", name, devInfo->mmio_area_id, devInfo->mmio_regs_addr);
 
 		if (devInfo->gtt_mmio_physical_address > 0 && devInfo->gtt_mmio_aperture_size > 0) {
-			snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt", devInfo->device_id);
+			snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_bar", devInfo->device_id);
 			devInfo->gtt_mmio_area_id = map_physical_memory(areaName,
 				devInfo->gtt_mmio_physical_address, devInfo->gtt_mmio_aperture_size,
 				B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
 				(void**)&devInfo->gtt_mmio_regs_addr);
 			if (devInfo->gtt_mmio_area_id < B_OK) {
-				TRACE("open: Failed to map GTTMMADR for %s, error: %s. Continuing without it.\n", name, strerror(devInfo->gtt_mmio_area_id));
+				TRACE("open: Failed to map GTTMMADR for %s: %s. Continuing.\n", name, strerror(devInfo->gtt_mmio_area_id));
 				devInfo->gtt_mmio_regs_addr = NULL;
 			} else {
-				TRACE("open: GTTMMADR for %s mapped to area %" B_PRId32 ", addr %p\n", name, devInfo->gtt_mmio_area_id, devInfo->gtt_mmio_regs_addr);
+				TRACE("open: GTTMMADR for %s mapped (area %" B_PRId32 ", addr %p)\n", name, devInfo->gtt_mmio_area_id, devInfo->gtt_mmio_regs_addr);
 			}
 		} else {
-			TRACE("open: GTTMMADR BAR not valid for %s. GTT control assumed via GMBAR.\n", name);
 			devInfo->gtt_mmio_regs_addr = NULL;
 		}
 
@@ -336,15 +278,14 @@ intel_i915_open(const char* name, uint32 flags, void** cookie)
 			B_ANY_KERNEL_ADDRESS, ROUND_TO_PAGE_SIZE(sizeof(intel_i915_shared_info)),
 			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_CLONEABLE_AREA);
 		if (devInfo->shared_info_area < B_OK) {
-			TRACE("open: Failed to create shared_info area for %s, error: %s\n", name, strerror(devInfo->shared_info_area));
-			if (devInfo->mmio_area_id >= B_OK) delete_area(devInfo->mmio_area_id);
+			TRACE("open: Failed to create shared_info for %s: %s\n", name, strerror(devInfo->shared_info_area));
+			delete_area(devInfo->mmio_area_id);
 			if (devInfo->gtt_mmio_area_id >= B_OK) delete_area(devInfo->gtt_mmio_area_id);
-			devInfo->mmio_area_id = -1; devInfo->mmio_regs_addr = NULL;
-			devInfo->gtt_mmio_area_id = -1; devInfo->gtt_mmio_regs_addr = NULL;
-			return devInfo->shared_info_area;
+			atomic_add(&devInfo->open_count, -1); return devInfo->shared_info_area;
 		}
 		memset(devInfo->shared_info, 0, sizeof(intel_i915_shared_info));
-		TRACE("open: Shared info for %s created at area %" B_PRId32 ", addr %p\n", name, devInfo->shared_info_area, devInfo->shared_info);
+		devInfo->shared_info->mode_list_area = -1;
+		TRACE("open: Shared info for %s created (area %" B_PRId32 ", addr %p)\n", name, devInfo->shared_info_area, devInfo->shared_info);
 
 		devInfo->shared_info->vendor_id = devInfo->vendor_id;
 		devInfo->shared_info->device_id = devInfo->device_id;
@@ -356,29 +297,38 @@ intel_i915_open(const char* name, uint32 flags, void** cookie)
 		devInfo->shared_info->regs_clone_area = devInfo->mmio_area_id;
 
 		status = intel_i915_gtt_init(devInfo);
-		if (status != B_OK) {
-			TRACE("open: GTT initialization failed: %s\n", strerror(status));
-			// Potentially cleanup shared_info, mmio areas if GTT is critical
-		}
+		if (status != B_OK) TRACE("open: GTT init failed: %s\n", strerror(status));
 
 		status = intel_i915_irq_init(devInfo);
-		if (status != B_OK) {
-			TRACE("open: IRQ initialization failed: %s\n", strerror(status));
-			// Potentially cleanup other resources
-		}
+		if (status != B_OK) TRACE("open: IRQ init failed: %s\n", strerror(status));
 
-		// TODO: Perform other device-specific initialization that occurs on first open:
-		// - Initial display mode setup
-		// - Framebuffer allocation and GTT mapping
+		status = intel_i915_vbt_init(devInfo);
+		if (status != B_OK) TRACE("open: VBT init failed: %s\n", strerror(status));
+
+		status = intel_i915_gmbus_init(devInfo);
+		if (status != B_OK) TRACE("open: GMBUS init failed: %s\n", strerror(status));
+
+		status = intel_i915_clocks_init(devInfo);
+		if (status != B_OK) TRACE("open: Clocks init failed: %s\n", strerror(status));
+
+		status = intel_i915_display_init(devInfo);
+		if (status != B_OK) {
+			TRACE("open: Display subsystem init failed: %s. Cleaning up.\n", strerror(status));
+			intel_i915_clocks_uninit(devInfo);
+			intel_i915_gmbus_cleanup(devInfo);
+			intel_i915_vbt_cleanup(devInfo);
+			intel_i915_irq_uninit(devInfo);
+			intel_i915_gtt_cleanup(devInfo);
+			delete_area(devInfo->shared_info_area);
+			if (devInfo->gtt_mmio_area_id >= B_OK) delete_area(devInfo->gtt_mmio_area_id);
+			delete_area(devInfo->mmio_area_id);
+			atomic_add(&devInfo->open_count, -1);
+			return status;
+		}
 	}
 
-	devInfo->open_count++;
 	*cookie = devInfo;
 	TRACE("open: success for %s, cookie %p, open_count %" B_PRIu32 "\n", name, devInfo, devInfo->open_count);
-	if (devInfo->mmio_regs_addr) {
-		uint32 pipeAConf = intel_i915_read32(devInfo, PIPEACONF);
-		TRACE("open: Test read PIPEACONF (0x%x) = 0x%08" B_PRIx32 "\n", PIPEACONF, pipeAConf);
-	}
 	return B_OK;
 }
 
@@ -386,11 +336,9 @@ static status_t
 intel_i915_close(void* cookie)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
-	TRACE("close() for device 0x%04x, open_count will be %" B_PRIu32 "\n", devInfo->device_id, devInfo->open_count - 1);
-	devInfo->open_count--;
-	if (devInfo->open_count == 0) {
-		TRACE("close: Last close for device 0x%04x\n", devInfo->device_id);
-		// Resources are cleaned up in free() when the node is truly released
+	TRACE("close() for device 0x%04x, open_count pre-decrement %" B_PRIu32 "\n", devInfo->device_id, devInfo->open_count);
+	if (atomic_add(&devInfo->open_count, -1) == 1) { // Was 1, now 0 (last closer)
+		TRACE("close: Last close for device 0x%04x. Resources will be freed in free().\n", devInfo->device_id);
 	}
 	return B_OK;
 }
@@ -403,26 +351,38 @@ intel_i915_free(void* cookie)
 
 	if (devInfo->open_count != 0) {
 		TRACE("free: Warning! Device 0x%04x freed while open_count = %" B_PRIu32 "\n", devInfo->device_id, devInfo->open_count);
+		// This indicates an issue, perhaps driver unloaded while still in use.
+		// Forcibly clean up resources anyway if this is called.
 	}
 
+	intel_i915_display_uninit(devInfo);
+	intel_i915_clocks_uninit(devInfo);
+	intel_i915_gmbus_cleanup(devInfo);
+	intel_i915_vbt_cleanup(devInfo);
 	intel_i915_irq_uninit(devInfo);
 	intel_i915_gtt_cleanup(devInfo);
 
 	if (devInfo->shared_info_area >= B_OK) {
-		TRACE("free: Deleting shared_info area %" B_PRId32 " for device 0x%04x\n", devInfo->shared_info_area, devInfo->device_id);
+		intel_i915_shared_info* si = devInfo->shared_info;
+		if (si != NULL && si->mode_list_area >= B_OK) {
+			delete_area(si->mode_list_area);
+		}
+		TRACE("free: Deleting shared_info area %" B_PRId32 "\n", devInfo->shared_info_area);
 		delete_area(devInfo->shared_info_area);
 		devInfo->shared_info_area = -1; devInfo->shared_info = NULL;
 	}
 	if (devInfo->gtt_mmio_area_id >= B_OK) {
-		TRACE("free: Deleting GTTMMADR area %" B_PRId32 " for device 0x%04x\n", devInfo->gtt_mmio_area_id, devInfo->device_id);
+		TRACE("free: Deleting GTTMMADR area %" B_PRId32 "\n", devInfo->gtt_mmio_area_id);
 		delete_area(devInfo->gtt_mmio_area_id);
 		devInfo->gtt_mmio_area_id = -1; devInfo->gtt_mmio_regs_addr = NULL;
 	}
 	if (devInfo->mmio_area_id >= B_OK) {
-		TRACE("free: Deleting MMIO area %" B_PRId32 " for device 0x%04x\n", devInfo->mmio_area_id, devInfo->device_id);
+		TRACE("free: Deleting MMIO area %" B_PRId32 "\n", devInfo->mmio_area_id);
 		delete_area(devInfo->mmio_area_id);
 		devInfo->mmio_area_id = -1; devInfo->mmio_regs_addr = NULL;
 	}
+	// Note: The gDeviceInfo[i] pointer itself is freed in uninit_driver.
+	// This hook is for resources tied to a specific open instance that has been fully closed.
 	return B_OK;
 }
 
@@ -444,7 +404,6 @@ static status_t
 intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
-	// TRACE("ioctl(op = %" B_PRIu32 ") for device 0x%04x\n", op, devInfo->device_id);
 
 	switch (op) {
 		case B_GET_ACCELERANT_SIGNATURE:
@@ -455,12 +414,21 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			TRACE("ioctl: INTEL_I915_GET_SHARED_INFO\n");
 			if (devInfo->shared_info_area < B_OK) return B_NO_INIT;
 			if (buffer == NULL || length < sizeof(intel_i915_get_shared_area_info)) return B_BAD_VALUE;
-			// Use user_memcpy for copying to user space buffer
 			if (user_memcpy(buffer, &devInfo->shared_info_area, sizeof(area_id)) != B_OK) return B_BAD_ADDRESS;
 			return B_OK;
+		case INTEL_I915_SET_DISPLAY_MODE:
+		{
+			TRACE("ioctl: INTEL_I915_SET_DISPLAY_MODE\n");
+			if (buffer == NULL || length != sizeof(display_mode)) return B_BAD_VALUE;
+			display_mode mode;
+			if (user_memcpy(&mode, buffer, sizeof(display_mode)) != B_OK) return B_BAD_ADDRESS;
+
+			// TODO: Determine target pipe and port based on current config or VBT.
+			// For now, assume Pipe A and a default digital port.
+			return intel_i915_display_set_mode_internal(devInfo, &mode, PIPE_A, PORT_A);
+		}
 		default:
-			// TRACE("ioctl: unknown opcode %" B_PRIu32 "\n", op);
 			return B_DEV_INVALID_IOCTL;
 	}
-	return B_DEV_INVALID_IOCTL;
+	return B_DEV_INVALID_IOCTL; // Should not be reached
 }

@@ -6,6 +6,12 @@ KernelAddon intel_i915 :
 	intel_i915.c
 	gtt.c
 	irq.c
-	# Add other source files here as they are created
+	vbt.c
+	gmbus.c
+	edid.c
+	clocks.c
+	display.c
+	# Add other source files here as they are created.
+	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a
 ;

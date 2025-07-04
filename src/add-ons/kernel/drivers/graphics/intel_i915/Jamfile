@@ -1,0 +1,11 @@
+# Haiku Kernel Driver Jamfile for Intel i915
+
+SetOptional KernelAddonFlags DEBUG ;
+
+KernelAddon intel_i915 :
+	intel_i915.c
+	gtt.c
+	irq.c
+	# Add other source files here as they are created
+	: libkernel.a
+;

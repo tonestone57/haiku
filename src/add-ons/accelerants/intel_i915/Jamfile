@@ -1,0 +1,10 @@
+# Haiku Accelerant Jamfile for Intel i915
+
+SetOptional AccelerantFlags DEBUG ;
+
+Accelerant intel_i915 :
+	accelerant.c
+	hooks.c
+	# Add other source files here as they are created
+	: libbe.so libdevice.so libroot.so
+;

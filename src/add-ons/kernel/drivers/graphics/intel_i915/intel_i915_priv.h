@@ -13,13 +13,17 @@
 #include <SupportDefs.h>
 #include <OS.h>
 #include <GraphicsDefs.h>
-#include <kernel/locks/mutex.h> // For mutex type
+#include <kernel/locks/mutex.h>
 
-#include "accelerant.h"
+#include "accelerant.h" // For intel_i915_shared_info
+// #include "pm.h" // Forward declare rps_info instead to avoid include loop if pm.h includes this
 
+// Forward declarations
 struct intel_vbt_data;
 struct intel_clock_params_t;
 struct intel_engine_cs;
+struct rps_info; // Forward declare from pm.h
+
 
 #define DEVICE_NAME_PRIV "intel_i915"
 #ifdef TRACE_DRIVER
@@ -114,11 +118,10 @@ typedef struct intel_i915_device_info {
 
 	area_id     scratch_page_area;
 	phys_addr_t scratch_page_phys_addr;
-	uint32      scratch_page_gtt_offset; // In bytes
+	uint32      scratch_page_gtt_offset;
 
-	// GTT Allocator state
 	mutex       gtt_allocator_lock;
-	uint32_t    gtt_next_free_page; // Next available GTT page index for bump allocator
+	uint32_t    gtt_next_free_page;
 
 	struct intel_vbt_data* vbt;
 	area_id     rom_area;
@@ -134,9 +137,10 @@ typedef struct intel_i915_device_info {
 	void*		framebuffer_addr;
 	phys_addr_t	framebuffer_phys_addr;
 	size_t		framebuffer_alloc_size;
-	uint32		framebuffer_gtt_offset; // In bytes
+	uint32		framebuffer_gtt_offset;
 
 	struct intel_engine_cs* rcs0;
+	struct rps_info* rps_state; // Pointer to RPS/RC6 state structure
 
 	uint32		open_count;
 	int32		irq_line;

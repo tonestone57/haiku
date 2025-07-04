@@ -15,6 +15,7 @@ KernelAddon intel_i915 :
 	gem_ioctl.c
 	engine.c
 	gem_context.c
+	pm.c
 	# Add other source files here as they are created.
 	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a

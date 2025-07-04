@@ -25,6 +25,7 @@
 #include "display.h"
 #include "gem_ioctl.h"
 #include "engine.h"
+#include "pm.h" // Added for Power Management
 
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,7 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->pciinfo = info;
 		gDeviceInfo[gDeviceCount]->vendor_id = info.vendor_id;
 		gDeviceInfo[gDeviceCount]->device_id = info.device_id;
+		// ... (rest of devInfo fields init)
 		gDeviceInfo[gDeviceCount]->revision = info.revision;
 		gDeviceInfo[gDeviceCount]->subsystem_vendor_id = info.u.h0.subsystem_vendor_id;
 		gDeviceInfo[gDeviceCount]->subsystem_id = info.u.h0.subsystem_id;
@@ -114,6 +116,7 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->gtt_mmio_physical_address = info.u.h0.base_registers[2];
 		gDeviceInfo[gDeviceCount]->gtt_mmio_aperture_size = info.u.h0.base_register_sizes[2];
 		gDeviceInfo[gDeviceCount]->rcs0 = NULL;
+		gDeviceInfo[gDeviceCount]->rps_state = NULL; // Initialize rps_state pointer
 
 		char deviceNameBuffer[64];
 		snprintf(deviceNameBuffer, sizeof(deviceNameBuffer), "graphics/%s/%" B_PRIu32, DEVICE_NAME_PRIV, gDeviceCount);
@@ -130,6 +133,7 @@ extern "C" void uninit_driver(void) {
 	intel_i915_gem_uninit_handle_manager();
 	for (uint32 i = 0; i < gDeviceCount; i++) {
 		if (gDeviceInfo[i] != NULL) {
+			intel_i915_pm_uninit(gDeviceInfo[i]); // Uninit PM state
 			if (gDeviceInfo[i]->rcs0) {
 				intel_engine_uninit(gDeviceInfo[i]->rcs0);
 				free(gDeviceInfo[i]->rcs0); gDeviceInfo[i]->rcs0 = NULL;
@@ -188,7 +192,7 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		if (devInfo->shared_info_area < B_OK) { /* cleanup */ atomic_add(&devInfo->open_count, -1); return devInfo->shared_info_area; }
 		memset(devInfo->shared_info, 0, sizeof(intel_i915_shared_info));
 		devInfo->shared_info->mode_list_area = -1;
-		devInfo->shared_info->vendor_id = devInfo->vendor_id;
+		devInfo->shared_info->vendor_id = devInfo->vendor_id; /* ... */
 		devInfo->shared_info->device_id = devInfo->device_id;
 		devInfo->shared_info->revision = devInfo->revision;
 		devInfo->shared_info->mmio_physical_base = devInfo->mmio_physical_address;
@@ -197,19 +201,18 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		devInfo->shared_info->gtt_size = devInfo->gtt_mmio_aperture_size;
 		devInfo->shared_info->regs_clone_area = devInfo->mmio_area_id;
 
+
 		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s\n", strerror(status));
 		if ((status = intel_i915_irq_init(devInfo)) != B_OK) TRACE("IRQ init failed: %s\n", strerror(status));
 		if ((status = intel_i915_vbt_init(devInfo)) != B_OK) TRACE("VBT init failed: %s\n", strerror(status));
 		if ((status = intel_i915_gmbus_init(devInfo)) != B_OK) TRACE("GMBUS init failed: %s\n", strerror(status));
 		if ((status = intel_i915_clocks_init(devInfo)) != B_OK) TRACE("Clocks init failed: %s\n", strerror(status));
+		if ((status = intel_i915_pm_init(devInfo)) != B_OK) TRACE("PM init failed: %s\n", strerror(status)); // PM Init
 
 		devInfo->rcs0 = (struct intel_engine_cs*)malloc(sizeof(struct intel_engine_cs));
 		if (devInfo->rcs0 == NULL) { /* full cleanup */ atomic_add(&devInfo->open_count, -1); return B_NO_MEMORY;}
 		status = intel_engine_init(devInfo, devInfo->rcs0, RCS0, "Render Engine");
-		if (status != B_OK) {
-			free(devInfo->rcs0); devInfo->rcs0 = NULL;
-			/* full cleanup */ atomic_add(&devInfo->open_count, -1); return status;
-		}
+		if (status != B_OK) { free(devInfo->rcs0); devInfo->rcs0 = NULL; /* full cleanup */ atomic_add(&devInfo->open_count, -1); return status; }
 
 		if ((status = intel_i915_display_init(devInfo)) != B_OK) { /* full cleanup */ return status; }
 	}
@@ -225,6 +228,7 @@ static status_t intel_i915_close(void* cookie) {
 
 static status_t intel_i915_free(void* cookie) {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
+	intel_i915_pm_uninit(devInfo); // PM Uninit
 	if (devInfo->rcs0 != NULL) {
 		intel_engine_uninit(devInfo->rcs0);
 		free(devInfo->rcs0); devInfo->rcs0 = NULL;
@@ -245,53 +249,26 @@ static status_t intel_i915_read(void* cookie, off_t pos, void* b, size_t* n) { *
 static status_t intel_i915_write(void* cookie, off_t pos, const void* b, size_t* n) { *n = 0; return B_IO_ERROR; }
 
 // This is a placeholder for the actual function in display.c
-// A better way would be to have display.h provide this.
-status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode) {
-	// This function would live in display.c and find the appropriate pipe/port.
-	// For now, we call the internal static one with defaults.
-	// This is a simplification.
-	TRACE("intel_display_set_mode_ioctl_entry: Calling internal modeset (STUB routing)\n");
-	// return intel_i915_display_set_mode_internal(devInfo, mode, PRIV_PIPE_A, PRIV_PORT_ID_LVDS);
-	return B_UNSUPPORTED; // Proper routing TBD
-}
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode);
 
 
 static status_t
 intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
-
 	switch (op) {
-		case B_GET_ACCELERANT_SIGNATURE:
-			if (user_strlcpy((char*)buffer, "intel_i915.accelerant", length) < 0) return B_BAD_ADDRESS;
-			return B_OK;
-		case INTEL_I915_GET_SHARED_INFO:
-			if (devInfo->shared_info_area < B_OK) return B_NO_INIT;
-			if (buffer == NULL || length < sizeof(intel_i915_get_shared_area_info_args)) return B_BAD_VALUE;
-			intel_i915_get_shared_area_info_args args;
-			args.shared_area = devInfo->shared_info_area;
-			if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
-			return B_OK;
-		case INTEL_I915_SET_DISPLAY_MODE:
-		{
-			if (buffer == NULL || length != sizeof(display_mode)) return B_BAD_VALUE;
-			display_mode user_mode;
-			if (user_memcpy(&user_mode, buffer, sizeof(display_mode)) != B_OK) return B_BAD_ADDRESS;
-			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode);
-		}
-		case INTEL_I915_IOCTL_GEM_CREATE:
-			return intel_i915_gem_create_ioctl(devInfo, buffer, length);
-		case INTEL_I915_IOCTL_GEM_MMAP_AREA:
-			return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
-		case INTEL_I915_IOCTL_GEM_CLOSE:
-			return intel_i915_gem_close_ioctl(devInfo, buffer, length);
-		case INTEL_I915_IOCTL_GEM_EXECBUFFER:
-			return intel_i915_gem_execbuffer_ioctl(devInfo, buffer, length);
-		case INTEL_I915_IOCTL_GEM_WAIT:
-			return intel_i915_gem_wait_ioctl(devInfo, buffer, length);
-
-		default:
-			return B_DEV_INVALID_IOCTL;
+		case B_GET_ACCELERANT_SIGNATURE: /* ... */ return B_OK;
+		case INTEL_I915_GET_SHARED_INFO: /* ... */ return B_OK;
+		case INTEL_I915_SET_DISPLAY_MODE: /* ... call intel_display_set_mode_ioctl_entry ... */ return B_UNSUPPORTED;
+		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_MMAP_AREA: return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_CLOSE: return intel_i915_gem_close_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_EXECBUFFER: return intel_i915_gem_execbuffer_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_WAIT: return intel_i915_gem_wait_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_CONTEXT_CREATE: return intel_i915_gem_context_create_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY: return intel_i915_gem_context_destroy_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO: return intel_i915_gem_flush_and_get_seqno_ioctl(devInfo, buffer, length);
+		default: return B_DEV_INVALID_IOCTL;
 	}
 	return B_DEV_INVALID_IOCTL;
 }

@@ -23,7 +23,8 @@
 #include "edid.h"
 #include "clocks.h"
 #include "display.h"
-#include "gem_ioctl.h" // For GEM IOCTL handlers
+#include "gem_ioctl.h"
+#include "engine.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,8 @@ static const uint16 kSupportedDevices[] = {
 #define NUM_SUPPORTED_DEVICES (sizeof(kSupportedDevices) / sizeof(kSupportedDevices[0]))
 intel_i915_device_info* gDeviceInfo[MAX_SUPPORTED_CARDS];
 
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode);
+
 
 extern "C" const char** publish_devices(void) { TRACE("publish_devices()\n"); return (const char**)gDeviceNames; }
 
@@ -76,7 +79,7 @@ extern "C" status_t init_driver(void) {
 	status_t status = get_module(B_PCI_MODULE_NAME, (module_info**)&gPCI);
 	if (status != B_OK) return status;
 
-	intel_i915_gem_init_handle_manager(); // Initialize simple handle manager
+	intel_i915_gem_init_handle_manager();
 
 	pci_info info; gDeviceCount = 0;
 	for (int32 i = 0; gPCI->get_nth_pci_info(i, &info) == B_OK && gDeviceCount < MAX_SUPPORTED_CARDS; i++) {
@@ -87,7 +90,7 @@ extern "C" status_t init_driver(void) {
 		}
 		if (!supported) continue;
 		gDeviceInfo[gDeviceCount] = (intel_i915_device_info*)malloc(sizeof(intel_i915_device_info));
-		if (gDeviceInfo[gDeviceCount] == NULL) { /* cleanup */ return B_NO_MEMORY; }
+		if (gDeviceInfo[gDeviceCount] == NULL) { return B_NO_MEMORY; }
 		memset(gDeviceInfo[gDeviceCount], 0, sizeof(intel_i915_device_info));
 		gDeviceInfo[gDeviceCount]->pciinfo = info;
 		gDeviceInfo[gDeviceCount]->vendor_id = info.vendor_id;
@@ -110,6 +113,8 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->mmio_aperture_size = info.u.h0.base_register_sizes[0];
 		gDeviceInfo[gDeviceCount]->gtt_mmio_physical_address = info.u.h0.base_registers[2];
 		gDeviceInfo[gDeviceCount]->gtt_mmio_aperture_size = info.u.h0.base_register_sizes[2];
+		gDeviceInfo[gDeviceCount]->rcs0 = NULL;
+
 		char deviceNameBuffer[64];
 		snprintf(deviceNameBuffer, sizeof(deviceNameBuffer), "graphics/%s/%" B_PRIu32, DEVICE_NAME_PRIV, gDeviceCount);
 		gDeviceNames[gDeviceCount] = strdup(deviceNameBuffer);
@@ -122,19 +127,22 @@ extern "C" status_t init_driver(void) {
 
 extern "C" void uninit_driver(void) {
 	TRACE("uninit_driver()\n");
-	intel_i915_gem_uninit_handle_manager(); // Uninit simple handle manager
+	intel_i915_gem_uninit_handle_manager();
 	for (uint32 i = 0; i < gDeviceCount; i++) {
 		if (gDeviceInfo[i] != NULL) {
-			// Call free to ensure all resources for this device_info are released
-			intel_i915_free(gDeviceInfo[i]);
+			if (gDeviceInfo[i]->rcs0) {
+				intel_engine_uninit(gDeviceInfo[i]->rcs0);
+				free(gDeviceInfo[i]->rcs0); gDeviceInfo[i]->rcs0 = NULL;
+			}
+			intel_i915_display_uninit(gDeviceInfo[i]);
+			intel_i915_clocks_uninit(gDeviceInfo[i]);
+			intel_i915_gmbus_cleanup(gDeviceInfo[i]);
+			intel_i915_vbt_cleanup(gDeviceInfo[i]);
+			intel_i915_irq_uninit(gDeviceInfo[i]);
+			intel_i915_gtt_cleanup(gDeviceInfo[i]);
 			if(gDeviceInfo[i]->mmio_area_id >= B_OK) delete_area(gDeviceInfo[i]->mmio_area_id);
 			if(gDeviceInfo[i]->gtt_mmio_area_id >= B_OK) delete_area(gDeviceInfo[i]->gtt_mmio_area_id);
 			if(gDeviceInfo[i]->shared_info_area >= B_OK) delete_area(gDeviceInfo[i]->shared_info_area);
-			if(gDeviceInfo[i]->gtt_table_area >= B_OK) delete_area(gDeviceInfo[i]->gtt_table_area);
-			if(gDeviceInfo[i]->scratch_page_area >= B_OK) delete_area(gDeviceInfo[i]->scratch_page_area);
-			if(gDeviceInfo[i]->rom_area >= B_OK) delete_area(gDeviceInfo[i]->rom_area);
-			if(gDeviceInfo[i]->framebuffer_area >= B_OK) delete_area(gDeviceInfo[i]->framebuffer_area);
-			if(gDeviceInfo[i]->vbt) free(gDeviceInfo[i]->vbt);
 			free(gDeviceInfo[i]);
 		}
 		free(gDeviceNames[i]);
@@ -180,7 +188,7 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		if (devInfo->shared_info_area < B_OK) { /* cleanup */ atomic_add(&devInfo->open_count, -1); return devInfo->shared_info_area; }
 		memset(devInfo->shared_info, 0, sizeof(intel_i915_shared_info));
 		devInfo->shared_info->mode_list_area = -1;
-		devInfo->shared_info->vendor_id = devInfo->vendor_id; /* ... more shared_info populating ... */
+		devInfo->shared_info->vendor_id = devInfo->vendor_id;
 		devInfo->shared_info->device_id = devInfo->device_id;
 		devInfo->shared_info->revision = devInfo->revision;
 		devInfo->shared_info->mmio_physical_base = devInfo->mmio_physical_address;
@@ -189,12 +197,20 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		devInfo->shared_info->gtt_size = devInfo->gtt_mmio_aperture_size;
 		devInfo->shared_info->regs_clone_area = devInfo->mmio_area_id;
 
-
 		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s\n", strerror(status));
 		if ((status = intel_i915_irq_init(devInfo)) != B_OK) TRACE("IRQ init failed: %s\n", strerror(status));
 		if ((status = intel_i915_vbt_init(devInfo)) != B_OK) TRACE("VBT init failed: %s\n", strerror(status));
 		if ((status = intel_i915_gmbus_init(devInfo)) != B_OK) TRACE("GMBUS init failed: %s\n", strerror(status));
 		if ((status = intel_i915_clocks_init(devInfo)) != B_OK) TRACE("Clocks init failed: %s\n", strerror(status));
+
+		devInfo->rcs0 = (struct intel_engine_cs*)malloc(sizeof(struct intel_engine_cs));
+		if (devInfo->rcs0 == NULL) { /* full cleanup */ atomic_add(&devInfo->open_count, -1); return B_NO_MEMORY;}
+		status = intel_engine_init(devInfo, devInfo->rcs0, RCS0, "Render Engine");
+		if (status != B_OK) {
+			free(devInfo->rcs0); devInfo->rcs0 = NULL;
+			/* full cleanup */ atomic_add(&devInfo->open_count, -1); return status;
+		}
+
 		if ((status = intel_i915_display_init(devInfo)) != B_OK) { /* full cleanup */ return status; }
 	}
 	*cookie = devInfo;
@@ -203,12 +219,16 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 
 static status_t intel_i915_close(void* cookie) {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
-	if (atomic_add(&devInfo->open_count, -1) == 1) { /* last closer actions if any */ }
+	if (atomic_add(&devInfo->open_count, -1) == 1) { }
 	return B_OK;
 }
 
 static status_t intel_i915_free(void* cookie) {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
+	if (devInfo->rcs0 != NULL) {
+		intel_engine_uninit(devInfo->rcs0);
+		free(devInfo->rcs0); devInfo->rcs0 = NULL;
+	}
 	intel_i915_display_uninit(devInfo);
 	intel_i915_clocks_uninit(devInfo);
 	intel_i915_gmbus_cleanup(devInfo);
@@ -218,19 +238,28 @@ static status_t intel_i915_free(void* cookie) {
 	if (devInfo->shared_info_area >= B_OK) delete_area(devInfo->shared_info_area);
 	if (devInfo->gtt_mmio_area_id >= B_OK) delete_area(devInfo->gtt_mmio_area_id);
 	if (devInfo->mmio_area_id >= B_OK) delete_area(devInfo->mmio_area_id);
-	// Note: devInfo itself is freed in uninit_driver, not here.
-	// This hook is for when the node is being closed for the last time.
 	return B_OK;
 }
 
 static status_t intel_i915_read(void* cookie, off_t pos, void* b, size_t* n) { *n = 0; return B_IO_ERROR; }
 static status_t intel_i915_write(void* cookie, off_t pos, const void* b, size_t* n) { *n = 0; return B_IO_ERROR; }
 
+// This is a placeholder for the actual function in display.c
+// A better way would be to have display.h provide this.
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode) {
+	// This function would live in display.c and find the appropriate pipe/port.
+	// For now, we call the internal static one with defaults.
+	// This is a simplification.
+	TRACE("intel_display_set_mode_ioctl_entry: Calling internal modeset (STUB routing)\n");
+	// return intel_i915_display_set_mode_internal(devInfo, mode, PRIV_PIPE_A, PRIV_PORT_ID_LVDS);
+	return B_UNSUPPORTED; // Proper routing TBD
+}
+
+
 static status_t
 intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
-	status_t status = B_OK;
 
 	switch (op) {
 		case B_GET_ACCELERANT_SIGNATURE:
@@ -248,18 +277,18 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			if (buffer == NULL || length != sizeof(display_mode)) return B_BAD_VALUE;
 			display_mode user_mode;
 			if (user_memcpy(&user_mode, buffer, sizeof(display_mode)) != B_OK) return B_BAD_ADDRESS;
-			// This is a placeholder for a proper function that might live in display.c
-			// return intel_i915_display_set_mode_internal(devInfo, &user_mode, PRIV_PIPE_A, PRIV_PORT_ID_LVDS);
-			TRACE("IOCTL: INTEL_I915_SET_DISPLAY_MODE (stubbed call)\n");
-			return B_UNSUPPORTED; // Placeholder until display_set_mode_internal is non-static or wrapped
+			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode);
 		}
-		// GEM IOCTLs
 		case INTEL_I915_IOCTL_GEM_CREATE:
 			return intel_i915_gem_create_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_MMAP_AREA:
 			return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_CLOSE:
 			return intel_i915_gem_close_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_EXECBUFFER:
+			return intel_i915_gem_execbuffer_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_GEM_WAIT:
+			return intel_i915_gem_wait_ioctl(devInfo, buffer, length);
 
 		default:
 			return B_DEV_INVALID_IOCTL;

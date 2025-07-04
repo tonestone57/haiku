@@ -16,11 +16,17 @@
 
 #include "accelerant.h" // For intel_i915_shared_info
 
-// Forward declare from display.h to avoid direct include if display.h also needs this.
-// However, for simplicity and since this is THE private kernel header,
-// it's better to define these enums once here if they are primarily for kernel use,
-// or ensure display.h can be included by having it only forward-declare intel_i915_device_info.
-// Let's define them here for clarity of kernel-side types.
+// Forward declare from other local headers
+struct intel_vbt_data;
+struct intel_clock_params_t;
+struct intel_engine_cs; // Forward declare from engine.h
+
+#define DEVICE_NAME_PRIV "intel_i915"
+#ifdef TRACE_DRIVER
+#	define TRACE(x...) dprintf(DEVICE_NAME_PRIV ": " x)
+#else
+#	define TRACE(x...) ;
+#endif
 
 enum pipe_id_priv {
 	PRIV_PIPE_A = 0, PRIV_PIPE_B, PRIV_PIPE_C,
@@ -31,31 +37,18 @@ enum pipe_id_priv {
 enum transcoder_id_priv {
 	PRIV_TRANSCODER_A = 0, PRIV_TRANSCODER_B, PRIV_TRANSCODER_C,
 	PRIV_TRANSCODER_EDP,
-	PRIV_TRANSCODER_DSI_0, PRIV_TRANSCODER_DSI_1, // If supporting DSI
+	PRIV_TRANSCODER_DSI_0, PRIV_TRANSCODER_DSI_1,
 	PRIV_TRANSCODER_INVALID = -1,
-	// Adjust max based on what Gen7 actually supports (typically A, B, C, EDP)
 	PRIV_MAX_TRANSCODERS = PRIV_TRANSCODER_EDP + 1
 };
 
-enum intel_port_id_priv { // Logical port identifiers used by the driver
-	PRIV_PORT_ID_NONE = 0,
-	PRIV_PORT_ID_VGA,    // Analog / CRT
-	PRIV_PORT_ID_LVDS,   // LVDS panel
-	PRIV_PORT_ID_EDP,    // eDP panel (often uses DDI_A)
-	PRIV_PORT_ID_DP_A,   // DDI_A if configured as DP
-	PRIV_PORT_ID_HDMI_A, // DDI_A if configured as HDMI
-	PRIV_PORT_ID_DVI_A,  // DDI_A if configured as DVI
-	PRIV_PORT_ID_DP_B,
-	PRIV_PORT_ID_HDMI_B,
-	PRIV_PORT_ID_DVI_B,
-	PRIV_PORT_ID_DP_C,
-	PRIV_PORT_ID_HDMI_C,
-	PRIV_PORT_ID_DVI_C,
-	PRIV_PORT_ID_DP_D,
-	PRIV_PORT_ID_HDMI_D,
-	PRIV_PORT_ID_DVI_D,
-	// DDI_E on HSW could be another set
-	PRIV_MAX_PORTS // Adjust as per max physical ports Gen7 can have
+enum intel_port_id_priv {
+	PRIV_PORT_ID_NONE = 0, PRIV_PORT_ID_VGA, PRIV_PORT_ID_LVDS,
+	PRIV_PORT_ID_EDP, PRIV_PORT_ID_DP_A, PRIV_PORT_ID_HDMI_A, PRIV_PORT_ID_DVI_A,
+	PRIV_PORT_ID_DP_B, PRIV_PORT_ID_HDMI_B, PRIV_PORT_ID_DVI_B,
+	PRIV_PORT_ID_DP_C, PRIV_PORT_ID_HDMI_C, PRIV_PORT_ID_DVI_C,
+	PRIV_PORT_ID_DP_D, PRIV_PORT_ID_HDMI_D, PRIV_PORT_ID_DVI_D,
+	PRIV_MAX_PORTS
 };
 
 enum intel_output_type_priv {
@@ -66,44 +59,29 @@ enum intel_output_type_priv {
 #define PRIV_MAX_EDID_MODES_PER_PORT 32
 #define PRIV_EDID_BLOCK_SIZE 128
 
-
 typedef struct {
 	enum pipe_id_priv      id;
 	bool                   enabled;
 	display_mode           current_mode;
 } intel_pipe_hw_state;
 
-
 typedef struct {
-	enum intel_port_id_priv     logical_port_id; // Driver's internal ID for this port instance
-	enum intel_output_type_priv type;            // Type of display connected or port type
-	uint16_t                    child_device_handle; // From VBT
+	enum intel_port_id_priv     logical_port_id;
+	enum intel_output_type_priv type;
+	uint16_t                    child_device_handle;
 	bool                        present_in_vbt;
-	uint8_t                     gmbus_pin_pair; // GMBUS_PIN_* from registers.h
-	uint8_t                     dp_aux_ch;      // For DP: e.g., 0 for AUX_CH_A, 1 for AUX_CH_B
-	                                            // Needs mapping from VBT's aux values.
-	int8_t                      hw_port_index;  // For DDI: 0=A, 1=B, 2=C, 3=D, 4=E. For ADPA/LVDS, could be fixed const.
-	enum transcoder_id_priv     source_transcoder; // Which transcoder output is this port wired to (VBT or detection)
-
+	uint8_t                     gmbus_pin_pair;
+	uint8_t                     dp_aux_ch;
+	int8_t                      hw_port_index;
+	enum transcoder_id_priv     source_transcoder;
 	bool                        connected;
 	bool                        edid_valid;
 	uint8_t                     edid_data[PRIV_EDID_BLOCK_SIZE * 2];
 	display_mode                modes[PRIV_MAX_EDID_MODES_PER_PORT];
 	int                         num_modes;
 	display_mode                preferred_mode;
-	enum pipe_id_priv           current_pipe; // Which pipe is currently driving this port
+	enum pipe_id_priv           current_pipe;
 } intel_output_port_state;
-
-
-struct intel_vbt_data;
-struct intel_clock_params_t;
-
-#define DEVICE_NAME_PRIV "intel_i915"
-#ifdef TRACE_DRIVER
-#	define TRACE(x...) dprintf(DEVICE_NAME_PRIV ": " x)
-#else
-#	define TRACE(x...) ;
-#endif
 
 
 typedef struct intel_i915_device_info {
@@ -153,6 +131,11 @@ typedef struct intel_i915_device_info {
 	phys_addr_t	framebuffer_phys_addr;
 	size_t		framebuffer_alloc_size;
 	uint32		framebuffer_gtt_offset;
+
+	// Command submission engines
+	struct intel_engine_cs* rcs0; // Render Command Streamer
+	// struct intel_engine_cs* bcs0; // Blitter, if used
+	// struct intel_engine_cs* vcs0; // Video, if used
 
 	uint32		open_count;
 	int32		irq_line;

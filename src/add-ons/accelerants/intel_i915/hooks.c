@@ -9,24 +9,31 @@
  * entry point for the app_server to get function pointers to accelerant features.
  */
 
-#include "accelerant.h"       // For gInfo and other accelerant-specific data structures/definitions
-#include "accelerant_protos.h" // For declarations of the hook functions, if any are made public directly
-
+#include "accelerant.h"
+#include "accelerant_protos.h"
 #include <Debug.h>
+#include <syslog.h> // For syslog in TRACE_HOOKS
 
+#undef TRACE
 #define TRACE_HOOKS
 #ifdef TRACE_HOOKS
-#	define TRACE(x) _sPrintf("intel_i915_hooks: " x)
+#	define TRACE(x...) syslog(LOG_INFO, "intel_i915_hooks: " x)
 #else
-#	define TRACE(x)
+#	define TRACE(x...)
 #endif
 
-// Forward declarations for static hook functions (actual implementations)
-// These would typically be in other .c files like mode.c, engine.c, cursor.c etc.
-// For the stub, many are declared in accelerant.c
+// Forward declarations for static hook functions
+// General (from accelerant.c or dedicated files)
+static status_t intel_i915_init_accelerant(int fd); // Actual INIT_ACCELERANT
+static ssize_t  intel_i915_accelerant_clone_info_size(void);
+static void     intel_i915_get_accelerant_clone_info(void *data);
+static status_t intel_i915_clone_accelerant(void *data);
+static void     intel_i915_uninit_accelerant(void);
+static status_t intel_i915_get_accelerant_device_info(accelerant_device_info *adi);
+static sem_id   intel_i915_accelerant_retrace_semaphore(void);
 
-// From accelerant.c (or mode.c if split later)
-static uint32 intel_i915_accelerant_mode_count(void);
+// Mode Configuration (from mode.c or accelerant.c)
+static uint32   intel_i915_accelerant_mode_count(void);
 static status_t intel_i915_get_mode_list(display_mode *dm);
 static status_t intel_i915_propose_display_mode(display_mode *target, const display_mode *low, const display_mode *high);
 static status_t intel_i915_set_display_mode(display_mode *mode_to_set);
@@ -34,184 +41,135 @@ static status_t intel_i915_get_display_mode(display_mode *current_mode);
 static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *a_frame_buffer);
 static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *low, uint32 *high);
 static status_t intel_i915_move_display(uint16 h_display_start, uint16 v_display_start);
-static void intel_i915_set_indexed_colors(uint count, uint8 first, uint8 *color_data, uint32 flags);
-static uint32 intel_i915_dpms_capabilities(void);
-static uint32 intel_i915_dpms_mode(void);
+static void     intel_i915_set_indexed_colors(uint count, uint8 first, uint8 *color_data, uint32 flags);
+static uint32   intel_i915_dpms_capabilities(void);
+static uint32   intel_i915_dpms_mode(void);
 static status_t intel_i915_set_dpms_mode(uint32 dpms_flags);
 static status_t intel_i915_get_preferred_display_mode(display_mode* preferred_mode);
 static status_t intel_i915_get_monitor_info(monitor_info* mi);
 static status_t intel_i915_get_edid_info(void* info, size_t size, uint32* _version);
 
-// From cursor.c (if split later)
+// Cursor Management (from cursor.c or accelerant.c)
 static status_t intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y, uint8 *and_mask, uint8 *xor_mask);
-static void intel_i915_move_cursor(uint16 x, uint16 y);
-static void intel_i915_show_cursor(bool is_visible);
+static void     intel_i915_move_cursor(uint16 x, uint16 y);
+static void     intel_i915_show_cursor(bool is_visible);
 static status_t intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y, color_space cs, uint16 bytesPerRow, const uint8 *bitmapData);
 
-
-// From engine.c (if split later)
-static uint32 intel_i915_accelerant_engine_count(void);
+// Synchronization (from engine.c or accelerant.c)
+static uint32   intel_i915_accelerant_engine_count(void);
 static status_t intel_i915_acquire_engine(uint32 capabilities, uint32 max_wait, sync_token *st, engine_token **et);
 static status_t intel_i915_release_engine(engine_token *et, sync_token *st);
-static void intel_i915_wait_engine_idle(void);
+static void     intel_i915_wait_engine_idle(void);
 static status_t intel_i915_get_sync_token(engine_token *et, sync_token *st);
 static status_t intel_i915_sync_to_token(sync_token *st);
 
-// From 2d_accel.c (if split later)
-static void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
-static void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
+// 2D Acceleration (from accel_2d.c)
+void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
+void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
 static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count);
 static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count);
 static void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
 static void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
 
 
-// get_accelerant_hook is called by the app_server to get pointers to the
-// accelerant functions.
 extern "C" void*
 get_accelerant_hook(uint32 feature, void *data)
 {
-	//TRACE("get_accelerant_hook: feature 0x%lx\n", feature); // Too noisy for every call
-
 	switch (feature) {
-		/* general hardware accelerant hooks */
-		case B_INIT_ACCELERANT:
-			return (void*)INIT_ACCELERANT;
-		case B_ACCELERANT_CLONE_INFO_SIZE:
-			return (void*)ACCELERANT_CLONE_INFO_SIZE;
-		case B_GET_ACCELERANT_CLONE_INFO:
-			return (void*)GET_ACCELERANT_CLONE_INFO;
-		case B_CLONE_ACCELERANT:
-			return (void*)CLONE_ACCELERANT;
-		case B_UNINIT_ACCELERANT:
-			return (void*)UNINIT_ACCELERANT;
-		case B_GET_ACCELERANT_DEVICE_INFO:
-			return (void*)GET_ACCELERANT_DEVICE_INFO;
-		case B_ACCELERANT_RETRACE_SEMAPHORE:
-			return (void*)ACCELERANT_RETRACE_SEMAPHORE;
-
-		/* mode configuration */
-		case B_ACCELERANT_MODE_COUNT:
-			return (void*)intel_i915_accelerant_mode_count;
-		case B_GET_MODE_LIST:
-			return (void*)intel_i915_get_mode_list;
-		case B_PROPOSE_DISPLAY_MODE:
-			return (void*)intel_i915_propose_display_mode;
-		case B_SET_DISPLAY_MODE:
-			return (void*)intel_i915_set_display_mode;
-		case B_GET_DISPLAY_MODE:
-			return (void*)intel_i915_get_display_mode;
-		case B_GET_FRAME_BUFFER_CONFIG:
-			return (void*)intel_i915_get_frame_buffer_config;
-		case B_GET_PIXEL_CLOCK_LIMITS:
-			return (void*)intel_i915_get_pixel_clock_limits;
-		case B_MOVE_DISPLAY:
-			return (void*)intel_i915_move_display;
-		case B_SET_INDEXED_COLORS:
-			return (void*)intel_i915_set_indexed_colors;
-		case B_DPMS_CAPABILITIES:
-			return (void*)intel_i915_dpms_capabilities;
-		case B_DPMS_MODE:
-			return (void*)intel_i915_dpms_mode;
-		case B_SET_DPMS_MODE:
-			return (void*)intel_i915_set_dpms_mode;
-		case B_GET_PREFERRED_DISPLAY_MODE:
-			return (void*)intel_i915_get_preferred_display_mode;
-		case B_GET_MONITOR_INFO:
-		    return (void*)intel_i915_get_monitor_info;
-		case B_GET_EDID_INFO:
-			return (void*)intel_i915_get_edid_info;
-
-
-		/*HW cursor support*/
-		case B_MOVE_CURSOR:
-			return (void*)intel_i915_move_cursor;
-		case B_SET_CURSOR_SHAPE:
-			return (void*)intel_i915_set_cursor_shape;
-		case B_SHOW_CURSOR:
-			return (void*)intel_i915_show_cursor;
-		case B_SET_CURSOR_BITMAP:
-			return (void*)intel_i915_set_cursor_bitmap;
-
-		/* synchronization */
-		case B_ACCELERANT_ENGINE_COUNT:
-			return (void*)intel_i915_accelerant_engine_count;
-		case B_ACQUIRE_ENGINE:
-			return (void*)intel_i915_acquire_engine;
-		case B_RELEASE_ENGINE:
-			return (void*)intel_i915_release_engine;
-		case B_WAIT_ENGINE_IDLE:
-			return (void*)intel_i915_wait_engine_idle;
-		case B_GET_SYNC_TOKEN:
-			return (void*)intel_i915_get_sync_token;
-		case B_SYNC_TO_TOKEN:
-			return (void*)intel_i915_sync_to_token;
-
-		/* 2D acceleration */
-		case B_SCREEN_TO_SCREEN_BLIT:
-			return (void*)intel_i915_screen_to_screen_blit;
-		case B_FILL_RECTANGLE:
-			return (void*)intel_i915_fill_rectangle;
-		case B_INVERT_RECTANGLE:
-			return (void*)intel_i915_invert_rectangle;
-		case B_FILL_SPAN:
-			return (void*)intel_i915_fill_span;
-		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT:
-			return (void*)intel_i915_screen_to_screen_transparent_blit;
-		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT:
-			return (void*)intel_i915_screen_to_screen_scaled_filtered_blit;
-
-		default:
-			TRACE("get_accelerant_hook: unknown feature 0x%lx\n", feature);
-			return NULL;
+		case B_INIT_ACCELERANT: return (void*)intel_i915_init_accelerant;
+		case B_ACCELERANT_CLONE_INFO_SIZE: return (void*)intel_i915_accelerant_clone_info_size;
+		case B_GET_ACCELERANT_CLONE_INFO: return (void*)intel_i915_get_accelerant_clone_info;
+		case B_CLONE_ACCELERANT: return (void*)intel_i915_clone_accelerant;
+		case B_UNINIT_ACCELERANT: return (void*)intel_i915_uninit_accelerant;
+		case B_GET_ACCELERANT_DEVICE_INFO: return (void*)intel_i915_get_accelerant_device_info;
+		case B_ACCELERANT_RETRACE_SEMAPHORE: return (void*)intel_i915_accelerant_retrace_semaphore;
+		case B_ACCELERANT_MODE_COUNT: return (void*)intel_i915_accelerant_mode_count;
+		case B_GET_MODE_LIST: return (void*)intel_i915_get_mode_list;
+		case B_PROPOSE_DISPLAY_MODE: return (void*)intel_i915_propose_display_mode;
+		case B_SET_DISPLAY_MODE: return (void*)intel_i915_set_display_mode;
+		case B_GET_DISPLAY_MODE: return (void*)intel_i915_get_display_mode;
+		case B_GET_FRAME_BUFFER_CONFIG: return (void*)intel_i915_get_frame_buffer_config;
+		case B_GET_PIXEL_CLOCK_LIMITS: return (void*)intel_i915_get_pixel_clock_limits;
+		case B_MOVE_DISPLAY: return (void*)intel_i915_move_display;
+		case B_SET_INDEXED_COLORS: return (void*)intel_i915_set_indexed_colors;
+		case B_DPMS_CAPABILITIES: return (void*)intel_i915_dpms_capabilities;
+		case B_DPMS_MODE: return (void*)intel_i915_dpms_mode;
+		case B_SET_DPMS_MODE: return (void*)intel_i915_set_dpms_mode;
+		case B_GET_PREFERRED_DISPLAY_MODE: return (void*)intel_i915_get_preferred_display_mode;
+		case B_GET_MONITOR_INFO: return (void*)intel_i915_get_monitor_info;
+		case B_GET_EDID_INFO: return (void*)intel_i915_get_edid_info;
+		case B_MOVE_CURSOR: return (void*)intel_i915_move_cursor;
+		case B_SET_CURSOR_SHAPE: return (void*)intel_i915_set_cursor_shape;
+		case B_SHOW_CURSOR: return (void*)intel_i915_show_cursor;
+		case B_SET_CURSOR_BITMAP: return (void*)intel_i915_set_cursor_bitmap;
+		case B_ACCELERANT_ENGINE_COUNT: return (void*)intel_i915_accelerant_engine_count;
+		case B_ACQUIRE_ENGINE: return (void*)intel_i915_acquire_engine;
+		case B_RELEASE_ENGINE: return (void*)intel_i915_release_engine;
+		case B_WAIT_ENGINE_IDLE: return (void*)intel_i915_wait_engine_idle;
+		case B_GET_SYNC_TOKEN: return (void*)intel_i915_get_sync_token;
+		case B_SYNC_TO_TOKEN: return (void*)intel_i915_sync_to_token;
+		case B_FILL_RECTANGLE: return (void*)intel_i915_fill_rectangle;
+		case B_SCREEN_TO_SCREEN_BLIT: return (void*)intel_i915_screen_to_screen_blit;
+		case B_INVERT_RECTANGLE: return (void*)intel_i915_invert_rectangle;
+		case B_FILL_SPAN: return (void*)intel_i915_fill_span;
+		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)intel_i915_screen_to_screen_transparent_blit;
+		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)intel_i915_screen_to_screen_scaled_filtered_blit;
+		default: TRACE("get_accelerant_hook: unknown feature 0x%lx\n", feature); return NULL;
 	}
 }
 
-// ---- Placeholder implementations for missing mode/cursor/engine/2D hooks ----
-// These would normally live in their own .c files (mode.c, cursor.c, etc.)
 
-// Mode Configuration
-static status_t intel_i915_get_preferred_display_mode(display_mode* preferred_mode) {
-    TRACE("GET_PREFERRED_DISPLAY_MODE (stub)\n");
-    if (gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0) {
-        // Typically, this would involve EDID parsing or VBT info.
-        // For a stub, let's just return the first mode.
-        *preferred_mode = gInfo->mode_list[0];
-        return B_OK;
-    }
-    return B_UNSUPPORTED;
-}
+// Placeholder implementations for functions that would normally be in separate files
+// or more fleshed out in accelerant.c.
+// These are needed because hooks.c forward-declares them.
 
-static status_t intel_i915_get_monitor_info(monitor_info* mi) {
-    TRACE("GET_MONITOR_INFO (stub)\n");
-    // This would parse EDID data obtained from the kernel driver.
-    // For now, fill with some placeholder values or return B_UNSUPPORTED.
-    if (mi) {
-        memset(mi, 0, sizeof(monitor_info));
-        strcpy(mi->vendor, "HAIKU");
-        strcpy(mi->name, "Generic Monitor");
-        // ... fill other fields as placeholders or from VBT/defaults
-    }
-    return B_UNSUPPORTED;
-}
+// General
+status_t intel_i915_init_accelerant(int fd) { return INIT_ACCELERANT(fd); } // From accelerant_protos.h
+ssize_t  intel_i915_accelerant_clone_info_size(void) { return ACCELERANT_CLONE_INFO_SIZE(); }
+void     intel_i915_get_accelerant_clone_info(void *data) { GET_ACCELERANT_CLONE_INFO(data); }
+status_t intel_i915_clone_accelerant(void *data) { return CLONE_ACCELERANT(data); }
+void     intel_i915_uninit_accelerant(void) { UNINIT_ACCELERANT(); }
+status_t intel_i915_get_accelerant_device_info(accelerant_device_info *adi) { return GET_ACCELERANT_DEVICE_INFO(adi); }
+sem_id   intel_i915_accelerant_retrace_semaphore(void) { return ACCELERANT_RETRACE_SEMAPHORE(); }
 
-static status_t intel_i915_get_edid_info(void* info, size_t size, uint32* _version) {
-    TRACE("GET_EDID_INFO (stub)\n");
-    // This would typically involve an ioctl to the kernel driver to get raw EDID data.
-    // The kernel driver reads it via I2C from the monitor.
-    // For a stub, we can indicate no EDID is available or return a fake one.
-    if (_version) *_version = 0; // No specific EDID version for stub
-    return B_UNSUPPORTED; // Or fill with dummy EDID if testing app_server behavior
-}
+// Mode Configuration (Stubs - actual implementations would be in mode.c or accelerant.c)
+static uint32   intel_i915_accelerant_mode_count(void) { TRACE("ACCELERANT_MODE_COUNT (stub)\n"); if (gInfo && gInfo->shared_info) return gInfo->shared_info->mode_count; return 0; }
+static status_t intel_i915_get_mode_list(display_mode *dm) { TRACE("GET_MODE_LIST (stub)\n"); if (!gInfo || !gInfo->mode_list || !dm) return B_ERROR; memcpy(dm, gInfo->mode_list, gInfo->shared_info->mode_count * sizeof(display_mode)); return B_OK; }
+static status_t intel_i915_propose_display_mode(display_mode *t, const display_mode *l, const display_mode *h) { TRACE("PROPOSE_DISPLAY_MODE (stub)\n"); if (gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0) { *t = gInfo->mode_list[0]; return B_OK; } return B_ERROR;}
+static status_t intel_i915_set_display_mode(display_mode *m) { TRACE("SET_DISPLAY_MODE (stub)\n"); if(!gInfo || !m) return B_BAD_VALUE; gInfo->shared_info->current_mode = *m; return B_OK; } // Simplified
+static status_t intel_i915_get_display_mode(display_mode *cm) { TRACE("GET_DISPLAY_MODE (stub)\n"); if(!gInfo || !cm) return B_BAD_VALUE; *cm = gInfo->shared_info->current_mode; return B_OK; }
+static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fb) { TRACE("GET_FRAME_BUFFER_CONFIG (stub)\n"); if(!gInfo || !fb) return B_BAD_VALUE; fb->frame_buffer=gInfo->framebuffer_base; fb->bytes_per_row=gInfo->shared_info->bytes_per_row; return B_OK;}
+static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *l, uint32 *h) { TRACE("GET_PIXEL_CLOCK_LIMITS (stub)\n"); *l=25000; *h=400000; return B_OK;}
+static status_t intel_i915_move_display(uint16 x, uint16 y) { TRACE("MOVE_DISPLAY (stub)\n"); return B_UNSUPPORTED;}
+static void     intel_i915_set_indexed_colors(uint c, uint8 f, uint8 *d, uint32 fl) { TRACE("SET_INDEXED_COLORS (stub)\n");}
+static uint32   intel_i915_dpms_capabilities(void) { TRACE("DPMS_CAPABILITIES (stub)\n"); return 0;}
+static uint32   intel_i915_dpms_mode(void) { TRACE("DPMS_MODE (stub)\n"); return B_DPMS_ON;}
+static status_t intel_i915_set_dpms_mode(uint32 flags) { TRACE("SET_DPMS_MODE (stub)\n"); return B_UNSUPPORTED;}
+static status_t intel_i915_get_preferred_display_mode(display_mode* pdm) { TRACE("GET_PREFERRED_DISPLAY_MODE (stub)\n"); if(gInfo && gInfo->mode_list && gInfo->shared_info->mode_count > 0){*pdm = gInfo->mode_list[0]; return B_OK;} return B_ERROR;}
+static status_t intel_i915_get_monitor_info(monitor_info* mi) { TRACE("GET_MONITOR_INFO (stub)\n"); return B_UNSUPPORTED;}
+static status_t intel_i915_get_edid_info(void* i, size_t s, uint32* v) { TRACE("GET_EDID_INFO (stub)\n"); return B_UNSUPPORTED;}
 
+// Cursor (Stubs)
+static status_t intel_i915_set_cursor_shape(uint16 w, uint16 h, uint16 hx, uint16 hy, uint8 *a, uint8 *x) { TRACE("SET_CURSOR_SHAPE (stub)\n"); return B_UNSUPPORTED;}
+static void     intel_i915_move_cursor(uint16 x, uint16 y) { TRACE("MOVE_CURSOR (stub)\n");}
+static void     intel_i915_show_cursor(bool v) { TRACE("SHOW_CURSOR (stub)\n");}
+static status_t intel_i915_set_cursor_bitmap(uint16 w, uint16 h, uint16 hx, uint16 hy, color_space cs, uint16 bpr, const uint8 *bm) { TRACE("SET_CURSOR_BITMAP (stub)\n"); return B_UNSUPPORTED;}
 
-// Cursor Management (Stubs already in accelerant.c for now)
+// Sync (Stubs)
+static uint32   intel_i915_accelerant_engine_count(void) { TRACE("ACCELERANT_ENGINE_COUNT (stub)\n"); return 1;} // At least one for RCS
+static status_t intel_i915_acquire_engine(uint32 c, uint32 mw, sync_token *st, engine_token **et) { TRACE("ACQUIRE_ENGINE (stub)\n"); if(et) *et = (engine_token*)gInfo; /* use gInfo as dummy token */ return B_OK;}
+static status_t intel_i915_release_engine(engine_token *et, sync_token *st) { TRACE("RELEASE_ENGINE (stub)\n"); return B_OK;}
+static void     intel_i915_wait_engine_idle(void) { TRACE("WAIT_ENGINE_IDLE (stub)\n"); /* Call IOCTL_GEM_WAIT */ }
+static status_t intel_i915_get_sync_token(engine_token *et, sync_token *st) { TRACE("GET_SYNC_TOKEN (stub)\n"); if(st) st->counter=0; return B_OK;}
+static status_t intel_i915_sync_to_token(sync_token *st) { TRACE("SYNC_TO_TOKEN (stub)\n"); return B_OK;}
 
-// Synchronization (Stubs already in accelerant.c for now)
-
-// 2D Acceleration (Stubs already in accelerant.c for now)
-static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count) { TRACE("SCREEN_TO_SCREEN_TRANSPARENT_BLIT (stub)\n"); }
-static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count) { TRACE("SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT (stub)\n"); }
-static void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count) { TRACE("FILL_SPAN (stub)\n"); }
-static void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count) { TRACE("INVERT_RECTANGLE (stub)\n"); }
-static status_t intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y, color_space cs, uint16 bytesPerRow, const uint8 *bitmapData) { TRACE("SET_CURSOR_BITMAP (stub)\n"); return B_UNSUPPORTED;}
+// 2D Accel (Stubs - actual implementations are in accel_2d.c, but need non-static decl or include accel_2d.c)
+// For now, provide minimal stubs here if accel_2d.c functions are static.
+// If accel_2d.c functions are non-static and declared in a header included by hooks.c, these are not needed.
+// Assuming they are now non-static and declared elsewhere (e.g. a new accel_2d.h)
+// void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count); // in accel_2d.c
+// void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count); // in accel_2d.c
+static void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 tc, blit_params *l, uint32 c) { TRACE("S2S_TRANSPARENT_BLIT (stub)\n");}
+static void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *l, uint32 c) { TRACE("S2S_SCALED_FILTERED_BLIT (stub)\n");}
+static void intel_i915_fill_span(engine_token* et, uint32 col, uint16* lst, uint32 cnt) { TRACE("FILL_SPAN (stub)\n");}
+static void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* lst, uint32 cnt) { TRACE("INVERT_RECTANGLE (stub)\n");}

@@ -544,10 +544,11 @@ rule KernelArchitectureSetup architecture
 			case openfirmware :
 				HAIKU_BOOT_$(bootTarget:U)_CCFLAGS += -fno-pic -fno-semantic-interposition -Wno-error=main -Wstack-usage=1023 ;
 				HAIKU_BOOT_$(bootTarget:U)_C++FLAGS += -fno-pic -fno-semantic-interposition -Wno-error=main -Wstack-usage=1023 ;
-				# Add -lgcc to link against the GCC support library to provide
-				# compiler runtime routines like _restgpr_ and _restfpr_
-				# which are needed when -ffreestanding is used.
-				HAIKU_BOOT_$(bootTarget:U)_LDFLAGS = -lgcc ;
+				# Add -L<path_to_gcc_libs> -lgcc to link against the GCC support
+				# library to provide compiler runtime routines like _restgpr_
+				# and _restfpr_ which are needed when -ffreestanding is used.
+				# $(architecture) here refers to the primary packaging architecture.
+				HAIKU_BOOT_$(bootTarget:U)_LDFLAGS = -L$(HAIKU_GCC_LIB_DIR_$(architecture)) -lgcc ;
 			case * :
 				# all other bootloaders are non-PIC
 				HAIKU_BOOT_$(bootTarget:U)_CCFLAGS += -fno-pic -Wno-error=main ;

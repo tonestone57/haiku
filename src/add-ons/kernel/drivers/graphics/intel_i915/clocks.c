@@ -811,11 +811,14 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 		// 2. Enable RX.
 		// TODO: Start actual link training sequence here:
 		// 1. Ensure FDI_TX_CTL is set for training pattern 1 (done in program_fdi).
-		// 2. Enable FDI_RX_PLL (often part of FDI_RX_CTL).
-		//    fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB; // Example: This bit needs to be defined.
-		//    intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
+		// 2. Enable FDI_RX_PLL.
+		fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB;
+		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
+		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); // Posting read
+		snooze(10); // Short delay for PLL to stabilize before enabling TX/RX data paths
+
 		fdi_tx_val |= FDI_TX_ENABLE;
-		fdi_rx_val |= FDI_RX_ENABLE; // This also enables RX PLL on some gens.
+		fdi_rx_val |= FDI_RX_ENABLE;
 		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); // Posting read
@@ -835,8 +838,14 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 				break;
 			}
 			// TODO: 4. If fail, adjust FDI_TX_CTL voltage/pre-emphasis and retry.
-			// This would involve reading VBT for VS/PE tables or iterating through values.
-			TRACE("FDI: Link training attempt %d for pipe %d failed to get bit lock (IIR=0x%08x).\n",
+				// This would involve:
+				//    - Selecting next VS/PE level (e.g., from VBT table or a predefined sequence).
+				//    - Disabling FDI TX (fdi_tx_val &= ~FDI_TX_ENABLE; intel_i915_write32).
+				//    - Programming new VS/PE into FDI_TX_CTL (bits 18:16 for VS, 15:14 for PE).
+				//    - Re-enabling FDI TX (fdi_tx_val |= FDI_TX_ENABLE; intel_i915_write32).
+				//    - Waiting a short delay before next poll.
+				// For now, we just retry without changing VS/PE.
+				TRACE("FDI: Link training attempt %d for pipe %d failed to get bit lock (IIR=0x%08x). VS/PE adjustment STUBBED.\n",
 				retries + 1, pipe, iir_val);
 			retries++;
 		}
@@ -850,22 +859,21 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 			TRACE("FDI: Link training for pipe %d complete, pattern set to NONE.\n", pipe);
 		} else {
 			TRACE("FDI: Link training for pipe %d FAILED after all retries.\n", pipe);
-			// Disable FDI TX/RX on failure to be safe
+			// Disable FDI TX/RX and RX PLL on failure to be safe
 			fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
 			fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
 			fdi_tx_val &= ~(FDI_TX_ENABLE | FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB);
-			fdi_rx_val &= ~FDI_RX_ENABLE;
+			fdi_rx_val &= ~(FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB);
 			intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 			intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 			return B_ERROR; // Indicate failure
 		}
 	} else { // Disable FDI
 		fdi_tx_val &= ~(FDI_TX_ENABLE | FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB);
-		fdi_rx_val &= ~FDI_RX_ENABLE;
-		// fdi_rx_val &= ~FDI_RX_PLL_ENABLE_IVB; // Also disable RX PLL
+		fdi_rx_val &= ~(FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB); // Also disable RX PLL
 		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
-		TRACE("FDI: Disabling FDI TX/RX for pipe %d.\n", pipe);
+		TRACE("FDI: Disabling FDI TX/RX and RX PLL for pipe %d.\n", pipe);
 	}
 	(void)intel_i915_read32(devInfo, fdi_tx_ctl_reg); // Posting read
 	(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg);

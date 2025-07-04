@@ -220,18 +220,36 @@
 
 // --- FDI Registers (Ivy Bridge PCH Link) ---
 // FDI_TX_CTL and FDI_RX_CTL are per-pipe (A/B for IVB)
-#define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100) // Example: PIPE_A_FDI_TX_CTL = 0x70100
-	#define FDI_TX_ENABLE			(1U << 31)
-	#define FDI_LINK_TRAIN_PATTERN_1_IVB (1U << 8)
-	#define FDI_LINK_TRAIN_PATTERN_2_IVB (2U << 8)
-	#define FDI_LINK_TRAIN_NONE_IVB		 (0U << 8)
-	// ... other FDI_TX_CTL bits for voltage, pre-emphasis, lanes ...
+#define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100) // PIPE_A_FDI_TX_CTL = 0x70100
+	#define FDI_TX_ENABLE					(1U << 31)
+	#define FDI_TX_CTL_TU_SIZE_MASK_IVB		(7U << 24) // Bits 26:24
+		#define FDI_TX_CTL_TU_SIZE_64_IVB	(0U << 24)
+		#define FDI_TX_CTL_TU_SIZE_32_IVB	(1U << 24)
+		#define FDI_TX_CTL_TU_SIZE_48_IVB	(2U << 24)
+		#define FDI_TX_CTL_TU_SIZE_56_IVB	(3U << 24)
+	#define FDI_TX_CTL_LANE_MASK_IVB		(0xFU << 19) // Bits 22:19 "FDI DP Port Width"
+		#define FDI_TX_CTL_LANE_1_IVB		(1U << 19)
+		#define FDI_TX_CTL_LANE_2_IVB		(3U << 19)
+		#define FDI_TX_CTL_LANE_4_IVB		(7U << 19)
+	// Bits 18:16 for Voltage Swing, 15:14 for Pre-emphasis
+	#define FDI_TX_CTL_VOLTAGE_SWING_MASK_IVB (7U << 16)
+	#define FDI_TX_CTL_PRE_EMPHASIS_MASK_IVB  (3U << 14)
+	#define FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB (0xFU << 8) // Example, covers bits 11:8 for patterns
+		#define FDI_LINK_TRAIN_NONE_IVB		 (0U << 8) // Normal operation
+		#define FDI_LINK_TRAIN_PATTERN_1_IVB (1U << 8) // Training Pattern 1
+		#define FDI_LINK_TRAIN_PATTERN_2_IVB (2U << 8) // Training Pattern 2
+		// Pattern 3 might be (3U << 8)
 
-#define FDI_RX_CTL(pipe)		(_PIPE(pipe) + 0x10C) // Example: PIPE_A_FDI_RX_CTL = 0x7010C
-	#define FDI_RX_ENABLE			(1U << 31)
-	// ... other FDI_RX_CTL bits for PLL enable, link reverse, etc. ...
+#define FDI_RX_CTL(pipe)		(_PIPE(pipe) + 0x10C) // PIPE_A_FDI_RX_CTL = 0x7010C
+	#define FDI_RX_ENABLE					(1U << 31)
+	#define FDI_RX_CTL_LANE_MASK_IVB		(0xFU << 19) // Bits 22:19, should match TX
+		#define FDI_RX_CTL_LANE_1_IVB		(1U << 19)
+		#define FDI_RX_CTL_LANE_2_IVB		(3U << 19)
+		#define FDI_RX_CTL_LANE_4_IVB		(7U << 19)
+	#define FDI_RX_PLL_ENABLE_IVB			(1U << 13) // FDI Receiver PLL Enable
+	// ... other FDI_RX_CTL bits for link reverse, etc. ...
 
-#define FDI_RX_IIR(pipe)		(_PIPE(pipe) + 0x110) // Example: PIPE_A_FDI_RX_IIR = 0x70110
+#define FDI_RX_IIR(pipe)		(_PIPE(pipe) + 0x110) // PIPE_A_FDI_RX_IIR = 0x70110
 	#define FDI_RX_BIT_LOCK_IVB		(1U << 1) // Training complete / Bit Lock
 	// ... other FDI status bits ...
 

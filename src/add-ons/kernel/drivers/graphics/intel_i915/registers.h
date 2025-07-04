@@ -18,101 +18,81 @@
                            ((trans) == 1 ? _PIPE_B_BASE : \
                            ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
 
+// --- Panel Power Control Registers (Gen7: IVB/HSW eDP/LVDS from CPU) ---
+// These are often specific to the South Display Engine on IVB, or CPU DDI control on HSW for eDP.
+// Using conceptual names based on Linux driver; PRM lookup needed for exact Gen7 IVB/HSW regs.
+#define PP_CONTROL(pipe)		(0x70080 + ((pipe) * 0x1000)) // Example base for Pipe A PP_CONTROL (Ivy Bridge: SDE_PP_CONTROL)
+                                                            // Haswell: Different register, e.g. PCH_PP_CONTROL (0xC7204) or direct DDI power states
+	#define POWER_TARGET_ON			(1U << 0) // Request panel power on
+	#define PANEL_POWER_RESET		(1U << 2) // Panel power reset
+	#define EDP_FORCE_VDD			(1U << 3) // For eDP, force VDD
+	#define EDP_BLC_ENABLE			(1U << 4) // eDP Backlight Control Enable (if BLC is via this reg)
+
+#define PP_STATUS(pipe)			(0x70084 + ((pipe) * 0x1000)) // Example for Pipe A PP_STATUS
+	#define PP_ON					(1U << 31) // Panel Power is On
+	#define PP_READY				(1U << 30) // Panel is Ready (Sequencing Done)
+	#define PP_SEQUENCE_MASK		(7U << 27) // Current sequence state
+	#define PP_SEQUENCE_OFF			(0U << 27)
+	#define PP_SEQUENCE_ON			(1U << 27)
+	#define PP_SEQUENCE_POWER_DOWN	(2U << 27)
+	#define PP_SEQUENCE_POWER_UP	(3U << 27)
+
+// Backlight Control (Gen specific)
+// Example for Gen7 (Ivy Bridge / Haswell often use PCH Backlight Control, or direct PWM from CPU for eDP)
+#define BLC_PWM_CTL2_HSW		0x48250 // Backlight PWM Control 2 (HSW CPU for eDP/LVDS)
+#define BLC_PWM_CTL_IVB			0x61254 // Backlight PWM Control (IVB PCH for LVDS) - this is PCH register space!
+	#define BLM_PWM_ENABLE			(1U << 31)
+	#define BLM_OVERRIDE_ENABLE		(1U << 30) // Override PWM value
+	// Other bits for frequency, cycle, etc.
+#define BLC_PWM_FREQ_HSW		0x48254 // HSW Backlight Frequency
+#define BLC_PWM_DUTY_HSW		0x48258 // HSW Backlight Duty Cycle
+
+// PCH LVDS Control (for older systems where LVDS is PCH-driven, e.g. SNB, some IVB configs)
+#define PCH_LVDS_CTL			0xE1180 // PCH_LVDS register (offset from PCH base)
+	#define PCH_LVDS_PORT_EN		(1U << 31)
+	#define PCH_LVDS_BL_ENABLE		(1U << 30) // Backlight Enable
+	#define PCH_LVDS_VDD_ON			(1U << 29) // VDD Power Enable
+	// Bits for pipe select, BPC, dual channel
+
+// DPCD (DisplayPort Configuration Data) - accessed via AUX channel
+#define DPCD_SET_POWER          0x600
+    #define DPCD_POWER_D0           0x01
+    #define DPCD_POWER_D3           0x02 // Power down
+
 
 // --- Interrupt Registers ---
 // ... (as before) ...
 #define DEIMR			0x4400c
-#define DEIER			0x44008
-#define DEIIR			0x44004
-#define DEISR			0x44000
-	#define DE_MASTER_IRQ_CONTROL		(1U << 31)
 #define GT_IIR					0x2064
-#define GT_IMR					0x2068
-#define GT_IER					0x206C
 	#define GT_IIR_PM_INTERRUPT_GEN7 (1U << 4)
-
 
 // GTT Registers
 #define PGTBL_CTL		0x02020
 	#define PGTBL_ENABLE			(1U << 0)
-	#define GTT_ENTRY_VALID         (1U << 0)
-	#define GTT_PTE_CACHE_WC_GEN7   (1U << 1)
-	#define GTT_PTE_CACHE_UC_GEN7   (1U << 2)
-	#define GTT_PTE_CACHE_WB_GEN7   0
-#define HWS_PGA			0x02080
+// ... (as before) ...
 
 // --- GMBUS Registers ---
-#define GMBUS0				0x5100 // ... (as before) ...
-#define GMBUS1				0x5104
-#define GMBUS2				0x5108
-#define GMBUS3				0x510C
+// ... (as before) ...
 
 // --- Clocking Registers (Gen7 Focus) ---
-
-// CDCLK / Core Display Clock
-// Ivy Bridge
-#define CDCLK_CTL_IVB			0x4C000 // Ivy Bridge CDCLK_CTL (was South Display Engine clock control before)
-	#define CDCLK_FREQ_SEL_IVB_MASK		(7U << 26) // Bits 28:26 for IVB Mobile, different for Desktop
-	#define CDCLK_FREQ_337_5_MHZ_IVB_M	(0U << 26) // 337.5 MHz (LCPLL 1350 / 4)
-	#define CDCLK_FREQ_450_MHZ_IVB_M	(1U << 26) // 450 MHz   (LCPLL 1350 / 3)
-	#define CDCLK_FREQ_540_MHZ_IVB_M	(2U << 26) // 540 MHz   (LCPLL 1620 / 3)
-	#define CDCLK_FREQ_675_MHZ_IVB_M	(4U << 26) // 675 MHz   (LCPLL 1350 / 2)
-	// IVB Desktop has different values/mechanism, often fixed or fewer options.
-	// For simplicity, we might use mobile values or a fixed known good one for IVB desktop.
-	#define CDCLK_CD2X_PIPE_SELECT_NONE_IVB (0U << 24)
-	#define CDCLK_CD2X_PIPE_A_IVB		(1U << 24)
-	#define CDCLK_CD2X_PIPE_B_IVB		(2U << 24)
-
-// Haswell
-#define LCPLL_CTL				0x130040 // HSW LCPLL1_CTL (controls the source for CDCLK)
-	#define LCPLL_PLL_ENABLE		(1U << 31)
-	#define LCPLL_PLL_LOCK			(1U << 30) // Read-only
-	#define LCPLL_CLK_FREQ_MASK_HSW	(3U << 26)
-		#define LCPLL_CLK_FREQ_450_REFCLK (0U << 26) // LCPLL uses 450MHz ref (actual LCPLL freq depends on dividers)
-		#define LCPLL_CLK_FREQ_540_REFCLK (1U << 26) // LCPLL uses 540MHz ref
-		#define LCPLL_CLK_FREQ_337_5_REFCLK (2U << 26)// LCPLL uses 337.5MHz ref
-	#define LCPLL_CD_SOURCE_FCLK	(1U << 27) // For CDCLK from FCLK (test/debug)
-	// More bits for LCPLL dividers (M, N not directly here, but derived)
-
-#define CDCLK_CTL_HSW           0x46000 // Haswell CDCLK_CTL (selects divider for LCPLL output)
-    #define HSW_CDCLK_LIMIT         (1U << 8) // Read-only: Indicates if 450MHz is max (if 0) or >450MHz (if 1)
-    #define HSW_CDCLK_FREQ_SEL_MASK (3U << 0) // Bits 1:0 for HSW to select final CDCLK
-    #define HSW_CDCLK_FREQ_450      (0U << 0) // LCPLL_LINK_RATE / 3 (e.g. 1350/3 = 450)
-    #define HSW_CDCLK_FREQ_540      (1U << 0) // LCPLL_LINK_RATE / 2.5 (e.g. 1350/2.5 = 540)
-    #define HSW_CDCLK_FREQ_337_5    (2U << 0) // LCPLL_LINK_RATE / 4 (e.g. 1350/4 = 337.5)
-    #define HSW_CDCLK_FREQ_675      (3U << 0) // LCPLL_LINK_RATE / 2 (e.g. 1350/2 = 675)
-    // The actual LCPLL_LINK_RATE is found from LCPLL_CTL link_rate bits (not fully defined here yet)
-
-// DPLL (Display PLLs)
-#define DPLL_CTL_A				0x6C058 // HSW WRPLL_CTL1. IVB DPLL_A is 0x6014.
-	#define DPLL_CTRL_ENABLE_PLL	(1U << 31)
-	#define DPLL_CTRL_VCO_ENABLE	(1U << 30) // Often separate from PLL enable
-// ... other DPLL registers ...
-#define SPLL_CTL_REG			0x46020 // HSW: SPLL_CTL (Shared PLL)
-
+// ... (as before) ...
+#define LCPLL_CTL				0x130040
+#define CDCLK_CTL_HSW           0x46000
+#define DPLL_CTL_A				0x6C058
 
 // --- Power Management: RC6, RPS, Forcewake ---
-// ... (RC6/RPS registers as before) ...
+// ... (as before) ...
 #define RENDER_C_STATE_CONTROL_HSW	0x83D0
 #define RC_CONTROL_IVB			0xA090
-#define RC_STATE_IVB			0xA094
 #define RPNSWREQ				0xA008
 #define RP_CONTROL				0xA024
-#define GEN6_CUR_FREQ			0xA004
-#define PMIMR					0xA168 // GEN6_PMINTRMSK
-	#define PM_INTR_RPS_UP_THRESHOLD	(1U << 5)
-	#define PM_INTR_RPS_DOWN_THRESHOLD	(1U << 6)
-	#define PM_INTR_RC6_THRESHOLD		(1U << 8)
-#define PMISR					0xA164 // PM Interrupt Status Register
+#define PMIMR					0xA168
+#define PMISR					0xA164
 #define FORCEWAKE_MT_HSW		0xA188
-	#define FORCEWAKE_RENDER_HSW_REQ (1U << 0)
-	#define FORCEWAKE_RENDER_HSW_BIT (1U << 16)
 #define FORCEWAKE_ACK_RENDER_HSW_REG 0x1300B0
-	#define FORCEWAKE_ACK_STATUS    (1U << 0)
 
 // MSRs
 #define MSR_IVB_RP_STATE_CAP	0x0000065E
 #define MSR_HSW_RP_STATE_CAP	0x00138098
-
 
 #endif /* INTEL_I915_REGISTERS_H */

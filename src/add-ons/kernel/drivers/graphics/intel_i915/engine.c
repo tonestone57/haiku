@@ -182,53 +182,91 @@ intel_engine_emit_mi_noop(struct intel_engine_cs* engine)
 status_t
 intel_engine_reset_hw(intel_i915_device_info* devInfo, struct intel_engine_cs* engine)
 {
-	if (!devInfo || !engine || engine->id != RCS0) { // Only RCS0 reset implemented for now
-		TRACE("Engine reset: Invalid args or not RCS0.\n");
+	if (!devInfo || !engine || !devInfo->mmio_regs_addr)
 		return B_BAD_VALUE;
+
+	// Currently, only implement for RCS0 on Gen7+ where GEN6_RSTCTL is applicable
+	if (engine->id != RCS0 || INTEL_GRAPHICS_GEN(devInfo->device_id) < 7) {
+		TRACE("Engine reset: Not implemented for engine %d or Gen %d.\n",
+			engine->id, INTEL_GRAPHICS_GEN(devInfo->device_id));
+		return B_UNSUPPORTED;
 	}
 
-	TRACE("Engine reset: Attempting to reset RCS0 (Render Command Streamer).\n");
+	TRACE("Engine reset: Attempting to reset %s (RCS0).\n", engine->name);
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 
-	// Conceptual register and bit for Gen7 RCS reset.
-	// This needs to map to actual hardware registers like GEN6_RSTCTL or specific engine reset bits.
-	// For example, on some gens, it's setting a bit in GFX_MODE or INSTPM.
-	// Using a placeholder register GENERIC_ENGINE_RESET_CTL and a bit for RCS0.
-	// This is a simplified sequence. Real reset can be more complex.
-	#define CONCEPTUAL_RCS0_RESET_REG (0x20d8) // Example: INSTPM on some gens
-	#define CONCEPTUAL_RCS0_RESET_BIT (1 << 0) // Example bit
+	// 1. Disable the ring buffer by clearing the enable bit in its CTL register.
+	//    This should prevent new commands from being fetched.
+	uint32_t ring_ctl_val = intel_i915_read32(devInfo, engine->ctl_reg_offset);
+	intel_i915_write32(devInfo, engine->ctl_reg_offset, ring_ctl_val & ~RING_CTL_ENABLE);
+	TRACE("Engine reset: Ring CTL (0x%x) disabled.\n", engine->ctl_reg_offset);
 
-	// 1. Disable ring buffer
-	intel_i915_write32(devInfo, engine->ctl_reg_offset, 0);
+	// 2. Assert the reset using GEN6_RSTCTL for Render Engine.
+	//    GEN6_RSTCTL (0x9400) is used for Gen6 (SNB) through HSW (Gen7.5).
+	//    BDW (Gen8) and later have per-engine reset registers (e.g., RENDER_RING_RESET_CTL 0x22B0).
+	//    This implementation focuses on Gen7.
+	uint32_t rstctl_val = intel_i915_read32(devInfo, GEN6_RSTCTL);
+	rstctl_val |= GEN6_RSTCTL_RENDER_RESET;
+	intel_i915_write32(devInfo, GEN6_RSTCTL, rstctl_val);
+	(void)intel_i915_read32(devInfo, GEN6_RSTCTL); // Posting read
+	TRACE("Engine reset: GEN6_RSTCTL (0x%x) set to 0x%08" B_PRIx32 " (assert render reset).\n",
+		GEN6_RSTCTL, rstctl_val);
 
-	// 2. Assert reset (specific to engine if possible)
-	// If using a global reset register like GEN6_RSTCTL:
-	// uint32_t rstctl = intel_i915_read32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7);
-	// intel_i915_write32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7, rstctl | RSTCTL_RENDER_GROUP_RESET_ENABLE_BIT);
-	// (void)intel_i915_read32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7); // Posting read
+	// 3. Wait for the reset to complete.
+	//    The GEN6_RSTCTL_RENDER_RESET bit is self-clearing.
+	//    Poll until it clears, with a timeout.
+	bigtime_t timeout = 10000; // 10ms timeout for reset completion
+	bigtime_t start_time = system_time();
+	bool reset_cleared = false;
+	while (system_time() - start_time < timeout) {
+		if (!(intel_i915_read32(devInfo, GEN6_RSTCTL) & GEN6_RSTCTL_RENDER_RESET)) {
+			reset_cleared = true;
+			break;
+		}
+		spin(50); // Spin for 50 microseconds
+	}
 
-	// Using a more direct (but conceptual) engine reset bit:
-	intel_i915_write32(devInfo, CONCEPTUAL_RCS0_RESET_REG, CONCEPTUAL_RCS0_RESET_BIT);
-	(void)intel_i915_read32(devInfo, CONCEPTUAL_RCS0_RESET_REG); // Posting read
-	snooze(100); // Wait a bit for reset to take effect
+	if (!reset_cleared) {
+		TRACE("Engine reset: Timeout waiting for render reset to clear in GEN6_RSTCTL (0x%x)!\n", GEN6_RSTCTL);
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_TIMED_OUT;
+	}
+	TRACE("Engine reset: Render reset bit cleared in GEN6_RSTCTL.\n");
 
-	// 3. De-assert reset
-	// intel_i915_write32(devInfo, GEN6_RSTCTL_REG_FOR_GEN7, rstctl & ~RSTCTL_RENDER_GROUP_RESET_ENABLE_BIT);
-	intel_i915_write32(devInfo, CONCEPTUAL_RCS0_RESET_REG, 0);
-	(void)intel_i915_read32(devInfo, CONCEPTUAL_RCS0_RESET_REG); // Posting read
-
-	// 4. Wait for reset complete (e.g., by checking a status bit or just a delay)
-	// This is also hardware specific. Some resets are self-clearing.
-	snooze(1000); // Generic delay for reset completion
-
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	TRACE("Engine reset: RCS0 reset sequence executed (using conceptual registers).\n");
-
-	// After reset, head and tail are typically 0.
+	// 4. Reset software tracking of ring state.
 	engine->cpu_ring_head = 0;
 	engine->cpu_ring_tail = 0;
-	// The ring buffer base, ctl should be re-programmed by caller (intel_engine_init) if needed.
-	// Here, we just ensure it's disabled. The init sequence will re-enable it.
+	engine->next_hw_seqno = 1; // Reset sequence number tracking
+	engine->last_submitted_hw_seqno = 0;
+
+	// 5. Re-initialize hardware ring registers (Head, Tail, Start, Control).
+	//    The ring buffer object (engine->ring_buffer_obj) and its GTT mapping remain valid.
+	//    The MI_SET_CONTEXT command will later restore context-specific ring state if contexts are used.
+	//    For a basic reset without immediate context restore, re-init to default state.
+	intel_i915_write32(devInfo, engine->head_reg_offset, 0);
+	intel_i915_write32(devInfo, engine->tail_reg_offset, 0);
+	intel_i915_write32(devInfo, engine->start_reg_offset, engine->ring_buffer_obj->gtt_offset_pages * B_PAGE_SIZE);
+
+	// Re-enable the ring with its original size.
+	// The original ring_ctl_val had the enable bit cleared.
+	// We need to set it again.
+	uint32_t new_ring_ctl = RING_CTL_SIZE(engine->ring_size_bytes / 1024) | RING_CTL_ENABLE;
+	intel_i915_write32(devInfo, engine->ctl_reg_offset, new_ring_ctl);
+	if (!(intel_i915_read32(devInfo, engine->ctl_reg_offset) & RING_CTL_ENABLE)) {
+		TRACE("Engine reset: Failed to re-enable ring CTL (0x%x) after reset!\n", engine->ctl_reg_offset);
+		// This is a critical failure.
+	} else {
+		TRACE("Engine reset: Ring CTL (0x%x) re-enabled to 0x%08" B_PRIx32 ".\n", engine->ctl_reg_offset, new_ring_ctl);
+	}
+
+	// Resetting current_context. The caller or next execbuffer will need to set a new one.
+	if (engine->current_context) {
+		intel_i915_gem_context_put(engine->current_context);
+		engine->current_context = NULL;
+	}
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("Engine reset: %s (RCS0) reset sequence complete.\n", engine->name);
 	return B_OK;
 }
 
@@ -273,72 +311,68 @@ status_t
 intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_gem_context* new_ctx)
 {
 	uint32_t offset_in_dwords;
-	// MI_FLUSH_DW (1 dword) + MI_SET_CONTEXT (3 dwords for restore) + MI_NOOP (1 dword)
-	const uint32_t cmd_len_dwords_flush_only = 1 + 1; // MI_FLUSH_DW + MI_NOOP
-	const uint32_t cmd_len_dwords_full_ctx = 1 + 3 + 1; // MI_FLUSH_DW + MI_SET_CONTEXT + MI_NOOP
+	// For Gen7 LRCA: MI_FLUSH_DW (1 dword) + MI_SET_CONTEXT (2 dwords) + MI_NOOP (1 dword) = 4 dwords
+	const uint32_t cmd_len_dwords_ctx_switch = 4;
+	const uint32_t cmd_len_dwords_flush_only = 2; // MI_FLUSH_DW + MI_NOOP
 	status_t status;
 
-	if (!engine || !new_ctx || !new_ctx->hw_image_obj) {
-		// If new_ctx is NULL, it might mean switch to default kernel context (if any)
-		// or this is an error. If hw_image_obj is NULL, we can only do a flush.
-		TRACE("Engine %s: Switch context: new_ctx or its hw_image_obj is NULL. Only flushing.\n", engine->name);
+	// It's crucial that new_ctx and its hw_image_obj are valid and GTT mapped.
+	if (!engine || !new_ctx || !new_ctx->hw_image_obj || !new_ctx->hw_image_obj->gtt_mapped) {
+		TRACE("Engine %s: Switch context: Invalid new_ctx, hw_image_obj, or not GTT mapped. Only flushing.\n", engine->name);
+		// Fallback to just a flush if context is invalid for a full switch.
 		status = intel_engine_get_space(engine, cmd_len_dwords_flush_only, &offset_in_dwords);
-		if (status != B_OK) return status;
+		if (status != B_OK) return status; // Cannot even get space for flush
+
 		intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE | MI_FLUSH_DEPTH_CACHE | MI_FLUSH_VF_CACHE);
 		intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
 		intel_engine_advance_tail(engine, cmd_len_dwords_flush_only);
-		return B_OK;
+
+		// If new_ctx was NULL (e.g. switching to kernel/idle), this might be acceptable.
+		// If new_ctx was non-NULL but invalid, return error.
+		return (new_ctx == NULL) ? B_OK : B_BAD_VALUE;
 	}
 
-	TRACE("Engine %s: Switching context to ID %lu (HW image GTT offset 0x%x pages)\n",
-		engine->name, new_ctx->id, new_ctx->hw_image_obj->gtt_offset_pages);
+	TRACE("Engine %s: Switching context from %p (ID %lu) to %p (ID %lu), GTT offset 0x%x pages\n",
+		engine->name, engine->current_context, engine->current_context ? engine->current_context->id : 0,
+		new_ctx, new_ctx->id, new_ctx->hw_image_obj->gtt_offset_pages);
 
-	// Ensure the context image is GTT mapped
-	if (!new_ctx->hw_image_obj->gtt_mapped) {
-		TRACE("Engine %s: Context %lu HW image not GTT mapped! (This is an error)\n", engine->name, new_ctx->id);
-		// This should have been mapped during context creation or execbuf.
-		// For now, we can't proceed with MI_SET_CONTEXT.
-		// Fallback to just a flush.
-		status = intel_engine_get_space(engine, cmd_len_dwords_flush_only, &offset_in_dwords);
-		if (status != B_OK) return status;
-		intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE);
-		intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
-		intel_engine_advance_tail(engine, cmd_len_dwords_flush_only);
-		return B_ERROR; // Indicate context switch couldn't fully happen.
+	status = intel_engine_get_space(engine, cmd_len_dwords_ctx_switch, &offset_in_dwords);
+	if (status != B_OK) {
+		TRACE("Engine %s: Failed to get space for context switch commands.\n", engine->name);
+		return status;
 	}
 
-
-	status = intel_engine_get_space(engine, cmd_len_dwords_full_ctx, &offset_in_dwords);
-	if (status != B_OK) return status;
-
-	// 1. MI_FLUSH_DW to ensure previous context's operations are done
+	// 1. MI_FLUSH_DW to ensure previous context's operations are done and caches are clean.
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE | MI_FLUSH_DEPTH_CACHE | MI_FLUSH_VF_CACHE);
 
-	// 2. MI_SET_CONTEXT (Gen7: Logical Ring Context Restore)
-	// This is a simplified version. Real MI_SET_CONTEXT for Gen7 RCS requires:
-	// - Context image in memory (hw_image_obj) containing register state.
-	// - GTT address of this image.
-	// - Flags for restore, inhibit save, etc.
-	// For now, we are just TRACEing the intent. The command below is a placeholder.
-	// A real MI_SET_CONTEXT has specific bits for Gen7 logical contexts.
-	// The command format used here (MI_SET_CONTEXT_RESTORE_EXT_STATE_ENABLE etc.)
-	// might be more for Gen8+ HW contexts or GuC contexts.
-	// Gen7 MI_SET_CONTEXT for RCS is simpler: 0x1E << 23 | (Length=1 for Gen7 LRCA)
-	// Dword 1: Logical Ring Context Address (GTT offset of context image)
-
+	// 2. MI_SET_CONTEXT for Gen7 Logical Ring Context Architecture (LRCA)
+	// DW0: Opcode (0x1E << 23) | Logical Context Restore (Bit 0 = 1) | Length (0 for 2DW command)
+	// DW1: Logical Ring Context Address (GTT address of the context image)
+	uint32_t mi_set_context_dw0 = (0x1E << 23) | (1 << 0) | 0; // Opcode, Logical Restore, Length=0
 	uint32_t context_gtt_address = new_ctx->hw_image_obj->gtt_offset_pages * B_PAGE_SIZE;
-	TRACE("Engine %s: Emitting MI_SET_CONTEXT (stubbed) for ctx ID %lu, image at GTT 0x%x\n",
-		engine->name, new_ctx->id, context_gtt_address);
 
-	// Placeholder for Gen7 MI_SET_CONTEXT (Logical Ring Context Address)
-	// This assumes a context image format and restore mechanism not fully implemented yet.
-	// Length for Gen7 LRCA MI_SET_CONTEXT is 1 (total 2 dwords).
-	intel_engine_write_dword(engine, offset_in_dwords++, MI_SET_CONTEXT | (2 - 2)); // Length 1 for Gen7 LRCA
+	// TODO: Context Save: If engine->current_context is valid and we need to save its state,
+	// the MI_SET_CONTEXT command would need the "Save Current Context" bit (Bit 1 on some gens,
+	// but Gen7 LRCA might handle save implicitly if the old context image was correctly set up
+	// or if specific save commands are issued prior). For now, assume simple restore without explicit save command.
+	// If save is needed, the hardware must know the GTT address of the *old* context's image.
+	// This is usually implicitly managed by the hardware after a context is loaded.
+
+	intel_engine_write_dword(engine, offset_in_dwords++, mi_set_context_dw0);
 	intel_engine_write_dword(engine, offset_in_dwords++, context_gtt_address);
-	// The actual context image needs to be prepared correctly in gem_context.c
 
+	// Add a MI_NOOP for padding or as a general good practice after control commands.
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
-	intel_engine_advance_tail(engine, cmd_len_dwords_full_ctx -1); // -1 because Gen7 MI_SET_CONTEXT is shorter
 
+	intel_engine_advance_tail(engine, cmd_len_dwords_ctx_switch);
+
+	// Update software tracking of the current context
+	if (engine->current_context) {
+		intel_i915_gem_context_put(engine->current_context);
+	}
+	engine->current_context = new_ctx;
+	intel_i915_gem_context_get(new_ctx); // Engine now holds a reference
+
+	TRACE("Engine %s: Context switch to ID %lu submitted.\n", engine->name, new_ctx->id);
 	return B_OK;
 }

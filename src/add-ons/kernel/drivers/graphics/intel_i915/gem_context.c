@@ -142,45 +142,64 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 			uint32_t* lrca = (uint32_t*)hw_image_cpu_addr;
 
 			// The context image is already zeroed by I915_BO_ALLOC_CPU_CLEAR.
-			// We only need to set non-zero default values.
+			// We need to set non-zero default values and ensure specific fields are as expected.
 			// LRCA DWord offsets are defined in registers.h
 
-			struct intel_engine_cs* rcs0 = devInfo->rcs0;
-			if (rcs0 && rcs0->ring_buffer_obj && rcs0->ring_cpu_map) {
-				// Initialize Ring Buffer registers in the context image to match the global ring.
-				// This sets up the context to use the existing global ring buffer.
-				lrca[CTX_RING_BUFFER_START_REGISTER] = rcs0->ring_buffer_obj->gtt_offset_pages * B_PAGE_SIZE;
-
-				// Read global ring control to copy its size and other relevant bits.
-				// Ensure the enable bit itself is NOT set in the context image's copy of RING_CTL,
-				// as the ring is enabled/disabled globally, not per-context via this field typically.
-				// The MI_SET_CONTEXT command implicitly makes the ring operational for this context.
+			struct intel_engine_cs* rcs0 = devInfo->rcs0; // Assuming this context is for RCS0
+			if (rcs0 && rcs0->ring_buffer_obj && rcs0->ring_cpu_map && rcs0->start_reg_offset != 0) {
+				// Initialize Ring Buffer registers in the context image.
+				// For Gen7 LRCA, these will be restored by MI_SET_CONTEXT.
+				lrca[CTX_RING_BUFFER_START_REGISTER] = intel_i915_read32(devInfo, rcs0->start_reg_offset);
+				// Ring control: size from global ring, but ensure enable bit is OFF in context image.
+				// The MI_SET_CONTEXT command itself makes the context active.
 				uint32_t global_ring_ctl = intel_i915_read32(devInfo, rcs0->ctl_reg_offset);
 				lrca[CTX_RING_BUFFER_CONTROL_REGISTER] = (global_ring_ctl & ~RING_CTL_ENABLE);
-				// Or, more simply, construct it:
+				// If RING_CTL_SIZE macro is available and reliable for image:
 				// lrca[CTX_RING_BUFFER_CONTROL_REGISTER] = RING_CTL_SIZE(rcs0->ring_size_bytes / 1024);
 
+				lrca[CTX_RING_HEAD] = 0; // Head should be 0 for a new/idle context.
+				lrca[CTX_RING_TAIL] = 0; // Tail should be 0.
 
-				lrca[CTX_RING_HEAD] = 0; // Head starts at 0 for a new context
-				lrca[CTX_RING_TAIL] = 0; // Tail starts at 0
+				// Context Control Register (CTX_LR_CONTEXT_CONTROL at offset 0x01)
+				// Bit 0: Inhibit Restore This Context (1=Inhibit, 0=Restore). Set to 0 for normal restore.
+				// Bit 1: Force PD Restore (PPGTT related). Set to 0 if no PPGTT.
+				// Bit 2: Force Restore All (pipeline state). Set to 0 for standard restore.
+				// Other bits are reserved or for specific features.
+				lrca[CTX_LR_CONTEXT_CONTROL] = 0; // Default: Restore this context, no force PD/All.
 
-				// Context Control Register (CTX_CONTEXT_CONTROL)
-				// Bit 0: Inhibit Context Restore (0 = Restore normally)
-				// Bit 1: Force PD Restore (if using PPGTT)
-				// Bit 2: Force Restore All (includes pipeline state)
-				lrca[CTX_LR_CONTEXT_CONTROL] = 0; // Default: No inhibit, no forced restores beyond standard
+				// Batch Buffer State Registers (should be idle/invalid for a new context)
+				lrca[CTX_BB_CURRENT_HEAD_LDW] = 0;
+				lrca[CTX_BB_CURRENT_HEAD_UDW] = 0; // Upper DW for 64-bit addresses, not used for BB head.
+				lrca[CTX_BB_STATE] = 0;            // Indicates no active batch buffer.
+				lrca[CTX_SECOND_BB_HEAD_LDW] = 0;
+				lrca[CTX_SECOND_BB_HEAD_UDW] = 0;
+				lrca[CTX_SECOND_BB_STATE] = 0;
 
-				// Batch Buffer State, Second BB State, ISP, State Base Address are zeroed,
-				// which means they are invalid/unused initially. This is fine for a default context
-				// that isn't immediately executing a complex batch.
+				// Indirect State Pointers (ISP) and General State Base Address (GSBA)
+				// For a default context without specific pre-loaded state, these are often 0.
+				lrca[CTX_INDIRECT_CTX_OFFSET] = 0;
+				lrca[CTX_INSTRUCTION_STATE_POINTER] = 0; // May need to point to a default ISP if required by HW.
+				                                        // For now, 0 assuming kernel context doesn't pre-load complex state.
 
-				TRACE("GEM Context: HW image (LRCA) initialized for RCS0:\n");
+				// PPGTT Page Directory Pointers (PDPs) - Set to 0 if not using PPGTT for this context.
+				// Example for PDP0 (offsets 0x24, 0x25 for LSW/MSW)
+				lrca[CTX_PDP0_LDW] = 0;
+				lrca[CTX_PDP0_UDW] = 0;
+				// ... and for PDP1, PDP2, PDP3 if they exist in the image and are used.
+				// The defines CTX_PDPx_LDW/UDW should come from registers.h.
+
+				// Other registers like Context ID (CCID) might be part of the image,
+				// but CCID is often managed by HW or GuC on newer gens.
+				// For Gen7 LRCA, the Context ID is implicit via the GTT address.
+
+				TRACE("GEM Context: HW image (Gen7 LRCA) initialized for RCS0:\n");
 				TRACE("  LRCA.RingStart = 0x%08x\n", lrca[CTX_RING_BUFFER_START_REGISTER]);
 				TRACE("  LRCA.RingCtl   = 0x%08x\n", lrca[CTX_RING_BUFFER_CONTROL_REGISTER]);
+				TRACE("  LRCA.RingHead  = 0x%08x\n", lrca[CTX_RING_HEAD]);
+				TRACE("  LRCA.ContextCtrl=0x%08x\n", lrca[CTX_LR_CONTEXT_CONTROL]);
 			} else {
-				TRACE("GEM Context: Could not initialize LRCA - RCS0 engine or ring not available.\n");
-				// This is a critical error if we expect contexts to function.
-				status = B_NO_INIT; // Mark as error
+				TRACE("GEM Context: Could not initialize LRCA - RCS0 engine or its registers not available.\n");
+				status = B_NO_INIT;
 			}
 		} else {
 			TRACE("GEM Context: HW image object too small for LRCA initialization (size %lu).\n",

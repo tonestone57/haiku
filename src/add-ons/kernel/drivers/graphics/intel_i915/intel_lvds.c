@@ -93,14 +93,8 @@ status_t
 intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
 	TRACE("LVDS/eDP: Panel Power ON for port %d (type %d)\n", port->logical_port_id, port->type);
-	// Use parsed VBT timings if available, otherwise defaults.
 	uint32_t t1_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t1_ms > 0) ?
 		devInfo->vbt->panel_power_t1_ms : DEFAULT_T1_VDD_PANEL_MS;
-	uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
-		devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
-	// Note: VBT may also contain t3 (AUX to Panel On for eDP), t4, t5 etc.
-	// The current panel_power_tX_ms in intel_vbt_data is a simplified T1-T5 model.
-	// For eDP, t1_delay_ms might represent VDD_ON + AUX_ON, and t2_delay_ms for Panel_ON + BL_ON.
 
 	enum pipe_id_priv pipe = port->current_pipe != PRIV_PIPE_INVALID ? port->current_pipe : PRIV_PIPE_A;
 	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
@@ -109,109 +103,50 @@ intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_sta
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 
 	uint32_t pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
-	if (port->type == PRIV_OUTPUT_EDP) pp_control_val |= EDP_FORCE_VDD;
+	if (port->type == PRIV_OUTPUT_EDP) {
+		pp_control_val |= EDP_FORCE_VDD; // Ensure VDD for eDP
+		// EDP_BLC_ENABLE is handled by set_backlight or port_enable now.
+	}
 	pp_control_val |= POWER_TARGET_ON;
 	intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
-	(void)intel_i915_read32(devInfo, pp_control_reg);
+	(void)intel_i915_read32(devInfo, pp_control_reg); // Posting read
 
 	bigtime_t start_time = system_time();
-	// Wait for T1 (VDD on to Panel Port functional)
-	while (system_time() - start_time < (t1_delay_ms * 1000 * 2 + 50000)) { // Max wait with margin
+	// Wait for T1: VDD on and stable, panel ready for signals/AUX.
+	// Max wait slightly more than T1 to account for variability.
+	while (system_time() - start_time < (t1_delay_ms * 1000 + 50000)) {
 		if (intel_i915_read32(devInfo, pp_status_reg) & PP_ON) break;
-		snooze(1000); // Check every 1ms
+		snooze(1000);
 	}
+
 	if (!(intel_i915_read32(devInfo, pp_status_reg) & PP_ON)) {
 		TRACE("LVDS/eDP: Timeout waiting for Panel VDD ON (PP_STATUS.ON)!\n");
-		// Consider this a failure for power on
-	} else {
-		TRACE("LVDS/eDP: Panel VDD is ON.\n");
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		return B_TIMED_OUT;
 	}
-	snooze(t1_delay_ms * 1000); // Wait for T1 duration
+	TRACE("LVDS/eDP: Panel VDD is ON. Waiting T1 delay (%u ms).\n", t1_delay_ms);
+	snooze(t1_delay_ms * 1000); // Wait for full T1 duration
 
 	if (port->type == PRIV_OUTPUT_EDP) {
-		TRACE("LVDS/eDP: eDP AUX CH: Powering on panel (DPCD SET_POWER D0).\n");
+		// After VDD is up and T1, eDP panel should be responsive to AUX.
+		// Powering on the panel to D0 state via DPCD.
+		TRACE("LVDS/eDP: eDP: Setting DPCD power state to D0.\n");
 		uint8_t dpcd_val = DPCD_POWER_D0;
 		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
 		if (aux_status != B_OK) {
-			TRACE("LVDS/eDP: Failed to power on eDP panel via AUX: %s\n", strerror(aux_status));
-			// Consider if this is fatal for panel_power_on
+			TRACE("LVDS/eDP: Failed to set eDP DPCD power D0: %s\n", strerror(aux_status));
+			// This might be critical, consider returning error.
+			// For now, continue, link training might still work or recover.
 		}
-		// VBT eDP T3 (AUX_ON to PANEL_ON) is part of t1_delay_ms from VBT eDP power seq.
-		// The following t2_delay_ms is for VBT eDP T8 (PANEL_ON to BL_ON).
+		// VBT eDP T3 (AUX_ON to PANEL_ON/signals active) delay is conceptually part of T1 here,
+		// or happens during link training initiated by DDI port enable.
 	}
 
-	snooze(t2_delay_ms * 1000); // Wait for T2 (Panel Port functional / Panel Signals On to Backlight On)
+	// Backlight is NOT enabled here. It's enabled by intel_lvds_set_backlight()
+	// which is called later in the modeset sequence (typically after plane/pipe/port are active).
+	// The VBT T2 delay (Panel Signals On to Backlight On) should be handled by the caller
+	// of intel_lvds_set_backlight(..., true).
 
-	// Backlight enable logic using VBT parsed backlight_control_source
-	// Default to CPU PWM if source is unknown or not applicable for current gen.
-	uint8_t bl_source = port->backlight_control_source; // This should be set by VBT parsing
-
-	// For eDP, sometimes PP_CONTROL's EDP_BLC_ENABLE is used regardless of VBT_BACKLIGHT_EDP_AUX,
-	// particularly if the panel doesn't have its own AUX brightness control.
-	// Prioritize EDP_BLC_ENABLE for eDP if available on this Gen.
-	if (port->type == PRIV_OUTPUT_EDP && (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id))) {
-		pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
-		pp_control_val |= EDP_BLC_ENABLE;
-		intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
-		TRACE("LVDS/eDP: Backlight enabled via PP_CONTROL (EDP_BLC_ENABLE).\n");
-	} else {
-		// LVDS, or eDP on gens without EDP_BLC_ENABLE in PP_CONTROL, or if VBT indicates PWM.
-		uint32_t blc_pwm_ctl1_reg = 0, blc_pwm_ctl2_reg = 0;
-		uint32_t blm_pwm_enable_bit = 0;
-		bool pwm_regs_valid = false;
-
-		// Determine PWM registers based on VBT backlight_control_source
-		if (bl_source == VBT_BACKLIGHT_CPU_PWM) {
-			if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) { // And other gens with CPU PWM
-				blc_pwm_ctl1_reg = BLC_PWM_CPU_CTL;
-				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2;
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB; // TODO: Check if HSW uses a different bit
-				pwm_regs_valid = true;
-				TRACE("LVDS/eDP: Using CPU PWM for backlight control source %u.\n", bl_source);
-			}
-		} else if (bl_source == VBT_BACKLIGHT_PCH_PWM) {
-			if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) { // And other gens with PCH PWM
-				blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1;
-				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW; // TODO: Check if IVB PCH uses a different bit
-				pwm_regs_valid = true;
-				TRACE("LVDS/eDP: Using PCH PWM for backlight control source %u.\n", bl_source);
-			}
-		} else if (bl_source == VBT_BACKLIGHT_EDP_AUX && port->type == PRIV_OUTPUT_EDP) {
-			// This case means eDP backlight is controlled via AUX DPCD (e.g. 0x00720).
-			// This requires intel_dp_aux_write_dpcd calls, not direct PWM registers.
-			// For now, this path is a TODO for full AUX backlight control.
-			// If EDP_BLC_ENABLE was not used above, this is where AUX control would go.
-			TRACE("LVDS/eDP: VBT indicates eDP AUX backlight control. STUBBED. (source %u)\n", bl_source);
-			// pwm_regs_valid remains false, so PWM programming below is skipped.
-		}
-
-
-		if (!pwm_regs_valid) {
-			TRACE("LVDS/eDP: PWM registers for backlight (source %u) not determined or not applicable. Backlight might not enable via PWM.\n", bl_source);
-		} else {
-			uint32_t pwm_freq_hz = 200; // Default 200 Hz
-			if (devInfo->vbt && devInfo->vbt->lvds_pwm_freq_hz > 0) {
-				pwm_freq_hz = devInfo->vbt->lvds_pwm_freq_hz;
-			}
-			TRACE("LVDS/eDP: Using PWM frequency %u Hz for backlight.\n", pwm_freq_hz);
-
-			uint32_t core_clock_khz = devInfo->current_cdclk_freq_khz;
-			if (core_clock_khz == 0) core_clock_khz = IS_HASWELL(devInfo->device_id) ? 450000 : 400000;
-
-			uint32_t cycle_len = core_clock_khz * 1000 / pwm_freq_hz;
-			uint32_t duty_len = cycle_len / 2; // Default to 50% brightness
-
-			intel_i915_write32(devInfo, blc_pwm_ctl1_reg, (cycle_len << 16) | duty_len);
-
-			uint32_t blc_ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
-			blc_ctl2_val |= blm_pwm_enable_bit;
-			intel_i915_write32(devInfo, blc_pwm_ctl2_reg, blc_ctl2_val);
-			TRACE("LVDS/eDP: Backlight enabled via PWM CTL1=0x%x (val 0x%x), CTL2=0x%x (val 0x%x).\n",
-				blc_pwm_ctl1_reg, intel_i915_read32(devInfo, blc_pwm_ctl1_reg),
-				blc_pwm_ctl2_reg, blc_ctl2_val);
-		}
-	}
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }
@@ -220,80 +155,67 @@ void
 intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
 	TRACE("LVDS/eDP: Panel Power OFF for port %d (type %d)\n", port->logical_port_id, port->type);
-	uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
-		devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+	// VBT T3 (Backlight Off to Panel Port Disable) is handled by caller of set_backlight(off)
+	// VBT T4 (Panel Port Disable to VDD Off)
 	uint32_t t4_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t4_ms > 0) ?
 		devInfo->vbt->panel_power_t4_ms : DEFAULT_T4_PANEL_VDD_MS;
+	// VBT T5 (VDD Off Cycle Time)
 	uint32_t t5_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t5_ms > 0) ?
 		devInfo->vbt->panel_power_t5_ms : DEFAULT_T5_VDD_CYCLE_MS;
 
 	enum pipe_id_priv pipe = port->current_pipe != PRIV_PIPE_INVALID ? port->current_pipe : PRIV_PIPE_A;
 	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
-	uint32_t pp_control_val; // To avoid uninitialized use later
+	uint32_t pp_status_reg = _get_pp_status_reg(devInfo, port, pipe); // For polling if needed
 
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 
-	// Backlight disable logic using VBT parsed backlight_control_source
-	uint8_t bl_source = port->backlight_control_source;
-	if (port->type == PRIV_OUTPUT_EDP && (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id))) {
-		// Prioritize EDP_BLC_ENABLE for eDP on Gen7
-		pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
-		pp_control_val &= ~EDP_BLC_ENABLE;
-		intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
-		TRACE("LVDS/eDP: Backlight disabled via PP_CONTROL (EDP_BLC_ENABLE).\n");
-	} else { // LVDS or eDP not using EDP_BLC_ENABLE path
-		uint32_t blc_pwm_ctl2_reg = 0;
-		uint32_t blm_pwm_enable_bit = 0;
-		bool pwm_regs_valid = false;
-
-		if (bl_source == VBT_BACKLIGHT_CPU_PWM) {
-			if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) {
-				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2;
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB; // TODO: Check HSW bit
-				pwm_regs_valid = true;
-			}
-		} else if (bl_source == VBT_BACKLIGHT_PCH_PWM) {
-			if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) {
-				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2;
-				blm_pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW; // TODO: Check IVB PCH bit
-				pwm_regs_valid = true;
-			}
-		} else if (bl_source == VBT_BACKLIGHT_EDP_AUX && port->type == PRIV_OUTPUT_EDP) {
-			TRACE("LVDS/eDP: VBT indicates eDP AUX backlight control for disable. STUBBED.\n");
-			// pwm_regs_valid remains false.
-		}
-
-		if (pwm_regs_valid) {
-			uint32_t blc_ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
-			blc_ctl2_val &= ~blm_pwm_enable_bit;
-			intel_i915_write32(devInfo, blc_pwm_ctl2_reg, blc_ctl2_val);
-			TRACE("LVDS/eDP: Backlight disabled via PWM CTL2=0x%x (source %u).\n", blc_pwm_ctl2_reg, bl_source);
-		} else {
-			TRACE("LVDS/eDP: PWM registers for backlight disable (source %u) not determined or not applicable.\n", bl_source);
-		}
-	}
-	snooze(t3_delay_ms * 1000); // Wait for T3 (Backlight Off to Panel Port disable)
+	// Backlight is assumed to be already OFF by a call to intel_lvds_set_backlight(..., false).
 
 	if (port->type == PRIV_OUTPUT_EDP) {
-		uint8_t dpcd_val = DPCD_POWER_D3_AUX_OFF;
-		TRACE("LVDS/eDP: eDP AUX CH: Powering down panel (DPCD SET_POWER to 0x%x).\n", dpcd_val);
+		// Power down eDP panel to D3 (AUX may or may not be kept alive for HPD)
+		// DPCD_POWER_D3_AUX_OFF powers down AUX too.
+		uint8_t dpcd_val = DPCD_POWER_D3; // Or DPCD_POWER_D3_AUX_OFF if full power down
+		TRACE("LVDS/eDP: eDP: Setting DPCD power state to D3 (0x%x).\n", dpcd_val);
 		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
 		if (aux_status != B_OK) {
-			TRACE("LVDS/eDP: Failed to power down eDP panel via AUX: %s\n", strerror(aux_status));
+			TRACE("LVDS/eDP: Failed to set eDP DPCD power D3: %s\n", strerror(aux_status));
 		}
-		// VBT eDP T10 (Panel Off to AUX Off) is part of t4_delay_ms from VBT eDP power seq.
+		// VBT eDP T10 (Panel Signals Off/DPCD D3 to AUX Off) is part of t4_delay_ms.
 	}
 
-	snooze(t4_delay_ms * 1000); // Wait for T4 (Panel Port disable to VDD Off)
-	pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
+	// Wait T4: Panel signals are assumed off (by port_disable), now wait before cutting VDD.
+	TRACE("LVDS/eDP: Waiting T4 delay (%u ms) before VDD off.\n", t4_delay_ms);
+	snooze(t4_delay_ms * 1000);
+
+	// Turn off VDD
+	uint32_t pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
 	pp_control_val &= ~POWER_TARGET_ON;
-	if (port->type == PRIV_OUTPUT_EDP) pp_control_val &= ~EDP_FORCE_VDD;
+	if (port->type == PRIV_OUTPUT_EDP) {
+		pp_control_val &= ~EDP_FORCE_VDD;
+		// EDP_BLC_ENABLE should have been cleared by set_backlight(off) if it was used.
+		pp_control_val &= ~EDP_BLC_ENABLE;
+	}
 	intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
-	(void)intel_i915_read32(devInfo, pp_control_reg);
-	snooze(vdd_cycle_delay_ms * 1000);
+	(void)intel_i915_read32(devInfo, pp_control_reg); // Posting read
+
+	// Poll for PP_STATUS OFF if necessary, though de-asserting POWER_TARGET_ON should be enough.
+	// Some platforms might require polling.
+	bigtime_t start_time = system_time();
+	while (system_time() - start_time < 50000) { // Max 50ms wait for VDD off
+		if (!(intel_i915_read32(devInfo, pp_status_reg) & PP_ON)) break;
+		snooze(1000);
+	}
+	if (intel_i915_read32(devInfo, pp_status_reg) & PP_ON) {
+		TRACE("LVDS/eDP: Timeout waiting for Panel VDD OFF (PP_STATUS.ON still set)!\n");
+	} else {
+		TRACE("LVDS/eDP: Panel VDD is OFF.\n");
+	}
+
+	// Wait T5: Minimum VDD off time before it can be powered on again.
+	TRACE("LVDS/eDP: Waiting T5 VDD cycle delay (%u ms).\n", t5_delay_ms);
+	snooze(t5_delay_ms * 1000);
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	TRACE("LVDS/eDP: Panel VDD is OFF.\n");
 }
 
 status_t intel_lvds_configure_panel_fitter(intel_i915_device_info* d, enum pipe_id_priv p, bool e, const display_mode* nm, const display_mode* sm) {
@@ -305,162 +227,255 @@ status_t
 intel_lvds_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* port,
 	enum pipe_id_priv pipe, const display_mode* mode)
 {
-	TRACE("LVDS/eDP: Port Enable for port %d (VBT handle 0x%04x) on pipe %d\n",
-		port->logical_port_id, port->child_device_handle, pipe);
+	TRACE("LVDS/eDP: Port Enable for port %d (type %d) on pipe %d\n",
+		port->logical_port_id, port->type, pipe);
 
-	// Ensure the port is associated with the target pipe for power sequencing logic
-	// (though _get_pp_control_reg might use port->hw_port_index for HSW eDP)
-	port->current_pipe = pipe;
+	// Panel VDD should already be on from intel_lvds_panel_power_on() called by display.c
+	// For eDP, DDI enable (link training) is also handled by display.c calling intel_ddi_port_enable().
 
-	// Panel power on sequence is largely handled by intel_lvds_panel_power_on,
-	// which is called earlier in the main modeset sequence in display.c.
-	// This function here would typically handle LVDS-specific register setup
-	// beyond just panel power, e.g., LVDS_CTL register for channel mode, BPC.
-
-	// Example: Configure LVDS_CTL (PCH_LVDS 0xE1180 or CPU LVDS registers for older gens)
-	// This is primarily for traditional LVDS. eDP setup is mostly DDI + panel power via PP_CONTROL.
 	if (port->type == PRIV_OUTPUT_LVDS) {
+		intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		uint32_t lvds_reg = 0;
-		// Determine LVDS register based on Gen (simplified)
-		if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id) /* and PCH LVDS */) {
-			// Assuming HSW PCH LVDS or IVB PCH LVDS (if VBT indicates PCH connection)
-			// If IVB has CPU LVDS (rare), it would be different.
-			// This logic needs refinement based on actual VBT output type and connection (CPU/PCH)
+		bool is_pch_lvds = false;
+
+		// Determine if CPU or PCH LVDS controller
+		if (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id)) {
+			// On IVB/HSW, LVDS can be on PCH. Some IVB might have CPU LVDS too.
+			// Assume VBT's is_pch_port flag is correctly set for the LVDS port.
+			if (port->is_pch_port) {
+				lvds_reg = PCH_LVDS;
+				is_pch_lvds = true;
+				TRACE("LVDS: Using PCH_LVDS register (0x%x)\n", lvds_reg);
+			} else { // CPU LVDS (e.g., IVB CPU eDP/LVDS combo port)
+				lvds_reg = LVDS; // CPU LVDS register 0x61180
+				is_pch_lvds = false;
+				TRACE("LVDS: Using CPU LVDS register (0x%x)\n", lvds_reg);
+			}
+		} else if (IS_SANDYBRIDGE(devInfo->device_id)) {
+			// SNB LVDS is typically PCH
 			lvds_reg = PCH_LVDS;
+			is_pch_lvds = true;
+			TRACE("LVDS: SNB: Using PCH_LVDS register (0x%x)\n", lvds_reg);
 		} else {
-			// Pre-SandyBridge (e.g. GM45) might use MMIO_LVDS (0x61180)
-			// lvds_reg = MMIO_LVDS; // Example
-			TRACE("LVDS: LVDS register for this Gen not fully specified, using PCH_LVDS as placeholder.\n");
-			lvds_reg = PCH_LVDS; // Fallback for now
+			TRACE("LVDS: LVDS port enable not fully implemented for this GEN.\n");
+			// For older gens like GM45, it would be MMIO_LVDS (0x61180)
+			// For now, assume it might be PCH_LVDS if not IVB/HSW CPU
+			lvds_reg = PCH_LVDS; // Placeholder for older gens if they use similar PCH interface
+			is_pch_lvds = true; // Assumption
 		}
 
-		if (lvds_reg != 0) {
-			uint32_t lvds_val = intel_i915_read32(devInfo, lvds_reg);
-			lvds_val |= LVDS_PORT_EN; // Enable LVDS port
+		uint32_t lvds_val = intel_i915_read32(devInfo, lvds_reg);
 
-			// Pipe Select (A or B)
-			lvds_val &= ~LVDS_PIPE_SEL_MASK; // Clear existing pipe bits
-			if (pipe == PRIV_PIPE_B) {
-				lvds_val |= LVDS_PIPEB_SELECT;
-			} else { // Default to Pipe A
-				lvds_val |= LVDS_PIPEA_SELECT;
-			}
-
-			// Bits Per Color (BPC)
-			lvds_val &= ~LVDS_BPC_MASK;
-			if (devInfo->vbt && devInfo->vbt->lfp_bits_per_color == 8) {
-				lvds_val |= LVDS_BPC_8;
-			} else { // Default to 6 BPC
-				lvds_val |= LVDS_BPC_6;
-			}
-
-			// Dual Channel
-			if (devInfo->vbt && devInfo->vbt->lfp_is_dual_channel) {
-				lvds_val |= LVDS_DUAL_CHANNEL_EN;
-				// If dual channel, typically Pipe B data is used for the second channel,
-				// ensure pipe select reflects this if necessary (some archs tie this to pipe B).
-				// The LVDS_PIPEB_SELECT above might cover this, or specific dual channel pipe select bits.
-			} else {
-				lvds_val &= ~LVDS_DUAL_CHANNEL_EN;
-			}
-
-			// TODO: LVDS_BORDER_EN if panel fitting is used.
-
-			intel_i915_write32(devInfo, lvds_reg, lvds_val);
-			TRACE("LVDS: Configured LVDS Register (0x%x) to 0x%08" B_PRIx32 "\n", lvds_reg, lvds_val);
-		} else {
-			TRACE("LVDS: LVDS control register not determined for this configuration.\n");
+		// Pipe Select
+		lvds_val &= ~LVDS_PIPE_SEL_MASK; // Clear existing for both PCH_LVDS and CPU_LVDS
+		if (pipe == PRIV_PIPE_B) {
+			lvds_val |= (is_pch_lvds ? LVDS_PIPEB_SELECT_PCH : LVDS_PIPEB_SELECT_CPU);
+		} else { // Default to Pipe A
+			lvds_val |= (is_pch_lvds ? LVDS_PIPEA_SELECT_PCH : LVDS_PIPEA_SELECT_CPU);
 		}
+
+		// Bits Per Color (BPC)
+		lvds_val &= ~LVDS_BPC_MASK; // Same mask for PCH_LVDS and CPU_LVDS
+		if (port_state->panel_bits_per_color == 8) { // From VBT
+			lvds_val |= LVDS_BPC_8;
+		} else { // Default to 6 BPC (18-bit panel)
+			lvds_val |= LVDS_BPC_6;
+		}
+
+		// Dual Channel
+		if (port_state->panel_is_dual_channel) { // From VBT
+			lvds_val |= LVDS_DUAL_CHANNEL_EN; // Same bit for PCH_LVDS and CPU_LVDS
+		} else {
+			lvds_val &= ~LVDS_DUAL_CHANNEL_EN;
+		}
+
+		// TODO: LVDS_BORDER_EN if panel fitting is used.
+
+		lvds_val |= LVDS_PORT_EN; // Enable LVDS port
+		intel_i915_write32(devInfo, lvds_reg, lvds_val);
+		(void)intel_i915_read32(devInfo, lvds_reg); // Posting read
+
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		TRACE("LVDS: Configured LVDS Register (0x%x) to 0x%08" B_PRIx32 "\n", lvds_reg, lvds_val);
+
 	} else if (port->type == PRIV_OUTPUT_EDP) {
-		TRACE("LVDS/eDP: eDP specific port configuration (beyond DDI/PP_CONTROL) STUBBED.\n");
+		// eDP specific port enable is mostly handled by intel_ddi_port_enable (link training)
+		// and panel power up (intel_lvds_panel_power_on).
+		// This function might ensure any final eDP-specific bits in shared panel registers are set.
+		// For example, some eDP panels might need a bit in PP_CONTROL for enabling output beyond VDD.
+		// However, EDP_BLC_ENABLE is for backlight, not port data.
+		TRACE("LVDS/eDP: eDP port %d enable - primarily handled by DDI and panel power.\n", port->logical_port_id);
+	} else {
+		TRACE("LVDS/eDP: intel_lvds_port_enable called for non-LVDS/eDP port type %d\n", port->type);
+		return B_BAD_TYPE;
 	}
-
-
-	// Backlight should be enabled AFTER panel is stable and displaying image.
-	// This might be better done at the very end of modeset, or after plane enable.
-	// intel_lvds_panel_power_on already has some backlight logic.
-	// For now, this function is mostly a high-level call.
-	// The actual power on sequence (VDD, panel signals, backlight) is in intel_lvds_panel_power_on.
-	// If intel_lvds_panel_power_on is not called before this, it should be called here.
-	// In the current display.c flow, intel_lvds_panel_power_on is called *before* intel_i915_port_enable.
-
-	// If further actions are needed specific to enabling the LVDS/eDP port's data transmission
-	// beyond what panel_power_on does, they would go here.
-	// For eDP, this might include starting link training if not done by panel_power_on.
-	if (port->type == PRIV_OUTPUT_EDP) {
-		// intel_dp_start_link_train(devInfo, port, mode->clock_params_for_edp_if_any);
-		TRACE("LVDS/eDP: eDP specific port enable (like link train if not done by panel_power_on) STUBBED.\n");
-	}
-
-
+	// Backlight is enabled separately by intel_lvds_set_backlight after this function and pipe/plane are on.
 	return B_OK;
 }
 
 void
 intel_lvds_port_disable(intel_i915_device_info* devInfo, intel_output_port_state* port)
 {
-	TRACE("LVDS/eDP: Port Disable for port %d (VBT handle 0x%04x)\n",
-		port->logical_port_id, port->child_device_handle);
+	TRACE("LVDS/eDP: Port Disable for port %d (type %d)\n",
+		port->logical_port_id, port->type);
 
-	// Panel power off sequence is handled by intel_lvds_panel_power_off,
-	// which is called earlier in display.c if the pipe was enabled on this port.
-	// This function would handle LVDS-specific register teardown.
+	// Backlight should be disabled by intel_lvds_set_backlight(false) before calling this.
+	// Panel VDD power off is handled by intel_lvds_panel_power_off after this.
 
-	// Example: Clear LVDS_PORT_EN in LVDS_CTL
 	if (port->type == PRIV_OUTPUT_LVDS) {
+		intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		uint32_t lvds_reg = 0;
-		if (IS_HASWELL(devInfo->device_id) || IS_IVYBRIDGE(devInfo->device_id)) { // PCH LVDS
+		if ((IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id)) && port->is_pch_port) {
 			lvds_reg = PCH_LVDS;
-		} else {
-			// lvds_reg = MMIO_LVDS; // Example for older gens
-			TRACE("LVDS: LVDS register for disable not fully specified, using PCH_LVDS as placeholder.\n");
-			lvds_reg = PCH_LVDS;
+		} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) { // Assuming CPU LVDS for these if not PCH
+			lvds_reg = LVDS;
+		} else { // Older or unknown
+			lvds_reg = PCH_LVDS; // Placeholder
 		}
 
 		if (lvds_reg != 0) {
 			uint32_t lvds_val = intel_i915_read32(devInfo, lvds_reg);
 			lvds_val &= ~LVDS_PORT_EN;
 			intel_i915_write32(devInfo, lvds_reg, lvds_val);
+			(void)intel_i915_read32(devInfo, lvds_reg); // Posting read
 			TRACE("LVDS: Disabled LVDS Port Register (0x%x).\n", lvds_reg);
 		}
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	} else if (port->type == PRIV_OUTPUT_EDP) {
-		// intel_dp_stop_link_train(devInfo, port);
-		TRACE("LVDS/eDP: eDP specific port disable STUBBED.\n");
+		// eDP port disable is mostly handled by intel_ddi_port_disable (PHY power down)
+		// and panel power off (intel_lvds_panel_power_off).
+		TRACE("LVDS/eDP: eDP port %d disable - primarily handled by DDI and panel power.\n", port->logical_port_id);
 	}
-
-	// The actual power off (backlight, panel signals, VDD) is in intel_lvds_panel_power_off.
-	// If intel_lvds_panel_power_off is not called after this, it should be called here.
-	// In current display.c flow, panel_power_off is called if pipe was enabled on this port.
 }
 
 
 status_t
 intel_lvds_set_backlight(intel_i915_device_info* devInfo, intel_output_port_state* port, bool on)
 {
-	TRACE("LVDS/eDP: Set backlight for port %d to %s (STUBBED)\n", port->logical_port_id, on ? "ON" : "OFF");
-	if (devInfo == NULL || port == NULL)
+	TRACE("LVDS/eDP: Set backlight for port %d (type %d) to %s\n",
+		port->logical_port_id, port->type, on ? "ON" : "OFF");
+
+	if (devInfo == NULL || port == NULL || devInfo->mmio_regs_addr == NULL)
 		return B_BAD_VALUE;
 
-	// This function would encapsulate the logic currently split between
-	// intel_lvds_panel_power_on and intel_lvds_panel_power_off for backlight.
-	// It needs to use port->backlight_control_source to determine method.
+	intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Backlight regs might need forcewake
 
-	// intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // If accessing regs directly
+	uint8_t bl_source = port->backlight_control_source;
+	enum pipe_id_priv pipe = port->current_pipe != PRIV_PIPE_INVALID ? port->current_pipe : PRIV_PIPE_A;
+	uint32_t pp_control_reg = _get_pp_control_reg(devInfo, port, pipe);
+	uint32_t pp_control_val;
 
 	if (on) {
-		// TODO: Implement backlight ON logic based on port->backlight_control_source
-		// This might involve:
-		// - Setting EDP_BLC_ENABLE in PP_CONTROL for eDP.
-		// - Programming PWM CTL1/CTL2 registers for LVDS/PWM eDP.
-		// - Sending DPCD AUX commands for eDP AUX backlight control.
-		TRACE("LVDS/eDP: Backlight ON logic STUBBED for port %d, source %u.\n",
-			port->logical_port_id, port->backlight_control_source);
-	} else {
-		// TODO: Implement backlight OFF logic
-		TRACE("LVDS/eDP: Backlight OFF logic STUBBED for port %d, source %u.\n",
-			port->logical_port_id, port->backlight_control_source);
+		// Path 1: eDP specific PP_CONTROL bit (Gen7+)
+		if (port->type == PRIV_OUTPUT_EDP && (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id))) {
+			pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
+			pp_control_val |= EDP_BLC_ENABLE;
+			intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
+			TRACE("LVDS/eDP: eDP backlight enabled via PP_CONTROL.EDP_BLC_ENABLE.\n");
+			// Brightness itself might be PWM or AUX, this is just the overall enable.
+		}
+
+		// Path 2: PWM control (CPU or PCH, or eDP if VBT says PWM source for it)
+		if (bl_source == VBT_BACKLIGHT_CPU_PWM || bl_source == VBT_BACKLIGHT_PCH_PWM ||
+			(port->type == PRIV_OUTPUT_EDP && bl_source != VBT_BACKLIGHT_EDP_AUX && !(IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id)))) {
+			// Fallback to PWM if eDP but not Gen7 with EDP_BLC_ENABLE or if VBT specified PWM for eDP.
+
+			uint32_t blc_pwm_ctl1_reg = 0, blc_pwm_ctl2_reg = 0;
+			uint32_t pwm_enable_bit = 0;
+
+			if (bl_source == VBT_BACKLIGHT_CPU_PWM) {
+				blc_pwm_ctl1_reg = BLC_PWM_CPU_CTL;   // Gen dependent, e.g. 0x61254 for older, 0x48254 for IVB+
+				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2; // Gen dependent, e.g. 0x61250 for older, 0x48250 for IVB+
+				pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB; // Or generic BLM_PWM_ENABLE if bits are same
+			} else { // VBT_BACKLIGHT_PCH_PWM
+				blc_pwm_ctl1_reg = PCH_BLC_PWM_CTL1; // e.g. 0xC8254 for CPT+
+				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; // e.g. 0xC8250 for CPT+
+				pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW; // Or generic if bits are same
+			}
+
+			if (blc_pwm_ctl1_reg != 0) { // Check if registers were determined
+				uint32_t pwm_freq_hz = 200; // Default 200 Hz
+				if (devInfo->vbt && devInfo->vbt->lvds_pwm_freq_hz > 0) {
+					pwm_freq_hz = devInfo->vbt->lvds_pwm_freq_hz;
+				}
+				uint32_t core_clock_khz = devInfo->current_cdclk_freq_khz;
+				if (core_clock_khz == 0) core_clock_khz = IS_HASWELL(devInfo->device_id) ? 450000 : 400000;
+
+				uint32_t cycle_len = core_clock_khz * 1000 / pwm_freq_hz;
+				uint32_t duty_len = cycle_len; // Full brightness for "on"
+
+				intel_i915_write32(devInfo, blc_pwm_ctl1_reg, (cycle_len << 16) | duty_len);
+				uint32_t ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
+				ctl2_val |= pwm_enable_bit;
+				// TODO: Add polarity bit if needed: ctl2_val |= BLM_POLARITY_PNV (active high)
+				intel_i915_write32(devInfo, blc_pwm_ctl2_reg, ctl2_val);
+				TRACE("LVDS/eDP: Backlight ON via PWM. CTL1=0x%x (val 0x%x), CTL2=0x%x (val 0x%x).\n",
+					blc_pwm_ctl1_reg, intel_i915_read32(devInfo, blc_pwm_ctl1_reg),
+					blc_pwm_ctl2_reg, ctl2_val);
+			} else {
+				TRACE("LVDS/eDP: PWM registers not determined for backlight source %u.\n", bl_source);
+			}
+		}
+		// Path 3: eDP AUX control for brightness (if EDP_BLC_ENABLE in PP_CONTROL is for overall enable)
+		if (port->type == PRIV_OUTPUT_EDP && bl_source == VBT_BACKLIGHT_EDP_AUX) {
+			uint8_t dpcd_brightness_msb = 0xFF; // Max brightness
+			uint8_t dpcd_brightness_lsb = 0xFF;
+			intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_BACKLIGHT_BRIGHTNESS_MSB, &dpcd_brightness_msb, 1);
+			intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_BACKLIGHT_BRIGHTNESS_LSB, &dpcd_brightness_lsb, 1);
+
+			// Ensure backlight is enabled in DPCD display control if not already via PP_CONTROL's EDP_BLC_ENABLE
+			// This depends on panel/Gen. Some panels only use EDP_BLC_ENABLE, others need DPCD too.
+			// uint8_t dpcd_display_ctl;
+			// intel_dp_aux_read_dpcd(devInfo, port, DPCD_EDP_DISPLAY_CONTROL_REGISTER, &dpcd_display_ctl, 1);
+			// dpcd_display_ctl |= EDP_DISPLAY_CTL_REG_ENABLE_BACKLIGHT;
+			// intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_DISPLAY_CONTROL_REGISTER, &dpcd_display_ctl, 1);
+			TRACE("LVDS/eDP: eDP backlight ON via AUX DPCD (brightness set to max).\n");
+		}
+
+	} else { // Turning OFF
+		// Path 1: eDP specific PP_CONTROL bit
+		if (port->type == PRIV_OUTPUT_EDP && (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id))) {
+			pp_control_val = intel_i915_read32(devInfo, pp_control_reg);
+			pp_control_val &= ~EDP_BLC_ENABLE;
+			intel_i915_write32(devInfo, pp_control_reg, pp_control_val);
+			TRACE("LVDS/eDP: eDP backlight disabled via PP_CONTROL.EDP_BLC_ENABLE.\n");
+		}
+
+		// Path 2: PWM control
+		if (bl_source == VBT_BACKLIGHT_CPU_PWM || bl_source == VBT_BACKLIGHT_PCH_PWM ||
+			(port->type == PRIV_OUTPUT_EDP && bl_source != VBT_BACKLIGHT_EDP_AUX && !(IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id)))) {
+			uint32_t blc_pwm_ctl2_reg = 0;
+			uint32_t pwm_enable_bit = 0;
+
+			if (bl_source == VBT_BACKLIGHT_CPU_PWM) {
+				blc_pwm_ctl2_reg = BLC_PWM_CPU_CTL2; pwm_enable_bit = BLM_PWM_ENABLE_CPU_IVB;
+			} else { // VBT_BACKLIGHT_PCH_PWM
+				blc_pwm_ctl2_reg = PCH_BLC_PWM_CTL2; pwm_enable_bit = BLM_PWM_ENABLE_PCH_HSW;
+			}
+
+			if (blc_pwm_ctl2_reg != 0) {
+				uint32_t ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
+				ctl2_val &= ~pwm_enable_bit;
+				intel_i915_write32(devInfo, blc_pwm_ctl2_reg, ctl2_val);
+				// Optionally set duty cycle to 0 in BLC_PWM_CTL1
+				// intel_i915_write32(devInfo, (blc_pwm_ctl2_reg == BLC_PWM_CPU_CTL2 ? BLC_PWM_CPU_CTL : PCH_BLC_PWM_CTL1), 0);
+				TRACE("LVDS/eDP: Backlight OFF via PWM CTL2=0x%x.\n", blc_pwm_ctl2_reg);
+			}
+		}
+		// Path 3: eDP AUX control for brightness/enable
+		if (port->type == PRIV_OUTPUT_EDP && bl_source == VBT_BACKLIGHT_EDP_AUX) {
+			// uint8_t dpcd_display_ctl;
+			// intel_dp_aux_read_dpcd(devInfo, port, DPCD_EDP_DISPLAY_CONTROL_REGISTER, &dpcd_display_ctl, 1);
+			// dpcd_display_ctl &= ~EDP_DISPLAY_CTL_REG_ENABLE_BACKLIGHT;
+			// intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_DISPLAY_CONTROL_REGISTER, &dpcd_display_ctl, 1);
+			// Optionally set brightness to 0 via AUX as well.
+			uint8_t dpcd_brightness_val = 0x00;
+			intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_BACKLIGHT_BRIGHTNESS_MSB, &dpcd_brightness_val, 1);
+			intel_dp_aux_write_dpcd(devInfo, port, DPCD_EDP_BACKLIGHT_BRIGHTNESS_LSB, &dpcd_brightness_val, 1);
+			TRACE("LVDS/eDP: eDP backlight OFF via AUX DPCD (brightness set to 0).\n");
+		}
 	}
 
-	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	return B_OK; // Placeholder
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return B_OK;
 }

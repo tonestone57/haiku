@@ -442,39 +442,82 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	// This step might be part of intel_i915_port_enable or a separate _port_configure.
 	// For now, intel_i915_port_enable will do basic DDI_BUF_CTL setup without full enable.
 
-	// 5. Panel Power On (for LVDS/eDP, before pipe/port fully on)
+	// 5. Panel Power On (for LVDS/eDP) - VDD and panel circuits, not backlight yet.
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
 		status = intel_lvds_panel_power_on(devInfo, port_state);
-		if (status != B_OK) goto modeset_fail_dpll;
+		if (status != B_OK) {
+			TRACE("Modeset: panel_power_on failed.\n");
+			goto modeset_fail_dpll; // DPLL is enabled, try to disable it
+		}
 	}
 
-	// 6. Enable Pipe/Transcoder
+	// 6. Program FDI (if needed by port_state->is_pch_port and Gen6/7)
+	if (clock_params.needs_fdi) {
+		status = intel_i915_program_fdi(devInfo, targetPipe, &clock_params);
+		if (status != B_OK) {
+			TRACE("Modeset: program_fdi failed.\n");
+			if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
+				intel_lvds_panel_power_off(devInfo, port_state);
+			goto modeset_fail_dpll;
+		}
+	}
+
+	// 7. Enable Pipe/Transcoder
 	status = intel_i915_pipe_enable(devInfo, targetPipe, mode, &clock_params);
 	if (status != B_OK) {
-		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
-			intel_lvds_panel_power_off(devInfo, port_state); // Attempt to power off panel
-		goto modeset_fail_dpll;
-	}
-
-	// 7. Enable Plane(s)
-	status = intel_i915_plane_enable(devInfo, targetPipe, true);
-	if (status != B_OK) {
-		intel_i915_pipe_disable(devInfo, targetPipe);
+		TRACE("Modeset: pipe_enable failed.\n");
 		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
 			intel_lvds_panel_power_off(devInfo, port_state);
 		goto modeset_fail_dpll;
 	}
 
-	// 8. Enable Port (PHY, Link Training for DP)
+	// 8. Enable FDI Link (if needed) - This includes training.
+	if (clock_params.needs_fdi) {
+		status = intel_i915_enable_fdi(devInfo, targetPipe, true);
+		if (status != B_OK) {
+			TRACE("Modeset: enable_fdi failed.\n");
+			intel_i915_pipe_disable(devInfo, targetPipe);
+			if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
+				intel_lvds_panel_power_off(devInfo, port_state);
+			goto modeset_fail_dpll;
+		}
+	}
+
+	// 9. Enable Port (LVDS registers; DDI port enable for eDP includes link training)
 	status = intel_i915_port_enable(devInfo, targetPortId, targetPipe, mode);
 	if (status != B_OK) {
-		intel_i915_plane_enable(devInfo, targetPipe, false);
+		TRACE("Modeset: port_enable failed.\n");
+		if (clock_params.needs_fdi) intel_i915_enable_fdi(devInfo, targetPipe, false);
 		intel_i915_pipe_disable(devInfo, targetPipe);
 		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
 			intel_lvds_panel_power_off(devInfo, port_state);
 		goto modeset_fail_dpll;
 	}
-	// For LVDS/eDP, backlight might be enabled here or as part of panel_power_on.
+
+	// 10. Enable Plane(s)
+	status = intel_i915_plane_enable(devInfo, targetPipe, true);
+	if (status != B_OK) {
+		TRACE("Modeset: plane_enable failed.\n");
+		intel_i915_port_disable(devInfo, targetPortId); // Call the dispatcher
+		if (clock_params.needs_fdi) intel_i915_enable_fdi(devInfo, targetPipe, false);
+		intel_i915_pipe_disable(devInfo, targetPipe);
+		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
+			intel_lvds_panel_power_off(devInfo, port_state);
+		goto modeset_fail_dpll;
+	}
+
+	// 11. Enable Backlight (for LVDS/eDP, after T2 delay)
+	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+		uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
+			devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
+		TRACE("Modeset: Waiting T2 delay (%u ms) before backlight on.\n", t2_delay_ms);
+		snooze(t2_delay_ms * 1000);
+		status = intel_lvds_set_backlight(devInfo, port_state, true);
+		if (status != B_OK) {
+			TRACE("Modeset: set_backlight(ON) failed. Proceeding without backlight.\n");
+			// Not necessarily a fatal error for the mode itself, but display will be dark.
+		}
+	}
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
 
@@ -1210,16 +1253,41 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 		case B_DPMS_ON:
 			if (!devInfo->pipes[pipe].enabled && port != NULL) {
 				TRACE("DPMS: Turning ON pipe %d, port %d\n", pipe, port_id);
-				// Full power on: PLL, Pipe, Plane, Port (panel, backlight, link)
-				intel_i915_program_dpll_for_pipe(devInfo, pipe, &current_clocks); // Reprogram DPLL
+				// 1. Program Clocks (CDCLK is assumed to be set globally or by first modeset)
+				intel_i915_program_dpll_for_pipe(devInfo, pipe, &current_clocks);
 				intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, &current_clocks);
-				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, &current_clocks);
-				intel_i915_plane_enable(devInfo, pipe, true);
-				// Port enable should handle panel power, backlight, DP link training etc.
+
+				// 2. Panel Power On (LVDS/eDP VDD, eDP DPCD D0)
 				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
-					intel_lvds_panel_power_on(devInfo, port); // Ensure panel VDD is on before port enable
+					intel_lvds_panel_power_on(devInfo, port);
 				}
+
+				// 3. Program FDI (if needed)
+				if (current_clocks.needs_fdi) {
+					intel_i915_program_fdi(devInfo, pipe, &current_clocks);
+				}
+
+				// 4. Enable Pipe
+				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, &current_clocks);
+
+				// 5. Enable FDI (if needed)
+				if (current_clocks.needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, true);
+				}
+
+				// 6. Enable Port (LVDS port regs, DDI link training for eDP)
 				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode);
+
+				// 7. Enable Plane
+				intel_i915_plane_enable(devInfo, pipe, true);
+
+				// 8. Enable Backlight (LVDS/eDP)
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
+						devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
+					snooze(t2_delay_ms * 1000);
+					intel_lvds_set_backlight(devInfo, port, true);
+				}
 			} else {
 				TRACE("DPMS: Pipe %d already ON or no port to enable.\n", pipe);
 			}
@@ -1229,25 +1297,36 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 		case B_DPMS_SUSPEND:
 			if (devInfo->pipes[pipe].enabled && port != NULL) {
 				TRACE("DPMS: Setting pipe %d, port %d to SUSPEND/STANDBY\n", pipe, port_id);
-				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
-					// For eDP, also handle backlight before potential D3.
-					if (port->type == PRIV_OUTPUT_EDP) {
-						intel_lvds_set_backlight(devInfo, port, false); // Turn off eDP backlight
-						snooze(devInfo->vbt ? devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS); // T3: BL off to Panel off
-					}
-					uint8_t dpcd_val = DPCD_POWER_D3; // D3 is standby/suspend for DP
-					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
-					TRACE("DPMS: DP/eDP port %d set to DPCD D3 power state.\n", port_id);
-				} else if (port->type == PRIV_OUTPUT_LVDS) { // LVDS only (eDP handled above)
-					intel_lvds_set_backlight(devInfo, port, false); // Turn off LVDS backlight
-					snooze(devInfo->vbt ? devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS);
-					// Optionally, could disable panel signals via PP_CONTROL for deeper suspend.
-					// For now, pipe disable will cut signals.
-					TRACE("DPMS: LVDS port %d suspend - backlight off.\n", port_id);
+				// For Suspend/Standby:
+				// 1. Turn off backlight (if LVDS/eDP)
+				// 2. Disable plane
+				// 3. Disable pipe (this cuts signals)
+				// 4. For DP/eDP, set DPCD D3 power state.
+				// 5. Keep Port enabled at a low level (e.g. DDI buffer might stay on for some ports)
+				// 6. Keep DPLL enabled for faster resume.
+				// 7. Panel VDD remains ON.
+
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000);
 				}
-				intel_i915_plane_enable(devInfo, pipe, false); // Turn off plane before pipe
+
+				intel_i915_plane_enable(devInfo, pipe, false);
+				// Not disabling port fully here for suspend, but pipe disable cuts signals.
+				// intel_i915_port_disable(devInfo, port_id);
+				if (current_clocks.needs_fdi) { // Disable FDI data path before pipe
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
 				intel_i915_pipe_disable(devInfo, pipe);
-				// Keep DPLL enabled for faster resume from suspend.
+
+				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					uint8_t dpcd_val = DPCD_POWER_D3; // D3 (Standby)
+					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+					TRACE("DPMS: DP/eDP port %d set to DPCD D3 power state for suspend.\n", port_id);
+				}
+				// Panel VDD remains ON, DPLL remains ON.
 			} else {
 				TRACE("DPMS: Pipe %d already OFF or no port for SUSPEND.\n", pipe);
 			}
@@ -1256,25 +1335,48 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 		case B_DPMS_OFF:
 			if (devInfo->pipes[pipe].enabled && port != NULL) {
 				TRACE("DPMS: Turning OFF pipe %d, port %d\n", pipe, port_id);
-				// Full power off: Port (panel, backlight, link), Plane, Pipe, PLL
-				intel_i915_port_disable(devInfo, port_id); // Handles panel VDD off, DPCD D3 etc.
+				// Full power off sequence:
+				// 1. Backlight off
+				// 2. (T3 delay)
+				// 3. Plane off
+				// 4. Port disable (LVDS regs off, DDI link down/PHY off)
+				// 5. FDI disable
+				// 6. Pipe off
+				// 7. Panel power off (eDP DPCD D3_AUX_OFF, VDD off, T4, T5 delays)
+				// 8. DPLL off
+
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000);
+				}
+
 				intel_i915_plane_enable(devInfo, pipe, false);
+				intel_i915_port_disable(devInfo, port_id); // LVDS regs off, DDI link/PHY off
+
+				if (devInfo->pipes[pipe].cached_clock_params.needs_fdi) { // Use cached params for FDI info
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
 				intel_i915_pipe_disable(devInfo, pipe);
-				// Get current clocks for disabling DPLL, even if it's just for selected_dpll_id
-				// This might be problematic if clocks weren't calculated for ON state first.
-				// For OFF, we mainly need to know which DPLL was used by this pipe.
-				// Use the cached clock_params for this pipe.
+
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_off(devInfo, port); // Handles eDP DPCD D3_AUX_OFF, VDD off, T4, T5
+				}
+				// Disable the DPLL associated with this pipe using its cached clock_params
 				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
-			} else if (devInfo->pipes[pipe].enabled) { // Pipe on but no port, just disable pipe
+
+			} else if (devInfo->pipes[pipe].enabled) { // Pipe on but no port, just disable pipe and its DPLL
 				TRACE("DPMS: Turning OFF pipe %d (no port assigned).\n", pipe);
 				intel_i915_plane_enable(devInfo, pipe, false);
+				if (devInfo->pipes[pipe].cached_clock_params.needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
 				intel_i915_pipe_disable(devInfo, pipe);
 				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
-			} else {
-				// Pipe already off, ensure DPLL is also off if it was associated with this pipe
-				// This requires knowing which DPLL was last used by this pipe.
-				// If cached_clock_params.selected_dpll_id is valid, we can use it.
-				if (devInfo->pipes[pipe].cached_clock_params.selected_dpll_id != -1) { // Assuming -1 is invalid
+			} else { // Pipe already off
+				// Ensure DPLL is also off if it was associated with this pipe
+				if (devInfo->pipes[pipe].cached_clock_params.selected_dpll_id != -1) {
 					TRACE("DPMS: Pipe %d already OFF, ensuring its DPLL is also OFF.\n", pipe);
 					intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, &devInfo->pipes[pipe].cached_clock_params);
 				}

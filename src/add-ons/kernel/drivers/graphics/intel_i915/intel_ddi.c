@@ -200,11 +200,15 @@ intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* po
 			uint8_t max_lane_count_raw;
 			if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_MAX_LANE_COUNT, &max_lane_count_raw, 1) == B_OK) {
 				port->dp_max_lane_count = max_lane_count_raw & DPCD_MAX_LANE_COUNT_MASK;
+				port->dp_tps3_supported = (max_lane_count_raw & DPCD_TPS3_SUPPORTED) != 0;
 				port->dp_enhanced_framing_capable = (max_lane_count_raw & DPCD_ENHANCED_FRAME_CAP) != 0;
-				TRACE("  DPCD: Max Lane Count: %d, Enhanced Frame Cap: %s\n",
-					port->dp_max_lane_count, port->dp_enhanced_framing_capable ? "Yes" : "No");
+				TRACE("  DPCD: Max Lane Count: %d, TPS3 Supported: %s, Enhanced Frame Cap: %s\n",
+					port->dp_max_lane_count,
+					port->dp_tps3_supported ? "Yes" : "No",
+					port->dp_enhanced_framing_capable ? "Yes" : "No");
 			} else {
 				port->dp_max_lane_count = 0; // Indicate failure to read
+				port->dp_tps3_supported = false;
 				port->dp_enhanced_framing_capable = false;
 			}
 
@@ -399,22 +403,15 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 
 	// Read TRAINING_AUX_RD_INTERVAL from DPCD 0x00E
 	if (intel_dp_aux_read_dpcd(devInfo, port, DPCD_TRAINING_AUX_RD_INTERVAL, dpcd_buf, 1) == B_OK) {
-		if ((dpcd_buf[0] & 0x7F) != 0) { // Bits 6:0 are interval in ms, bit 7 is unit (0=1ms, 1=100us)
-			// This interpretation of DPCD 0x00E needs PRM confirmation.
-			// DP Spec: DPCD 0000Eh: TRAINING_AUX_RD_INTERVAL.
-			// Value 00h: default (400 μs). Other values: (value * 4) ms.
-			// Let's assume if non-zero, it's value * 4 ms, else 400us.
-			// A common interpretation is bits 3:0 are interval in 1ms units (0-15ms),
-			// or if bit 7 is set, it's in 100us units.
-			// For simplicity, if DPCD[0x0E] is non-zero, use its value * 1000us as a rough guide, up to a max.
-			// This is a placeholder, real parsing of 0x00E is needed.
-			// The Linux driver uses: if (val == 0) interval = 400; else interval = val * 4000;
-			// Let's use a simplified: if val > 0, use val * 1ms, else 400us. Max 16ms.
-			uint8_t interval_val = dpcd_buf[0] & 0x0F; // Assume lower nibble is interval in ms
-			if (interval_val > 0 && interval_val <= 16) {
-				training_aux_rd_interval_us = interval_val * 1000;
-			}
+		// DP 1.2 Spec: Bits 3:0 define the interval. Value 0 means 400µs.
+		// Non-zero value 'N' means N milliseconds. Max value is 0Fh (15ms).
+		uint8_t interval_field_val = dpcd_buf[0] & 0x0F;
+		if (interval_field_val == 0) {
+			training_aux_rd_interval_us = 400;
+		} else {
+			training_aux_rd_interval_us = (uint32_t)interval_field_val * 1000; // Value in ms, convert to us
 		}
+		// Bit 7 (0x80) is DPTX_FEATURE_ENUMERATION_DONE, not related to unit.
 	}
 	TRACE("  DP Link Training: Using AUX RD Interval: %lu us\n", training_aux_rd_interval_us);
 
@@ -601,24 +598,28 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 	uint32_t dp_tp_ctl_pattern_bit = DP_TP_CTL_LINK_TRAIN_PAT2_HSW;
 
 	if (clocks && clocks->dp_link_rate_khz >= 540000) { // HBR2 rate (5.4 Gbps)
-		// For HBR2, TPS3 is often preferred or required by some sinks.
-		// TODO: Check sink DPCD capabilities for TPS3 support (DPCD 0x2201h for DP 1.2 TPS3 support)
-		// For now, unconditionally try TPS3 if link rate is HBR2.
-		TRACE("  DP Link Training: HBR2 link rate, selecting TPS3 for EQ.\n");
-		training_pattern_to_set = DPCD_TRAINING_PATTERN_3;
-		dp_tp_ctl_pattern_bit = DP_TP_CTL_LINK_TRAIN_PAT3_HSW;
+		if (port->dp_tps3_supported) { // Check if sink supports TPS3
+			TRACE("  DP Link Training: HBR2 link rate and sink supports TPS3, selecting TPS3 for EQ.\n");
+			training_pattern_to_set = DPCD_TRAINING_PATTERN_3;
+			dp_tp_ctl_pattern_bit = DP_TP_CTL_LINK_TRAIN_PAT3_HSW;
+		} else {
+			TRACE("  DP Link Training: HBR2 link rate, but sink does not support TPS3. Using TPS2 for EQ.\n");
+		}
 	}
 
 	dpcd_buf[0] = training_pattern_to_set;
-	// Ensure scrambling is enabled (clear SCRAMBLING_DISABLED bit if it was set for TPS1)
-	// dpcd_buf[0] &= ~DPCD_TRAINING_PATTERN_SCRAMBLING_DISABLED; // This is implicit if not set
+	// Scrambling should be enabled for TPS2/TPS3. DPCD_TRAINING_PATTERN_SET bit 5 = SCRAMBLING_DISABLE.
+	// Ensure it's 0 for TPS2/3. It should have been set to 1 (disabled) for TPS1.
+	// The values for DPCD_TRAINING_PATTERN_2 (0x02) and _3 (0x03) already have bit 5 as 0.
 	intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_PATTERN_SET, dpcd_buf, 1);
-	TRACE("  DPCD: Set Training Pattern to 0x%02x (scrambling implicitly enabled).\n", training_pattern_to_set);
+	TRACE("  DPCD: Set Training Pattern to 0x%02x.\n", training_pattern_to_set);
 
 	// Update DP_TP_CTL to output selected pattern
 	dp_tp_val = intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index));
-	dp_tp_val &= ~(DP_TP_CTL_LINK_TRAIN_PAT1 | DP_TP_CTL_LINK_TRAIN_PAT2_HSW | DP_TP_CTL_LINK_TRAIN_PAT3_HSW);
+	dp_tp_val &= ~(DP_TP_CTL_LINK_TRAIN_PAT1 | DP_TP_CTL_LINK_TRAIN_PAT2_HSW | DP_TP_CTL_LINK_TRAIN_PAT3_HSW | DP_TP_CTL_SCRAMBLE_DISABLE_HSW);
 	dp_tp_val |= dp_tp_ctl_pattern_bit;
+	// Scramble normally enabled for TPS2/3. If DP_TP_CTL_SCRAMBLE_DISABLE_HSW needs to be cleared, do it.
+	// Assuming that not setting DP_TP_CTL_SCRAMBLE_DISABLE_HSW means scrambling is enabled.
 	intel_i915_write32(devInfo, DP_TP_CTL(port->hw_port_index), dp_tp_val);
 	(void)intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index)); // Posting read
 	TRACE("  DP_TP_CTL(hw_idx %d) set to 0x%08" B_PRIx32 " for EQ training (pattern value 0x%x)\n",

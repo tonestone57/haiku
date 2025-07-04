@@ -77,8 +77,9 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	// DPCD-derived properties (for DP/eDP ports)
 	uint8_t  dpcd_revision;
 	uint8_t  dp_max_link_rate; // Value from DPCD_MAX_LINK_RATE (e.g., 0x06, 0x0A, 0x14)
-	uint8_t  dp_max_lane_count; // Max lanes from DPCD_MAX_LANE_COUNT
-	bool     dp_enhanced_framing_capable;
+	uint8_t  dp_max_lane_count; // Max lanes from DPCD_MAX_LANE_COUNT (lower 5 bits)
+	bool     dp_tps3_supported; // From DPCD_MAX_LANE_COUNT bit 6
+	bool     dp_enhanced_framing_capable; // From DPCD_MAX_LANE_COUNT bit 7
 	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
 	enum pipe_id_priv current_pipe_assignment; // Which pipe is this port currently configured for
 } intel_output_port_state;

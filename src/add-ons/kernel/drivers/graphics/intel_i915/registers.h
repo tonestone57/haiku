@@ -291,9 +291,13 @@
 #define DPCD_DPCD_REV                       0x000 // DPCD Revision
 #define DPCD_MAX_LINK_RATE                  0x001 // Max Link Rate
 #define DPCD_MAX_LANE_COUNT                 0x002 // Max Lane Count & other flags
-	#define DPCD_MAX_LANE_COUNT_MASK        0x1F
-	#define DPCD_ENHANCED_FRAME_CAP         (1U << 7)
+	#define DPCD_MAX_LANE_COUNT_MASK        0x1F // Bits 4:0
+	#define DPCD_TPS3_SUPPORTED             (1U << 6) // Training Pattern 3 Supported (DP 1.2)
+	#define DPCD_ENHANCED_FRAME_CAP         (1U << 7) // Enhanced Framing Supported
 #define DPCD_TRAINING_AUX_RD_INTERVAL       0x00E // Training AUX Read Interval
+	#define DPCD_TRAINING_AUX_RD_INTERVAL_MASK 0x7F // Bits 6:0 are value
+	#define DPCD_TRAINING_AUX_RD_UNIT_100US    (1U << 7) // If set, unit is 100us, else 1ms. (DP spec clarification needed for this bit)
+	                                                   // More common: Value 0 is 400us, else value * 4ms.
 
 #define DPCD_LINK_BW_SET                    0x100 // Link Bandwidth Set
 	#define DPCD_LINK_BW_1_62               0x06 // 1.62 Gbps

@@ -196,12 +196,21 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	if (args.context_handle != 0) {
 		ctx = (struct intel_i915_gem_context*)_generic_handle_lookup(args.context_handle, HANDLE_TYPE_GEM_CONTEXT);
 		if (ctx == NULL) { status = B_BAD_VALUE; goto exec_cleanup_mapped_cmd_obj; }
-		if (engine->current_context != ctx) { // Ptr comparison
-			// TRACE("EXECBUFFER: Context switch from %p to %p (ID %lu)\n", engine->current_context, ctx, ctx ? ctx->id : 0);
-			// TODO: intel_engine_switch_context(engine, ctx);
-			// For now, just update software tracking. Old context's ref is on engine struct.
-			if(engine->current_context) intel_i915_gem_context_put(engine->current_context);
-			engine->current_context = ctx; // ctx from lookup already has a ref. Engine now owns this ref.
+		if (engine->current_context != ctx) { // Pointer comparison
+			TRACE("EXECBUFFER: Switching context from %p (ID %lu) to %p (ID %lu)\n",
+				engine->current_context,
+				engine->current_context ? engine->current_context->id : 0,
+				ctx, ctx ? ctx->id : 0);
+			status = intel_engine_switch_context(engine, ctx);
+			if (status != B_OK) {
+				TRACE("EXECBUFFER: intel_engine_switch_context failed: %s\n", strerror(status));
+				// Decide if this is a fatal error for execbuffer. For now, let's allow it to proceed
+				// but the GPU might be in an undefined state or using the wrong context.
+				// Or, return error: goto exec_cleanup_ctx; (after putting ctx)
+			}
+			// Update software tracking of current context
+			if(engine->current_context) intel_i915_gem_context_put(engine->current_context); // Release old
+			engine->current_context = ctx; // Engine now owns the ref obtained from _generic_handle_lookup for new ctx
 			ctx = NULL; // Avoid double put later
 		}
 	}

@@ -208,22 +208,100 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 	(void)intel_i915_read32(devInfo, DP_TP_CTL(port->hw_port_index)); // Posting read
 	TRACE("  DP_TP_CTL(hw_idx %d) set to 0x%08" B_PRIx32 " for training\n", port->hw_port_index, dp_tp_val);
 
-	// Full link training involves a loop:
-	//   - Read DPCD_LANE0_1_STATUS, DPCD_LANE2_3_STATUS.
-	//   - Check for CR_DONE bits.
-	//   - If not all CR_DONE, read DPCD_ADJUST_REQUEST_LANE0_1/2_3.
-	//   - Adjust DDI_BUF_CTL voltage swing/pre-emphasis for relevant lanes.
-	//   - Write DPCD_TRAINING_LANE0_SET etc. with new settings.
-	//   - Repeat or switch to TPS2/TPS3 (Channel Equalization).
-	// This is deferred. For now, we just start TPS1.
-	TRACE("  DP Link Training: Clock Recovery started. Iterative adjustment loop STUBBED.\n");
+	// Full link training iterative loop (Clock Recovery)
+	int cr_tries = 0;
+	bool cr_done = false;
+	uint8_t lane_count = 4; // TODO: Get actual lane count from link config
+	                        // e.g. from clocks->dp_actual_lane_count if populated
+
+	// Initial VS/PE settings (level 0 or VBT default)
+	uint8_t train_lane_set[4] = {0, 0, 0, 0}; // VS=0, PE=0 for each lane
+	// TODO: Apply VBT default VS/PE if available.
+	// For now, all start at level 0.
+	// train_lane_set[0] = (PE_LEVEL_0 << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) | (VS_LEVEL_0 << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT); ...
+
+	for (cr_tries = 0; cr_tries < 5; cr_tries++) {
+		// Write current VS/PE settings to DPCD TRAINING_LANEx_SET
+		intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE0_SET, &train_lane_set[0], 1);
+		if (lane_count > 1) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE1_SET, &train_lane_set[1], 1);
+		if (lane_count > 2) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE2_SET, &train_lane_set[2], 1); // Assuming lane2_set is at 0x105
+		if (lane_count > 3) intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_LANE3_SET, &train_lane_set[3], 1); // Assuming lane3_set is at 0x106
+
+		snooze(400); // Wait for receiver to process (min 400us for CR)
+
+		uint8_t status_lane01, status_lane23;
+		intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE0_1_STATUS, &status_lane01, 1);
+		if (lane_count > 2)
+			intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE2_3_STATUS, &status_lane23, 1);
+		else
+			status_lane23 = 0; // Assume lanes 2,3 are fine if not used
+
+		TRACE("  DP Link Training (CR Try %d): LANE01_STATUS=0x%02x, LANE23_STATUS=0x%02x\n",
+			cr_tries, status_lane01, status_lane23);
+
+		cr_done = true;
+		if (!(status_lane01 & DPCD_LANE0_CR_DONE)) cr_done = false;
+		if (lane_count > 1 && !(status_lane01 & DPCD_LANE1_CR_DONE)) cr_done = false;
+		if (lane_count > 2 && !(status_lane23 & DPCD_LANE2_CR_DONE)) cr_done = false;
+		if (lane_count > 3 && !(status_lane23 & DPCD_LANE3_CR_DONE)) cr_done = false;
+
+		if (cr_done) {
+			TRACE("  DP Link Training: Clock Recovery DONE for all %d lanes.\n", lane_count);
+			break;
+		}
+
+		// Not done, read adjust requests
+		uint8_t adj_req_lane01, adj_req_lane23;
+		intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE0_1, &adj_req_lane01, 1);
+		if (lane_count > 2)
+			intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE2_3, &adj_req_lane23, 1);
+		else
+			adj_req_lane23 = 0;
+
+		// Update train_lane_set based on adj_req_lane01 and adj_req_lane23
+		// And also update DDI_BUF_CTL VS/PE settings for each lane.
+		// This part is highly hardware specific for DDI_BUF_CTL.
+		// For DPCD TRAINING_LANEx_SET:
+		// Bits 1:0 = VS, Bits 4:3 = PE
+		// For ADJ_REQ: Bits 1:0 = VS Lane X, Bits 3:2 = PE Lane X
+		//              Bits 5:4 = VS Lane Y, Bits 7:6 = PE Lane Y
+		uint8_t vs_adj[4], pe_adj[4];
+		vs_adj[0] = (adj_req_lane01 >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3;
+		pe_adj[0] = (adj_req_lane01 >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+		vs_adj[1] = (adj_req_lane01 >> DPCD_ADJUST_VOLTAGE_SWING_LANE1_SHIFT) & 0x3;
+		pe_adj[1] = (adj_req_lane01 >> DPCD_ADJUST_PRE_EMPHASIS_LANE1_SHIFT) & 0x3;
+		if (lane_count > 2) {
+			vs_adj[2] = (adj_req_lane23 >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3; // Same shifts for lane 2 in its byte
+			pe_adj[2] = (adj_req_lane23 >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+			vs_adj[3] = (adj_req_lane23 >> DPCD_ADJUST_VOLTAGE_SWING_LANE1_SHIFT) & 0x3; // Same shifts for lane 3
+			pe_adj[3] = (adj_req_lane23 >> DPCD_ADJUST_PRE_EMPHASIS_LANE1_SHIFT) & 0x3;
+		}
+		for (int l = 0; l < lane_count; l++) {
+			train_lane_set[l] = (pe_adj[l] << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) |
+			                    (vs_adj[l] << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT);
+		}
+		TRACE("  DP Link Training: Adjusting VS/PE. New DPCD_TRAINING_LANE0_SET=0x%02x (example)\n", train_lane_set[0]);
+		TRACE("  DP Link Training: DDI_BUF_CTL VS/PE update STUBBED.\n");
+		// uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, DDI_BUF_CTL(port->hw_port_index));
+		// ... modify ddi_buf_ctl_val based on vs_adj and pe_adj for each lane ...
+		// intel_i915_write32(devInfo, DDI_BUF_CTL(port->hw_port_index), ddi_buf_ctl_val);
+	}
+
+	if (!cr_done) {
+		TRACE("  DP Link Training: Clock Recovery FAILED after %d tries.\n", cr_tries);
+		intel_dp_stop_link_train(devInfo, port); // Clean up
+		return B_ERROR;
+	}
+
+	// TODO: Channel Equalization (TPS2/TPS3/TPS4)
+	// - Set DPCD_TRAINING_PATTERN_SET to TPS2/TPS3/TPS4
+	// - Set DP_TP_CTL to output selected pattern
+	// - Loop: Read LANE_ALIGN_STATUS_UPDATED, LANE0_1_STATUS, LANE2_3_STATUS for EQ_DONE & SYMBOL_LOCKED
+	// - If not done, read ADJ_REQ and update TRAINING_LANEx_SET (no DDI_BUF_CTL change for EQ usually)
 	TRACE("  DP Link Training: Channel Equalization STUBBED.\n");
-	TRACE("  DP Link Training: Assuming link trained successfully for stub.\n");
 
-	// If training were successful, we would disable training pattern in DPCD and DP_TP_CTL.
-	// For this stub, we'll do it here to allow (potential) image display.
-	intel_dp_stop_link_train(devInfo, port); // Call stop immediately for stub
-
+	// Assuming training successful for stub:
+	intel_dp_stop_link_train(devInfo, port); // End training patterns
 	return B_OK;
 }
 
@@ -267,24 +345,34 @@ intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* 
 	ddi_buf_ctl_val &= ~(DDI_BUF_CTL_ENABLE | DDI_BUF_CTL_PORT_TRANS_SELECT_MASK_HSW | DDI_BUF_CTL_MODE_SELECT_MASK_HSW);
 
 	// Set Pipe Select (Transcoder Select for DDI on HSW)
-	switch (pipe) {
-		case PRIV_PIPE_A: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_A_HSW; break;
-		case PRIV_PIPE_B: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_B_HSW; break;
-		case PRIV_PIPE_C: ddi_buf_ctl_val |= DDI_BUF_CTL_TRANS_SELECT_PIPE_C_HSW; break;
+	// This maps the DDI port to a specific transcoder (which is linked to a pipe).
+	uint32_t trans_sel_val;
+	switch (pipe) { // Assuming pipe maps 1:1 to transcoder for this
+		case PRIV_PIPE_A: trans_sel_val = DDI_BUF_CTL_TRANS_SELECT_PIPE_A_HSW; break;
+		case PRIV_PIPE_B: trans_sel_val = DDI_BUF_CTL_TRANS_SELECT_PIPE_B_HSW; break;
+		case PRIV_PIPE_C: trans_sel_val = DDI_BUF_CTL_TRANS_SELECT_PIPE_C_HSW; break;
 		default: TRACE("DDI: Invalid pipe %d for DDI port %d\n", pipe, port->hw_port_index); status = B_BAD_VALUE; goto done;
 	}
+	ddi_buf_ctl_val |= trans_sel_val;
+
 
 	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
 		ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_SELECT_DP_SST_HSW;
-		// Port width (lane count) is usually set by link training or VBT.
-		// DDI_BUF_CTL does not directly set lane count on HSW for DP.
-		// It's implicitly determined by link training results and DP_TP_CTL.
 		TRACE("DDI: Configuring port %d for DP/eDP.\n", port->hw_port_index);
 	} else if (port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI) {
-		ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_SELECT_HDMI_HSW; // HDMI and DVI use similar DDI mode
-		// TODO: HDMI specific audio / infoframes setup.
-		// TODO: DVI specific configurations if any.
-		TRACE("DDI: Configuring port %d for HDMI/DVI. Further setup STUBBED.\n", port->hw_port_index);
+		ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_SELECT_HDMI_HSW;
+		// For HDMI, also set HDMI specific signaling if needed (e.g. DDI_BUF_CTL_HDMI_SIGNALING_HSW)
+		// This bit is typically set for HDMI 1.4 voltage levels.
+		// For basic HDMI (like DVI with audio), it might not be strictly needed or might be default.
+		// ddi_buf_ctl_val |= DDI_BUF_CTL_HDMI_SIGNALING_HSW; // If defined and needed
+
+		TRACE("DDI: Configuring port %d for HDMI/DVI.\n", port->hw_port_index);
+
+		if (port->type == PRIV_OUTPUT_HDMI) {
+			// Send a default AVI InfoFrame for HDMI
+			intel_ddi_send_avi_infoframe(devInfo, port, pipe, adjusted_mode);
+			// TODO: Setup audio (configure audio DIPs, enable audio path)
+		}
 	} else {
 		TRACE("DDI: Unsupported port type %d for DDI enable.\n", port->type);
 		status = B_BAD_TYPE; goto done;

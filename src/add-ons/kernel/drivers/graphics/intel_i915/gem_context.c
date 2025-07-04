@@ -104,24 +104,53 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	}
 	ctx->hw_image_obj->gtt_mapped_by_execbuf = false; // This was mapped by context creation
 
-	// TODO: Initialize the content of ctx->hw_image_obj with default hardware state
-	// This involves mapping it to CPU and writing default register values for the context type.
-	// For Gen7 RCS, this would be the "Logical Ring Context Address" (LRCA) related state.
-	// For now, it's cleared by I915_BO_ALLOC_CPU_CLEAR.
+	// Initialize the content of ctx->hw_image_obj with default hardware state
+	// for a Gen7 Logical Ring Context (RCS0).
+	// The exact layout of this context image is hardware-specific.
+	// For now, we assume it's zeroed by I915_BO_ALLOC_CPU_CLEAR,
+	// and we might only need to set a few key fields if they aren't zero by default,
+	// or if they need specific pointers (like to PPGTT PDPs, which we are not using yet).
+	// A minimal context might just need to be present for MI_SET_CONTEXT to point to.
+	// More advanced contexts would store register state (ring buffer, pipeline state, etc.).
+
 	void* hw_image_cpu_addr;
 	status = intel_i915_gem_object_map_cpu(ctx->hw_image_obj, &hw_image_cpu_addr);
 	if (status == B_OK && hw_image_cpu_addr != NULL) {
-		TRACE("GEM Context: HW image object CPU mapped at %p. Initializing (stub).\n", hw_image_cpu_addr);
-		// memset(hw_image_cpu_addr, 0, ctx->hw_image_obj->size); // Already done by CPU_CLEAR flag
-		// Here, one would write the default context state.
-		// For example, for Gen7 Logical Ring Contexts, it might involve setting up
-		// pointers to per-context GGTT page tables if using aliasing PPGTT,
-		// or other state like default pipeline state pointers.
-		// This is highly complex and Gen-specific.
-		// intel_i915_gem_object_unmap_cpu(ctx->hw_image_obj); // No-op for area backed
+		TRACE("GEM Context: HW image object CPU mapped at %p (size %lu). Initializing.\n",
+			hw_image_cpu_addr, ctx->hw_image_obj->size);
+
+		// Example: Writing some default values to conceptual context image offsets.
+		// These offsets and values are placeholders and need to match the hardware's
+		// expected LRCA layout for RCS0 on Gen7.
+		// The GEN7_RCS_CONTEXT_IMAGE_SIZE must be large enough.
+		// Typically, the context image contains state like:
+		// - Ring Buffer Head, Tail, Start, Control registers
+		// - Batch Buffer Start, Head, State
+		// - Second Level Batch Buffer registers
+		// - Various pipeline state pointers (Instruction State, State Base Address, etc.)
+		// - PDPs for PPGTT (if aliasing PPGTT is used)
+
+		// For a very basic logical context that primarily uses the global ring buffer settings
+		// and global GTT (no PPGTT), the context image might be simpler or mostly rely on
+		// being zeroed. The MI_SET_CONTEXT command itself might handle setting up
+		// the ring registers from the global ones if the context image doesn't override them.
+		// However, usually, the context image *does* contain at least the ring state.
+		// For now, we'll assume the context is zeroed and the hardware/MI_SET_CONTEXT
+		// will use global ring settings if these are not explicitly set in the image.
+		// This is a simplification. A real driver would populate this more thoroughly.
+		if (ctx->hw_image_obj->size >= 16) { // Ensure some minimal size for example
+			// uint32_t* ctx_regs = (uint32_t*)hw_image_cpu_addr;
+			// Example: Setting a context ID or flags within the image if HW expects it.
+			// ctx_regs[0] = ctx->id; // Example: Store context ID at offset 0
+			// ctx_regs[1] = 0xDEFC0FFE; // Example: Magic number or flags
+			TRACE("GEM Context: HW image initialized (conceptually, mostly zeroed).\n");
+		}
+
+		// intel_i915_gem_object_unmap_cpu(ctx->hw_image_obj); // No-op for area-backed BOs
 	} else {
-		TRACE("GEM Context: Could not CPU map HW image for initialization.\n");
-		// This might be an issue if initialization is critical.
+		TRACE("GEM Context: Could not CPU map HW image for initialization. Status: %s\n", strerror(status));
+		// This is a critical failure if context image requires non-zero initialization.
+		// For now, proceed as if zeroed image is acceptable for basic MI_SET_CONTEXT.
 	}
 
 

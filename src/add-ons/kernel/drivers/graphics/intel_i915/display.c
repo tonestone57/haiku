@@ -282,7 +282,7 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
 
 	// 1. Calculate and Program Clocks (CDCLK, DPLL)
-	status = intel_i915_calculate_display_clocks(devInfo, mode, targetPipe, &clock_params);
+	status = intel_i915_calculate_display_clocks(devInfo, mode, targetPipe, targetPortId, &clock_params);
 	if (status != B_OK) goto modeset_fail_fw;
 	status = intel_i915_program_cdclk(devInfo, &clock_params);
 	if (status != B_OK) goto modeset_fail_fw;

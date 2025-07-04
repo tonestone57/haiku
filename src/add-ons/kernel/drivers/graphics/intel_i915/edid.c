@@ -249,6 +249,65 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 	}
 	// Other bits in byte 37 are reserved or for specific manufacturer use in older EDID versions.
 
+	// Parse Standard Timing Identifiers (bytes 38-53 / 0x26-0x35)
+	TRACE("EDID: Parsing Standard Timings (up to 8 descriptors):\n");
+	for (int i = 0; i < 8; i++) {
+		const uint8_t* std_timing = &edid->standard_timings[i*2];
+		if (std_timing[0] == 0x01 && std_timing[1] == 0x01) {
+			// Unused descriptor
+			continue;
+		}
+
+		uint16_t h_active = (std_timing[0] + 31) * 8;
+		uint8_t aspect_ratio_bits = (std_timing[1] & 0xC0) >> 6;
+		uint8_t v_refresh = (std_timing[1] & 0x3F) + 60;
+		uint16_t v_active = 0;
+
+		const char* aspect_str = "Unknown";
+		switch (aspect_ratio_bits) {
+			case 0x00: // 16:10 (EDID 1.3+), or 1:1 for some specific timings
+				if (edid->edid_version > 1 || (edid->edid_version == 1 && edid->edid_revision >= 3)) {
+					// EDID 1.3 interpretation:
+					// If HActive is 1360 (val 139), 1:1 means 1360x1360.
+					// Otherwise, typically 16:10.
+					// For simplicity here, assume 16:10.
+					v_active = h_active * 10 / 16;
+					aspect_str = "16:10";
+				} else { // EDID 1.0-1.2 interpretation
+					v_active = h_active * 10 / 16; // Was 1:1, but 16:10 is more common for this code.
+					aspect_str = "1:1 (interpreted as 16:10)";
+				}
+				break;
+			case 0x01: // 4:3
+				v_active = h_active * 3 / 4;
+				aspect_str = "4:3";
+				break;
+			case 0x02: // 5:4
+				v_active = h_active * 4 / 5;
+				aspect_str = "5:4";
+				break;
+			case 0x03: // 16:9
+				v_active = h_active * 9 / 16;
+				aspect_str = "16:9";
+				break;
+		}
+
+		TRACE("EDID: Standard Timing #%d: HActive=%u, Aspect=%s (VActive ~%u), VRefresh=%uHz\n",
+			i, h_active, aspect_str, v_active, v_refresh);
+		TRACE("       (Full timing calculation via GTF/CVT needed to make this a usable mode - NOT ADDED YET)\n");
+		// if (mode_count < max_modes && v_active > 0) {
+		//   display_mode* new_mode = &modes[mode_count];
+		//   memset(new_mode, 0, sizeof(display_mode));
+		//   new_mode->virtual_width = h_active;
+		//   new_mode->virtual_height = v_active;
+		//   new_mode->space = B_RGB32_LITTLE;
+		//   // TODO: Populate new_mode->timing using GTF or CVT formula based on h_active, v_active, v_refresh
+		//   // This is complex and not implemented here.
+		//   // For now, we don't increment mode_count for these.
+		// }
+	}
+
+
 	// TODO: Handle EDID extensions if edid->extension_flag > 0
 
 	if (mode_count == 0) {

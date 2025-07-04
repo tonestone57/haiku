@@ -31,9 +31,172 @@ static uint8_t vbt_ddc_pin_to_gmbus_pin(uint8_t v) { /* ... */ return GMBUS_PIN_
 static status_t intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	const display_mode* mode, enum pipe_id_priv targetPipe, enum intel_port_id_priv targetPortId);
 
+// Helper to check if a mode already exists in a list
+static bool mode_already_in_list(const display_mode* mode, const display_mode* list, int count) {
+	for (int i = 0; i < count; i++) {
+		// Simple comparison based on resolution and pixel clock for uniqueness
+		if (list[i].virtual_width == mode->virtual_width &&
+			list[i].virtual_height == mode->virtual_height &&
+			list[i].timing.pixel_clock == mode->timing.pixel_clock &&
+			list[i].timing.flags == mode->timing.flags) { // Also consider flags for interlace
+			return true;
+		}
+	}
+	return false;
+}
 
 status_t
-intel_i915_display_init(intel_i915_device_info* devInfo) { /* ... as before ... */ return B_OK; }
+intel_i915_display_init(intel_i915_device_info* devInfo)
+{
+	if (!devInfo || !devInfo->vbt || !devInfo->shared_info) {
+		TRACE("display_init: Invalid devInfo or subsystems not initialized.\n");
+		return B_BAD_VALUE;
+	}
+
+	TRACE("display_init: Probing ports for EDID and compiling mode list.\n");
+	uint8 edid_buffer[EDID_BLOCK_SIZE]; // EDID Block 0 is 128 bytes
+	display_mode* global_mode_list = NULL;
+	int global_mode_capacity = 0;
+	int global_mode_count = 0;
+	const int MAX_TOTAL_MODES = MAX_VBT_CHILD_DEVICES * PRIV_MAX_EDID_MODES_PER_PORT + 10; // Generous estimate
+
+	global_mode_list = (display_mode*)malloc(MAX_TOTAL_MODES * sizeof(display_mode));
+	if (global_mode_list == NULL) {
+		TRACE("display_init: Failed to allocate memory for global mode list.\n");
+		return B_NO_MEMORY;
+	}
+	global_mode_capacity = MAX_TOTAL_MODES;
+
+	// 1. Iterate through VBT-detected ports and try to get EDID
+	for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+		intel_output_port_state* port = &devInfo->ports[i];
+		port->connected = false; // Assume not connected until EDID is found
+		port->edid_valid = false;
+		port->num_modes = 0;
+
+		if (!port->present_in_vbt) continue;
+
+		TRACE("display_init: Probing port %u (VBT handle 0x%x, type %d, gmbus_pin 0x%x)\n",
+			i, port->child_device_handle, port->type, port->gmbus_pin_pair);
+
+		// Only try GMBUS/EDID on ports that typically have it
+		if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP ||
+			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI ||
+			port->type == PRIV_OUTPUT_ANALOG /* VGA also uses DDC */ ) {
+
+			if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
+				status_t edid_status = intel_i915_gmbus_read_edid_block(devInfo,
+					port->gmbus_pin_pair, edid_buffer, 0);
+
+				if (edid_status == B_OK) {
+					memcpy(port->edid_data, edid_buffer, EDID_BLOCK_SIZE);
+					port->edid_valid = true;
+					port->num_modes = intel_i915_parse_edid(port->edid_data,
+						port->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+
+					if (port->num_modes > 0) {
+						port->connected = true;
+						TRACE("display_init: Port %u EDID parsed, %d modes found.\n", i, port->num_modes);
+						// Set preferred mode (e.g., first DTD)
+						// parse_dtd sets pixel_clock = 0 if not a DTD.
+						// The first valid DTD is usually preferred.
+						if (port->modes[0].timing.pixel_clock != 0) {
+							port->preferred_mode = port->modes[0];
+						}
+						// Add unique modes to global list
+						for (int j = 0; j < port->num_modes; j++) {
+							if (global_mode_count < global_mode_capacity &&
+								!mode_already_in_list(&port->modes[j], global_mode_list, global_mode_count)) {
+								global_mode_list[global_mode_count++] = port->modes[j];
+							}
+						}
+					} else {
+						TRACE("display_init: Port %u EDID read OK, but no modes parsed.\n", i);
+					}
+				} else {
+					TRACE("display_init: Port %u EDID read failed (pin 0x%x): %s\n",
+						i, port->gmbus_pin_pair, strerror(edid_status));
+				}
+			} else {
+				TRACE("display_init: Port %u has no valid GMBUS pin for EDID.\n", i);
+			}
+		}
+	}
+
+	// 2. Handle LFP DTD from VBT for LVDS/eDP if no EDID modes or to prioritize VBT DTD
+	if (devInfo->vbt && devInfo->vbt->has_lfp_data) {
+		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+			intel_output_port_state* port = &devInfo->ports[i];
+			if (port->present_in_vbt && (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP)) {
+				TRACE("display_init: Considering VBT LFP DTD for port %u.\n", i);
+				// If LVDS/eDP has no EDID modes, or if we want to ensure VBT DTD is listed
+				if (devInfo->vbt->lfp_panel_dtd.timing.pixel_clock > 0) { // Check if VBT DTD is valid
+					port->connected = true; // Assume internal panel is connected
+					// Add VBT DTD if not already effectively there
+					if (!mode_already_in_list(&devInfo->vbt->lfp_panel_dtd, port->modes, port->num_modes)) {
+						if (port->num_modes < PRIV_MAX_EDID_MODES_PER_PORT) {
+							port->modes[port->num_modes++] = devInfo->vbt->lfp_panel_dtd;
+							TRACE("display_init: Added VBT LFP DTD to port %u modes list.\n", i);
+						}
+					}
+					// Add to global list if unique
+					if (global_mode_count < global_mode_capacity &&
+						!mode_already_in_list(&devInfo->vbt->lfp_panel_dtd, global_mode_list, global_mode_count)) {
+						global_mode_list[global_mode_count++] = devInfo->vbt->lfp_panel_dtd;
+					}
+					// Set as preferred if no other preferred mode yet or if VBT DTD is better
+					if (port->preferred_mode.timing.pixel_clock == 0) {
+						port->preferred_mode = devInfo->vbt->lfp_panel_dtd;
+					}
+				}
+				break; // Assuming only one LFP
+			}
+		}
+	}
+
+	// 3. If no modes found from EDID/VBT, add VESA fallbacks
+	if (global_mode_count == 0) {
+		TRACE("display_init: No modes from EDID/VBT, adding VESA fallbacks.\n");
+		int fallback_count = intel_i915_get_vesa_fallback_modes(
+			global_mode_list + global_mode_count, // Append to current list (which is empty)
+			global_mode_capacity - global_mode_count);
+		global_mode_count += fallback_count;
+	}
+
+	// 4. Create shared area for the mode list
+	if (global_mode_count > 0) {
+		char areaName[B_OS_NAME_LENGTH];
+		snprintf(areaName, sizeof(areaName), "i915_0x%04x_modes", devInfo->device_id);
+		size_t mode_list_size = global_mode_count * sizeof(display_mode);
+		void* mode_list_addr;
+
+		devInfo->shared_info->mode_list_area = create_area(areaName, &mode_list_addr,
+			B_ANY_KERNEL_ADDRESS, ROUND_TO_PAGE_SIZE(mode_list_size),
+			B_READ_AREA | B_CLONEABLE_AREA, 0); // Kernel owns it, accelerant clones read-only
+
+		if (devInfo->shared_info->mode_list_area < B_OK) {
+			TRACE("display_init: Failed to create shared mode list area: %s\n",
+				strerror(devInfo->shared_info->mode_list_area));
+			devInfo->shared_info->mode_count = 0;
+			free(global_mode_list);
+			return devInfo->shared_info->mode_list_area;
+		}
+		memcpy(mode_list_addr, global_mode_list, mode_list_size);
+		devInfo->shared_info->mode_count = global_mode_count;
+		TRACE("display_init: Created shared mode list with %d modes.\n", global_mode_count);
+	} else {
+		devInfo->shared_info->mode_list_area = -1;
+		devInfo->shared_info->mode_count = 0;
+		TRACE("display_init: No modes available for device.\n");
+	}
+
+	free(global_mode_list);
+	// TODO: Perform an initial modeset to a preferred mode on a connected display?
+	// This is often done by the accelerant later, or by bootloader.
+	// For now, kernel driver just prepares the list.
+	return B_OK;
+}
+
 void
 intel_i915_display_uninit(intel_i915_device_info* devInfo) { /* ... as before ... */ }
 
@@ -598,6 +761,71 @@ intel_i915_pipe_disable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
 
 	devInfo->pipes[pipe].enabled = false; // Update software state
 	return B_OK;
+}
+
+// Dispatcher for port enable
+status_t
+intel_i915_port_enable(intel_i915_device_info* devInfo, enum intel_port_id_priv portId,
+	enum pipe_id_priv pipe, const display_mode* mode)
+{
+	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, portId);
+	if (port_state == NULL) {
+		TRACE("port_enable: Invalid portId %d\n", portId);
+		return B_BAD_VALUE;
+	}
+
+	// Clock parameters are needed by DDI/LVDS enable functions
+	// This assumes they have been calculated and stored appropriately if needed by port logic
+	// For now, passing NULL as clock_params are not directly used by the stubs yet.
+	// A more complete implementation might pass &devInfo->current_clock_params or similar.
+	const struct intel_clock_params_t* clock_params = NULL; // Placeholder
+
+	TRACE("port_enable: Dispatching for port %d (type %d)\n", portId, port_state->type);
+	switch (port_state->type) {
+		case PRIV_OUTPUT_LVDS:
+		case PRIV_OUTPUT_EDP: // eDP often handled similarly to LVDS at this level, or by DDI logic
+			return intel_lvds_port_enable(devInfo, port_state, pipe, mode);
+		case PRIV_OUTPUT_DP:
+		case PRIV_OUTPUT_HDMI:
+		case PRIV_OUTPUT_DVI: // DVI might be TMDS from a DP or dedicated DVI port
+			return intel_ddi_port_enable(devInfo, port_state, pipe, mode, clock_params);
+		case PRIV_OUTPUT_ANALOG:
+			// Analog CRT port enable (DAC, etc.)
+			TRACE("port_enable: Analog CRT port enable STUBBED for port %d\n", portId);
+			return B_OK; // Stub
+		default:
+			TRACE("port_enable: Unknown port type %d for port %d\n", port_state->type, portId);
+			return B_BAD_VALUE;
+	}
+}
+
+// Dispatcher for port disable
+void
+intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv portId)
+{
+	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, portId);
+	if (port_state == NULL) {
+		TRACE("port_disable: Invalid portId %d\n", portId);
+		return;
+	}
+	TRACE("port_disable: Dispatching for port %d (type %d)\n", portId, port_state->type);
+	switch (port_state->type) {
+		case PRIV_OUTPUT_LVDS:
+		case PRIV_OUTPUT_EDP:
+			intel_lvds_port_disable(devInfo, port_state);
+			break;
+		case PRIV_OUTPUT_DP:
+		case PRIV_OUTPUT_HDMI:
+		case PRIV_OUTPUT_DVI:
+			intel_ddi_port_disable(devInfo, port_state);
+			break;
+		case PRIV_OUTPUT_ANALOG:
+			TRACE("port_disable: Analog CRT port disable STUBBED for port %d\n", portId);
+			break;
+		default:
+			TRACE("port_disable: Unknown port type %d for port %d\n", port_state->type, portId);
+			break;
+	}
 }
 
 

@@ -25,8 +25,143 @@ static const char BDB_SIGNATURE[] = "BIOS_DATA_BLOCK";
 #define DEFAULT_T4_PANEL_VDD_MS    50  // Panel signals disable to VDD off
 #define DEFAULT_T5_VDD_CYCLE_MS   500  // Min time VDD must be off
 
+// PCI Expansion ROM constants
+#define PCI_ROM_ADDRESS_MASK (~0x7FF)
+#define PCI_ROM_ADDRESS_ENABLE 0x1
 
-static status_t map_pci_rom(intel_i915_device_info* devInfo) { /* ... as before ... */ return B_OK; }
+static status_t
+map_pci_rom(intel_i915_device_info* devInfo)
+{
+	if (!devInfo || !gPCI || !devInfo->vbt) {
+		TRACE("VBT: map_pci_rom: devInfo, gPCI, or devInfo->vbt is NULL.\n");
+		return B_BAD_VALUE;
+	}
+
+	uint32_t rom_bar_val;
+	uint16_t pci_command_orig; // Store original PCI command value
+	void* rom_virt_addr = NULL;
+	area_id rom_area = -1;
+	size_t rom_search_size = 128 * 1024; // Map 128KB for searching VBT initially
+
+	// 1. Read current PCI command register
+	pci_command_orig = gPCI->read_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+		devInfo->pciinfo.function, PCI_command, 2);
+
+	// 2. Enable ROM BAR address decoding & Memory Space access
+	uint16_t pci_command_new = pci_command_orig | PCI_command_memory | PCI_command_expansion_rom_enable;
+	gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+		devInfo->pciinfo.function, PCI_command, 2, pci_command_new);
+
+	// 3. Read Expansion ROM Base Address Register
+	rom_bar_val = gPCI->read_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+		devInfo->pciinfo.function, PCI_expansion_rom, 4);
+
+	if (!(rom_bar_val & PCI_ROM_ADDRESS_ENABLE)) {
+		TRACE("VBT: PCI Expansion ROM is disabled or not present (rom_bar_val: 0x%08" B_PRIx32 ").\n", rom_bar_val);
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig); // Restore PCI command
+		return B_ERROR;
+	}
+
+	phys_addr_t rom_phys_addr = rom_bar_val & PCI_ROM_ADDRESS_MASK;
+	if (rom_phys_addr == 0) {
+		TRACE("VBT: PCI Expansion ROM base address is 0.\n");
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig); // Restore PCI command
+		return B_ERROR;
+	}
+
+	char areaName[64];
+	snprintf(areaName, sizeof(areaName), "i915_vbt_rom_0x%04x", devInfo->device_id);
+	rom_area = map_physical_memory(areaName, rom_phys_addr, rom_search_size,
+		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA, &rom_virt_addr);
+
+	if (rom_area < B_OK) {
+		TRACE("VBT: Failed to map PCI ROM at phys 0x%lx, size %lu: %s\n",
+			rom_phys_addr, rom_search_size, strerror(rom_area));
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig); // Restore PCI command
+		return rom_area;
+	}
+	TRACE("VBT: PCI ROM mapped: phys 0x%lx, virt %p, size %lu, area %" B_PRId32 "\n",
+		rom_phys_addr, rom_virt_addr, rom_search_size, rom_area);
+
+	const uint8_t* rom_bytes = (const uint8_t*)rom_virt_addr;
+	bool vbt_found = false;
+	const struct vbt_header* vbt_hdr_ptr = NULL;
+
+	for (size_t i = 0; i + sizeof(VBT_FULL_SIGNATURE) -1 < rom_search_size; i += 512) {
+		if (memcmp(rom_bytes + i, VBT_SIGNATURE_PREFIX, sizeof(VBT_SIGNATURE_PREFIX)-1) == 0) {
+			if (memcmp(rom_bytes + i, VBT_FULL_SIGNATURE, sizeof(VBT_FULL_SIGNATURE)-1) == 0 ||
+			    (rom_bytes[i+sizeof(VBT_SIGNATURE_PREFIX)-1] >= '0' && rom_bytes[i+sizeof(VBT_SIGNATURE_PREFIX)-1] <= '9')) {
+				vbt_hdr_ptr = (const struct vbt_header*)(rom_bytes + i);
+				vbt_found = true;
+				TRACE("VBT: Signature found at ROM offset 0x%lx.\n", i);
+				break;
+			}
+		}
+	}
+
+	if (!vbt_found || vbt_hdr_ptr == NULL) {
+		TRACE("VBT: VBT signature not found in mapped ROM.\n");
+		delete_area(rom_area);
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig); // Restore PCI command
+		return B_NAME_NOT_FOUND;
+	}
+
+	devInfo->vbt->header = vbt_hdr_ptr;
+
+	// Assuming vbt_header in vbt.h has: uint16_t version, header_size, vbt_size, bdb_offset;
+	// And bdb_header has: uint8_t signature[16], uint16_t version, header_size, bdb_size;
+	// These fields MUST be correctly defined in vbt.h for this to work.
+	if (devInfo->vbt->header->header_size == 0 || // Basic sanity for header_size
+	    devInfo->vbt->header->bdb_offset == 0 ||
+	    devInfo->vbt->header->bdb_offset >= rom_search_size - sizeof(struct bdb_header)) {
+		TRACE("VBT: Invalid VBT header fields (header_size: %u, bdb_offset: 0x%x).\n",
+			devInfo->vbt->header->header_size, devInfo->vbt->header->bdb_offset);
+		delete_area(rom_area);
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig);
+		return B_BAD_DATA;
+	}
+	TRACE("VBT Header: Version %u, Header Size %u, VBT Size %u, BDB Offset 0x%x\n",
+		devInfo->vbt->header->version, devInfo->vbt->header->header_size,
+		devInfo->vbt->header->vbt_size, devInfo->vbt->header->bdb_offset);
+
+
+	devInfo->vbt->bdb_header = (const struct bdb_header*)((const uint8_t*)devInfo->vbt->header + devInfo->vbt->header->bdb_offset);
+	const struct bdb_header* bdb_hdr = devInfo->vbt->bdb_header;
+
+	if (memcmp(bdb_hdr->signature, BDB_SIGNATURE, sizeof(BDB_SIGNATURE) - 1) != 0) {
+		TRACE("VBT: BDB signature mismatch. Expected '%s', Got '%.16s'\n",
+			BDB_SIGNATURE, bdb_hdr->signature); // Ensure signature field is char array in struct
+		delete_area(rom_area);
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig);
+		return B_BAD_DATA;
+	}
+	TRACE("BDB Header: Version %u, Header Size %u, BDB Size %u\n",
+		bdb_hdr->version, bdb_hdr->header_size, bdb_hdr->bdb_size);
+
+	devInfo->vbt->bdb_data_start = (const uint8_t*)bdb_hdr + bdb_hdr->header_size;
+	devInfo->vbt->bdb_data_size = bdb_hdr->bdb_size;
+
+	if ((const uint8_t*)devInfo->vbt->bdb_data_start + devInfo->vbt->bdb_data_size > rom_bytes + rom_search_size) {
+		TRACE("VBT: BDB data (offset %p, size %lu) exceeds mapped ROM size (%p).\n",
+			devInfo->vbt->bdb_data_start, devInfo->vbt->bdb_data_size, rom_bytes + rom_search_size);
+		delete_area(rom_area);
+		gPCI->write_pci_config(devInfo->pciinfo.bus, devInfo->pciinfo.device,
+			devInfo->pciinfo.function, PCI_command, 2, pci_command_orig);
+		return B_BAD_DATA;
+	}
+
+	devInfo->rom_base = rom_virt_addr;
+	devInfo->rom_area = rom_area;
+	// PCI command will be restored in vbt_cleanup or when ROM is no longer needed.
+
+	return B_OK;
+}
 
 // Define assumed structures and constants for VBT Child Device parsing
 // These should ideally be in vbt.h and be accurate for the target hardware.
@@ -181,6 +316,16 @@ parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8_t* block_da
 	TRACE("VBT: Detected %u child devices/ports.\n", devInfo->num_ports_detected);
 }
 
+static void
+parse_bdb_general_definitions(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	// This block contains general information, like boot display preferences,
+	// possibly panel type for LVDS, core/graphics frequencies etc.
+	// For now, just acknowledge it's found.
+	// struct bdb_general_definitions_block* defs = (struct bdb_general_definitions_block*)block_data;
+	// Example: devInfo->vbt->boot_display = defs->boot_display_bits;
+	TRACE("VBT: Parsing General Definitions block (ID %u, size %u) - STUBBED\n", BDB_GENERAL_DEFINITIONS, block_size);
+}
 
 static void
 parse_bdb_general_features(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)

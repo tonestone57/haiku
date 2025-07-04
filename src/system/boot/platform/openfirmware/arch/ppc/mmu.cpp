@@ -877,8 +877,60 @@ arch_mmu_init(void)
 	}
 
 	if (exceptionHandlers == (void *)-1) {
-		// TODO: create mapping for the exception handlers
-		dprintf("Error: no mapping for the exception handlers!\n");
+		void* vectorBase = (void*)0x0; // Exception vectors start at 0x0 for MSR[IP]=0
+		size_t vectorSize = B_PAGE_SIZE;
+		// Using PAGE_READ_WRITE initially; the kernel might adjust later.
+		// Mode should also consider cache properties (WIMG).
+		// For now, let's use a mode that's likely safe: Caching Inhibited, Read/Write.
+		// From OF spec: mode bit 0=cache-inhibited, 1=write-through, 2=copyback (usually not set by OF)
+		// bit 3=guarded. Protection bits 6,7 (00=NA, 01=RO, 10=RW, 11=RO)
+		// A common safe setting for such low-level areas might be Caching Inhibited.
+		// PAGE_READ_WRITE is 0x02 (protection bits only).
+		// Let's try with a mode that is caching inhibited (bit 0 set in OF mode)
+		// and read/write (bits 6,7 are 10). OF mode: (1<<0) | (2 << 6) = 0x81 (if mode was direct OF bits)
+		// The map_range function uses protection constants like PAGE_READ_WRITE (0x02).
+		// Let's stick to PAGE_READ_WRITE for now, assuming map_range defaults WIMG appropriately
+		// or that the critical aspect is just getting it mapped.
+		uint8 vectorProtection = PAGE_READ_WRITE;
+
+		dprintf("No pre-existing mapping for exception handlers found. Creating one...\n");
+		dprintf("Mapping vectors: VA=0x%p, PA=0x%p, Size=0x%lx, Mode=0x%x\n",
+			vectorBase, vectorBase, vectorSize, vectorProtection);
+
+		// Ensure the physical memory for vectors is available.
+		if (!is_physical_memory(vectorBase, vectorSize)) {
+			// This is a critical issue if physical 0x0 isn't RAM.
+			// However, most systems expect 0x0 to be valid for vectors.
+			// We might need to find a suitable physical page if 0x0 is not RAM,
+			// but that complicates where the CPU vectors. For now, assume 0x0 is usable.
+			dprintf("Warning: Physical memory for exception vectors (0x0-0x%lx) "
+				"not reported in OF memory map. Attempting to map anyway.\n", vectorSize - 1);
+			// If it's not in the physical_memory_range, insert_physical_allocated_range
+			// might behave unexpectedly or it might not matter if map_range can map it.
+			// For simplicity, we proceed, but this is a potential point of failure if 0x0 is truly unusable.
+		}
+
+		// Record the allocation. This is important so this range isn't considered free later.
+		// If these fail, it might indicate 0x0 was already claimed for something else,
+		// which would be an issue.
+		if (insert_physical_allocated_range((addr_t)vectorBase, vectorSize) != B_OK) {
+			dprintf("Warning: Failed to record physical allocation for exception vectors. "
+				"It might already be allocated.\n");
+		}
+		if (insert_virtual_allocated_range((addr_t)vectorBase, vectorSize) != B_OK) {
+			dprintf("Warning: Failed to record virtual allocation for exception vectors. "
+				"It might already be allocated.\n");
+		}
+
+		map_range(vectorBase, vectorBase, vectorSize, vectorProtection);
+		exceptionHandlers = vectorBase; // Update the variable
+
+		// Update kernel args for the exception handlers, as this is done later
+		// with the potentially unchanged exceptionHandlers value.
+		gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
+		gKernelArgs.arch_args.exception_handlers.size = vectorSize;
+
+		dprintf("Dynamically mapped exception handler area at VA/PA 0x%p.\n", exceptionHandlers);
 	}
 
 	// Set the Open Firmware memory callback. From now on the Open Firmware

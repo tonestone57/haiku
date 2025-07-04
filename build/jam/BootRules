@@ -129,13 +129,8 @@ rule BootLd
 
 	# Remove any preset LINKLIBS, but link against libgcc.a. Linking against
 	# libsupc++ is opt-out.
-	local libs ;
-	if ! [ on $(1) return $(HAIKU_NO_LIBSUPC++) ] {
-		libs += [ TargetBootLibsupc++ true ] ;
-		Depends $(1) : [ TargetBootLibsupc++ ] ;
-	}
-	LINKLIBS on $(1) = $(libs) [ TargetBootLibgcc $(TARGET_KERNEL_ARCH) : true ] ;
-	Depends $(1) : [ TargetBootLibgcc $(TARGET_KERNEL_ARCH) ] ;
+	# LINKLIBS are now handled by HAIKU_BOOT_<platform>_LDFLAGS to ensure correct libgcc version and order.
+	LINKLIBS on $(1) = ;
 
 	# TODO: Do we really want to invoke SetupBoot here? The objects should
 	# have been compiled with BootObjects anyway, so we're doing that twice.
@@ -158,7 +153,7 @@ rule BootLd
 
 actions BootLd bind VERSION_SCRIPT
 {
-	$(LINK) $(LINKFLAGS) -o "$(1)" "$(2)" $(LINKLIBS) \
+	$(LINK) -o "$(1)" "$(2)" $(LINKFLAGS) $(LINKLIBS) \
 		--version-script=$(VERSION_SCRIPT)
 }
 

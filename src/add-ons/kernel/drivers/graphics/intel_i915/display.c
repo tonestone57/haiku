@@ -868,3 +868,206 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 
 intel_output_port_state* intel_display_get_port_by_vbt_handle(intel_i915_device_info* d, uint16_t h){ return NULL;}
 intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* d, enum intel_port_id_priv id){ if (!d) return NULL; for (int i = 0; i < d->num_ports_detected; i++) { if (d->ports[i].logical_port_id == id) return &d->ports[i]; } return NULL; }
+
+
+// --- Cursor IOCTL Handlers ---
+
+// Max cursor dimensions (Gen7 often supports 256x256)
+#define MAX_CURSOR_WIDTH 256
+#define MAX_CURSOR_HEIGHT 256
+
+status_t
+intel_i915_set_cursor_bitmap_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+{
+	if (!devInfo || !buffer || length != sizeof(intel_i915_set_cursor_bitmap_args))
+		return B_BAD_VALUE;
+
+	intel_i915_set_cursor_bitmap_args args;
+	if (user_memcpy(&args, buffer, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	if (args.pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+	if (args.width == 0 || args.height == 0 ||
+		args.width > MAX_CURSOR_WIDTH || args.height > MAX_CURSOR_HEIGHT ||
+		args.hot_x >= args.width || args.hot_y >= args.height)
+		return B_BAD_VALUE;
+
+	size_t expected_size = (size_t)args.width * args.height * 4; // ARGB = 4 bytes/pixel
+	if (args.bitmap_size != expected_size) {
+		TRACE("set_cursor_bitmap: bitmap_size mismatch (got %lu, expected %lu)\n", args.bitmap_size, expected_size);
+		return B_BAD_VALUE;
+	}
+
+	status_t status = B_OK;
+	void* cursor_cpu_addr = NULL;
+
+	// Ensure forcewake for register access if needed (though CURABASE usually doesn't need it once set)
+	// intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Might not be needed for all cursor ops
+
+	// Manage cursor_bo: release old if size/format changed, create new.
+	// For simplicity, always recreate if dimensions change. A more optimal way would reuse if possible.
+	if (devInfo->cursor_bo[args.pipe] != NULL &&
+		(devInfo->cursor_width[args.pipe] != args.width || devInfo->cursor_height[args.pipe] != args.height)) {
+		intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
+		devInfo->cursor_bo[args.pipe] = NULL;
+		// GTT space for old BO is freed by gem_object_put if it was mapped and refcount is 0
+	}
+
+	if (devInfo->cursor_bo[args.pipe] == NULL) {
+		size_t bo_alloc_size = ROUND_TO_PAGE_SIZE(expected_size); // Allocate page-aligned BO
+		status = intel_i915_gem_object_create(devInfo, bo_alloc_size,
+			I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &devInfo->cursor_bo[args.pipe]);
+		if (status != B_OK) {
+			TRACE("set_cursor_bitmap: Failed to create cursor BO: %s\n", strerror(status));
+			goto exit_no_fw_put; // Skip forcewake put if it wasn't acquired
+		}
+
+		uint32_t gtt_page_offset;
+		status = intel_i915_gtt_alloc_space(devInfo, devInfo->cursor_bo[args.pipe]->num_phys_pages, &gtt_page_offset);
+		if (status != B_OK) {
+			intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
+			devInfo->cursor_bo[args.pipe] = NULL;
+			TRACE("set_cursor_bitmap: Failed to alloc GTT for cursor BO: %s\n", strerror(status));
+			goto exit_no_fw_put;
+		}
+		devInfo->cursor_gtt_offset_pages[args.pipe] = gtt_page_offset;
+
+		status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[args.pipe], gtt_page_offset, GTT_CACHE_NONE); // Uncached for cursor
+		if (status != B_OK) {
+			intel_i915_gtt_free_space(devInfo, gtt_page_offset, devInfo->cursor_bo[args.pipe]->num_phys_pages);
+			intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
+			devInfo->cursor_bo[args.pipe] = NULL;
+			TRACE("set_cursor_bitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
+			goto exit_no_fw_put;
+		}
+	}
+
+	// Copy bitmap data from user space to the cursor BO
+	status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[args.pipe], &cursor_cpu_addr);
+	if (status != B_OK || cursor_cpu_addr == NULL) {
+		TRACE("set_cursor_bitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
+		// BO remains, but can't write to it. This is problematic.
+		goto exit_no_fw_put;
+	}
+	if (copy_from_user(cursor_cpu_addr, (void*)args.user_bitmap_ptr, args.bitmap_size) != B_OK) {
+		TRACE("set_cursor_bitmap: copy_from_user failed.\n");
+		status = B_BAD_ADDRESS;
+		goto exit_no_fw_put;
+	}
+	// intel_i915_gem_object_unmap_cpu(devInfo->cursor_bo[args.pipe]); // No-op for area-backed
+
+	devInfo->cursor_width[args.pipe] = args.width;
+	devInfo->cursor_height[args.pipe] = args.height;
+	devInfo->cursor_hot_x[args.pipe] = args.hot_x;
+	devInfo->cursor_hot_y[args.pipe] = args.hot_y;
+
+	// Determine CURSOR_MODE for CURxCNTR based on size (Gen7+ ARGB cursors)
+	// Example: 256x256 ARGB, 128x128 ARGB, 64x64 ARGB
+	// This assumes CURSOR_MODE_256_ARGB_AX etc. are defined in registers.h
+	if (args.width <= 64 && args.height <= 64) {
+		devInfo->cursor_format[args.pipe] = CURSOR_MODE_64_ARGB_AX;
+	} else if (args.width <= 128 && args.height <= 128) {
+		devInfo->cursor_format[args.pipe] = CURSOR_MODE_128_ARGB_AX;
+	} else if (args.width <= 256 && args.height <= 256) {
+		devInfo->cursor_format[args.pipe] = CURSOR_MODE_256_ARGB_AX;
+	} else {
+		// Should have been caught by size check earlier
+		TRACE("set_cursor_bitmap: Invalid cursor dimensions after checks?\n");
+		status = B_BAD_VALUE;
+		goto exit_no_fw_put;
+	}
+
+	// Update hardware registers if cursor is currently visible or becomes visible
+	// This is typically handled by set_cursor_state. Here we just set base address.
+	uint32_t cur_base_reg;
+	switch(args.pipe) {
+		case PRIV_PIPE_A: cur_base_reg = CURABASE_A; break;
+		case PRIV_PIPE_B: cur_base_reg = CURABASE_B; break;
+		case PRIV_PIPE_C: cur_base_reg = CURABASE_C; break;
+		default: status = B_BAD_VALUE; goto exit_no_fw_put;
+	}
+	intel_i915_write32(devInfo, cur_base_reg, devInfo->cursor_bo[args.pipe]->gtt_offset_pages * B_PAGE_SIZE);
+	TRACE("set_cursor_bitmap: Pipe %d, CURBASE (0x%x) set to GTT 0x%lx\n",
+		args.pipe, cur_base_reg, (uint64_t)devInfo->cursor_bo[args.pipe]->gtt_offset_pages * B_PAGE_SIZE);
+
+exit_no_fw_put:
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // If acquired
+	return status;
+}
+
+status_t
+intel_i915_set_cursor_state_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+{
+	if (!devInfo || !buffer || length != sizeof(intel_i915_set_cursor_state_args))
+		return B_BAD_VALUE;
+
+	intel_i915_set_cursor_state_args args;
+	if (user_memcpy(&args, buffer, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	if (args.pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	// intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Might not be needed for all cursor ops
+
+	devInfo->cursor_x[args.pipe] = args.x;
+	devInfo->cursor_y[args.pipe] = args.y;
+	devInfo->cursor_visible[args.pipe] = args.is_visible;
+
+	uint32_t cur_cntr_reg, cur_pos_reg, cur_base_reg;
+	switch(args.pipe) {
+		case PRIV_PIPE_A:
+			cur_cntr_reg = CURACNTR; cur_pos_reg = CURAPOS_A; cur_base_reg = CURABASE_A;
+			break;
+		case PRIV_PIPE_B:
+			cur_cntr_reg = CURBCNTR; cur_pos_reg = CURBPOS_B; cur_base_reg = CURABASE_B;
+			break;
+		case PRIV_PIPE_C:
+			cur_cntr_reg = CURCCNTR; cur_pos_reg = CURCPOS_C; cur_base_reg = CURABASE_C;
+			break;
+		default:
+			// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return B_BAD_VALUE;
+	}
+
+	uint32_t cntr_val = intel_i915_read32(devInfo, cur_cntr_reg);
+	cntr_val &= ~CURSOR_MODE_MASK; // Clear old mode bits
+
+	if (args.is_visible && devInfo->cursor_bo[args.pipe] != NULL) {
+		cntr_val |= devInfo->cursor_format[args.pipe]; // Set current format (size)
+		cntr_val |= CURSOR_MODE_ENABLE | CURSOR_GAMMA_ENABLE;
+
+		// Position is relative to hotspot
+		int16_t actual_x = args.x - devInfo->cursor_hot_x[args.pipe];
+		int16_t actual_y = args.y - devInfo->cursor_hot_y[args.pipe];
+		uint32_t pos_val = 0;
+		if (actual_x < 0) {
+			pos_val |= CURSOR_POS_SIGN_X;
+			actual_x = -actual_x;
+		}
+		if (actual_y < 0) {
+			pos_val |= CURSOR_POS_SIGN_Y;
+			actual_y = -actual_y;
+		}
+		pos_val |= (actual_y & 0x7FFF) << 16; // Y pos is 15 bits
+		pos_val |= (actual_x & 0x7FFF);      // X pos is 15 bits
+		intel_i915_write32(devInfo, cur_pos_reg, pos_val);
+
+		// Ensure base address is set (might have been cleared if cursor was hidden by disabling BO)
+		intel_i915_write32(devInfo, cur_base_reg, devInfo->cursor_bo[args.pipe]->gtt_offset_pages * B_PAGE_SIZE);
+		TRACE("set_cursor_state: Pipe %d VISIBLE at (%d,%d), hot (%u,%u) -> HW pos (%d,%d). CNTR=0x%x, POS=0x%x, BASE=0x%lx\n",
+			args.pipe, args.x, args.y, devInfo->cursor_hot_x[args.pipe], devInfo->cursor_hot_y[args.pipe],
+			actual_x, actual_y, cntr_val, pos_val, (uint64_t)devInfo->cursor_bo[args.pipe]->gtt_offset_pages * B_PAGE_SIZE);
+
+	} else { // Not visible or no bitmap
+		cntr_val &= ~CURSOR_MODE_ENABLE;
+		// Optionally, could also clear CURABASE if desired when hidden, or set to scratch page.
+		// For now, just disable via control register.
+		TRACE("set_cursor_state: Pipe %d HIDDEN. CNTR=0x%x\n", args.pipe, cntr_val);
+	}
+	intel_i915_write32(devInfo, cur_cntr_reg, cntr_val);
+
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return B_OK;
+}

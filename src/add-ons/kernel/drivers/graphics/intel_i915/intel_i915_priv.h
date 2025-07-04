@@ -128,6 +128,19 @@ typedef struct intel_i915_device_info {
 	struct intel_engine_cs* rcs0; struct rps_info* rps_state;
 	uint32_t current_cdclk_freq_khz;
 	uint32_t open_count; int32_t irq_line; sem_id vblank_sem_id; void* irq_cookie;
+
+	// Cursor state per pipe
+	struct intel_i915_gem_object* cursor_bo[PRIV_MAX_PIPES];
+	uint32_t cursor_gtt_offset_pages[PRIV_MAX_PIPES]; // GTT page offset
+	bool     cursor_visible[PRIV_MAX_PIPES];
+	uint16_t cursor_width[PRIV_MAX_PIPES];    // Current bitmap width
+	uint16_t cursor_height[PRIV_MAX_PIPES];   // Current bitmap height
+	uint16_t cursor_hot_x[PRIV_MAX_PIPES];
+	uint16_t cursor_hot_y[PRIV_MAX_PIPES];
+	int16_t  cursor_x[PRIV_MAX_PIPES];        // Current screen X (can be negative)
+	int16_t  cursor_y[PRIV_MAX_PIPES];        // Current screen Y (can be negative)
+	uint32_t cursor_format[PRIV_MAX_PIPES];   // CURSOR_MODE_SELECT value
+
 } intel_i915_device_info;
 
 static inline uint32 intel_i915_read32(intel_i915_device_info* d, uint32 o) { /* ... */ return 0; }

@@ -106,6 +106,18 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->gtt_mmio_aperture_size = info.u.h0.base_register_sizes[2];
 		gDeviceInfo[gDeviceCount]->rcs0 = NULL;
 		gDeviceInfo[gDeviceCount]->rps_state = NULL;
+		for (int k = 0; k < PRIV_MAX_PIPES; k++) {
+			gDeviceInfo[gDeviceCount]->cursor_bo[k] = NULL;
+			gDeviceInfo[gDeviceCount]->cursor_gtt_offset_pages[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_visible[k] = false;
+			gDeviceInfo[gDeviceCount]->cursor_width[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_height[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_hot_x[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_hot_y[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_x[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_y[k] = 0;
+			gDeviceInfo[gDeviceCount]->cursor_format[k] = 0;
+		}
 
 		char deviceNameBuffer[64];
 		snprintf(deviceNameBuffer, sizeof(deviceNameBuffer), "graphics/%s/%" B_PRIu32, DEVICE_NAME_PRIV, gDeviceCount);
@@ -217,6 +229,16 @@ static status_t intel_i915_free(void* cookie) {
 	intel_i915_gmbus_cleanup(devInfo);
 	intel_i915_vbt_cleanup(devInfo);
 	intel_i915_irq_uninit(devInfo);
+
+	// Cleanup cursor BOs
+	for (int k = 0; k < PRIV_MAX_PIPES; k++) {
+		if (devInfo->cursor_bo[k] != NULL) {
+			// GTT unmap and space free should be handled by gem_object_put if mapped
+			intel_i915_gem_object_put(devInfo->cursor_bo[k]);
+			devInfo->cursor_bo[k] = NULL;
+		}
+	}
+
 	intel_i915_gtt_cleanup(devInfo);
 	if (devInfo->shared_info_area >= B_OK) delete_area(devInfo->shared_info_area);
 	if (devInfo->gtt_mmio_area_id >= B_OK) delete_area(devInfo->gtt_mmio_area_id);
@@ -252,6 +274,13 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_IOCTL_GEM_CONTEXT_CREATE: return intel_i915_gem_context_create_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY: return intel_i915_gem_context_destroy_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO: return intel_i915_gem_flush_and_get_seqno_ioctl(devInfo, buffer, length);
+
+		// Cursor IOCTLs
+		case INTEL_I915_IOCTL_SET_CURSOR_STATE:
+			return intel_i915_set_cursor_state_ioctl(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
+			return intel_i915_set_cursor_bitmap_ioctl(devInfo, buffer, length);
+
 		default: return B_DEV_INVALID_IOCTL;
 	}
 	return B_DEV_INVALID_IOCTL;

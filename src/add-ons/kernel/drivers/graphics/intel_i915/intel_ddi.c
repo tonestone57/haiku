@@ -293,25 +293,44 @@ intel_dp_start_link_train(intel_i915_device_info* devInfo, intel_output_port_sta
 		TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original value: 0x%08" B_PRIx32 "\n",
 			ddi_buf_ctl_reg, original_ddi_buf_ctl_val);
 
+		// Determine max requested VS and PE across all lanes
+		uint8_t max_vs_req = 0;
+		uint8_t max_pe_req = 0;
 		for (int l = 0; l < lane_count; l++) {
-			// Placeholder: TRACE what would be done.
-			// Example: ddi_buf_ctl_val &= ~DDI_BUF_CTL_VS_LANE_MASK(l);
-			// ddi_buf_ctl_val |= DDI_BUF_CTL_VS_LANE_VALUE(l, vs_adj[l]);
-			// ddi_buf_ctl_val &= ~DDI_BUF_CTL_PE_LANE_MASK(l);
-			// ddi_buf_ctl_val |= DDI_BUF_CTL_PE_LANE_VALUE(l, pe_adj[l]);
-			TRACE("  DP Link Training: Would update DDI_BUF_CTL for Lane %d: VS Level %d, PE Level %d\n",
-				l, vs_adj[l], pe_adj[l]);
+			if (vs_adj[l] > max_vs_req) max_vs_req = vs_adj[l];
+			if (pe_adj[l] > max_pe_req) max_pe_req = pe_adj[l];
 		}
 
-		// Since actual bit manipulation is not implemented, do not write back modified ddi_buf_ctl_val.
-		// If it were implemented:
-		// if (ddi_buf_ctl_val != original_ddi_buf_ctl_val) {
-		//    intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
-		//    TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) updated to 0x%08" B_PRIx32 "\n",
-		//		ddi_buf_ctl_reg, ddi_buf_ctl_val);
-		// } else {
-		//    TRACE("  DP Link Training: DDI_BUF_CTL no change needed for VS/PE.\n");
-		// }
+		// This is where the source DDI_BUF_CTL register would be updated.
+		// For HSW/IVB, DDI_BUF_CTL has common VS/PE bits, not always per-lane directly accessible.
+		// Assume DDI_BUF_CTL_DP_VS_LEVEL_SHIFT_HSW and DDI_BUF_CTL_DP_PE_LEVEL_SHIFT_HSW
+		// and that max_vs_req/max_pe_req (0-3) can be written to these fields.
+		uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+		uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		uint32_t original_ddi_buf_ctl_val = ddi_buf_ctl_val;
+
+		// Clear old common VS/PE bits (assuming masks are defined)
+		// ddi_buf_ctl_val &= ~(DDI_BUF_CTL_DP_VS_LEVEL_MASK_HSW | DDI_BUF_CTL_DP_PE_LEVEL_MASK_HSW);
+		// Set new common VS/PE bits
+		// ddi_buf_ctl_val |= (max_vs_req << DDI_BUF_CTL_DP_VS_LEVEL_SHIFT_HSW) & DDI_BUF_CTL_DP_VS_LEVEL_MASK_HSW;
+		// ddi_buf_ctl_val |= (max_pe_req << DDI_BUF_CTL_DP_PE_LEVEL_SHIFT_HSW) & DDI_BUF_CTL_DP_PE_LEVEL_MASK_HSW;
+
+		// For this step, we TRACE what would be written but don't actually write
+		// due to uncertainty of exact bitfield definitions for VS/PE levels 0-3.
+		uint32_t temp_ddi_buf_ctl_val = original_ddi_buf_ctl_val;
+		// Conceptual update:
+		// temp_ddi_buf_ctl_val = (original_ddi_buf_ctl_val & ~0x0000006E) // Clear bits 1,2,3,4,5,6 example
+		//                        | ((max_vs_req & 0x3) << 1)             // VS bits 2:1 example
+		//                        | ((max_pe_req & 0x3) << 4);            // PE bits 5:4 example
+
+		if (temp_ddi_buf_ctl_val != original_ddi_buf_ctl_val) {
+			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) original: 0x%08" B_PRIx32 ", would change to 0x%08" B_PRIx32 " (VS_max=%u, PE_max=%u)\n",
+				ddi_buf_ctl_reg, original_ddi_buf_ctl_val, temp_ddi_buf_ctl_val, max_vs_req, max_pe_req);
+			// intel_i915_write32(devInfo, ddi_buf_ctl_reg, temp_ddi_buf_ctl_val); // Not writing yet
+		} else {
+			TRACE("  DP Link Training: DDI_BUF_CTL (0x%x) value 0x%08" B_PRIx32 " sufficient for VS_max=%u, PE_max=%u (no change needed).\n",
+				ddi_buf_ctl_reg, original_ddi_buf_ctl_val, max_vs_req, max_pe_req);
+		}
 		TRACE("  DP Link Training: Actual DDI_BUF_CTL VS/PE update is STUBBED (no write performed).\n");
 	}
 

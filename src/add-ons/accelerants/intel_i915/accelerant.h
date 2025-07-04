@@ -93,6 +93,25 @@ typedef struct {
 	uint32 seqno;        // out
 } intel_i915_gem_flush_and_get_seqno_args;
 
+// Args for Cursor IOCTLs
+typedef struct {
+	bool		is_visible;
+	uint16_t	x;
+	uint16_t	y;
+	uint32_t	pipe; // 0 for Pipe A, 1 for Pipe B, etc.
+	// hot_x, hot_y are part of bitmap upload, position is relative to hotspot
+} intel_i915_set_cursor_state_args;
+
+typedef struct {
+	uint16_t	width;
+	uint16_t	height;
+	uint16_t	hot_x;
+	uint16_t	hot_y;
+	uint64_t	user_bitmap_ptr; // User-space pointer to ARGB data
+	size_t		bitmap_size;     // Expected size: width * height * 4 bytes for ARGB
+	uint32_t	pipe;            // Which pipe this cursor is primarily for (can be shown on multiple)
+} intel_i915_set_cursor_bitmap_args;
+
 
 typedef struct {
 	area_id			regs_clone_area;

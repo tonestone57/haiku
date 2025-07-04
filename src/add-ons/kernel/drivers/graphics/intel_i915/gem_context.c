@@ -146,45 +146,60 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 			// Example LRCA structure (highly simplified, real one is sparse and larger):
 			// DW0: Reserved / Flags / Context ID
 			// DW1: CTX_RING_HEAD (Ring Head Pointer)
-			// DW2: CTX_RING_TAIL (Ring Tail Pointer)
-			// DW3: CTX_RING_BUFFER_START_REGISTER (Ring Buffer Base Address - GTT)
-			// DW4: CTX_RING_BUFFER_CONTROL_REGISTER (Ring Buffer Control)
-			// ... other registers ...
-			#define LRCA_CTX_ID_REG_OFFSET_DW      0x02 // Example: Context ID Register (Conceptual)
-			#define LRCA_RING_HEAD_REG_OFFSET_DW   0x04 // Example: Offset in DWORDS for Ring Head
-			#define LRCA_RING_TAIL_REG_OFFSET_DW   0x05 // Example
-			#define LRCA_RING_START_REG_OFFSET_DW  0x06 // Example
-			#define LRCA_RING_CTL_REG_OFFSET_DW    0x07 // Example
-			// IMPORTANT: These offsets are NOT REAL and are for demonstration of initialization.
-			// The actual context image layout is complex.
+			// Standard Gen7 RCS LRCA DWord Offsets (from start of context image)
+			// These should ideally be macros from a header shared with engine.c if it parses these.
+			#define CTX_LR_CONTEXT_CONTROL            0x01 // Logical Ring Context Control
+			#define CTX_RING_HEAD                     0x02 // Logical Ring Head Pointer
+			#define CTX_RING_TAIL                     0x03 // Logical Ring Tail Pointer
+			#define CTX_RING_BUFFER_START_REGISTER    0x04 // Logical Ring Buffer Start Address
+			#define CTX_RING_BUFFER_CONTROL_REGISTER  0x05 // Logical Ring Buffer Control
+			#define CTX_BB_CURRENT_HEAD_UDW           0x10 // Batch Buffer Current Head Upper DW
+			#define CTX_BB_CURRENT_HEAD_LDW           0x11 // Batch Buffer Current Head Lower DW
+			#define CTX_BB_STATE                      0x12 // Batch Buffer State
+			#define CTX_SECOND_BB_HEAD_UDW            0x13 // Second Level BB Head Upper DW
+			#define CTX_SECOND_BB_HEAD_LDW            0x14 // Second Level BB Head Lower DW
+			#define CTX_SECOND_BB_STATE               0x15 // Second Level BB State
+			#define CTX_INSTRUCTION_STATE_POINTER     0x0D // Indirect State Pointers
+			#define CTX_STATE_BASE_ADDRESS            0x0E // General State Base Address
+			// PDP registers for PPGTT would also be here (e.g., 0x20-0x27 for PDP3-0)
 
-			struct intel_engine_cs* rcs0 = devInfo->rcs0; // Assuming RCS0 is the target engine
-			if (rcs0 && rcs0->ring_buffer_obj) {
-				// Initialize Ring Buffer registers in the context image
-				// These should point to the global ring buffer for now (no per-context ring)
-				lrca[LRCA_RING_START_REG_OFFSET_DW] = rcs0->ring_buffer_obj->gtt_offset_pages * B_PAGE_SIZE;
+			// The context image is already zeroed by I915_BO_ALLOC_CPU_CLEAR.
+			// We only need to set non-zero default values.
 
-				uint32_t ring_ctl_val = RING_CTL_SIZE(rcs0->ring_size_bytes / 1024) | RING_CTL_ENABLE;
-				// Add any other necessary bits for context's view of RING_CTL, e.g. buffer length.
-				// It should match the global ring's control register settings.
-				lrca[LRCA_RING_CTL_REG_OFFSET_DW] = ring_ctl_val;
+			struct intel_engine_cs* rcs0 = devInfo->rcs0;
+			if (rcs0 && rcs0->ring_buffer_obj && rcs0->ring_cpu_map) {
+				// Initialize Ring Buffer registers in the context image to match the global ring.
+				// This sets up the context to use the existing global ring buffer.
+				lrca[CTX_RING_BUFFER_START_REGISTER] = rcs0->ring_buffer_obj->gtt_offset_pages * B_PAGE_SIZE;
 
-				lrca[LRCA_RING_HEAD_REG_OFFSET_DW] = 0; // Head starts at 0 for a new context
-				lrca[LRCA_RING_TAIL_REG_OFFSET_DW] = 0; // Tail starts at 0
+				// Read global ring control to copy its size and other relevant bits.
+				// Ensure the enable bit itself is NOT set in the context image's copy of RING_CTL,
+				// as the ring is enabled/disabled globally, not per-context via this field typically.
+				// The MI_SET_CONTEXT command implicitly makes the ring operational for this context.
+				uint32_t global_ring_ctl = intel_i915_read32(devInfo, rcs0->ctl_reg_offset);
+				lrca[CTX_RING_BUFFER_CONTROL_REGISTER] = (global_ring_ctl & ~RING_CTL_ENABLE);
+				// Or, more simply, construct it:
+				// lrca[CTX_RING_BUFFER_CONTROL_REGISTER] = RING_CTL_SIZE(rcs0->ring_size_bytes / 1024);
 
-				// Store Context ID (if HW has a register in context image for it, for debug/verify)
-				// This is conceptual. Some HW stores CONTEXT_ID in a specific context reg.
-				lrca[LRCA_CTX_ID_REG_OFFSET_DW] = ctx->id;
+
+				lrca[CTX_RING_HEAD] = 0; // Head starts at 0 for a new context
+				lrca[CTX_RING_TAIL] = 0; // Tail starts at 0
+
+				// Context Control Register (CTX_CONTEXT_CONTROL)
+				// Bit 0: Inhibit Context Restore (0 = Restore normally)
+				// Bit 1: Force PD Restore (if using PPGTT)
+				// Bit 2: Force Restore All (includes pipeline state)
+				lrca[CTX_LR_CONTEXT_CONTROL] = 0; // Default: No inhibit, no forced restores beyond standard
+
+				// Batch Buffer State, Second BB State, ISP, State Base Address are zeroed,
+				// which means they are invalid/unused initially. This is fine for a default context
+				// that isn't immediately executing a complex batch.
 
 				TRACE("GEM Context: HW image (LRCA) initialized for RCS0:\n");
-				TRACE("  LRCA.RingStart = 0x%08x (points to global ring GTT)\n", lrca[LRCA_RING_START_REG_OFFSET_DW]);
-				TRACE("  LRCA.RingCtl   = 0x%08x\n", lrca[LRCA_RING_CTL_REG_OFFSET_DW]);
-				TRACE("  LRCA.RingHead  = 0x%08x\n", lrca[LRCA_RING_HEAD_REG_OFFSET_DW]);
-				TRACE("  LRCA.RingTail  = 0x%08x\n", lrca[LRCA_RING_TAIL_REG_OFFSET_DW]);
-				TRACE("  LRCA.CtxIDReg  = 0x%08x (conceptual)\n", lrca[LRCA_CTX_ID_REG_OFFSET_DW]);
-
+				TRACE("  LRCA.RingStart = 0x%08x\n", lrca[CTX_RING_BUFFER_START_REGISTER]);
+				TRACE("  LRCA.RingCtl   = 0x%08x\n", lrca[CTX_RING_BUFFER_CONTROL_REGISTER]);
 			} else {
-				TRACE("GEM Context: Could not initialize LRCA, RCS0 engine or ring not available.\n");
+				TRACE("GEM Context: Could not initialize LRCA - RCS0 engine or ring not available.\n");
 				// This is a critical error if we expect contexts to function.
 				status = B_NO_INIT; // Mark as error
 			}

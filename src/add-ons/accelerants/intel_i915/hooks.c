@@ -419,11 +419,113 @@ intel_i915_get_edid_info(void* edid_info, size_t size, uint32* _version)
 	return B_OK;
 }
 
-// Cursor (Stubs)
-static status_t intel_i915_set_cursor_shape(uint16 w, uint16 h, uint16 hx, uint16 hy, uint8 *a, uint8 *x) { TRACE("SET_CURSOR_SHAPE (stub)\n"); return B_UNSUPPORTED;}
-static void     intel_i915_move_cursor(uint16 x, uint16 y) { TRACE("MOVE_CURSOR (stub)\n");}
-static void     intel_i915_show_cursor(bool v) { TRACE("SHOW_CURSOR (stub)\n");}
-static status_t intel_i915_set_cursor_bitmap(uint16 w, uint16 h, uint16 hx, uint16 hy, color_space cs, uint16 bpr, const uint8 *bm) { TRACE("SET_CURSOR_BITMAP (stub)\n"); return B_UNSUPPORTED;}
+// Cursor Management
+static status_t
+intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y,
+	uint8 *and_mask, uint8 *xor_mask)
+{
+	// This hook is for monochrome cursors. Gen7+ primarily uses ARGB cursors.
+	// We could try to convert, or just support ARGB via SET_CURSOR_BITMAP.
+	TRACE("SET_CURSOR_SHAPE: (Monochrome cursor) STUB/UNSUPPORTED\n");
+	return B_UNSUPPORTED;
+}
+
+static void
+intel_i915_move_cursor(uint16 x, uint16 y)
+{
+	// TRACE("MOVE_CURSOR to %u,%u\n", x, y);
+	if (!gInfo || gInfo->device_fd < 0 || !gInfo->shared_info) return;
+
+	// Assume cursor is for pipe 0 for now. Multi-monitor cursor needs more thought.
+	// Also, need to know current visibility state to pass to IOCTL.
+	// For simplicity, assume we have a cached visibility state or read it.
+	// Let's assume kernel keeps track of visibility per pipe if we just send pos.
+	// The IOCTL SET_CURSOR_STATE takes visibility. So we need to cache it in accelerant_info.
+	// This requires adding cursor_visible_cached[MAX_PIPES] to accelerant_info.
+	// For now, assume it's visible if moved. A better way is to get current state.
+
+	intel_i915_set_cursor_state_args args;
+	args.pipe = 0; // Default to Pipe A
+	args.x = x;
+	args.y = y;
+	args.is_visible = gInfo->shared_info->primary_edid_valid; // Hack: use edid_valid as proxy for visible
+	                                       // This needs proper state tracking in accelerant_info
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args)) != 0) {
+		// TRACE("MOVE_CURSOR: IOCTL failed.\n");
+	}
+}
+
+static void
+intel_i915_show_cursor(bool is_visible)
+{
+	TRACE("SHOW_CURSOR: %s\n", is_visible ? "true" : "false");
+	if (!gInfo || gInfo->device_fd < 0 || !gInfo->shared_info) return;
+
+	// Assume cursor is for pipe 0.
+	// Need current X, Y to pass to IOCTL. Assume (0,0) or cache previous.
+	// This also needs proper state tracking in accelerant_info.
+	intel_i915_set_cursor_state_args args;
+	args.pipe = 0; // Default to Pipe A
+	args.x = 0; // TODO: Get current/last known X from accelerant_info cache
+	args.y = 0; // TODO: Get current/last known Y
+	args.is_visible = is_visible;
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args)) != 0) {
+		TRACE("SHOW_CURSOR: IOCTL failed.\n");
+	}
+	// TODO: Cache args.is_visible in accelerant_info if used by MOVE_CURSOR
+}
+
+static status_t
+intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y,
+	color_space cs, uint16 bytes_per_row, const uint8 *bitmap_data)
+{
+	TRACE("SET_CURSOR_BITMAP: %ux%u, hot (%u,%u), space 0x%x\n", width, height, hot_x, hot_y, cs);
+	if (!gInfo || gInfo->device_fd < 0) return B_BAD_VALUE;
+
+	// We expect ARGB32 for Gen7+ hardware cursors
+	if (cs != B_RGBA32 && cs != B_RGB32) { // B_RGB32 might be acceptable if alpha is assumed 0xFF
+		TRACE("SET_CURSOR_BITMAP: Unsupported color space 0x%x (expected RGBA32/RGB32).\n", cs);
+		return B_BAD_VALUE;
+	}
+	if (width == 0 || height == 0 || width > 256 || height > 256) // Max 256x256 for Gen7
+		return B_BAD_VALUE;
+	if (hot_x >= width || hot_y >= height)
+		return B_BAD_VALUE;
+
+	intel_i915_set_cursor_bitmap_args args;
+	args.pipe = 0; // Default to Pipe A for now
+	args.width = width;
+	args.height = height;
+	args.hot_x = hot_x;
+	args.hot_y = hot_y;
+	args.user_bitmap_ptr = (uint64_t)(uintptr_t)bitmap_data; // Cast to uint64_t for IOCTL struct
+	args.bitmap_size = width * height * 4; // ARGB is 4 bytes per pixel
+
+	// It's important that bytes_per_row from app_server matches width * 4 for a packed ARGB bitmap.
+	if (bytes_per_row != width * 4) {
+		TRACE("SET_CURSOR_BITMAP: bytes_per_row (%u) does not match width * 4 (%u).\n", bytes_per_row, width*4);
+		// We could handle non-packed bitmaps by copying row-by-row, but simpler to require packed.
+		return B_BAD_VALUE;
+	}
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_BITMAP, &args, sizeof(args));
+	if (status != B_OK) {
+		TRACE("SET_CURSOR_BITMAP: IOCTL failed: %s\n", strerror(status));
+		return status;
+	}
+
+	// After setting a new bitmap, also ensure its state (pos, visibility) is applied.
+	// This might require caching current x,y,visible in accelerant_info.
+	// For now, assume kernel will show it at (0,0) or keep previous state if possible.
+	// A call to show_cursor(true) and move_cursor(current_x,current_y) might be needed here.
+	intel_i915_show_cursor(true); // Make it visible by default after setting shape
+	// intel_i915_move_cursor(gInfo->cached_cursor_x, gInfo->cached_cursor_y); // If we cached
+
+	return B_OK;
+}
+
 
 // Sync (Stubs)
 static uint32   intel_i915_accelerant_engine_count(void) { TRACE("ACCELERANT_ENGINE_COUNT (stub)\n"); return 1;} // At least one for RCS

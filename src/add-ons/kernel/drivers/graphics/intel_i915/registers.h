@@ -82,16 +82,27 @@
 #define PGTBL_CTL		0x02020
 	#define PGTBL_ENABLE			(1U << 0)
 	// Gen7 GTT PTE bits (Ivy Bridge / Haswell)
-	#define GTT_ENTRY_VALID         (1U << 0)
-	// Bits 1, 2, 3 are used for PAT index selection (or other cache control on older gens)
-	// For simplicity, let's define a common "Write Combining" attribute if PAT is set up for it.
-	// This assumes a PAT index (e.g. PAT1) is configured for WC by BIOS/OS.
-	#define GTT_PTE_CACHE_PAT_WC_IVB (1U << 1) // Example: PAT Index 1 = Write Combining
-	#define GTT_PTE_CACHE_UNCACHED_IVB (2U << 1) // Example: PAT Index 2 = Uncached
-	// Actual PAT index values need to match MSR_IA32_PAT configuration.
+	#define GTT_ENTRY_VALID                 (1U << 0)
+	// For IvyBridge/Haswell, caching is typically controlled by PAT Index selected by PTE bits.
+	// These are *examples* assuming a specific PAT MSR setup.
+	// PTE[1] = PAT_IDX[0]
+	// PTE[2] = PAT_IDX[1]
+	// PTE[6] = PAT_IDX[2] (for IVB+) / PTE[11] for SNB GTT Table
+	// Assuming PAT Index 1 (001b) = WC, PAT Index 2 (010b) = UC- or UC
+	#define GTT_PTE_PAT_IDX0_IVB        (1U << 1) // LSB of PAT Index
+	#define GTT_PTE_PAT_IDX1_IVB        (1U << 2) // Middle bit of PAT Index
+	#define GTT_PTE_PAT_IDX2_IVB        (1U << 6) // MSB of PAT Index (for IVB+)
 
-#define HWS_PGA			0x02080 // Hardware Status Page Address (points to GTT on Gen6/7)
-#define GTTMMADR_PTE_OFFSET_GEN6   0x80000 // If GTT entries are in MMIO BAR2
+	// Example combinations:
+	// To select PAT Index 1 (001b) -> set GTT_PTE_PAT_IDX0_IVB
+	#define GTT_PTE_CACHE_WC_GEN7       GTT_PTE_PAT_IDX0_IVB
+	// To select PAT Index 2 (010b) -> set GTT_PTE_PAT_IDX1_IVB
+	#define GTT_PTE_CACHE_UC_GEN7       GTT_PTE_PAT_IDX1_IVB
+	// To select PAT Index 0 (000b) -> no PAT index bits set (usually WB)
+	#define GTT_PTE_CACHE_WB_GEN7       0
+
+#define HWS_PGA			0x02080
+#define GTTMMADR_PTE_OFFSET_GEN6   0x80000
 
 	#define I915_GTT_PAGE_SHIFT		12
 	#define I915_GTT_ENTRY_SIZE		4

@@ -20,19 +20,16 @@
 static void
 intel_i915_gtt_flush(intel_i915_device_info* devInfo)
 {
-	// Ensure previous writes are globally visible before the flush command.
-	memory_write_barrier(); // Or specific CPU cache flush if GTT table is cacheable by CPU.
-
+	memory_write_barrier();
 	intel_i915_write32(devInfo, PGTBL_CTL, devInfo->pgtbl_ctl);
-	// A read from any GMBAR register ensures that the write to PGTBL_CTL has completed.
-	(void)intel_i915_read32(devInfo, PGTBL_CTL); // Posting read
+	(void)intel_i915_read32(devInfo, PGTBL_CTL);
 	TRACE("GTT flushed (PGTBL_CTL rewritten).\n");
 }
 
 // Helper to insert a single PTE
 static status_t
 intel_i915_gtt_insert_pte(intel_i915_device_info* devInfo, uint32 pte_index,
-	uint64 phys_addr, uint32 pte_flags)
+	uint64 phys_addr, enum gtt_caching_type cache_type)
 {
 	if (devInfo->gtt_table_virtual_address == NULL) {
 		TRACE("GTT insert: GTT table not mapped!\n");
@@ -43,11 +40,24 @@ intel_i915_gtt_insert_pte(intel_i915_device_info* devInfo, uint32 pte_index,
 		return B_BAD_INDEX;
 	}
 
-	// Gen7 PTE format: PhysAddr[39:12], Cache (PAT index for IVB+), Valid
-	// Using placeholder GTT_PTE_WC_GEN7 for caching for now.
-	uint32 pte_value = (uint32)(phys_addr & ~0xFFFULL) | pte_flags; // Assumes phys_addr is page-aligned
+	uint32 pte_flags = GTT_ENTRY_VALID;
+	switch (cache_type) {
+		case GTT_CACHE_UNCACHED:
+			pte_flags |= GTT_PTE_CACHE_UC_GEN7; // Uses PAT Index (e.g., 2 or 3)
+			break;
+		case GTT_CACHE_WRITE_COMBINING:
+			pte_flags |= GTT_PTE_CACHE_WC_GEN7; // Uses PAT Index (e.g., 1)
+			break;
+		case GTT_CACHE_NONE: // Fallthrough to default (often WB via PAT0)
+		default:
+			// This assumes PAT0 is WB and selected by no explicit PAT bits in PTE.
+			// Or use GTT_PTE_CACHE_WB_GEN7 if defined for explicit WB.
+			pte_flags |= GTT_PTE_CACHE_WB_GEN7; // Default to WB via PAT Index 0
+			break;
+	}
+
+	uint32 pte_value = (uint32)(phys_addr & ~0xFFFULL) | pte_flags;
 	devInfo->gtt_table_virtual_address[pte_index] = pte_value;
-	// TRACE("GTT PTE[%u] = 0x%08" B_PRIx32 " (phys 0x%Lx)\n", pte_index, pte_value, phys_addr);
 	return B_OK;
 }
 
@@ -59,21 +69,17 @@ intel_i915_gtt_map_scratch_page(intel_i915_device_info* devInfo)
 		TRACE("GTT: Scratch page physical address is not set!\n");
 		return B_NO_INIT;
 	}
-	// Map scratch page to GTT offset 0 (PTE index 0) for Gen7.
-	// Some drivers reserve the first few entries or the last one.
-	// For simplicity, using index 0.
 	devInfo->scratch_page_gtt_offset = 0; // In bytes
 	uint32 pte_index = devInfo->scratch_page_gtt_offset / B_PAGE_SIZE;
 
-	TRACE("gtt_map_scratch_page: phys 0x%Lx to GTT index %u\n",
+	TRACE("gtt_map_scratch_page: phys 0x%Lx to GTT index %u (UC)\n",
 		devInfo->scratch_page_phys_addr, pte_index);
 
 	status_t status = intel_i915_gtt_insert_pte(devInfo, pte_index,
-		devInfo->scratch_page_phys_addr, GTT_ENTRY_VALID | GTT_PTE_CACHE_UNCACHED_IVB);
-		// Using UNCACHED for scratch page.
+		devInfo->scratch_page_phys_addr, GTT_CACHE_UNCACHED);
 
 	if (status == B_OK) {
-		intel_i915_gtt_flush(devInfo); // Flush after updating this important PTE
+		intel_i915_gtt_flush(devInfo);
 		TRACE("GTT: Scratch page mapped at GTT index %u.\n", pte_index);
 	} else {
 		TRACE("GTT: Failed to insert PTE for scratch page at index %u.\n", pte_index);
@@ -89,8 +95,8 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	status_t status = B_OK;
 	char areaName[64];
 
-	devInfo->scratch_page_area = -1; // Initialize
-	devInfo->gtt_table_area = -1;    // Initialize
+	devInfo->scratch_page_area = -1;
+	devInfo->gtt_table_area = -1;
 
 	if (devInfo->mmio_regs_addr == NULL) {
 		TRACE("gtt_init: MMIO (GMBAR) not mapped.\n");
@@ -106,9 +112,8 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	}
 	TRACE("gtt_init: GTT is enabled by BIOS/firmware.\n");
 
-	// 1. Allocate Scratch Page
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_scratch", devInfo->device_id);
-	void* scratch_virt_addr_temp; // Temporary virtual address for get_memory_map
+	void* scratch_virt_addr_temp;
 	devInfo->scratch_page_area = create_area_etc(areaName, &scratch_virt_addr_temp,
 		B_ANY_KERNEL_ADDRESS, B_PAGE_SIZE, B_FULL_LOCK,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, CREATE_AREA_DONT_WAIT_FOR_LOCK, 0,
@@ -131,19 +136,13 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 		}
 		devInfo->scratch_page_phys_addr = pe.address;
 	}
-	memset(scratch_virt_addr_temp, 0, B_PAGE_SIZE); // Clear the scratch page via its kernel mapping
+	memset(scratch_virt_addr_temp, 0, B_PAGE_SIZE);
 	TRACE("GTT: Scratch page allocated, area %" B_PRId32 ", phys_addr 0x%Lx\n",
 		devInfo->scratch_page_area, devInfo->scratch_page_phys_addr);
 
-
-	// 2. Determine GTT Table Physical Address and Size (Gen7: from HWS_PGA)
 	uint32 hws_pga_val = intel_i915_read32(devInfo, HWS_PGA);
 	devInfo->gtt_table_physical_address = hws_pga_val & ~0xFFF;
-
-	devInfo->gtt_entries_count = 512 * 1024; // Default 2MB GTT table / 512k entries for Gen7
-	// TODO: More accurately determine GTT size from HWS_PGA or PCHSTPREG for specific Gen7 variants if needed.
-	// For example, HWS_PGA[15:8] on some IVB/HSW variants can specify GTT size.
-	// For now, fixed 512k entries.
+	devInfo->gtt_entries_count = 512 * 1024;
 	devInfo->gtt_aperture_actual_size = (size_t)devInfo->gtt_entries_count * B_PAGE_SIZE;
 	size_t gtt_table_alloc_size = devInfo->gtt_entries_count * I915_GTT_ENTRY_SIZE;
 
@@ -160,7 +159,6 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 		return B_ERROR;
 	}
 
-	// 3. Map the GTT Page Table
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_table", devInfo->device_id);
 	devInfo->gtt_table_area = map_physical_memory(areaName,
 		devInfo->gtt_table_physical_address, gtt_table_alloc_size,
@@ -178,7 +176,6 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	TRACE("GTT: Page Table mapped to kernel virtual address %p (Area ID: %" B_PRId32 ")\n",
 		devInfo->gtt_table_virtual_address, devInfo->gtt_table_area);
 
-	// 4. Map the Scratch Page into the GTT
 	status = intel_i915_gtt_map_scratch_page(devInfo);
 	if (status != B_OK) {
 		TRACE("GTT: Failed to map scratch page into GTT: %s\n", strerror(status));
@@ -220,11 +217,12 @@ intel_i915_gtt_cleanup(intel_i915_device_info* devInfo)
 
 status_t
 intel_i915_gtt_map_memory(intel_i915_device_info* devInfo,
-	uint64 first_page_physical_address, uint32 gtt_offset_bytes,
-	size_t num_pages, uint32 pte_caching_flags)
+	area_id source_area, size_t area_offset_pages,
+	uint32 gtt_offset_bytes, size_t num_pages,
+	enum gtt_caching_type cache_type)
 {
-	TRACE("gtt_map_memory: phys 0x%Lx to gtt_offset 0x%lx, %lu pages, flags 0x%lx\n",
-		first_page_physical_address, gtt_offset_bytes, num_pages, pte_caching_flags);
+	TRACE("gtt_map_memory: area %" B_PRId32 ", area_offset_pages %lu, to gtt_offset 0x%lx, %lu pages, cache %d\n",
+		source_area, area_offset_pages, gtt_offset_bytes, num_pages, cache_type);
 
 	if (!devInfo || !(devInfo->pgtbl_ctl & PGTBL_ENABLE)) {
 		TRACE("gtt_map_memory: GTT not initialized or not enabled!\n");
@@ -234,6 +232,10 @@ intel_i915_gtt_map_memory(intel_i915_device_info* devInfo,
 		TRACE("gtt_map_memory: GTT page table is not mapped in kernel! Cannot write PTEs.\n");
 		return B_NO_INIT;
 	}
+	if (source_area < B_OK) {
+		TRACE("gtt_map_memory: Invalid source_area ID %" B_PRId32 "\n", source_area);
+		return B_BAD_VALUE;
+	}
 
 	uint32 pte_start_index = gtt_offset_bytes / B_PAGE_SIZE;
 	if (pte_start_index + num_pages > devInfo->gtt_entries_count) {
@@ -242,16 +244,50 @@ intel_i915_gtt_map_memory(intel_i915_device_info* devInfo,
 		return B_BAD_VALUE;
 	}
 
-	for (size_t i = 0; i < num_pages; i++) {
-		uint64 page_phys_addr = first_page_physical_address + (i * B_PAGE_SIZE);
-		status_t status = intel_i915_gtt_insert_pte(devInfo, pte_start_index + i,
-			page_phys_addr, GTT_ENTRY_VALID | pte_caching_flags);
+	area_info sourceAreaInfo;
+	status_t status = get_area_info(source_area, &sourceAreaInfo);
+	if (status != B_OK) {
+		TRACE("gtt_map_memory: Failed to get info for source_area %" B_PRId32 ": %s\n", source_area, strerror(status));
+		return status;
+	}
+	if (area_offset_pages + num_pages > sourceAreaInfo.size / B_PAGE_SIZE) {
+		TRACE("gtt_map_memory: Mapping request (offset %lu + %lu pages) exceeds source_area size (%lu pages).\n",
+			area_offset_pages, num_pages, sourceAreaInfo.size / B_PAGE_SIZE);
+		return B_BAD_VALUE;
+	}
+
+	physical_entry pe_buffer[16];
+	size_t current_area_page_offset = area_offset_pages;
+	size_t pages_remaining = num_pages;
+	size_t pte_current_index = pte_start_index;
+
+	while (pages_remaining > 0) {
+		size_t pages_to_get = min_c(pages_remaining, sizeof(pe_buffer) / sizeof(physical_entry));
+		status = get_memory_map((uint8*)sourceAreaInfo.address + current_area_page_offset * B_PAGE_SIZE,
+			pages_to_get * B_PAGE_SIZE, pe_buffer, pages_to_get);
+
 		if (status != B_OK) {
+			TRACE("gtt_map_memory: get_memory_map failed for source_area %" B_PRId32 ": %s\n", source_area, strerror(status));
 			return status;
 		}
+
+		for (size_t i = 0; i < pages_to_get; i++) {
+			status = intel_i915_gtt_insert_pte(devInfo, pte_current_index + i,
+				pe_buffer[i].address, cache_type);
+			if (status != B_OK) {
+				TRACE("gtt_map_memory: Failed to insert PTE at index %lu: %s\n", pte_current_index + i, strerror(status));
+				return status;
+			}
+		}
+		pages_remaining -= pages_to_get;
+		pte_current_index += pages_to_get;
+		current_area_page_offset += pages_to_get;
 	}
 
 	intel_i915_gtt_flush(devInfo);
+	TRACE("GTT mapped %lu pages from area %" B_PRId32 " (offset %lu pages) to GTT offset 0x%lx.\n",
+		num_pages, source_area, area_offset_pages, gtt_offset_bytes);
+
 	return B_OK;
 }
 
@@ -278,7 +314,7 @@ intel_i915_gtt_unmap_memory(intel_i915_device_info* devInfo,
 
 	for (size_t i = 0; i < num_pages; i++) {
 		status_t status = intel_i915_gtt_insert_pte(devInfo, pte_start_index + i,
-			devInfo->scratch_page_phys_addr, GTT_ENTRY_VALID | GTT_PTE_CACHE_UNCACHED_IVB);
+			devInfo->scratch_page_phys_addr, GTT_CACHE_UNCACHED);
 		if (status != B_OK) return status;
 	}
 

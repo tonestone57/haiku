@@ -9,20 +9,18 @@
 #define INTEL_I915_GTT_H
 
 #include <SupportDefs.h>
+#include <OS.h> // For area_id
 
-// Forward declare to avoid circular dependency with intel_i915.c's definition
-// However, intel_i915.c now includes this, so we need the full definition here or a common types header.
-// For now, let's assume intel_i915.c will define it before including gtt.c stuff.
-// A better solution would be a dedicated "intel_i915_types.h".
 struct intel_i915_device_info;
 typedef struct intel_i915_device_info intel_i915_device_info;
 
 
-// GTT Caching modes (example, Gen specific)
-#define GTT_ENTRY_VALID			(1 << 0)
-#define GTT_ENTRY_CACHED_LLC	(1 << 1) // Example for some gens
-#define GTT_ENTRY_CACHED_SNOOP	(1 << 2) // Example for some gens (often combined with LLC)
-#define GTT_ENTRY_UNCACHED		0        // Often means just Valid bit set
+// GTT Caching types for use with intel_i915_gtt_insert_pte
+enum gtt_caching_type {
+	GTT_CACHE_NONE = 0,      // No specific caching bits, might default to OS/PAT0 (often WB)
+	GTT_CACHE_UNCACHED,      // Request Uncached (maps to a PAT index for UC)
+	GTT_CACHE_WRITE_COMBINING // Request Write-Combining (maps to a PAT index for WC)
+};
 
 
 #ifdef __cplusplus
@@ -33,8 +31,12 @@ status_t intel_i915_gtt_init(intel_i915_device_info* devInfo);
 void intel_i915_gtt_cleanup(intel_i915_device_info* devInfo);
 
 status_t intel_i915_gtt_map_memory(intel_i915_device_info* devInfo,
-                                  uint64 physical_address, uint32 gtt_offset_in_bytes,
-                                  size_t num_pages, uint32 caching_mode);
+                                  area_id source_area,
+                                  size_t area_offset_pages,
+                                  uint32 gtt_offset_bytes,
+                                  size_t num_pages,
+                                  enum gtt_caching_type cache_type); // Updated parameter
+
 status_t intel_i915_gtt_unmap_memory(intel_i915_device_info* devInfo,
                                     uint32 gtt_offset_in_bytes, size_t num_pages);
 #ifdef __cplusplus

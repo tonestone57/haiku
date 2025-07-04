@@ -56,11 +56,18 @@ typedef struct intel_i915_device_info {
 	area_id		shared_info_area;
 	intel_i915_shared_info* shared_info;
 
-	phys_addr_t	gtt_table_physical_address;
-	uint32*		gtt_table_virtual_address;
-	uint32		gtt_entries_count;
-	size_t		gtt_aperture_actual_size;
-	uint32      pgtbl_ctl;
+	// GTT specific fields
+	phys_addr_t	gtt_table_physical_address; // Physical address of the GTT page table itself (from HWS_PGA)
+	uint32*		gtt_table_virtual_address;  // Kernel virtual address of the mapped GTT page table
+	area_id     gtt_table_area;             // Area ID for the mapped GTT page table
+	uint32		gtt_entries_count;          // Number of entries in the GTT
+	size_t		gtt_aperture_actual_size;   // Actual graphics aperture size (e.g., 2GB for 512k entries)
+	uint32      pgtbl_ctl;                  // Cached value of PGTBL_CTL register
+
+	area_id     scratch_page_area;          // Area for the GTT scratch page
+	phys_addr_t scratch_page_phys_addr;     // Physical address of the scratch page
+	uint32      scratch_page_gtt_offset;    // GTT offset where scratch page is mapped (in bytes)
+
 
 	struct intel_vbt_data* vbt;
 	area_id     rom_area;
@@ -73,12 +80,11 @@ typedef struct intel_i915_device_info {
 	display_mode current_hw_mode;
 	intel_pipe_state pipes[MAX_PIPES];
 
-	// Framebuffer specific
-	area_id		framebuffer_area;		// Kernel's area_id for the physical framebuffer
-	void*		framebuffer_addr;		// Kernel virtual address (if mapped directly)
-	phys_addr_t	framebuffer_phys_addr;	// Physical address of the framebuffer
-	size_t		framebuffer_alloc_size;	// Allocated size of the framebuffer
-	uint32		framebuffer_gtt_offset;	// Offset in GTT where framebuffer is mapped
+	area_id		framebuffer_area;
+	void*		framebuffer_addr;
+	phys_addr_t	framebuffer_phys_addr;	// Can be a list/array if non-contiguous
+	size_t		framebuffer_alloc_size;
+	uint32		framebuffer_gtt_offset;
 
 	uint32		open_count;
 	int32		irq_line;

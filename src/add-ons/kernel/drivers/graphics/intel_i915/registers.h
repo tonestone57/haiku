@@ -68,36 +68,6 @@
 #define DSPSURF(pipe)			(_PIPE(pipe) + 0x019C)
 #define DSPTILEOFF(pipe)		(_PIPE(pipe) + 0x01A4)
 
-// --- Port Control Registers (Gen7 - IVB/HSW examples) ---
-// Analog CRT Port
-#define ADPA					0x61100		// Analog Display Port A Control
-	#define ADPA_DAC_ENABLE			(1U << 31)
-	#define ADPA_HSYNC_ACTIVE_HIGH	(1U << 4)
-	#define ADPA_VSYNC_ACTIVE_HIGH	(1U << 3)
-	#define ADPA_PIPE_SELECT_SHIFT	29 // Pipe B on IVB/HSW
-	#define ADPA_PIPE_SELECT(pipe)	(((pipe) == PIPE_B ? 1 : 0) << ADPA_PIPE_SELECT_SHIFT) // Simplified
-
-// LVDS Port (if present, often on mobile)
-#define LVDS					0x61180		// LVDS Port Control
-	#define LVDS_PORT_EN			(1U << 31)
-	#define LVDS_PIPE_SELECT_SHIFT	29 // Pipe B on IVB/HSW
-	#define LVDS_PIPE_SELECT(pipe)	(((pipe) == PIPE_B ? 1 : 0) << LVDS_PIPE_SELECT_SHIFT) // Simplified
-	#define LVDS_A0A2_CLKA_POWER_UP (1U << 20) // Example power bit
-
-// Digital Ports (DP/HDMI/DVI via DDI - Display Data Interface on HSW/IVB)
-// DDI A: 0x64000, DDI B: 0x64100, DDI C: 0x64200, DDI D: 0x64300, DDI E: 0x64400 (HSW)
-#define DDI_BUF_CTL(port)		(0x64000 + (port) * 0x100) // port is 0 for DDI_A, 1 for DDI_B etc.
-	#define DDI_BUF_CTL_ENABLE		(1U << 31)
-	#define DDI_PORT_WIDTH_X1		(0 << 1)
-	#define DDI_PORT_WIDTH_X2		(1 << 1)
-	#define DDI_PORT_WIDTH_X4		(3 << 1)
-	// Many more bits for voltage swing, pre-emphasis, DP/HDMI mode selection, etc.
-
-#define DP_TP_CTL(port)			(0x64040 + (port) * 0x100) // DisplayPort Transport Control
-	#define DP_TP_CTL_ENABLE		(1U << 31)
-	#define DP_TP_CTL_LINK_TRAIN_PAT1 (1 << 8)
-	// Many more bits for training patterns, enhanced framing, etc.
-
 // --- Interrupt Registers ---
 #define DEIMR			0x4400c
 #define DEIER			0x44008
@@ -111,6 +81,21 @@
 // GTT Registers
 #define PGTBL_CTL		0x02020
 	#define PGTBL_ENABLE			(1U << 0)
+	// Gen7 GTT PTE bits (Ivy Bridge / Haswell)
+	#define GTT_ENTRY_VALID         (1U << 0)
+	// Bits 1, 2, 3 are used for PAT index selection (or other cache control on older gens)
+	// For simplicity, let's define a common "Write Combining" attribute if PAT is set up for it.
+	// This assumes a PAT index (e.g. PAT1) is configured for WC by BIOS/OS.
+	#define GTT_PTE_CACHE_PAT_WC_IVB (1U << 1) // Example: PAT Index 1 = Write Combining
+	#define GTT_PTE_CACHE_UNCACHED_IVB (2U << 1) // Example: PAT Index 2 = Uncached
+	// Actual PAT index values need to match MSR_IA32_PAT configuration.
+
+#define HWS_PGA			0x02080 // Hardware Status Page Address (points to GTT on Gen6/7)
+#define GTTMMADR_PTE_OFFSET_GEN6   0x80000 // If GTT entries are in MMIO BAR2
+
+	#define I915_GTT_PAGE_SHIFT		12
+	#define I915_GTT_ENTRY_SIZE		4
+
 
 // --- GMBUS Registers ---
 #define GMBUS0				0x5100

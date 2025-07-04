@@ -11,6 +11,8 @@ KernelAddon intel_i915 :
 	edid.c
 	clocks.c
 	display.c
+	gem_object.c
+	gem_ioctl.c
 	# Add other source files here as they are created.
 	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a

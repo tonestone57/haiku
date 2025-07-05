@@ -28,13 +28,22 @@ struct i915_ppgtt {
 	// gen7_ppgtt_pte_t* pt_cpu_maps[GEN7_PPGTT_PD_ENTRIES]; // Optional cached CPU maps for PTs
 
 	// GPU Virtual Address Space Allocator for this PPGTT
-	// This is a placeholder for a more sophisticated VMA manager.
-	// For now, it might not be used if userspace provides GPU VAs.
-	uint64_t vma_next_free_offset; // Simple bump allocator for GPU VAs
 	uint64_t vma_size;             // e.g., 4GB for a 32-bit PPGTT
+	struct list free_vma_list;     // List of i915_ppgtt_vma_node for free ranges
+	struct list allocated_vma_list; // List of i915_ppgtt_vma_node for allocated ranges (optional tracking)
+	// struct mutex vma_lock;      // Consider if ppgtt->lock is sufficient or separate lock needed. For now, use ppgtt->lock.
 
 	// Other PPGTT-specific info, e.g., generation, flags
 };
+
+// Node for managing GPU Virtual Memory Address ranges within a PPGTT
+struct i915_ppgtt_vma_node {
+	list_link link;
+	uint64_t start_addr; // Start of the GPU VA range
+	uint64_t size;       // Size of the GPU VA range in bytes
+	// struct intel_i915_gem_object* obj; // Optional: if tracking which object is in an allocated node
+};
+
 
 // PPGTT lifecycle functions
 status_t i915_ppgtt_create(struct intel_i915_device_info* devInfo, struct i915_ppgtt** ppgtt_out);

@@ -14,6 +14,8 @@
 #include <Debug.h>
 #include <syslog.h> // For syslog in TRACE_HOOKS
 #include <unistd.h> // For ioctl
+#include <stdlib.h> // For malloc/free
+#include <string.h> // For memset
 
 #undef TRACE
 #define TRACE_HOOKS
@@ -22,6 +24,12 @@
 #else
 #	define TRACE(x...)
 #endif
+
+// Define a practical maximum cursor size for buffer allocation.
+// Hardware might support 64x64, 128x128, or 256x256.
+// Using 256x256 as a general upper bound for modern HW.
+#define MAX_CURSOR_DIM 256
+
 
 // General
 static status_t intel_i915_init_accelerant(int fd) { return INIT_ACCELERANT(fd); }
@@ -44,17 +52,17 @@ static status_t intel_i915_get_mode_list(display_mode *dm) {
 	return B_OK;
 }
 static status_t intel_i915_propose_display_mode(display_mode *t, const display_mode *l, const display_mode *h) {
-	// Implementation in accelerant.c
 	return PROPOSE_DISPLAY_MODE(t, l, h);
 }
 static status_t intel_i915_set_display_mode(display_mode *mode_to_set) {
-	// Implementation in accelerant.c - This IOCTL doesn't take pipe directly.
-	// Kernel needs to infer target pipe from device fd or other context.
+	// Kernel must infer target pipe for this IOCTL based on the calling fd's association.
 	return SET_DISPLAY_MODE(mode_to_set);
 }
 static status_t intel_i915_get_display_mode(display_mode *current_mode) {
 	if (!gInfo || !gInfo->shared_info || !current_mode) return B_BAD_VALUE;
-	*current_mode = gInfo->shared_info->current_mode; // Assumes current_mode is for the correct head
+	// This assumes current_mode in shared_info is relevant for this accelerant instance (head).
+	// If shared_info is truly global, kernel would need to populate it per-head or this needs an IOCTL.
+	*current_mode = gInfo->shared_info->current_mode;
 	return B_OK;
 }
 static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fb_config) {
@@ -66,7 +74,7 @@ static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *low,
 static status_t intel_i915_move_display(uint16 h_display_start, uint16 v_display_start) {
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
 	intel_i915_move_display_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.x = h_display_start;
 	args.y = v_display_start;
 	return ioctl(gInfo->device_fd, INTEL_I915_MOVE_DISPLAY_OFFSET, &args, sizeof(args));
@@ -74,7 +82,7 @@ static status_t intel_i915_move_display(uint16 h_display_start, uint16 v_display
 static void intel_i915_set_indexed_colors(uint count, uint8 first, uint8 *color_data, uint32 flags) {
 	if (!gInfo || gInfo->device_fd < 0 || count == 0 || color_data == NULL) return;
 	intel_i915_set_indexed_colors_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.first_color = first;
 	args.count = count;
 	args.user_color_data_ptr = (uint64_t)(uintptr_t)color_data;
@@ -84,7 +92,7 @@ static uint32 intel_i915_dpms_capabilities(void) { return DPMS_CAPABILITIES(); }
 static uint32 intel_i915_dpms_mode(void) {
 	if (!gInfo || gInfo->device_fd < 0) return B_DPMS_ON;
 	intel_i915_get_dpms_mode_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.mode = gInfo->cached_dpms_mode;
 	if (ioctl(gInfo->device_fd, INTEL_I915_GET_DPMS_MODE, &args, sizeof(args)) == 0) {
 		gInfo->cached_dpms_mode = args.mode;
@@ -95,7 +103,7 @@ static uint32 intel_i915_dpms_mode(void) {
 static status_t intel_i915_set_dpms_mode(uint32 dpms_flags) {
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
 	intel_i915_set_dpms_mode_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.mode = dpms_flags;
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DPMS_MODE, &args, sizeof(args));
 	if (status == B_OK) gInfo->cached_dpms_mode = args.mode;
@@ -106,14 +114,55 @@ static status_t intel_i915_get_monitor_info(monitor_info* mi) { return GET_MONIT
 static status_t intel_i915_get_edid_info(void* i, size_t s, uint32* v) { return GET_EDID_INFO(i,s,v); }
 
 // Cursor Management
-static status_t intel_i915_set_cursor_shape(uint16 w, uint16 h, uint16 hx, uint16 hy, uint8 *a, uint8 *x) {
-	return B_UNSUPPORTED; // Monochrome cursors not directly supported by Gen7+ HW
+static status_t intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y, uint8 *andMask, uint8 *xorMask) {
+	TRACE("SET_CURSOR_SHAPE: %ux%u, hot (%u,%u)\n", width, height, hot_x, hot_y);
+	if (!gInfo || gInfo->device_fd < 0) return B_BAD_VALUE;
+	if (width == 0 || height == 0 || width > MAX_CURSOR_DIM || height > MAX_CURSOR_DIM) return B_BAD_VALUE;
+	if (hot_x >= width || hot_y >= height) return B_BAD_VALUE;
+	if (andMask == NULL || xorMask == NULL) return B_BAD_VALUE;
+
+	// Allocate buffer for ARGB32 data
+	size_t argb_size = width * height * 4;
+	uint32* argb_bitmap = (uint32*)malloc(argb_size);
+	if (argb_bitmap == NULL) {
+		TRACE("SET_CURSOR_SHAPE: Failed to allocate ARGB buffer\n");
+		return B_NO_MEMORY;
+	}
+	memset(argb_bitmap, 0, argb_size); // Default to transparent
+
+	int bytes_per_mono_row = (width + 7) / 8;
+
+	for (uint16 y = 0; y < height; y++) {
+		for (uint16 x = 0; x < width; x++) {
+			uint32_t byte_offset = y * bytes_per_mono_row + x / 8;
+			uint8_t bit_mask = 0x80 >> (x % 8);
+
+			bool and_bit = (andMask[byte_offset] & bit_mask) != 0;
+			bool xor_bit = (xorMask[byte_offset] & bit_mask) != 0;
+
+			uint32 argb_pixel = 0x00000000; // Transparent by default
+
+			if (!and_bit && xor_bit) { // AND=0, XOR=1 -> Black
+				argb_pixel = 0xFF000000;
+			} else if (and_bit && xor_bit) { // AND=1, XOR=1 -> White (inverted screen)
+				argb_pixel = 0xFFFFFFFF;
+			}
+			// Cases AND=0,XOR=0 (transparent) and AND=1,XOR=0 (screen/transparent) are handled by default 0x00000000
+
+			argb_bitmap[y * width + x] = argb_pixel;
+		}
+	}
+
+	status_t status = intel_i915_set_cursor_bitmap(width, height, hot_x, hot_y, B_RGBA32, width * 4, (const uint8*)argb_bitmap);
+	free(argb_bitmap);
+	return status;
 }
+
 static void intel_i915_move_cursor(uint16 x, uint16 y) {
 	if (!gInfo || gInfo->device_fd < 0) return;
 	gInfo->cursor_current_x = x; gInfo->cursor_current_y = y;
 	intel_i915_set_cursor_state_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.x = x; args.y = y; args.is_visible = gInfo->cursor_is_visible;
 	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args));
 }
@@ -121,7 +170,7 @@ static void intel_i915_show_cursor(bool is_visible) {
 	if (!gInfo || gInfo->device_fd < 0) return;
 	gInfo->cursor_is_visible = is_visible;
 	intel_i915_set_cursor_state_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.x = gInfo->cursor_current_x; args.y = gInfo->cursor_current_y;
 	args.is_visible = is_visible;
 	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &args, sizeof(args));
@@ -129,12 +178,12 @@ static void intel_i915_show_cursor(bool is_visible) {
 static status_t intel_i915_set_cursor_bitmap(uint16 w, uint16 h, uint16 hx, uint16 hy, color_space cs, uint16 bpr, const uint8 *data) {
 	if (!gInfo || gInfo->device_fd < 0) return B_BAD_VALUE;
 	if (cs!=B_RGBA32 && cs!=B_RGB32) return B_BAD_VALUE;
-	if (w==0||h==0||w>256||h>256) return B_BAD_VALUE;
+	if (w==0||h==0||w>MAX_CURSOR_DIM||h>MAX_CURSOR_DIM) return B_BAD_VALUE; // Use MAX_CURSOR_DIM
 	if (hx>=w||hy>=h) return B_BAD_VALUE;
 	if (bpr!=w*4) return B_BAD_VALUE;
 
 	intel_i915_set_cursor_bitmap_args args;
-	args.pipe = gInfo->target_pipe; // Use target_pipe
+	args.pipe = gInfo->target_pipe;
 	args.width=w; args.height=h; args.hot_x=hx; args.hot_y=hy;
 	args.user_bitmap_ptr=(uint64_t)(uintptr_t)data; args.bitmap_size=w*h*4;
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_BITMAP, &args, sizeof(args));

@@ -222,6 +222,10 @@
 #define MSR_IVB_RP_STATE_CAP	0x0000065E
 #define MSR_HSW_RP_STATE_CAP	0x00138098
 
+// Fuses
+#define FUSE_STRAP_HSW			0xC2014 // Example address, check HSW PRM for exact offset
+	#define HSW_EXTREF_FREQ_100MHZ_BIT (1U << 22) // External Reference Frequency is 100MHz (for SSC)
+
 
 // --- FDI Registers (Ivy Bridge PCH Link) ---
 // FDI_TX_CTL and FDI_RX_CTL are per-pipe (A/B for IVB)

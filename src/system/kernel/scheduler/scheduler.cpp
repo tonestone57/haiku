@@ -58,6 +58,7 @@ float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
 float gSchedulerBaseQuantumMultiplier = 1.0f;
 float gSchedulerAgingThresholdMultiplier = 1.0f;
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+float gSchedulerSMTConflictFactor = 0.5f; // Default to current behavior
 
 
 }	// namespace Scheduler
@@ -917,7 +918,8 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 			siblings.ClearBit(currentCPU->ID());
 			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * 0.5f;
+					// Use the global tunable factor instead of hardcoded 0.5f
+					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
 				}
 			}
 		}

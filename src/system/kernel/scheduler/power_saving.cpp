@@ -21,6 +21,7 @@ using namespace Scheduler;
 
 const bigtime_t kPowerSavingCacheExpire = 100000;
 static CoreEntry* sSmallTaskCore = NULL;
+const int32 kConsolidationScoreHysteresisMargin = kMaxLoad / 10; // Only switch if new core is 10% of MaxLoad better
 
 
 static CoreEntry*
@@ -32,23 +33,36 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 		affinityMask = *affinityMaskPtr;
 	const bool useAffinityMask = !affinityMask.IsEmpty();
 
-	if (sSmallTaskCore != NULL && (!useAffinityMask || sSmallTaskCore->CPUMask().Matches(affinityMask))) {
+	CoreEntry* currentGlobalSTC = sSmallTaskCore; // Capture current global value
+
+	// Check if current sSmallTaskCore is still valid and suitable
+	if (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
 		bool hasEnabledCPU = false;
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (sSmallTaskCore->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
+			if (currentGlobalSTC->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
 				hasEnabledCPU = true;
 				break;
 			}
 		}
-		if (hasEnabledCPU)
-			return sSmallTaskCore;
-		else {
-			atomic_pointer_set(&sSmallTaskCore, (CoreEntry*)NULL);
+		if (!hasEnabledCPU) {
+			// Current STC is no longer valid (CPUs disabled)
+			if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentGlobalSTC) == currentGlobalSTC) {
+				// Successfully nulled it if it was indeed currentGlobalSTC
+				dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated (no enabled CPUs).\n", currentGlobalSTC->ID());
+			}
+			currentGlobalSTC = NULL; // Proceed to find a new one
 		}
+		// If currentGlobalSTC is still valid here, it's a candidate to stick with.
+	} else if (currentGlobalSTC != NULL && useAffinityMask && !currentGlobalSTC->CPUMask().Matches(affinityMask)) {
+		// Current global STC exists but doesn't match affinity for *this call*.
+		// We will still find the best candidate for *this affinity*, but we won't try to overwrite the global STC
+		// unless our candidate is significantly better *and* the global STC is NULL or also being replaced.
+		// For now, this path means currentGlobalSTC is not *our* preferred sticky candidate for this call.
 	}
 
-	CoreEntry* bestCandidate = NULL;
-	int32 bestCandidateScore = -1;
+
+	CoreEntry* bestAffinityCandidate = NULL;
+	int32 bestAffinityCandidateScore = -1;
 
 	for (int32 i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[i];
@@ -66,57 +80,130 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 			continue;
 
 		int32 currentCoreLoad = core->GetLoad();
-		int32 score = kMaxLoad - currentCoreLoad;
+		int32 score = 0;
 
-		if (core->GetActiveTime() > 0 && currentCoreLoad < kHighLoad) {
-			score += kMaxLoad;
-		} else if (core->GetActiveTime() == 0) {
-			score += kMaxLoad / 2;
+		// Refined Scoring (Proposal 2)
+		if (core->GetActiveTime() == 0 && currentCoreLoad == 0) { // Truly idle
+			score = kMaxLoad * 2; // Strongest preference
+		} else if (currentCoreLoad < kLowLoad) { // Very lightly loaded (active or not)
+			score = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - currentCoreLoad); // Higher than just active, rewards lower load
+		} else if (core->GetActiveTime() > 0 && currentCoreLoad < kHighLoad) { // Active and not heavily loaded
+			score = kMaxLoad + (kHighLoad - currentCoreLoad); // Base bonus for being active and light
+		} else { // Busy, or idle but with some residual load reported (less ideal)
+			score = kMaxLoad - currentCoreLoad; // Original base score
 		}
 
-		if (score > bestCandidateScore) {
-			bestCandidateScore = score;
-			bestCandidate = core;
+		// Hysteresis/Stickiness Boost (Proposal 1 part A)
+		// If this core is the current global STC (and matches affinity for this call), give it a boost.
+		if (core == currentGlobalSTC && (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask)))) {
+			score += kConsolidationScoreHysteresisMargin;
+		}
+
+		if (score > bestAffinityCandidateScore) {
+			bestAffinityCandidateScore = score;
+			bestAffinityCandidate = core;
 		}
 	}
 
-	if (bestCandidate != NULL) {
-		CoreEntry* previousSmallTaskCore = atomic_pointer_test_and_set(&sSmallTaskCore, bestCandidate, (CoreEntry*)NULL);
-		if (previousSmallTaskCore == NULL) {
-			dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 "\n", bestCandidate->ID());
-			return bestCandidate;
-		} else {
-			if (!useAffinityMask || previousSmallTaskCore->CPUMask().Matches(affinityMask)) {
-				return previousSmallTaskCore;
+	// Decision logic (Proposal 1 part B & Proposal 3 simplification)
+	if (bestAffinityCandidate == NULL) {
+		// No core matches affinity or no cores enabled.
+		return NULL;
+	}
+
+	// If currentGlobalSTC is still valid for this affinity and is our bestAffinityCandidate, just return it.
+	if (currentGlobalSTC == bestAffinityCandidate && currentGlobalSTC != NULL
+		&& (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
+		return currentGlobalSTC;
+	}
+
+	// If currentGlobalSTC exists, is valid for this affinity, but is NOT our bestAffinityCandidate:
+	// Only switch if bestAffinityCandidate is significantly better.
+	if (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
+		int32 currentGlobalSTCScore = 0; // Recalculate its score without the self-boost for fair comparison
+		int32 load = currentGlobalSTC->GetLoad();
+		if (currentGlobalSTC->GetActiveTime() == 0 && load == 0) { currentGlobalSTCScore = kMaxLoad * 2; }
+		else if (load < kLowLoad) { currentGlobalSTCScore = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - load); }
+		else if (currentGlobalSTC->GetActiveTime() > 0 && load < kHighLoad) { currentGlobalSTCScore = kMaxLoad + (kHighLoad - load); }
+		else { currentGlobalSTCScore = kMaxLoad - load; }
+
+		if (bestAffinityCandidateScore > currentGlobalSTCScore + kConsolidationScoreHysteresisMargin) {
+			// Significantly better, attempt to set globally
+			if (atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC) == currentGlobalSTC) {
+				dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 " (was %" B_PRId32 ")\n", bestAffinityCandidate->ID(), currentGlobalSTC->ID());
+				return bestAffinityCandidate;
 			} else {
-				return bestCandidate;
+				// Race: someone else changed sSmallTaskCore. Return the new global if it matches affinity.
+				CoreEntry* newGlobalSTC = sSmallTaskCore; // Re-read after failed atomic_tas
+				if (newGlobalSTC != NULL && (!useAffinityMask || newGlobalSTC->CPUMask().Matches(affinityMask)))
+					return newGlobalSTC;
+				return bestAffinityCandidate; // Fallback to our best affinity candidate if new global doesn't match
 			}
+		} else {
+			// Not significantly better, stick with currentGlobalSTC for this call
+			return currentGlobalSTC;
+		}
+	} else {
+		// No current valid global STC (either NULL or didn't match affinity for this call), or we are setting it for the first time.
+		// Attempt to set our bestAffinityCandidate as the global one.
+		CoreEntry* previousGlobalValue = atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC);
+			// `currentGlobalSTC` here is what `sSmallTaskCore` was at the start of the function,
+			// or NULL if it was invalidated. This TAS tries to replace that old value.
+
+		if (previousGlobalValue == currentGlobalSTC) { // Successfully set it (or it was already bestAffinityCandidate)
+			if (currentGlobalSTC != bestAffinityCandidate) // Only print if it actually changed or was newly set
+				dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 " (previous was %s%" B_PRId32 ")\n",
+					bestAffinityCandidate->ID(), currentGlobalSTC ? "" : "NULL or affinity mismatch, now ", currentGlobalSTC ? currentGlobalSTC->ID() : -1);
+			return bestAffinityCandidate;
+		} else {
+			// Race: someone else changed sSmallTaskCore between our initial read and the TAS.
+			// Return the new global value if it matches our affinity needs.
+			CoreEntry* newGlobalSTC = sSmallTaskCore; // Re-read after failed atomic_tas
+			if (newGlobalSTC != NULL && (!useAffinityMask || newGlobalSTC->CPUMask().Matches(affinityMask)))
+				return newGlobalSTC;
+			// If the new global STC doesn't match our affinity, we return our best candidate for this call,
+			// but the global STC remains what the other thread set it to.
+			return bestAffinityCandidate;
 		}
 	}
-	return NULL;
 }
 
 static CoreEntry*
 power_saving_get_consolidation_target_core(const ThreadData* threadToPlace)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (sSmallTaskCore != NULL) {
+	CoreEntry* currentSTC = sSmallTaskCore; // Read once
+
+	if (currentSTC != NULL) {
 		CPUSet affinityMask;
 		if (threadToPlace != NULL)
 			affinityMask = threadToPlace->GetCPUMask();
 
-		if (!affinityMask.IsEmpty() && !sSmallTaskCore->CPUMask().Matches(affinityMask))
+		if (!affinityMask.IsEmpty() && !currentSTC->CPUMask().Matches(affinityMask))
 			return NULL;
 
 		bool hasEnabledCPU = false;
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (sSmallTaskCore->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
+			if (currentSTC->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
 				hasEnabledCPU = true;
 				break;
 			}
 		}
-		if (hasEnabledCPU)
-			return sSmallTaskCore;
+		if (!hasEnabledCPU) {
+			// Attempt to clear it if it was indeed this invalid core
+			if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentSTC) == currentSTC) {
+				dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated by get_consolidation_target_core (no enabled CPUs).\n", currentSTC->ID());
+			}
+			return NULL;
+		}
+
+		// Proposal 4: Softer invalidation if load is too high
+		if (currentSTC->GetLoad() > kVeryHighLoad) { // Or kHighLoad, tunable
+			dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " too loaded (%" B_PRId32 "), not using for this placement.\n", currentSTC->ID(), currentSTC->GetLoad());
+			return NULL; // Don't use it if it's currently too busy
+		}
+
+		return currentSTC;
 	}
 	return NULL;
 }

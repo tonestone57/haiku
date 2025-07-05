@@ -17,6 +17,75 @@
 #include <kernel/util/atomic.h>
 #include <kernel/util/list.h> // For list_init_link
 
+#define ALIGN(val, align) (((val) + (align) - 1) & ~((align) - 1))
+
+
+// Calculates hardware stride and total allocated size for a tiled buffer.
+// This is a simplified version and needs generation-specific details from PRMs.
+static status_t
+_calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
+	enum i915_tiling_mode tiling_mode,
+	uint32_t width_px, uint32_t height_px, uint32_t bpp, // bits per pixel
+	uint32_t* stride_out, size_t* total_size_out)
+{
+	if (stride_out == NULL || total_size_out == NULL || bpp == 0 || width_px == 0 || height_px == 0)
+		return B_BAD_VALUE;
+
+	uint32_t bytes_per_pixel = bpp / 8;
+	if (bytes_per_pixel == 0) return B_BAD_VALUE; // Should not happen if bpp > 0
+
+	uint32_t calculated_stride = 0;
+	size_t calculated_total_size = 0;
+	uint32_t gen = INTEL_GRAPHICS_GEN(devInfo->device_id);
+
+	// These are typical values for Gen6/7. May vary for other gens.
+	// X-tile: 512B wide, 8 rows high.
+	// Y-tile: 128B wide, 32 rows high.
+	const uint32_t x_tile_width_bytes = 512;
+	const uint32_t x_tile_height_rows = 8;
+	const uint32_t y_tile_width_bytes = 128;
+	const uint32_t y_tile_height_rows = 32;
+
+	if (tiling_mode == I915_TILING_X) {
+		if (gen >= 6) { // SNB+
+			calculated_stride = ALIGN(width_px * bytes_per_pixel, x_tile_width_bytes);
+			uint32_t aligned_height_rows = ALIGN(height_px, x_tile_height_rows);
+			calculated_total_size = (size_t)calculated_stride * aligned_height_rows;
+		} else {
+			// Older gens might have different X-tile rules or might not support it well.
+			TRACE("X-Tiling not fully defined for Gen %u\n", gen);
+			return B_UNSUPPORTED;
+		}
+	} else if (tiling_mode == I915_TILING_Y) {
+		if (gen >= 6) { // SNB+ (Y-tiling more complex, this is still simplified)
+			// Stride must be multiple of Y-tile width (128B for common Y-tiles)
+			calculated_stride = ALIGN(width_px * bytes_per_pixel, y_tile_width_bytes);
+			// Height must be multiple of Y-tile height (32 rows)
+			uint32_t aligned_height_rows = ALIGN(height_px, y_tile_height_rows);
+			// Total width in bytes for allocation might also need alignment to tile width.
+			// The surface width used for stride might differ from image width if padding is needed.
+			// This simplified calculation uses the stride based on aligned image width.
+			calculated_total_size = (size_t)calculated_stride * aligned_height_rows;
+
+			// Y-tiling on some gens (e.g. Gen7 for display) might have max stride limits for fences.
+			// This is not handled here yet.
+		} else {
+			TRACE("Y-Tiling not fully defined for Gen %u\n", gen);
+			return B_UNSUPPORTED;
+		}
+	} else {
+		return B_BAD_VALUE; // Should not be called for I915_TILING_NONE
+	}
+
+	if (calculated_stride == 0 || calculated_total_size == 0)
+		return B_ERROR; // Calculation failed
+
+	*stride_out = calculated_stride;
+	*total_size_out = ALIGN(calculated_total_size, B_PAGE_SIZE); // Ensure final size is page aligned
+
+	return B_OK;
+}
+
 
 static void
 _intel_i915_gem_object_free_internal(struct intel_i915_gem_object* obj)
@@ -251,24 +320,48 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 	list_init_link(&obj->lru_link);
 
 
-	// Placeholder for stride calculation and size adjustment for tiling
-	// A real implementation needs bpp, specific tiling geometry, and GPU generation.
-	// For now, assume stride is passed or determined by framebuffer setup for simplicity,
-	// or calculated based on width (if known) and tiling.
-	// If this object is a framebuffer, its stride is critical.
-	// For generic BOs, stride might be less critical until mapped for specific HW use.
-	// Let's assume for now that for tiled buffers, the requested 'size' might be
-	// width*height*bpp and stride calculation might adjust 'allocated_size'.
-	// This is a simplification.
-	obj->stride = 0; // Will be set later if needed, e.g. by display driver for FB
+	// Stride and size calculation
+	obj->stride = 0; // Default for non-tiled or if calculation fails
 	if (obj->tiling_mode != I915_TILING_NONE) {
-		// Example: X-tiling often aligns stride to 512 bytes for certain configurations.
-		// Y-tiling has different constraints.
-		// obj->stride = ALIGN(requested_width * bpp, 512);
-		// obj->allocated_size = ALIGN(obj->stride * requested_height, PAGE_SIZE);
-		// For this step, we'll just note that 'allocated_size' might need adjustment.
-		// The 'size' parameter to create_area should use the adjusted size.
-		TRACE("GEM: Object requested with tiling mode %d. Stride/size adjustment logic is placeholder.\n", obj->tiling_mode);
+		// CRITICAL ASSUMPTION: For this to work, 'width_px', 'height_px', and 'bpp'
+		// must be available to intel_i915_gem_object_create.
+		// This likely requires changing intel_i915_gem_create_args IOCTL structure.
+		// For now, using placeholder values if these are not passed.
+		// This is a MAJOR simplification point.
+		uint32_t temp_width_px = 1024; // Placeholder - MUST BECOME A PARAMETER
+		uint32_t temp_height_px = 768; // Placeholder - MUST BECOME A PARAMETER
+		uint32_t temp_bpp = 32;      // Placeholder - MUST BECOME A PARAMETER
+
+		// If 'size' was originally width*height*bpp/8, we could try to infer,
+		// but width/height/bpp are needed separately for correct tiling.
+		// Example: if size = 1024*768*4, and we assume 32bpp, width=1024, height=768.
+
+		size_t original_requested_size = size; // Keep the original requested size for reference if needed
+
+		status = _calculate_tile_stride_and_size(devInfo, obj->tiling_mode,
+			temp_width_px, temp_height_px, temp_bpp,
+			&obj->stride, &obj->allocated_size);
+
+		if (status != B_OK) {
+			TRACE("GEM: Failed to calculate stride/size for tiled object. Reverting to linear.\n");
+			obj->tiling_mode = I915_TILING_NONE;
+			obj->stride = ALIGN(temp_width_px * (temp_bpp / 8), 64); // Basic linear stride alignment
+			obj->allocated_size = ALIGN(obj->stride * temp_height_px, B_PAGE_SIZE);
+			if (obj->allocated_size < original_requested_size) obj->allocated_size = ALIGN(original_requested_size, B_PAGE_SIZE);
+
+		} else {
+			TRACE("GEM: Tiled object: mode %d, calculated stride %u, alloc_size %lu\n",
+				obj->tiling_mode, obj->stride, obj->allocated_size);
+			// Ensure allocated_size is page aligned (already done by _calculate_tile_stride_and_size)
+			// And ensure 'size' used for area creation is this new allocated_size
+			size = obj->allocated_size; // THIS IS KEY: update 'size' for create_area
+		}
+	} else {
+		// Linear buffer: Stride is typically width * bpp/8, page align size.
+		// If width/bpp known: obj->stride = ALIGN(temp_width_px * (temp_bpp / 8), 64);
+		// For now, if linear, stride might be set by display driver for framebuffer.
+		// obj->allocated_size is already 'size' which is page-aligned earlier.
+		// For generic linear BOs, stride isn't as critical until used as a 2D surface.
 	}
 
 
@@ -411,48 +504,113 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 		if (obj->tiling_mode != I915_TILING_NONE && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
 			obj->fence_reg_id = intel_i915_fence_alloc(devInfo);
 			if (obj->fence_reg_id != -1) {
-				// Program the hardware fence register
-				// This is highly generation-specific. Using conceptual SNB+ register format.
-				uint32_t fence_reg_low_val = FENCE_VALID;
-				uint32_t fence_reg_high_val = (obj->gtt_offset_pages * B_PAGE_SIZE) >> 12; // GTT Addr [31:12]
+				uint32_t fence_reg_addr_low = FENCE_REG_SANDYBRIDGE(obj->fence_reg_id);
+				uint32_t fence_reg_addr_high = fence_reg_addr_low + 4;
 
-				// Stride for fence is typically in units of 128 bytes.
-				// Object stride must be pre-calculated and stored in obj->stride.
-				// For this step, assume obj->stride is correctly populated if tiled.
+				uint64_t fence_value = 0;
+				uint32_t val_low = 0, val_high = 0;
+
+				// Start Address (GTT page Aligned)
+				val_high = (obj->gtt_offset_pages * B_PAGE_SIZE) >> 12; // Bits [31:12] of GTT address
+
+				// Pitch (Stride)
 				if (obj->stride == 0 && obj->tiling_mode != I915_TILING_NONE) {
-					// Fallback/Error: stride wasn't set for a tiled buffer.
-					// This should ideally be calculated during object creation based on width/bpp.
-					// For now, attempt a linear stride for safety, though it won't be correct for tiling.
-					// A proper solution needs width/height/bpp at object creation.
-					// obj->stride = obj->num_phys_pages > 0 ? B_PAGE_SIZE : SOME_DEFAULT_WIDTH * BPP; // Placeholder
-					TRACE("GEM: Warning - Tiled object %p has no stride for fence programming. Using placeholder.\n", obj);
-					// For now, we won't program pitch if stride is 0, fence might be mostly useless.
+					TRACE("GEM: ERROR - Tiled object %p has zero stride for fence programming!\n", obj);
+					// Cannot program fence correctly, free it and mark object as not having a fence.
+					intel_i915_fence_free(devInfo, obj->fence_reg_id);
+					obj->fence_reg_id = -1;
+					// Continue, but object will effectively be linear to GPU if no valid fence covers it.
 				} else if (obj->stride > 0) {
-					fence_reg_low_val |= ((obj->stride / 128) << FENCE_PITCH_SHIFT) & FENCE_PITCH_MASK;
+					uint32_t pitch_val_tiles;
+					if (obj->tiling_mode == I915_TILING_Y) {
+						if ((obj->stride % 128) != 0) TRACE("GEM: Warning - Y-Tile stride %u not multiple of 128\n", obj->stride);
+						pitch_val_tiles = obj->stride / 128;
+					} else { // I915_TILING_X
+						if ((obj->stride % 512) != 0) TRACE("GEM: Warning - X-Tile stride %u not multiple of 512\n", obj->stride);
+						pitch_val_tiles = obj->stride / 512;
+					}
+					if (pitch_val_tiles > 0) {
+						// FENCE_PITCH_IN_TILES_MINUS_1 is bits [27:16] in FENCE_REG_LO
+						val_low |= ((pitch_val_tiles - 1) & 0xFFF) << 16;
+					} else {
+						TRACE("GEM: ERROR - Calculated tile pitch is 0 for stride %u\n", obj->stride);
+						intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
+					}
 				}
 
+				if (obj->fence_reg_id != -1) { // Recheck if stride error occurred
+					// Tiling Format (Bit 2 of FENCE_REG_LO for Y on SNB+)
+					if (obj->tiling_mode == I915_TILING_Y) {
+						val_low |= FENCE_TILING_FORMAT_Y; // Bit 2 for SNB+ Y-Tile
 
-				if (obj->tiling_mode == I915_TILING_Y) {
-					fence_reg_low_val |= FENCE_TILING_Y_SANDYBRIDGE; // Conceptual Y-tile bit
-					// Y-tiles also need width/height in tiles programmed, complex.
-					// This part is heavily simplified.
-				} else { // I915_TILING_X
-					// X-tile bit might be 0 or a different bit depending on exact HW.
-					// fence_reg_low_val |= FENCE_TILING_X_SANDYBRIDGE; // Conceptual X-tile bit
+						// Y-Tile specific: Max Width and Height in tiles
+						// These require width_px, height_px, bpp from object creation.
+						// Assuming they are available or object stores them (obj->width_px, obj->height_px, obj->bpp).
+						// This is a MAJOR placeholder.
+						uint32_t temp_width_px = 1024;  // Placeholder - obj should store its dimensions
+						uint32_t temp_height_px = 768; // Placeholder
+						uint32_t temp_bpp = 32;        // Placeholder
+
+						uint32_t bytes_per_pixel = temp_bpp / 8;
+						if (bytes_per_pixel > 0) {
+							uint32_t width_in_y_tiles = ALIGN(temp_width_px * bytes_per_pixel, 128) / 128;
+							uint32_t height_in_y_tiles = ALIGN(temp_height_px, 32) / 32;
+
+							if (width_in_y_tiles > 0 && height_in_y_tiles > 0) {
+								// FENCE_MAX_WIDTH_IN_TILES_MINUS_1 [31:28]
+								val_low |= ((width_in_y_tiles - 1) & 0xF) << 28;
+								// FENCE_MAX_HEIGHT_IN_TILES_MINUS_1 [11:3]
+								val_low |= ((height_in_y_tiles - 1) & 0x1FF) << 3;
+							} else {
+								TRACE("GEM: ERROR - Y-Tile width/height in tiles is 0.\n");
+								intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
+							}
+						}
+					} else { // I915_TILING_X
+						// X-Tile format bit is 0 for FENCE_TILING_FORMAT_Y field.
+						// Size for X-tiles is often implicit or handled differently (e.g. covering up to next fence).
+						// The Height/Width fields in LO DWord are for Y-tiles.
+						// For X-tiles, some gens might use part of HI dword for size, or LO dword bits [11:3].
+						// This part is simplified: assuming X-tile size is implicitly managed by GPU accesses
+						// within the GTT range up to where the object is mapped.
+					}
 				}
 
-				// Size/End Address for fence (also very simplified)
-				// For X-tile, it's often total size. For Y-tile, height in tiles.
-				// uint32_t fence_size_val = obj->num_phys_pages; // Example: size in pages
-				// This would be encoded into fence_reg_high_val or fence_reg_low_val depending on GEN.
+				if (obj->fence_reg_id != -1) { // Recheck after Y-tile specific calcs
+					val_low |= FENCE_VALID; // Enable the fence
 
-				status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
-				if (fw_status == B_OK) {
-					intel_i915_write32(devInfo, FENCE_REG_INDEX(obj->fence_reg_id) + 4, fence_reg_high_val); // High DWORD
-					intel_i915_write32(devInfo, FENCE_REG_INDEX(obj->fence_reg_id), fence_reg_low_val);      // Low DWORD (enables)
-					intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-					TRACE("GEM: Object %p (tiled %d) mapped to GTT offset %u, using fence %d. Stride %u.\n",
-						obj, obj->tiling_mode, gtt_page_offset, obj->fence_reg_id, obj->stride);
+					status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+					if (fw_status == B_OK) {
+						intel_i915_write32(devInfo, fence_reg_addr_high, val_high);
+						intel_i915_write32(devInfo, fence_reg_addr_low, val_low);
+						intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+						TRACE("GEM: Obj %p (tiled %d) GTT@%upgs, Fence %d. Stride %u. HW Low:0x%x High:0x%x\n",
+							obj, obj->tiling_mode, gtt_page_offset, obj->fence_reg_id, obj->stride, val_low, val_high);
+
+						mutex_lock(&devInfo->fence_allocator_lock);
+						devInfo->fence_state[obj->fence_reg_id].gtt_offset_pages = obj->gtt_offset_pages;
+						devInfo->fence_state[obj->fence_reg_id].obj_num_pages = obj->num_phys_pages;
+						devInfo->fence_state[obj->fence_reg_id].tiling_mode = obj->tiling_mode;
+						devInfo->fence_state[obj->fence_reg_id].obj_stride = obj->stride;
+						mutex_unlock(&devInfo->fence_allocator_lock);
+					} else {
+						TRACE("GEM: Failed to get forcewake for programming fence %d for obj %p.\n", obj->fence_reg_id, obj);
+						intel_i915_fence_free(devInfo, obj->fence_reg_id);
+						obj->fence_reg_id = -1;
+					}
+				}
+			} else {
+				TRACE("GEM: Failed to allocate fence for tiled object %p (tiled %d) at GTT offset %u.\n",
+					obj, obj->tiling_mode, gtt_page_offset);
+			}
+		} else { // Not tiled or Gen9+
+			obj->fence_reg_id = -1; // Ensure no fence for linear or Gen9+
+			TRACE("GEM: Object %p (linear or Gen9+) mapped to GTT at page offset %u.\n", obj, gtt_page_offset);
+		}
+	} else {
+		TRACE("GEM: Failed to map object %p to GTT: %s\n", obj, strerror(status));
+	}
+	return status;
 
 					// Update devInfo fence_state
 					mutex_lock(&devInfo->fence_allocator_lock);

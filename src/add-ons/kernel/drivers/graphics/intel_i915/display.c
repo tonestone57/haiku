@@ -17,7 +17,8 @@
 #include "forcewake.h"
 #include "intel_lvds.h"
 #include "intel_ddi.h"
-#include "gem_object.h" // For cursor BO
+#include "intel_analog.h" // Added for analog port stubs
+#include "gem_object.h"   // For cursor BO
 
 #include <KernelExport.h>
 #include <string.h>
@@ -213,7 +214,7 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	}
 	devInfo->shared_info->preferred_mode_suggestion = devInfo->preferred_mode_suggestion;
 
-	if (devInfo->num_ports_detected > 0 && devInfo->ports[0].edid_valid) { // This assumes port 0 is always the one to report EDID for.
+	if (devInfo->num_ports_detected > 0 && devInfo->ports[0].edid_valid) {
 		memcpy(devInfo->shared_info->primary_edid_block, devInfo->ports[0].edid_data, EDID_BLOCK_SIZE);
 		devInfo->shared_info->primary_edid_valid = true;
 	}
@@ -329,10 +330,26 @@ intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo,
 		return B_BAD_INDEX;
 	}
 
-	if (devInfo->pch_type == PCH_LPT /* && port_is_sde_driven_by_trans(devInfo, trans) */ ) {
-		TRACE("ConfigureTranscoderPipe: LPT PCH (type %d). Transcoder %d. SDE specific TRANSCONF needed.\n",
+	// TODO: PCH Integration: If 'trans' refers to a PCH-based transcoder (e.g., SDE on LPT PCH),
+	// the base register for TRANSCONF might be different, or specific bits might change.
+	// This requires VBT parsing to identify if a port's source_transcoder is a PCH one,
+	// and then using devInfo->pch_type to select the correct register base or bit definitions.
+	// Example:
+	// intel_output_port_state* port = intel_display_get_port_for_transcoder(devInfo, trans); // Helper needed
+	// if (port && port->is_pch_port) { // Assuming VBT sets is_pch_port
+	//     if (devInfo->pch_type == PCH_LPT) {
+	//         transconf_reg = SDE_TRANSCONF_LPT(trans); // Hypothetical SDE register
+	//         // Apply LPT-specific SDE_TRANSCONF bits for pipe select, BPC, interlace
+	//         TRACE("ConfigureTranscoderPipe: LPT PCH SDE Transcoder %d specific path using reg 0x%x.\n", trans, transconf_reg);
+	//     } else if (devInfo->pch_type == PCH_CPT) {
+	//         // CPT PCH might use CPU-like TRANSCONF for its PCH-driven ports, or have minor differences.
+	//     }
+	// }
+	if (devInfo->pch_type == PCH_LPT && (trans == PRIV_TRANSCODER_A || trans == PRIV_TRANSCODER_B)) {
+		TRACE("ConfigureTranscoderPipe: LPT PCH (type %d). Transcoder %d. SDE specific TRANSCONF logic would be needed here.\n",
 			devInfo->pch_type, trans);
 	}
+
 
 	if (IS_IVYBRIDGE(devInfo->device_id) || IS_HASWELL(devInfo->device_id)) {
 		transconf_val &= ~TRANSCONF_PIPE_SEL_MASK_IVB;
@@ -380,7 +397,8 @@ intel_i915_configure_primary_plane(intel_i915_device_info* devInfo,
 	dspcntr_val &= ~(DISPPLANE_FORMAT_MASK | DISPPLANE_TILED | DISPPLANE_STEREO_ENABLE);
 	dspcntr_val |= get_dspcntr_format_bits(cspace);
 	dspcntr_val |= DISPPLANE_GAMMA_ENABLE;
-	// TODO: Tiling based on framebuffer_bo->tiling_mode
+	// TODO: Tiling based on framebuffer_bo->tiling_mode (needs GEM object info here)
+	// if (framebuffer_bo_is_tiled) dspcntr_val |= DISPPLANE_TILED;
 
 	intel_i915_write32(devInfo, DSPSURF(pipe), gtt_offset_bytes);
 
@@ -403,7 +421,7 @@ status_t
 intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	const display_mode* mode, const intel_clock_params_t* clocks)
 {
-	if (devInfo == NULL || mode == NULL) return B_BAD_VALUE;
+	if (devInfo == NULL || mode == NULL) return B_BAD_VALUE; // clocks can be NULL if not changing BPC
 	if (pipe == PRIV_PIPE_INVALID || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
 
 	uint32_t pipeconf_val = intel_i915_read32(devInfo, PIPECONF_REG(pipe));
@@ -449,23 +467,27 @@ intel_i915_pipe_disable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
 	if (devInfo == NULL) return B_BAD_VALUE;
 	if (pipe == PRIV_PIPE_INVALID || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
 
-	uint32_t pipeconf_val = intel_i915_read32(devInfo, PIPECONF_REG(pipe));
+	uint32_t pipeconf_reg = PIPECONF_REG(pipe);
+	// TODO: PCH/SDE specific PIPECONF register if applicable
+	// if (devInfo->pch_type == PCH_LPT && is_sde_pipe(pipe)) { pipeconf_reg = SDE_PIPECONF_LPT(pipe); }
+
+	uint32_t pipeconf_val = intel_i915_read32(devInfo, pipeconf_reg);
 	pipeconf_val &= ~PIPECONF_ENABLE;
-	intel_i915_write32(devInfo, PIPECONF_REG(pipe), pipeconf_val);
-	(void)intel_i915_read32(devInfo, PIPECONF_REG(pipe));
+	intel_i915_write32(devInfo, pipeconf_reg, pipeconf_val);
+	(void)intel_i915_read32(devInfo, pipeconf_reg);
 	snooze(1000);
 
 	bigtime_t startTime = system_time();
 	while (system_time() - startTime < 50000) {
-		if (!(intel_i915_read32(devInfo, PIPECONF_REG(pipe)) & PIPECONF_STATE_ENABLE)) {
-			TRACE("Pipe %d disabled. PIPECONF=0x%08lx\n", pipe, intel_i915_read32(devInfo, PIPECONF_REG(pipe)));
+		if (!(intel_i915_read32(devInfo, pipeconf_reg) & PIPECONF_STATE_ENABLE)) {
+			TRACE("Pipe %d disabled. PIPECONF=0x%08lx\n", pipe, intel_i915_read32(devInfo, pipeconf_reg));
 			devInfo->pipes[pipe].enabled = false;
 			memset(&devInfo->pipes[pipe].current_mode, 0, sizeof(display_mode));
 			return B_OK;
 		}
 		snooze(100);
 	}
-	TRACE("Pipe %d disable TIMEOUT! PIPECONF=0x%08lx\n", pipe, intel_i915_read32(devInfo, PIPECONF_REG(pipe)));
+	TRACE("Pipe %d disable TIMEOUT! PIPECONF=0x%08lx\n", pipe, intel_i915_read32(devInfo, pipeconf_reg));
 	devInfo->pipes[pipe].enabled = false;
 	memset(&devInfo->pipes[pipe].current_mode, 0, sizeof(display_mode));
 	return B_TIMED_OUT;
@@ -477,14 +499,17 @@ intel_i915_plane_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	if (devInfo == NULL) return B_BAD_VALUE;
 	if (pipe == PRIV_PIPE_INVALID || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
 
-	uint32_t dspcntr_val = intel_i915_read32(devInfo, DSPCNTR(pipe));
+	uint32_t dspcntr_reg = DSPCNTR(pipe);
+	// TODO: PCH/SDE specific DSPCNTR register if applicable
+
+	uint32_t dspcntr_val = intel_i915_read32(devInfo, dspcntr_reg);
 	if (enable) {
 		dspcntr_val |= DISPPLANE_ENABLE;
 	} else {
 		dspcntr_val &= ~DISPPLANE_ENABLE;
 	}
-	intel_i915_write32(devInfo, DSPCNTR(pipe), dspcntr_val);
-	(void)intel_i915_read32(devInfo, DSPCNTR(pipe));
+	intel_i915_write32(devInfo, dspcntr_reg, dspcntr_val);
+	(void)intel_i915_read32(devInfo, dspcntr_reg);
 	TRACE("Plane (Pipe %d) %s. DSPCNTR=0x%08lx\n", pipe, enable ? "enabled" : "disabled", dspcntr_val);
 	return B_OK;
 }
@@ -508,8 +533,7 @@ intel_i915_port_enable(intel_i915_device_info* devInfo, enum intel_port_id_priv 
 		case PRIV_OUTPUT_DVI:
 			return intel_ddi_port_enable(devInfo, port, pipe, mode);
 		case PRIV_OUTPUT_ANALOG:
-			TRACE("PortEnable: Analog port enable STUBBED for port %d\n", portId);
-			return B_OK;
+			return intel_analog_port_enable(devInfo, port, pipe, mode);
 		default:
 			TRACE("PortEnable: Unsupported port type %d for port %d\n", port->type, portId);
 			return B_UNSUPPORTED;
@@ -536,7 +560,7 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 			intel_ddi_port_disable(devInfo, port);
 			return B_OK;
 		case PRIV_OUTPUT_ANALOG:
-			TRACE("PortDisable: Analog port disable STUBBED for port %d\n", portId);
+			intel_analog_port_disable(devInfo, port);
 			return B_OK;
 		default:
 			TRACE("PortDisable: Unsupported port type %d for port %d\n", port->type, portId);
@@ -965,27 +989,1039 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 	return B_OK;
 }
 
+// Kernel-side implementation for INTEL_I915_IOCTL_SET_CURSOR_BITMAP
 status_t
-intel_i915_set_cursor_bitmap_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+intel_i915_set_cursor_bitmap_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_bitmap_args* args)
 {
-	/* ... (check args) ... */
-	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
-	if (fw_status != B_OK) return fw_status;
-	/* ... (main logic) ... */
-// exit_no_fw_put: // This label was causing issues, ensure fw is put before returning.
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+	// Max cursor size for Gen7+ is often 256x256. Smallest is 64x64.
+	// Let's allocate for max and allow smaller bitmaps.
+	if (args->width == 0 || args->height == 0 || args->width > MAX_CURSOR_SIZE || args->height > MAX_CURSOR_SIZE)
+		return B_BAD_VALUE;
+	if (args->bitmap_size != args->width * args->height * 4) // Expecting ARGB32
+		return B_BAD_VALUE;
+	if (args->user_bitmap_ptr == 0)
+		return B_BAD_ADDRESS;
+
+	status_t status = B_OK;
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	size_t requiredBoSize = MAX_CURSOR_SIZE * MAX_CURSOR_SIZE * 4; // Allocate for largest possible
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
+
+	// 1. Allocate/Re-allocate Cursor Buffer Object (BO) if needed
+	if (devInfo->cursor_bo[pipe] == NULL || devInfo->cursor_bo[pipe]->size < requiredBoSize) {
+		if (devInfo->cursor_bo[pipe] != NULL) {
+			// Unmap and free old GTT space if it was mapped
+			if (devInfo->cursor_bo[pipe]->gtt_mapped) {
+				intel_i915_gem_object_unmap_gtt(devInfo->cursor_bo[pipe]);
+				intel_i915_gtt_free_space(devInfo, devInfo->cursor_bo[pipe]->gtt_offset_pages,
+					devInfo->cursor_bo[pipe]->num_phys_pages);
+			}
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+		}
+
+		status = intel_i915_gem_object_create(devInfo, requiredBoSize,
+			I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &devInfo->cursor_bo[pipe]);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to create cursor BO: %s\n", strerror(status));
+			goto exit_no_fw_put; // Changed from exit_put_fw to avoid double put
+		}
+
+		uint32_t gtt_page_offset;
+		status = intel_i915_gtt_alloc_space(devInfo, devInfo->cursor_bo[pipe]->num_phys_pages, &gtt_page_offset);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to alloc GTT for cursor BO: %s\n", strerror(status));
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_no_fw_put;
+		}
+		status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[pipe], gtt_page_offset, GTT_CACHE_UNCACHED);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
+			intel_i915_gtt_free_space(devInfo, gtt_page_offset, devInfo->cursor_bo[pipe]->num_phys_pages);
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_no_fw_put;
+		}
+		devInfo->cursor_gtt_offset_pages[pipe] = gtt_page_offset; // Store page offset
+		TRACE("SetCursorBitmap: Cursor BO created/mapped for pipe %d at GTT page offset %u\n", pipe, gtt_page_offset);
+	}
+
+	// 2. Copy bitmap data from userland to the BO
+	void* bo_cpu_addr;
+	status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[pipe], &bo_cpu_addr);
+	if (status != B_OK || bo_cpu_addr == NULL) {
+		TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
+		// BO is still valid and GTT mapped, but we can't write to it.
+		// This is a problem. For now, we won't free it, subsequent calls might succeed.
+		status = (status == B_OK) ? B_ERROR : status;
+		goto exit_no_fw_put;
+	}
+	// Clear the relevant part of the BO first, especially if new bitmap is smaller than BO size
+	// or if only a sub-region of a max-sized BO is used for smaller cursors.
+	// For simplicity, if using a fixed-size BO (e.g. 256x256), clear only the args->width * args->height portion.
+	// If the BO is always sized to max, clearing only the active part is fine.
+	memset(bo_cpu_addr, 0, args->width * args->height * 4); // Clear the region we are about to write to.
+	                                                        // This is important if the new cursor is smaller than previous.
+	if (copy_from_user(bo_cpu_addr, (void*)args->user_bitmap_ptr, args->bitmap_size) != B_OK) {
+		TRACE("SetCursorBitmap: copy_from_user failed for bitmap data.\n");
+		status = B_BAD_ADDRESS;
+		// No need to unmap_cpu for area-backed BOs like this.
+		goto exit_no_fw_put;
+	}
+	// No need to unmap_cpu for area-backed BOs.
+
+	// 3. Program CURSOR_BASE register
+	intel_i915_write32(devInfo, CURSOR_BASE(pipe), devInfo->cursor_bo[pipe]->gtt_offset_pages * B_PAGE_SIZE);
+
+	// 4. Update software state
+	devInfo->cursor_width[pipe] = args->width;
+	devInfo->cursor_height[pipe] = args->height;
+	devInfo->cursor_hot_x[pipe] = args->hot_x;
+	devInfo->cursor_hot_y[pipe] = args->hot_y;
+
+	if (args->width <= 64 && args->height <= 64) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_64;
+	else if (args->width <= 128 && args->height <= 128) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_128;
+	else if (args->width <= 256 && args->height <= 256) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_256;
+	else {
+		TRACE("SetCursorBitmap: Invalid cursor dimensions %ux%u after checks.\n", args->width, args->height);
+		status = B_BAD_VALUE; // Should have been caught earlier
+		goto exit_no_fw_put;
+	}
+	TRACE("SetCursorBitmap: Pipe %d cursor bitmap updated. Format: 0x%lx\n", pipe, devInfo->cursor_format[pipe]);
+
+	// 5. Apply current state (visibility, position) with new bitmap format/base
+	// This is done by calling the state ioctl's kernel part.
+	intel_i915_set_cursor_state_args state_args;
+	state_args.pipe = pipe;
+	state_args.is_visible = devInfo->cursor_visible[pipe];
+	state_args.x = devInfo->cursor_x[pipe];
+	state_args.y = devInfo->cursor_y[pipe];
+	// The set_cursor_state_ioctl_kern will use the new format and base address.
+	// No need to release/re-acquire forcewake if this call also expects it to be held.
+	// For now, assume set_cursor_state_ioctl_kern handles its own FW if needed,
+	// or that this current FW hold is sufficient.
+	// To be safe, let's make it handle its own.
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Release before calling another that might take it
+	status = intel_i915_set_cursor_state_ioctl_kern(devInfo, &state_args); // This will re-acquire FW
+	// Re-acquire for the final put if we are not returning immediately.
+	// However, since this is the end of the function, we can just let the final put handle it.
+	// If status from set_cursor_state_ioctl_kern is an error, it will be returned.
+	// If it's B_OK, the original status (from bitmap copy etc.) will be returned.
+	// This is a bit awkward. Let's simplify: set_cursor_state_ioctl_kern should assume FW is held.
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Matched with get at start of function
+	// No, the set_cursor_state_ioctl_kern will program registers, it needs FW.
+	// The current FW hold IS for this function.
+	// Let's call set_cursor_state_ioctl_kern directly assuming it will use the current FW.
+
+	status_t state_status = intel_i915_set_cursor_state_ioctl_kern(devInfo, &state_args);
+	if (state_status != B_OK) {
+		TRACE("SetCursorBitmap: Failed to re-apply cursor state: %s\n", strerror(state_status));
+		// If applying state failed, the original status of bitmap upload is still relevant.
+		// However, a failure here means cursor might not show correctly.
+		// For simplicity, if bitmap upload was OK, but state apply failed, return state_status.
+		if (status == B_OK) status = state_status;
+	}
+
+exit_no_fw_put: // Label used for error paths before FW is released
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	return status; // status should be set by main logic
+	return status;
 }
 
+
 status_t
-intel_i915_set_cursor_state_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+intel_i915_set_cursor_state_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_state_args* args)
 {
-	/* ... (check args) ... */
-	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
-	if (fw_status != B_OK) return fw_status;
-	/* ... (main logic) ... */
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	status_t status = B_OK;
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
+
+	uint32_t curcntr_reg = CURSOR_CONTROL(pipe);
+	uint32_t curpos_reg = CURSOR_POSITION(pipe);
+	// CURSOR_BASE is set by bitmap ioctl
+
+	uint32_t curcntr_val = intel_i915_read32(devInfo, curcntr_reg);
+	curcntr_val &= ~CURSOR_MODE_MASK; // Clear old mode
+
+	if (args->is_visible) {
+		if (devInfo->cursor_bo[pipe] == NULL) { // No bitmap set yet
+			TRACE("SetCursorState: Visible requested for pipe %d but no bitmap set.\n", pipe);
+			curcntr_val |= CURSOR_FORMAT_DISABLED; // Keep it disabled
+		} else {
+			curcntr_val |= devInfo->cursor_format[pipe]; // Use format set by bitmap upload
+			// Example: CURSOR_FORMAT_ARGB_64
+			// Add extended mode for > 64x64 if necessary (e.g. CURSOR_EXTENDED_MODE on some gens)
+			// This depends on the specific generation's CURSOR_CONTROL bits.
+			// For Gen7, mode itself implies size.
+		}
+	} else {
+		curcntr_val |= CURSOR_FORMAT_DISABLED;
+	}
+
+	// TODO: Add Gen-specific bits if needed (e.g., CURSOR_GAMMA_ENABLE on some)
+	intel_i915_write32(devInfo, curcntr_reg, curcntr_val);
+
+	if (args->is_visible) {
+		uint32_t curpos_val = 0;
+		int16_t x = args->x - devInfo->cursor_hot_x[pipe];
+		int16_t y = args->y - devInfo->cursor_hot_y[pipe];
+
+		if (x < 0) {
+			curpos_val |= CURSOR_POS_X_SIGN;
+			x = -x;
+		}
+		if (y < 0) {
+			curpos_val |= CURSOR_POS_Y_SIGN;
+			y = -y;
+		}
+		curpos_val |= (x & CURSOR_POS_X_MASK);
+		curpos_val |= ((y & CURSOR_POS_Y_MASK) << 16); // Y position is in high word for CURAPOS
+		intel_i915_write32(devInfo, curpos_reg, curpos_val);
+	}
+
+	// Update software state
+	devInfo->cursor_visible[pipe] = args->is_visible && (devInfo->cursor_bo[pipe] != NULL);
+	devInfo->cursor_x[pipe] = args->x;
+	devInfo->cursor_y[pipe] = args->y;
+
+	TRACE("SetCursorState (Pipe %d): Visible: %d, X: %d, Y: %d. CURSOR_CONTROL=0x%08lx, CURSOR_POS=0x%08lx\n",
+		pipe, devInfo->cursor_visible[pipe], devInfo->cursor_x[pipe], devInfo->cursor_y[pipe],
+		intel_i915_read32(devInfo, curcntr_reg), intel_i915_read32(devInfo, curpos_reg));
+
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	return B_OK;
+	return status;
 }
+
+
+status_t
+intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t dpms_mode)
+{
+	/* ... (find port, check args) ... */
+	status_t status = B_OK;
+	intel_output_port_state* port = NULL; // Find port connected to this pipe
+	enum intel_port_id_priv port_id = PRIV_PORT_ID_NONE;
+	display_mode current_pipe_mode; // Need current mode for re-enabling
+
+	if (devInfo == NULL) return B_BAD_VALUE;
+	if (pipe < 0 || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	current_pipe_mode = devInfo->pipes[pipe].current_mode; // Get mode before potentially disabling
+
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].current_pipe_assignment == pipe && devInfo->ports[i].connected) {
+			port = &devInfo->ports[i];
+			port_id = port->logical_port_id;
+			break;
+		}
+	}
+	// It's possible for a pipe to be active without a port (e.g. internal VBT panel not fully enumerated yet)
+	// or if the port was disconnected. DPMS should still try to power down the pipe.
+
+	if (dpms_mode == B_DPMS_ON && devInfo->pipes[pipe].enabled && devInfo->pipes[pipe].current_dpms_mode == B_DPMS_ON) {
+		TRACE("SetDPMS: Pipe %d already ON.\n", pipe);
+		return B_OK; // Already in the desired state
+	}
+	if (dpms_mode != B_DPMS_ON && !devInfo->pipes[pipe].enabled) {
+		TRACE("SetDPMS: Pipe %d already OFF/Standby/Suspend (disabled).\n", pipe);
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode; // Update sw state
+		return B_OK;
+	}
+
+
+	if (dpms_mode == B_DPMS_ON) {
+		// If turning on, we need valid clock params.
+		// If they are not cached (e.g. first modeset after boot or full off),
+		// this DPMS call might not have enough info to fully restore.
+		// A full modeset is typically required to establish valid clock params.
+		// For now, assume cached_clock_params are valid if pipe was previously enabled.
+		if (devInfo->pipes[pipe].cached_clock_params.pixel_clock_khz == 0 && port != NULL) {
+			TRACE("SetDPMS: Pipe %d ON requested, but no cached clocks. Attempting to recalculate for preferred mode of port %d.\n", pipe, port_id);
+			status = intel_i915_calculate_display_clocks(devInfo, &port->preferred_mode, pipe, port_id, &devInfo->pipes[pipe].cached_clock_params);
+			if (status != B_OK) {
+				TRACE("SetDPMS: Failed to calculate clocks for DPMS ON. Cannot turn on pipe %d.\n", pipe);
+				return status;
+			}
+			current_pipe_mode = port->preferred_mode; // Use preferred mode for re-enable
+		} else if (devInfo->pipes[pipe].cached_clock_params.pixel_clock_khz == 0 && port == NULL) {
+			TRACE("SetDPMS: Pipe %d ON requested, no cached clocks and no connected port. Cannot turn on.\n", pipe);
+			return B_ERROR;
+		}
+	}
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
+	if (fw_status != B_OK) { return (status != B_OK) ? status : fw_status; } // Should be status=B_OK here
+
+	// ... (rest of DPMS logic from previous version, simplified) ...
+	const intel_clock_params_t* cached_clocks = &devInfo->pipes[pipe].cached_clock_params;
+
+	switch (dpms_mode) {
+		case B_DPMS_ON:
+			if (!devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Turning pipe %d ON for port %d\n", pipe, port_id);
+				intel_i915_program_dpll_for_pipe(devInfo, pipe, cached_clocks);
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, cached_clocks);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_on(devInfo, port);
+				}
+				if (cached_clocks->needs_fdi) {
+					intel_i915_program_fdi(devInfo, pipe, cached_clocks);
+				}
+				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, cached_clocks); // Use current_pipe_mode
+				if (cached_clocks->needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, true);
+				}
+				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode);
+				intel_i915_plane_enable(devInfo, pipe, true);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
+						devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
+					snooze(t2_delay_ms * 1000);
+					intel_lvds_set_backlight(devInfo, port, true);
+				}
+				devInfo->pipes[pipe].enabled = true; // Mark pipe as enabled
+			}
+			break;
+		case B_DPMS_STANDBY: // Often same as Suspend for digital
+		case B_DPMS_SUSPEND:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Setting pipe %d to SUSPEND/STANDBY for port %d\n", pipe, port_id);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000); // Delay before plane off
+				}
+				intel_i915_plane_enable(devInfo, pipe, false);
+				// For DPMS Suspend/Standby, typically the port and pipe are kept mostly active
+				// but signals might be blanked or reduced power state entered by the sink.
+				// Full pipe/port/DPLL disable is usually for DPMS OFF.
+				// For DisplayPort, DPMS states are set via DPCD.
+				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					uint8_t dpcd_val = (dpms_mode == B_DPMS_STANDBY) ? DPCD_POWER_D3 : DPCD_POWER_D3; // Or specific standby if panel supports
+					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+				}
+				// For HDMI, sink might go to sleep based on no signal from blanked plane.
+				// For LVDS, backlight off is the main action for standby/suspend.
+				// Pipe itself might not need to be fully disabled.
+				// intel_i915_pipe_disable(devInfo, pipe); // Maybe not for standby/suspend
+			}
+			break;
+		case B_DPMS_OFF:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Turning pipe %d OFF for port %d\n", pipe, port_id);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000);
+				}
+				intel_i915_plane_enable(devInfo, pipe, false);
+				intel_i915_port_disable(devInfo, port_id);
+				if (cached_clocks->needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
+				intel_i915_pipe_disable(devInfo, pipe); // This sets devInfo->pipes[pipe].enabled = false
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_off(devInfo, port);
+				}
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, cached_clocks);
+			} else if (devInfo->pipes[pipe].enabled) { // Pipe was on but no port, just disable pipe
+				intel_i915_pipe_disable(devInfo, pipe);
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, cached_clocks); // Also disable its DPLL
+			}
+			break;
+		default: status = B_BAD_VALUE; break;
+	}
+
+	if (status == B_OK) {
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+		if (devInfo->shared_info) {
+			// TODO: Does shared_info need a per-pipe DPMS state?
+			// For now, assume a global DPMS state or that current_mode reflects overall state.
+			// If pipe is off, current_mode might be cleared or reflect last active mode.
+		}
+	}
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	return status;
+}
+
+// Kernel-side implementation for INTEL_I915_IOCTL_SET_CURSOR_BITMAP
+status_t
+intel_i915_set_cursor_bitmap_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_bitmap_args* args)
+{
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	if (args->width == 0 || args->height == 0 || args->width > MAX_CURSOR_SIZE || args->height > MAX_CURSOR_SIZE) {
+		TRACE("SetCursorBitmap: Invalid dimensions %ux%u\n", args->width, args->height);
+		return B_BAD_VALUE;
+	}
+	// Assuming ARGB32 format, so 4 bytes per pixel
+	if (args->bitmap_size != args->width * args->height * 4) {
+		TRACE("SetCursorBitmap: Invalid bitmap_size %lu for %ux%u ARGB cursor\n", args->bitmap_size, args->width, args->height);
+		return B_BAD_VALUE;
+	}
+	if (args->user_bitmap_ptr == 0)
+		return B_BAD_ADDRESS;
+
+	status_t status = B_OK;
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	// Max HW cursor size is often 256x256. Allocate BO for this.
+	size_t boAllocSize = MAX_CURSOR_SIZE * MAX_CURSOR_SIZE * 4;
+	boAllocSize = ROUND_TO_PAGE_SIZE(boAllocSize); // Ensure page alignment for BO
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // CURSOR_BASE is usually render domain
+	if (status != B_OK) return status;
+
+	// 1. Allocate/Re-allocate Cursor Buffer Object (BO) if needed
+	if (devInfo->cursor_bo[pipe] == NULL || devInfo->cursor_bo[pipe]->size < boAllocSize) {
+		if (devInfo->cursor_bo[pipe] != NULL) {
+			if (devInfo->cursor_bo[pipe]->gtt_mapped) {
+				intel_i915_gem_object_unmap_gtt(devInfo->cursor_bo[pipe]);
+				intel_i915_gtt_free_space(devInfo, devInfo->cursor_bo[pipe]->gtt_offset_pages,
+					devInfo->cursor_bo[pipe]->num_phys_pages);
+			}
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			devInfo->cursor_gtt_offset_pages[pipe] = 0;
+		}
+
+		status = intel_i915_gem_object_create(devInfo, boAllocSize,
+			I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &devInfo->cursor_bo[pipe]);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to create cursor BO: %s\n", strerror(status));
+			goto exit_cursor_bitmap;
+		}
+
+		uint32_t gtt_page_offset;
+		status = intel_i915_gtt_alloc_space(devInfo, devInfo->cursor_bo[pipe]->num_phys_pages, &gtt_page_offset);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to alloc GTT for cursor BO: %s\n", strerror(status));
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_cursor_bitmap;
+		}
+		status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[pipe], gtt_page_offset, GTT_CACHE_UNCACHED);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
+			intel_i915_gtt_free_space(devInfo, gtt_page_offset, devInfo->cursor_bo[pipe]->num_phys_pages);
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_cursor_bitmap;
+		}
+		devInfo->cursor_gtt_offset_pages[pipe] = gtt_page_offset;
+		TRACE("SetCursorBitmap: Cursor BO created/mapped for pipe %d at GTT page offset %u\n", pipe, gtt_page_offset);
+	}
+
+	// 2. Copy bitmap data from userland to the BO
+	void* bo_cpu_addr;
+	status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[pipe], &bo_cpu_addr);
+	if (status != B_OK || bo_cpu_addr == NULL) {
+		TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
+		status = (status == B_OK) ? B_ERROR : status;
+		goto exit_cursor_bitmap;
+	}
+	// Clear entire BO (or at least max cursor size) before copying new data
+	memset(bo_cpu_addr, 0, devInfo->cursor_bo[pipe]->size);
+	if (copy_from_user(bo_cpu_addr, (void*)args->user_bitmap_ptr, args->bitmap_size) != B_OK) {
+		TRACE("SetCursorBitmap: copy_from_user failed for bitmap data.\n");
+		status = B_BAD_ADDRESS;
+		goto exit_cursor_bitmap;
+	}
+
+	// 3. Program CURSOR_BASE register (GTT offset in bytes)
+	intel_i915_write32(devInfo, CURSOR_BASE(pipe), devInfo->cursor_bo[pipe]->gtt_offset_pages * B_PAGE_SIZE);
+
+	// 4. Update software state for cursor properties
+	devInfo->cursor_width[pipe] = args->width;
+	devInfo->cursor_height[pipe] = args->height;
+	devInfo->cursor_hot_x[pipe] = args->hot_x;
+	devInfo->cursor_hot_y[pipe] = args->hot_y;
+
+	if (args->width <= 64 && args->height <= 64) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_64;
+	else if (args->width <= 128 && args->height <= 128) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_128;
+	else if (args->width <= 256 && args->height <= 256) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_256;
+	else {
+		TRACE("SetCursorBitmap: Invalid cursor dimensions %ux%u after checks for format.\n", args->width, args->height);
+		status = B_BAD_VALUE;
+		goto exit_cursor_bitmap;
+	}
+	TRACE("SetCursorBitmap: Pipe %d cursor bitmap updated. Format: 0x%lx\n", pipe, devInfo->cursor_format[pipe]);
+
+	// 5. Apply current state (visibility, position) with new bitmap format/base
+	// This is typically done by a subsequent call to set_cursor_state by accelerant.
+	// Forcing a state update here ensures the new bitmap is immediately effective if cursor was visible.
+	intel_i915_set_cursor_state_args state_args;
+	state_args.pipe = pipe;
+	state_args.is_visible = devInfo->cursor_visible[pipe];
+	state_args.x = devInfo->cursor_x[pipe];
+	state_args.y = devInfo->cursor_y[pipe];
+	// No need to release/re-acquire forcewake as set_cursor_state_ioctl_kern will be called internally.
+	status_t state_status = intel_i915_set_cursor_state_ioctl_kern(devInfo, &state_args);
+	if (state_status != B_OK) {
+		TRACE("SetCursorBitmap: Failed to re-apply cursor state: %s\n", strerror(state_status));
+		if (status == B_OK) status = state_status;
+	}
+
+exit_cursor_bitmap:
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+
+status_t
+intel_i915_set_cursor_state_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_state_args* args)
+{
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	status_t status = B_OK;
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Cursor regs are usually render domain
+	if (status != B_OK) return status;
+
+	uint32_t curcntr_reg = CURSOR_CONTROL(pipe);
+	uint32_t curpos_reg = CURSOR_POSITION(pipe);
+
+	uint32_t curcntr_val = intel_i915_read32(devInfo, curcntr_reg);
+	curcntr_val &= ~CURSOR_MODE_MASK; // Clear old mode/format
+
+	if (args->is_visible) {
+		if (devInfo->cursor_bo[pipe] == NULL || devInfo->cursor_format[pipe] == 0) {
+			TRACE("SetCursorState: Visible for pipe %d but no bitmap/format set. Disabling.\n", pipe);
+			curcntr_val |= CURSOR_FORMAT_DISABLED;
+		} else {
+			curcntr_val |= devInfo->cursor_format[pipe]; // Use format from bitmap upload
+			// Example: CURSOR_FORMAT_ARGB_64
+			// On some gens, might need CURSOR_ENABLE bit separately if mode doesn't imply enable.
+			// For Gen7+, setting a valid mode enables the cursor.
+		}
+	} else {
+		curcntr_val |= CURSOR_FORMAT_DISABLED;
+	}
+
+	// TODO: Add Gen-specific bits if needed (e.g., CURSOR_GAMMA_ENABLE on some older gens)
+	// For Gen7+, CURSOR_TRICKLE_FEED_DISABLE is often set.
+	if (INTEL_DISPLAY_GEN(devInfo) >= 7) {
+		curcntr_val |= CURSOR_TRICKLE_FEED_DISABLE_GEN7; // If this define exists and is correct
+	}
+
+	intel_i915_write32(devInfo, curcntr_reg, curcntr_val);
+
+	if (args->is_visible && devInfo->cursor_bo[pipe] != NULL) {
+		uint32_t curpos_val = 0;
+		// Adjust position by hotspot
+		int16_t x = args->x - devInfo->cursor_hot_x[pipe];
+		int16_t y = args->y - devInfo->cursor_hot_y[pipe];
+
+		if (x < 0) {
+			curpos_val |= CURSOR_POS_X_SIGN;
+			x = -x;
+		}
+		if (y < 0) {
+			curpos_val |= CURSOR_POS_Y_SIGN;
+			y = -y;
+		}
+		// CURSOR_POS_X_MASK and CURSOR_POS_Y_MASK should be for the magnitude.
+		curpos_val |= (x & CURSOR_POS_X_MASK);
+		curpos_val |= ((y & CURSOR_POS_Y_MASK) << 16); // Y position in high word of CURAPOS
+		intel_i915_write32(devInfo, curpos_reg, curpos_val);
+	}
+
+	// Update software state
+	devInfo->cursor_visible[pipe] = args->is_visible && (devInfo->cursor_bo[pipe] != NULL);
+	devInfo->cursor_x[pipe] = args->x;
+	devInfo->cursor_y[pipe] = args->y;
+	// devInfo->cursor_hot_x/y and format are set by set_cursor_bitmap_ioctl_kern
+
+	TRACE("SetCursorState (Pipe %d): Visible: %d, X: %d, Y: %d. CURSOR_CONTROL=0x%08lx, CURSOR_POS=0x%08lx\n",
+		pipe, devInfo->cursor_visible[pipe], devInfo->cursor_x[pipe], devInfo->cursor_y[pipe],
+		intel_i915_read32(devInfo, curcntr_reg), intel_i915_read32(devInfo, curpos_reg));
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+
+status_t
+intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t dpms_mode)
+{
+	intel_output_port_state* port = NULL;
+	enum intel_port_id_priv port_id = PRIV_PORT_ID_NONE;
+	display_mode current_pipe_mode; // Needed for re-enabling pipe
+	status_t status = B_OK;
+
+	if (devInfo == NULL) return B_BAD_VALUE;
+	if (pipe < 0 || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	// Find the port currently associated with this pipe
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].current_pipe_assignment == pipe && devInfo->ports[i].connected) {
+			port = &devInfo->ports[i];
+			port_id = port->logical_port_id;
+			break;
+		}
+	}
+	current_pipe_mode = devInfo->pipes[pipe].current_mode; // Get mode before potentially disabling
+
+
+	if (dpms_mode == B_DPMS_ON && devInfo->pipes[pipe].enabled && devInfo->pipes[pipe].current_dpms_mode == B_DPMS_ON) {
+		TRACE("SetDPMS: Pipe %d already ON.\n", pipe);
+		return B_OK;
+	}
+	if (dpms_mode != B_DPMS_ON && !devInfo->pipes[pipe].enabled &&
+		(devInfo->pipes[pipe].current_dpms_mode == dpms_mode || devInfo->pipes[pipe].current_dpms_mode == B_DPMS_OFF)) {
+		TRACE("SetDPMS: Pipe %d already effectively in state %lu (disabled).\n", pipe, dpms_mode);
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+		return B_OK;
+	}
+
+	const intel_clock_params_t* cached_clocks = &devInfo->pipes[pipe].cached_clock_params;
+	if (dpms_mode == B_DPMS_ON) {
+		if (cached_clocks->pixel_clock_khz == 0) {
+			if (port != NULL && port->preferred_mode.timing.pixel_clock > 0) {
+				current_pipe_mode = port->preferred_mode; // Use port's preferred mode for re-enable
+				TRACE("SetDPMS: Pipe %d ON, no cached clocks, calculating for preferred mode of port %d.\n", pipe, port_id);
+				status = intel_i915_calculate_display_clocks(devInfo, &current_pipe_mode, pipe, port_id,
+					(intel_clock_params_t*)cached_clocks); // Cast away const to update cache
+			} else if (devInfo->current_hw_mode.timing.pixel_clock > 0) {
+				// Fallback to current overall hardware mode if port has no preferred
+				current_pipe_mode = devInfo->current_hw_mode;
+				TRACE("SetDPMS: Pipe %d ON, no cached clocks, calculating for current HW mode.\n", pipe);
+				status = intel_i915_calculate_display_clocks(devInfo, &current_pipe_mode, pipe, port_id,
+					(intel_clock_params_t*)cached_clocks); // Cast away const
+			} else {
+				TRACE("SetDPMS: Pipe %d ON requested, no cached clocks and no suitable mode found. Cannot turn on.\n", pipe);
+				return B_ERROR;
+			}
+			if (status != B_OK) {
+				TRACE("SetDPMS: Failed to calculate clocks for DPMS ON. Cannot turn on pipe %d.\n", pipe);
+				return status;
+			}
+		}
+	}
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
+	if (fw_status != B_OK) { return fw_status; }
+
+	switch (dpms_mode) {
+		case B_DPMS_ON:
+			if (!devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Turning pipe %d ON for port %d\n", pipe, port_id);
+				// Full sequence: clocks, panel power, dpll, pipe, fdi, port, plane, backlight
+				intel_i915_program_dpll_for_pipe(devInfo, pipe, cached_clocks); // Assumes cached_clocks is now valid
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, cached_clocks);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_on(devInfo, port);
+				}
+				if (cached_clocks->needs_fdi) {
+					intel_i915_program_fdi(devInfo, pipe, cached_clocks);
+				}
+				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, cached_clocks);
+				if (cached_clocks->needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, true);
+				}
+				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode);
+				intel_i915_plane_enable(devInfo, pipe, true); // Must be after pipe enable
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
+						devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
+					snooze(t2_delay_ms * 1000);
+					intel_lvds_set_backlight(devInfo, port, true);
+				}
+				devInfo->pipes[pipe].enabled = true;
+			}
+			break;
+		case B_DPMS_STANDBY:
+		case B_DPMS_SUSPEND:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Setting pipe %d to SUSPEND/STANDBY for port %d\n", pipe, port_id);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					// Do not power off panel VDD for standby/suspend
+				}
+				intel_i915_plane_enable(devInfo, pipe, false); // Blank the plane
+
+				// For DP, send power down sequence to sink
+				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					uint8_t dpcd_val = DPCD_POWER_D3; // Or a specific standby state if supported by sink & standard
+					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+				}
+				// Pipe and DPLL typically remain on for standby/suspend to allow quick resume.
+				// If full power off is desired for these states, it's same as B_DPMS_OFF.
+			}
+			break;
+		case B_DPMS_OFF:
+			if (devInfo->pipes[pipe].enabled) { // Check if pipe is on, regardless of port
+				TRACE("DPMS: Turning pipe %d OFF%s\n", pipe, port ? "" : " (no port attached)");
+				if (port != NULL && (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP)) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000);
+				}
+				intel_i915_plane_enable(devInfo, pipe, false);
+				if (port != NULL)
+					intel_i915_port_disable(devInfo, port_id);
+				if (cached_clocks->needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
+				intel_i915_pipe_disable(devInfo, pipe); // This sets devInfo->pipes[pipe].enabled = false
+				if (port != NULL && (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP)) {
+					intel_lvds_panel_power_off(devInfo, port);
+				}
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, cached_clocks);
+			}
+			break;
+		default: status = B_BAD_VALUE; break;
+	}
+
+	if (status == B_OK) {
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+	}
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	return status;
+}
+
+// Kernel-side implementation for INTEL_I915_IOCTL_SET_CURSOR_BITMAP
+status_t
+intel_i915_set_cursor_bitmap_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_bitmap_args* args)
+{
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	if (args->width == 0 || args->height == 0 || args->width > MAX_CURSOR_SIZE || args->height > MAX_CURSOR_SIZE) {
+		TRACE("SetCursorBitmap: Invalid dimensions %ux%u\n", args->width, args->height);
+		return B_BAD_VALUE;
+	}
+	if (args->bitmap_size != args->width * args->height * 4) {
+		TRACE("SetCursorBitmap: Invalid bitmap_size %lu for %ux%u ARGB cursor\n", args->bitmap_size, args->width, args->height);
+		return B_BAD_VALUE;
+	}
+	if (args->user_bitmap_ptr == 0)
+		return B_BAD_ADDRESS;
+
+	status_t status = B_OK;
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	size_t boAllocSize = MAX_CURSOR_SIZE * MAX_CURSOR_SIZE * 4;
+	boAllocSize = ROUND_TO_PAGE_SIZE(boAllocSize);
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
+
+	if (devInfo->cursor_bo[pipe] == NULL || devInfo->cursor_bo[pipe]->size < boAllocSize) {
+		if (devInfo->cursor_bo[pipe] != NULL) {
+			if (devInfo->cursor_bo[pipe]->gtt_mapped) {
+				intel_i915_gem_object_unmap_gtt(devInfo->cursor_bo[pipe]);
+				intel_i915_gtt_free_space(devInfo, devInfo->cursor_bo[pipe]->gtt_offset_pages,
+					devInfo->cursor_bo[pipe]->num_phys_pages);
+			}
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			devInfo->cursor_gtt_offset_pages[pipe] = 0;
+		}
+
+		status = intel_i915_gem_object_create(devInfo, boAllocSize,
+			I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &devInfo->cursor_bo[pipe]);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to create cursor BO: %s\n", strerror(status));
+			goto exit_cursor_bitmap;
+		}
+
+		uint32_t gtt_page_offset;
+		status = intel_i915_gtt_alloc_space(devInfo, devInfo->cursor_bo[pipe]->num_phys_pages, &gtt_page_offset);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to alloc GTT for cursor BO: %s\n", strerror(status));
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_cursor_bitmap;
+		}
+		status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[pipe], gtt_page_offset, GTT_CACHE_UNCACHED);
+		if (status != B_OK) {
+			TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
+			intel_i915_gtt_free_space(devInfo, gtt_page_offset, devInfo->cursor_bo[pipe]->num_phys_pages);
+			intel_i915_gem_object_put(devInfo->cursor_bo[pipe]);
+			devInfo->cursor_bo[pipe] = NULL;
+			goto exit_cursor_bitmap;
+		}
+		devInfo->cursor_gtt_offset_pages[pipe] = gtt_page_offset;
+		TRACE("SetCursorBitmap: Cursor BO created/mapped for pipe %d at GTT page offset %u\n", pipe, gtt_page_offset);
+	}
+
+	void* bo_cpu_addr;
+	status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[pipe], &bo_cpu_addr);
+	if (status != B_OK || bo_cpu_addr == NULL) {
+		TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
+		status = (status == B_OK) ? B_ERROR : status;
+		goto exit_cursor_bitmap;
+	}
+	memset(bo_cpu_addr, 0, devInfo->cursor_bo[pipe]->size);
+	if (copy_from_user(bo_cpu_addr, (void*)args->user_bitmap_ptr, args->bitmap_size) != B_OK) {
+		TRACE("SetCursorBitmap: copy_from_user failed for bitmap data.\n");
+		status = B_BAD_ADDRESS;
+		goto exit_cursor_bitmap;
+	}
+
+	intel_i915_write32(devInfo, CURSOR_BASE(pipe), devInfo->cursor_bo[pipe]->gtt_offset_pages * B_PAGE_SIZE);
+
+	devInfo->cursor_width[pipe] = args->width;
+	devInfo->cursor_height[pipe] = args->height;
+	devInfo->cursor_hot_x[pipe] = args->hot_x;
+	devInfo->cursor_hot_y[pipe] = args->hot_y;
+
+	if (args->width <= 64 && args->height <= 64) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_64;
+	else if (args->width <= 128 && args->height <= 128) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_128;
+	else if (args->width <= 256 && args->height <= 256) devInfo->cursor_format[pipe] = CURSOR_FORMAT_ARGB_256;
+	else {
+		TRACE("SetCursorBitmap: Invalid cursor dimensions %ux%u after checks for format.\n", args->width, args->height);
+		status = B_BAD_VALUE;
+		goto exit_cursor_bitmap;
+	}
+	TRACE("SetCursorBitmap: Pipe %d cursor bitmap updated. Format: 0x%lx\n", pipe, devInfo->cursor_format[pipe]);
+
+	intel_i915_set_cursor_state_args state_args;
+	state_args.pipe = pipe;
+	state_args.is_visible = devInfo->cursor_visible[pipe];
+	state_args.x = devInfo->cursor_x[pipe];
+	state_args.y = devInfo->cursor_y[pipe];
+
+	status_t state_status = intel_i915_set_cursor_state_ioctl_kern(devInfo, &state_args);
+	if (state_status != B_OK) {
+		TRACE("SetCursorBitmap: Failed to re-apply cursor state: %s\n", strerror(state_status));
+		if (status == B_OK) status = state_status;
+	}
+
+exit_cursor_bitmap:
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+
+status_t
+intel_i915_set_cursor_state_ioctl_kern(intel_i915_device_info* devInfo,
+	intel_i915_set_cursor_state_args* args)
+{
+	if (devInfo == NULL || args == NULL) return B_BAD_VALUE;
+	if (args->pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	enum pipe_id_priv pipe = (enum pipe_id_priv)args->pipe;
+	status_t status = B_OK;
+
+	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (status != B_OK) return status;
+
+	uint32_t curcntr_reg = CURSOR_CONTROL(pipe);
+	uint32_t curpos_reg = CURSOR_POSITION(pipe);
+
+	uint32_t curcntr_val = intel_i915_read32(devInfo, curcntr_reg);
+	curcntr_val &= ~CURSOR_MODE_MASK;
+
+	if (args->is_visible) {
+		if (devInfo->cursor_bo[pipe] == NULL || devInfo->cursor_format[pipe] == 0) {
+			TRACE("SetCursorState: Visible for pipe %d but no bitmap/format set. Disabling.\n", pipe);
+			curcntr_val |= CURSOR_FORMAT_DISABLED;
+		} else {
+			curcntr_val |= devInfo->cursor_format[pipe];
+			if (INTEL_DISPLAY_GEN(devInfo) >= 7) { // Trickle feed disable often set for Gen7+
+				curcntr_val |= CURSOR_TRICKLE_FEED_DISABLE_GEN7;
+			}
+		}
+	} else {
+		curcntr_val |= CURSOR_FORMAT_DISABLED;
+	}
+
+	intel_i915_write32(devInfo, curcntr_reg, curcntr_val);
+
+	if (args->is_visible && devInfo->cursor_bo[pipe] != NULL) {
+		uint32_t curpos_val = 0;
+		int16_t x = args->x - devInfo->cursor_hot_x[pipe];
+		int16_t y = args->y - devInfo->cursor_hot_y[pipe];
+
+		if (x < 0) {
+			curpos_val |= CURSOR_POS_X_SIGN;
+			x = -x;
+		}
+		if (y < 0) {
+			curpos_val |= CURSOR_POS_Y_SIGN;
+			y = -y;
+		}
+		curpos_val |= (x & CURSOR_POS_X_MASK);
+		curpos_val |= ((y & CURSOR_POS_Y_MASK) << 16);
+		intel_i915_write32(devInfo, curpos_reg, curpos_val);
+	}
+
+	devInfo->cursor_visible[pipe] = args->is_visible && (devInfo->cursor_bo[pipe] != NULL);
+	devInfo->cursor_x[pipe] = args->x;
+	devInfo->cursor_y[pipe] = args->y;
+
+	TRACE("SetCursorState (Pipe %d): Visible: %d, X: %d, Y: %d. CURSOR_CONTROL=0x%08lx, CURSOR_POS=0x%08lx\n",
+		pipe, devInfo->cursor_visible[pipe], devInfo->cursor_x[pipe], devInfo->cursor_y[pipe],
+		intel_i915_read32(devInfo, curcntr_reg), intel_i915_read32(devInfo, curpos_reg));
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+
+status_t
+intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
+	enum pipe_id_priv pipe, uint32_t dpms_mode)
+{
+	intel_output_port_state* port = NULL;
+	enum intel_port_id_priv port_id = PRIV_PORT_ID_NONE;
+	display_mode current_pipe_mode;
+	status_t status = B_OK;
+
+	if (devInfo == NULL) return B_BAD_VALUE;
+	if (pipe < 0 || pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	current_pipe_mode = devInfo->pipes[pipe].current_mode;
+
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].current_pipe_assignment == pipe && devInfo->ports[i].connected) {
+			port = &devInfo->ports[i];
+			port_id = port->logical_port_id;
+			break;
+		}
+	}
+
+	if (dpms_mode == B_DPMS_ON && devInfo->pipes[pipe].enabled && devInfo->pipes[pipe].current_dpms_mode == B_DPMS_ON) {
+		TRACE("SetDPMS: Pipe %d already ON.\n", pipe);
+		return B_OK;
+	}
+	if (dpms_mode != B_DPMS_ON && !devInfo->pipes[pipe].enabled &&
+		(devInfo->pipes[pipe].current_dpms_mode == dpms_mode || devInfo->pipes[pipe].current_dpms_mode == B_DPMS_OFF)) {
+		TRACE("SetDPMS: Pipe %d already effectively in state %lu (disabled).\n", pipe, dpms_mode);
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+		return B_OK;
+	}
+
+	const intel_clock_params_t* cached_clocks = &devInfo->pipes[pipe].cached_clock_params;
+	if (dpms_mode == B_DPMS_ON) {
+		if (cached_clocks->pixel_clock_khz == 0) {
+			if (port != NULL && port->preferred_mode.timing.pixel_clock > 0) {
+				current_pipe_mode = port->preferred_mode;
+				TRACE("SetDPMS: Pipe %d ON, no cached clocks, calculating for preferred mode of port %d.\n", pipe, port_id);
+				status = intel_i915_calculate_display_clocks(devInfo, &current_pipe_mode, pipe, port_id,
+					(intel_clock_params_t*)cached_clocks);
+			} else if (devInfo->current_hw_mode.timing.pixel_clock > 0 && port == NULL) {
+				// If no port is associated, but we have a current_hw_mode, try to use that.
+				// This case is less common for DPMS ON, as a port is usually needed.
+				current_pipe_mode = devInfo->current_hw_mode;
+				TRACE("SetDPMS: Pipe %d ON, no cached clocks, calculating for current HW mode (no specific port).\n", pipe);
+				status = intel_i915_calculate_display_clocks(devInfo, &current_pipe_mode, pipe, PRIV_PORT_ID_NONE, // No specific port
+					(intel_clock_params_t*)cached_clocks);
+			} else {
+				TRACE("SetDPMS: Pipe %d ON requested, no cached clocks and no suitable mode found. Cannot turn on.\n", pipe);
+				return B_ERROR;
+			}
+			if (status != B_OK) {
+				TRACE("SetDPMS: Failed to calculate clocks for DPMS ON. Cannot turn on pipe %d.\n", pipe);
+				return status;
+			}
+		}
+	}
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
+	if (fw_status != B_OK) { return fw_status; }
+
+	switch (dpms_mode) {
+		case B_DPMS_ON:
+			if (!devInfo->pipes[pipe].enabled) { // Only proceed if pipe is actually off
+				if (port == NULL) { // Cannot turn on a pipe without a port to output to
+					TRACE("DPMS: Pipe %d ON requested, but no port is associated/connected.\n", pipe);
+					status = B_ERROR;
+					break;
+				}
+				TRACE("DPMS: Turning pipe %d ON for port %d\n", pipe, port_id);
+				intel_i915_program_dpll_for_pipe(devInfo, pipe, cached_clocks);
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, cached_clocks);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_panel_power_on(devInfo, port);
+				}
+				if (cached_clocks->needs_fdi) {
+					intel_i915_program_fdi(devInfo, pipe, cached_clocks);
+				}
+				intel_i915_pipe_enable(devInfo, pipe, &current_pipe_mode, cached_clocks);
+				if (cached_clocks->needs_fdi) {
+					intel_i915_enable_fdi(devInfo, pipe, true);
+				}
+				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode);
+				intel_i915_plane_enable(devInfo, pipe, true);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
+						devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
+					snooze(t2_delay_ms * 1000);
+					intel_lvds_set_backlight(devInfo, port, true);
+				}
+				devInfo->pipes[pipe].enabled = true;
+			}
+			break;
+		case B_DPMS_STANDBY:
+		case B_DPMS_SUSPEND:
+			if (devInfo->pipes[pipe].enabled && port != NULL) {
+				TRACE("DPMS: Setting pipe %d to SUSPEND/STANDBY for port %d\n", pipe, port_id);
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, port, false);
+				}
+				intel_i915_plane_enable(devInfo, pipe, false);
+				if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+					uint8_t dpcd_val = DPCD_POWER_D3;
+					intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
+				}
+			}
+			break;
+		case B_DPMS_OFF:
+			if (devInfo->pipes[pipe].enabled) {
+				TRACE("DPMS: Turning pipe %d OFF%s\n", pipe, port ? "" : " (no port was attached)");
+				if (port != NULL && (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP)) {
+					intel_lvds_set_backlight(devInfo, port, false);
+					uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
+						devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
+					snooze(t3_delay_ms * 1000);
+				}
+				intel_i915_plane_enable(devInfo, pipe, false);
+				if (port != NULL)
+					intel_i915_port_disable(devInfo, port_id);
+				if (cached_clocks->needs_fdi) { // Use cached_clocks from when pipe was active
+					intel_i915_enable_fdi(devInfo, pipe, false);
+				}
+				intel_i915_pipe_disable(devInfo, pipe);
+				if (port != NULL && (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP)) {
+					intel_lvds_panel_power_off(devInfo, port);
+				}
+				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, cached_clocks);
+			}
+			break;
+		default: status = B_BAD_VALUE; break;
+	}
+
+	if (status == B_OK) {
+		devInfo->pipes[pipe].current_dpms_mode = dpms_mode;
+	}
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	return status;
+}
+// Note: intel_i915_set_cursor_bitmap_ioctl and intel_i915_set_cursor_state_ioctl
+// are the public IOCTL entry points in intel_i915.c.
+// The _kern versions are the internal implementations.
+// No change needed to the IOCTL dispatch itself in intel_i915.c for this step.
 
 [end of src/add-ons/kernel/drivers/graphics/intel_i915/display.c]

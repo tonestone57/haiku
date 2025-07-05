@@ -14,6 +14,11 @@
 
 // IOCTL codes
 #define INTEL_I915_IOCTL_BASE (B_GRAPHIC_DRIVER_IOCTL_BASE + 0x1000)
+
+// Max cursor dimensions supported by hardware (Gen7+ can often do 256x256)
+// Kernel driver will allocate buffer based on this. Accelerant should validate against it.
+#define MAX_CURSOR_SIZE 256
+
 enum {
 	INTEL_I915_GET_SHARED_INFO = INTEL_I915_IOCTL_BASE,
 	INTEL_I915_SET_DISPLAY_MODE,

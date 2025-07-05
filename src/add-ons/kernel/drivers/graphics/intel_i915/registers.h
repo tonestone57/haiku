@@ -136,10 +136,22 @@
 	// For HDMI/LVDS P2: (bits 20:19) 00=/10, 01=/5
 	#define DPLL_FPA0_P2_POST_DIV_SHIFT_IVB 19
 	#define DPLL_FPA0_P2_POST_DIV_MASK_IVB  (3U << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB)
+		// For LVDS Mode, P2 encoding:
+		#define DPLL_P2_LVDS_DIV_14_IVB_FIELD_VAL (0U) // Field value for /14
+		#define DPLL_P2_LVDS_DIV_7_IVB_FIELD_VAL  (1U) // Field value for /7
+		// For HDMI/DVI Mode, P2 encoding:
+		#define DPLL_P2_HDMIDVI_DIV_10_IVB_FIELD_VAL (0U) // Field value for /10
+		#define DPLL_P2_HDMIDVI_DIV_5_IVB_FIELD_VAL  (1U) // Field value for /5
+		// For DP Mode, P2 encoding (bits 20:19): 01b = /5. (Actual P2 is more complex for DP, often involves link symbol rate)
+		// The P2 field here might be for the pixel clock path after link symbol conversion.
+		// Let's assume for DP the direct P2 field value is what's needed if it's not /1.
+		#define DPLL_P2_DP_DIV_5_IVB_FIELD_VAL    (1U) // Example if DP mode uses this P2 field for /5
+
 	// Mode Select (bits 26:24)
-	#define DPLL_MODE_LVDS_IVB             (0U << 24) // Check PRM, might be 011b for LVDS
-	#define DPLL_MODE_DP_IVB               (2U << 24) // 010b
-	#define DPLL_MODE_HDMI_DVI_IVB         (4U << 24) // 100b
+	#define DPLL_MODE_MASK_IVB             (7U << 24)
+	#define DPLL_MODE_LVDS_IVB             (3U << 24) // 011b for LVDS
+	#define DPLL_MODE_DP_IVB               (2U << 24) // 010b for DisplayPort
+	#define DPLL_MODE_HDMI_DVI_IVB         (4U << 24) // 100b for HDMI/DVI
 
 #define DPLL_MD_A_IVB           0x601C // Pixel Divider for DPLL_A
 #define DPLL_MD_B_IVB           0x6020 // Pixel Divider for DPLL_B

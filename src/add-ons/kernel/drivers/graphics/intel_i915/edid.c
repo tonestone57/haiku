@@ -112,6 +112,14 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 		(edid->manufacturer_id & 0x1F) + 'A' - 1,
 		edid->product_id);
 
+	// TODO: intel_i915.c:305 - check returned EDID version!
+	if (edid->edid_version != 1) {
+		TRACE("EDID: Warning: EDID version is %d.%d, parser may not be fully compatible.\n",
+			edid->edid_version, edid->edid_revision);
+		// For now, we'll attempt to parse it as v1.x, but strict parsing might reject it
+		// or handle it differently if it were, for example, DisplayID.
+	}
+
 	// Parse Detailed Timing Descriptors (DTDs)
 	for (int i = 0; i < 4; i++) {
 		if (mode_count >= max_modes) break;

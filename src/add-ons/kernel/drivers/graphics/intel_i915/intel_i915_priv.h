@@ -229,6 +229,8 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	bool     dp_enhanced_framing_capable; // From DPCD_MAX_LANE_COUNT bit 7
 	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
 	enum pipe_id_priv current_pipe_assignment; // Which pipe is this port currently configured for
+	uint8_t  physical_width_cm;  // Max display image width in cm, from EDID
+	uint8_t  physical_height_cm; // Max display image height in cm, from EDID
 } intel_output_port_state;
 
 // Define backlight control source enum (conceptual)

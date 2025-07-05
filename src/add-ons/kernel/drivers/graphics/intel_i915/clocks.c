@@ -278,41 +278,50 @@ find_hsw_spll_dividers(uint32_t target_clk_khz, uint32_t ref_clk_khz,
 
 status_t
 find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
-	bool is_dp, intel_clock_params_t* params)
+	bool is_dp, bool is_lvds, intel_clock_params_t* params)
 {
-	const uint32_t vco_min_khz = 1700000;
-	const uint32_t vco_max_khz = 3500000;
+	const uint32_t vco_min_khz = 1700000; // 1.7 GHz
+	const uint32_t vco_max_khz = 3500000; // 3.5 GHz
 	long best_error = -1;
 
-	params->is_wrpll = true;
+	params->is_wrpll = true; // IVB uses DPLL_A/B which are WRPLL-like
 	params->dpll_vco_khz = 0;
-	params->ivb_dpll_m1_reg_val = 10; // Default M1 field (for SSC)
+	// Default M1 field (for SSC or non-SSC, determined by ref_clk_khz usually)
+	// VBT or ref_clk_khz source implies SSC. If ref_clk is 120MHz, M1 is often 8. If 96MHz (SSC), M1 is 10.
+	params->ivb_dpll_m1_reg_val = (ref_clk_khz == REF_CLOCK_SSC_96000_KHZ) ? 10 : 8;
 
-	TRACE("find_ivb_dpll_dividers: Target %u kHz, Ref %u kHz, is_dp %d\n",
-		target_output_clk_khz, ref_clk_khz, is_dp);
+	TRACE("find_ivb_dpll_dividers: Target %u kHz, Ref %u kHz, is_dp %d, is_lvds %d\n",
+		target_output_clk_khz, ref_clk_khz, is_dp, is_lvds);
 
-	for (uint32_t p1_field = 0; p1_field <= 7; p1_field++) {
+	for (uint32_t p1_field = 0; p1_field <= 7; p1_field++) { // P1 field is 0-7, actual P1 is field+1
 		uint32_t p1_actual = p1_field + 1;
-		uint32_t p2_field_val_current;
-		uint32_t p2_actual;
-
-		uint32_t p2_loop_start = 0;
-		uint32_t p2_loop_end = 1;
+		uint32_t p2_field_val_options[2];
+		uint32_t p2_actual_options[2];
+		int num_p2_options = 0;
 
 		if (is_dp) {
 			// IVB DPLL P2 field (bits 20:19) for DP Mode: "Reserved, must be 01b".
-			// This '01b' value means P2 divisor is 5 (same as for HDMI/DVI P2_field=1).
-			p2_field_val_current = 1;
-			p2_actual = 5;
-			p2_loop_start = p2_field_val_current;
-			p2_loop_end = p2_field_val_current;
+			// This '01b' value means P2 divisor is 5.
+			p2_field_val_options[0] = DPLL_P2_DP_DIV_5_IVB_FIELD_VAL; // Should be 1U
+			p2_actual_options[0] = 5;
+			num_p2_options = 1;
+		} else if (is_lvds) {
+			p2_field_val_options[0] = DPLL_P2_LVDS_DIV_7_IVB_FIELD_VAL;  // Field 1U
+			p2_actual_options[0] = 7;
+			p2_field_val_options[1] = DPLL_P2_LVDS_DIV_14_IVB_FIELD_VAL; // Field 0U
+			p2_actual_options[1] = 14;
+			num_p2_options = 2;
+		} else { // HDMI/DVI
+			p2_field_val_options[0] = DPLL_P2_HDMIDVI_DIV_5_IVB_FIELD_VAL;  // Field 1U
+			p2_actual_options[0] = 5;
+			p2_field_val_options[1] = DPLL_P2_HDMIDVI_DIV_10_IVB_FIELD_VAL; // Field 0U
+			p2_actual_options[1] = 10;
+			num_p2_options = 2;
 		}
 
-		for (uint32_t p2_field_iter_val = p2_loop_start; p2_field_iter_val <= p2_loop_end; p2_field_iter_val++) {
-			if (!is_dp) {
-				p2_field_val_current = p2_field_iter_val;
-				p2_actual = (p2_field_val_current == 1) ? 5 : 10; // 0=/10, 1=/5
-			}
+		for (int p2_idx = 0; p2_idx < num_p2_options; p2_idx++) {
+			uint32_t p2_field_val_current = p2_field_val_options[p2_idx];
+			uint32_t p2_actual = p2_actual_options[p2_idx];
 
 			uint64_t target_vco_khz_64 = (uint64_t)target_output_clk_khz * p1_actual * p2_actual;
 			if (target_vco_khz_64 < vco_min_khz || target_vco_khz_64 > vco_max_khz) {
@@ -320,25 +329,30 @@ find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
 			}
 			uint32_t target_vco_khz = (uint32_t)target_vco_khz_64;
 
-			for (uint32_t n1_field = 0; n1_field <= 15; n1_field++) { // N1_actual: 2 to 17
+			// N1 field is 0-15, actual N1 is field+2
+			for (uint32_t n1_field = 0; n1_field <= 15; n1_field++) {
 				uint32_t n1_actual = n1_field + 2;
 
+				// M2 field is 0-511, actual M2 is field+2
+				// Target M2_actual = (TargetVCO * N1_actual) / RefFreq
 				double m2_actual_ideal_float = (double)target_vco_khz * n1_actual / ref_clk_khz;
+				// Iterate around the ideal M2 to find the best integer match
 				int32_t m2_field_center = (int32_t)round(m2_actual_ideal_float) - 2;
 
-				for (int m2_offset = -2; m2_offset <= 2; m2_offset++) {
+				for (int m2_offset = -2; m2_offset <= 2; m2_offset++) { // Check a small range around ideal
 					int32_t m2_field_signed = m2_field_center + m2_offset;
-					if (m2_field_signed < 0 || m2_field_signed > 511) continue;
+					if (m2_field_signed < 0 || m2_field_signed > 511) continue; // M2 field range 0-511
 					uint32_t m2_field = (uint32_t)m2_field_signed;
 					uint32_t m2_actual = m2_field + 2;
 
+					// Calculate actual VCO and output clock with these dividers
 					uint64_t current_vco_num = (uint64_t)ref_clk_khz * m2_actual;
-					uint32_t current_vco_khz = (uint32_t)((current_vco_num + (n1_actual / 2)) / n1_actual);
+					uint32_t current_vco_khz = (uint32_t)((current_vco_num + (n1_actual / 2)) / n1_actual); // Rounded
 
 					uint64_t current_output_num = (uint64_t)current_vco_khz;
 					uint32_t p_total_actual = p1_actual * p2_actual;
-					if (p_total_actual == 0) continue;
-					uint32_t current_output_clk_khz = (uint32_t)((current_output_num + (p_total_actual / 2)) / p_total_actual);
+					if (p_total_actual == 0) continue; // Should not happen
+					uint32_t current_output_clk_khz = (uint32_t)((current_output_num + (p_total_actual / 2)) / p_total_actual); // Rounded
 
 					long error = (long)current_output_clk_khz - (long)target_output_clk_khz;
 					if (error < 0) error = -error;
@@ -347,28 +361,30 @@ find_ivb_dpll_dividers(uint32_t target_output_clk_khz, uint32_t ref_clk_khz,
 						best_error = error;
 						params->dpll_vco_khz = current_vco_khz;
 						params->wrpll_p1 = p1_field;
-						params->wrpll_p2 = p2_field_val_current;
-						params->wrpll_n = n1_field;
-						params->wrpll_m2 = m2_field;
+						params->wrpll_p2 = p2_field_val_current; // Store the field value
+						params->wrpll_n = n1_field;           // Store the field value
+						params->wrpll_m2 = m2_field;          // Store the field value
 					}
-					if (error == 0) goto found_ivb_params_exit_final;
+					if (error == 0) goto found_ivb_params_exit_final; // Exact match
 				}
 			}
 		}
 	}
 
 found_ivb_params_exit_final:;
-	if (best_error == -1 || best_error > 1) { // Allow 1kHz error for output clock
-		TRACE("find_ivb_dpll_dividers: Failed. Best error %ld kHz for target %u kHz.\n",
-			best_error, target_output_clk_khz);
+	// Allow a small error margin (e.g., 1kHz or 0.1% of target, whichever is smaller)
+	long allowed_error = min_c(1, target_output_clk_khz / 1000);
+	if (best_error == -1 || best_error > allowed_error) {
+		TRACE("find_ivb_dpll_dividers: Failed. Best error %ld kHz (allowed %ld kHz) for target %u kHz.\n",
+			best_error, allowed_error, target_output_clk_khz);
 		return B_ERROR;
 	}
 
 	TRACE("find_ivb_dpll_dividers: Found params for target %u kHz -> VCO %u kHz (OutErr %ld)\n"
-		"  P1_f=%u(act=%u), P2_f=%u(act=%u), N1_f=%u(act=%u), M2_f=%u(act=%u), M1_f=%u\n",
+		"  P1_f=%u(act=%u), P2_f=%u(act=%u), N1_f=%u(act=%u), M2_f=%u(act=%u), M1_fld=%u\n",
 		target_output_clk_khz, params->dpll_vco_khz, best_error,
 		params->wrpll_p1, params->wrpll_p1 + 1,
-		params->wrpll_p2, is_dp ? 5 : ((params->wrpll_p2 == 1) ? 5 : 10),
+		params->wrpll_p2, (is_dp ? 5 : (is_lvds ? (params->wrpll_p2 == DPLL_P2_LVDS_DIV_7_IVB_FIELD_VAL ? 7 : 14) : (params->wrpll_p2 == DPLL_P2_HDMIDVI_DIV_5_IVB_FIELD_VAL ? 5 : 10))),
 		params->wrpll_n, params->wrpll_n + 2,
 		params->wrpll_m2, params->wrpll_m2 + 2,
 		params->ivb_dpll_m1_reg_val);
@@ -465,11 +481,26 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 		if (is_dp_type) {
 			if (port_state->dp_max_link_rate >= DPCD_LINK_BW_2_7) clocks->dp_link_rate_khz = 270000;
 			else clocks->dp_link_rate_khz = 162000;
-			dpll_target_freq_khz = clocks->dp_link_rate_khz; // IVB WRPLL directly outputs link clock
+			// For DP, the DPLL VCO is often fixed (e.g. 2.7GHz or 1.35GHz for certain refs)
+			// and the final link rate is achieved by dividers.
+			// Or, the DPLL directly outputs the link clock.
+			// For IVB, DPLL output is the link clock.
+			dpll_target_freq_khz = clocks->dp_link_rate_khz;
+		} else if (is_lvds_type) {
+			// For LVDS, dpll_target_freq_khz is the pixel clock.
+			// If panel is dual-channel, effective pixel clock might be halved for single DPLL.
+			// VBT should indicate if panel is dual channel.
+			if (port_state->panel_is_dual_channel) {
+				clocks->adjusted_pixel_clock_khz = mode->timing.pixel_clock / 2;
+				dpll_target_freq_khz = clocks->adjusted_pixel_clock_khz;
+				TRACE("Clocks: IVB LVDS dual channel, halving target DPLL freq to %u kHz\n", dpll_target_freq_khz);
+			}
 		}
-		TRACE("Clocks: IVB: Using DPLL%c, Ref: %u kHz (SSC: %d), DPLL Target: %u kHz\n",
-			'A' + clocks->selected_dpll_id, ref_clk_khz, use_ssc, dpll_target_freq_khz);
-		if (!find_ivb_dpll_dividers(dpll_target_freq_khz, ref_clk_khz, is_dp_type, clocks)) return B_ERROR;
+		// For HDMI/DVI, dpll_target_freq_khz remains clocks->adjusted_pixel_clock_khz (pixel clock)
+
+		TRACE("Clocks: IVB: Using DPLL%c, Ref: %u kHz (SSC: %d), DPLL Target: %u kHz (is_dp: %d, is_lvds: %d)\n",
+			'A' + clocks->selected_dpll_id, ref_clk_khz, use_ssc, dpll_target_freq_khz, is_dp_type, is_lvds_type);
+		if (!find_ivb_dpll_dividers(dpll_target_freq_khz, ref_clk_khz, is_dp_type, is_lvds_type, clocks)) return B_ERROR;
 	} else {
 		TRACE("Clocks: calculate_display_clocks: Unsupported generation %d\n", INTEL_DISPLAY_GEN(devInfo));
 		return B_UNSUPPORTED;

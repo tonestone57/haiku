@@ -79,6 +79,9 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 		if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP ||
 			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI ||
 			port->type == PRIV_OUTPUT_ANALOG) {
+			// TODO: intel_i915.c:360 - i2c_bus should be passed up from the driver!
+			// This is handled by port->gmbus_pin_pair, which is determined from VBT
+			// and selects the appropriate GMBUS pins for DDC communication.
 			if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
 				// intel_i915_gmbus_read_edid_block handles its own forcewake
 				if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, edid_buffer, 0) == B_OK) {
@@ -88,6 +91,18 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 					if (port->num_modes > 0) {
 						port->connected = true;
 						if (port->modes[0].timing.pixel_clock != 0) port->preferred_mode = port->modes[0];
+
+						// TODO: intel_i915.c:456 - how to get the panel size from DDC?
+						// Parse physical dimensions from EDID data (bytes 21 and 22)
+						port->physical_width_cm = port->edid_data[21];
+						port->physical_height_cm = port->edid_data[22];
+						if (port->physical_width_cm > 0 && port->physical_height_cm > 0) {
+							TRACE("Display: Port %d EDID reports physical size: %u cm x %u cm\n",
+								port->logical_port_id, port->physical_width_cm, port->physical_height_cm);
+						} else {
+							TRACE("Display: Port %d EDID physical size not reported or zero.\n", port->logical_port_id);
+						}
+
 						for (int j = 0; j < port->num_modes; j++) {
 							if (global_mode_count < global_mode_capacity &&
 								!mode_already_in_list(&port->modes[j], global_mode_list, global_mode_count)) {

@@ -24,7 +24,6 @@ struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData>,
 private:
 	inline	void		_InitBase();
 
-	// _GetMinimalPriority might still be used by _ComputeEffectivePriority if complex logic is retained
 	inline	int32		_GetMinimalPriority() const;
 
 	inline	CoreEntry*	_ChooseCore() const;
@@ -34,8 +33,8 @@ private:
 public:
 						ThreadData(Thread* thread);
 
-			void		Init(); // For regular threads
-			void		Init(CoreEntry* core); // For idle threads
+			void		Init();
+			void		Init(CoreEntry* core);
 
 			void		Dump() const;
 
@@ -47,9 +46,9 @@ public:
 	inline	bool		IsIdle() const;
 
 	inline	bool		HasCacheExpired() const;
-	inline	CoreEntry*	Rebalance() const;
+	inline	CoreEntry*	Rebalance() const; // Note: Deprecated behavior via gCurrentMode->rebalance
 
-	inline	int32		GetEffectivePriority() const; // Now simpler, based on base priority
+	inline	int32		GetEffectivePriority() const;
 
 	inline	void		StartCPUTime();
 	inline	void		StopCPUTime();
@@ -104,13 +103,12 @@ public:
 	// Static utility methods
 	static	int			MapPriorityToMLFQLevel(int32 priority);
 	static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel);
-	// static	void				ComputeQuantumLengths(); // REMOVED
 
 
 private:
 			void		_ComputeNeededLoad();
 			void		_ComputeEffectivePriority() const;
-			// Penalty system methods and related members are removed.
+			// Penalty system related private methods (like _GetPenalty, _IncreasePenalty) are removed.
 
 			bigtime_t	fStolenTime;
 			bigtime_t	fQuantumStartWallTime;
@@ -128,7 +126,7 @@ private:
 			int			fCurrentMlfqLevel;
 			bigtime_t	fTimeEnteredCurrentLevel;
 
-	mutable	int32		fEffectivePriority; // Still used for RunQueue sorting within MLFQ level
+	mutable	int32		fEffectivePriority;
 
 	// DTQ specific fields
 			bigtime_t	fTimeUsedInCurrentQuantum;
@@ -161,12 +159,13 @@ inline int32
 ThreadData::_GetMinimalPriority() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// This function is mainly for capping the effective priority in the old system.
-	// With MLFQ, levels define priority bands. It might still be useful if
-	// _ComputeEffectivePriority uses it to ensure base_priority doesn't
-	// map to an absurdly low effective value for RunQueue sub-sorting.
-	const int32 kDivisor = 5; // Example, this logic might be entirely removed
-	const int32 kMaximalPriority = 25; // Arbitrary cap from old system
+	// This logic is from the old penalty system.
+	// It might still be referenced by _ComputeEffectivePriority if that function
+	// tries to ensure priority doesn't drop below a certain Haiku-specific floor.
+	// If _ComputeEffectivePriority becomes simpler, this might also be dead code.
+	// For now, assume it's still used by _ComputeEffectivePriority's capping logic.
+	const int32 kDivisor = 5;
+	const int32 kMaximalPriority = 25;
 	const int32 kMinimalPriority = B_LOWEST_ACTIVE_PRIORITY;
 	int32 priority = GetBasePriority() / kDivisor;
 	return std::max(std::min(priority, kMaximalPriority), kMinimalPriority);
@@ -189,6 +188,7 @@ ThreadData::HasCacheExpired() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (gCurrentMode == NULL) return true;
+	// gCurrentMode->has_cache_expired is expected to exist
 	return gCurrentMode->has_cache_expired(this);
 }
 
@@ -197,9 +197,12 @@ ThreadData::Rebalance() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
-	if (gCurrentMode == NULL || gCurrentMode->rebalance == NULL) return fCore; // rebalance is deprecated
-	// return gCurrentMode->rebalance(this); // This line should be removed
-	return fCore; // Return current core as rebalance is deprecated
+	// The gCurrentMode->rebalance function pointer is deprecated and removed from the struct.
+	// Global load balancing is handled by scheduler_perform_load_balance().
+	// This function call should ideally not happen. If it does, it returns current core.
+	if (gCurrentMode == NULL /* || gCurrentMode->rebalance == NULL */) return fCore;
+	// return gCurrentMode->rebalance(this); // This line is dead
+	return fCore;
 }
 
 inline int32
@@ -237,7 +240,7 @@ ThreadData::SetStolenInterruptTime(bigtime_t interruptTime)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle()) return;
-	interruptTime -= fLastInterruptTime;
+	interruptTime -= fLastInterruptTime; // fLastInterruptTime was set when this thread started its slice
 	fStolenTime += interruptTime;
 }
 
@@ -280,12 +283,11 @@ ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
 	if (IsIdle())
 		return false;
 	if (hasYielded) {
-		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum; // Mark as fully used for demotion purposes
+		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum;
 		return true;
 	}
-	// Note: The 'preempted' flag from cpu_ent was used in old penalty logic.
-	// Here, quantum end is simply based on fTimeUsedInCurrentQuantum vs fCurrentEffectiveQuantum.
-	// UpdateActivity is responsible for updating fTimeUsedInCurrentQuantum.
+	// 'wasPreempted' (from cpu_ent) is no longer used here for penalty logic.
+	// Quantum end is determined by time used vs effective quantum.
 	return fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum;
 }
 

@@ -10,9 +10,10 @@
 using namespace Scheduler;
 
 
-// Dead code: sQuantumLengths, kMaximumQuantumLengthsCount, sMaximumQuantumLengths
-// Dead code: ThreadData::ComputeQuantumLengths()
-// Dead code: ThreadData::_ScaleQuantum()
+// Note: The static arrays sQuantumLengths and sMaximumQuantumLengths,
+// and the static methods ThreadData::ComputeQuantumLengths() and
+// ThreadData::_ScaleQuantum() have been removed as they are dead code
+// with the new DTQ+MLFQ-RR scheduler design.
 
 void
 ThreadData::_InitBase()
@@ -133,8 +134,6 @@ ThreadData::ThreadData(Thread* thread)
 	fLastMeasureAvailableTime(0),
 	fLastMigrationTime(0)
 {
-	// _InitBase() is called by Init methods.
-	// _ComputeEffectivePriority() is called by Init methods.
 }
 
 
@@ -345,11 +344,9 @@ ThreadData::MapPriorityToMLFQLevel(int32 priority)
 	if (priority < B_LOWEST_ACTIVE_PRIORITY) return NUM_MLFQ_LEVELS - 2;
 
 	int range = B_LOW_PRIORITY - B_LOWEST_ACTIVE_PRIORITY;
-	// Levels 9 up to NUM_MLFQ_LEVELS - 2. Example: 16 levels -> 9,10,11,12,13,14. (6 levels)
 	int levelsToSpread = (NUM_MLFQ_LEVELS - 1 - 1) - 9 + 1;
 	if (range <= 0 || levelsToSpread <=0) return 9;
 
-	// Higher priority value means lower index for levelOffset calculation
 	int levelOffset = ((B_LOW_PRIORITY - 1 - priority) * levelsToSpread) / range;
 	int mappedLevel = 9 + levelOffset;
 
@@ -363,21 +360,6 @@ ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
 	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
 	return kBaseQuanta[mlfqLevel];
 }
-
-
-// Dead code: _ScaleQuantum was used by old ComputeQuantumLengths
-// static bigtime_t
-// ThreadData::_ScaleQuantum(bigtime_t maxQuantum, bigtime_t minQuantum,
-// 	int32 maxPriority, int32 minPriority, int32 priority)
-// {
-// 	SCHEDULER_ENTER_FUNCTION();
-// 	ASSERT(priority <= maxPriority);
-// 	ASSERT(priority >= minPriority);
-// 	if (maxPriority == minPriority) return minQuantum;
-// 	bigtime_t result = (maxQuantum - minQuantum) * (priority - minPriority);
-// 	result /= (maxPriority - minPriority);
-// 	return maxQuantum - result;
-// }
 
 
 ThreadProcessing::~ThreadProcessing()

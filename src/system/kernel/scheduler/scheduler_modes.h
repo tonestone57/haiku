@@ -1,5 +1,6 @@
 /*
  * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
+ * Copyright 2023, Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  */
 #ifndef KERNEL_SCHEDULER_MODES_H
@@ -7,15 +8,20 @@
 
 
 #include <kscheduler.h>
-#include <thread_types.h>
+#include <thread_types.h> // For ThreadData, CoreEntry forward declarations if needed by CPUSet
+#include <kernel.h> // For CPUSet
+
+
+// Forward declarations from other scheduler headers
+namespace Scheduler {
+	class ThreadData;
+	class CoreEntry;
+	// CPUSet is defined in kernel.h, usually included via OS.h or kernel.h
+}
 
 
 struct scheduler_mode_operations {
 	const char*				name;
-
-	// bigtime_t				base_quantum; // DEPRECATED
-	// bigtime_t				minimal_quantum; // DEPRECATED
-	// bigtime_t				quantum_multipliers[2]; // DEPRECATED
 
 	bigtime_t				maximum_latency; // Still used by _user_estimate_max_scheduling_latency
 
@@ -25,8 +31,6 @@ struct scheduler_mode_operations {
 								const Scheduler::ThreadData* threadData);
 	Scheduler::CoreEntry*	(*choose_core)( // For initial thread placement
 								const Scheduler::ThreadData* threadData);
-
-	// Scheduler::CoreEntry*	(*rebalance)(const Scheduler::ThreadData* threadData); // DEPRECATED
 
 	void					(*rebalance_irqs)(bool idle);
 
@@ -48,11 +52,10 @@ namespace Scheduler {
 
 
 extern scheduler_mode gCurrentModeID;
-extern scheduler_mode_operations* gCurrentMode;
+extern scheduler_mode_operations* gCurrentMode; // Points to one of the above
 
 
 }
 
 
 #endif	// KERNEL_SCHEDULER_MODES_H
-

@@ -14,6 +14,7 @@
 #include <OS.h>
 #include <GraphicsDefs.h>
 #include <kernel/locks/mutex.h>
+#include <kernel/util/list.h> // For struct list and list_link
 
 #include "accelerant.h" // For intel_i915_shared_info
 
@@ -164,6 +165,33 @@ enum i915_caching_mode {
 	I915_CACHING_WC,             // Write-Combining (via B_MTRRT_WC)
 	I915_CACHING_WB              // Write-Back (via B_MTRRT_WB)
 };
+
+// GEM Object States (for eviction management)
+enum i915_gem_object_state {
+	I915_GEM_OBJECT_STATE_SYSTEM = 0, // Backing store in system memory, not bound to GTT/VRAM
+	I915_GEM_OBJECT_STATE_GTT    = 1, // Bound to a GTT range
+	I915_GEM_OBJECT_STATE_VRAM   = 2  // (Future Placeholder) Primarily in VRAM
+};
+
+// New GEM Object creation flags for eviction control (extend BO_ALLOC flags)
+// Bit 7 (after tiling and caching flags)
+#define I915_BO_ALLOC_EVICTION_SHIFT    6 // Assuming caching used bits 4,5
+#define I915_BO_ALLOC_PINNED            (1 << I915_BO_ALLOC_EVICTION_SHIFT)
+// Default is evictable (if this flag is not set)
+
+
+// Forward declare for list_link if not already available via other Haiku headers.
+// Typically, <kernel/util/list.h> would provide this.
+// struct list_link; // If needed
+
+// Forward declarations for GEM LRU list management functions (defined in gem_object.c)
+struct intel_i915_device_info; // Forward declare this struct itself
+void i915_gem_object_lru_init(struct intel_i915_device_info* devInfo);
+void i915_gem_object_lru_uninit(struct intel_i915_device_info* devInfo);
+void i915_gem_object_update_lru(struct intel_i915_gem_object* obj); // Declaration for use in gem_ioctl.c
+// Forward declaration for GEM eviction function (defined in gem_object.c)
+status_t intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo);
+
 
 // MMIO Access (Forcewake must be handled by caller)
 static inline uint32
@@ -359,6 +387,13 @@ typedef struct intel_i915_device_info {
 		uint32_t obj_stride;       // Stride of the object in this fence
 	} fence_state[I915_MAX_FENCES];
 	mutex fence_allocator_lock;
+
+	// LRU list for GTT-bound evictable GEM objects
+	struct list active_lru_list;
+	mutex lru_lock;
+	uint32_t last_completed_render_seqno; // For checking if an object is idle (approximate)
+	// Potentially add similar for other engines if they exist:
+	// uint32_t last_completed_blit_seqno;
 
 	struct intel_vbt_data* vbt; area_id rom_area; uint8_t* rom_base;
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;

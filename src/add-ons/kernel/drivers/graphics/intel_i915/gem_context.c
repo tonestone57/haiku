@@ -91,9 +91,9 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	}
 
 	// Allocate a GEM object for the hardware context image
-	// Size depends on Gen & engine.
+	// Size depends on Gen & engine. Context images should be pinned.
 	status = intel_i915_gem_object_create(devInfo, GEN7_RCS_CONTEXT_IMAGE_SIZE,
-		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &ctx->hw_image_obj);
+		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED, &ctx->hw_image_obj);
 	if (status != B_OK) {
 		TRACE("GEM Context: Failed to create HW image object: %s\n", strerror(status));
 		mutex_destroy(&ctx->lock);

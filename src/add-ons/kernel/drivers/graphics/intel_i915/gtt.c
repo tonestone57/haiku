@@ -350,8 +350,48 @@ intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 	}
 
 	// No suitable contiguous block found
-	mutex_unlock(&devInfo->gtt_allocator_lock);
-	TRACE("GTT Alloc: No contiguous block of %lu pages found. Free pages globally: %u\n",
+	// Attempt to evict something and retry ONCE.
+	// A more sophisticated loop could try multiple evictions if needed.
+	mutex_unlock(&devInfo->gtt_allocator_lock); // Release lock before calling eviction
+
+	TRACE("GTT Alloc: No contiguous block of %lu pages. Free: %u. Attempting eviction.\n",
+		num_pages, devInfo->gtt_free_pages_count);
+
+	if (intel_i915_gem_evict_one_object(devInfo) == B_OK) {
+		TRACE("GTT Alloc: Eviction successful, retrying allocation.\n");
+		mutex_lock(&devInfo->gtt_allocator_lock); // Re-acquire lock for retry
+		// Retry logic (same as above, simplified for one retry attempt)
+		if (num_pages > devInfo->gtt_free_pages_count) {
+			mutex_unlock(&devInfo->gtt_allocator_lock);
+			return B_NO_MEMORY;
+		}
+		consecutive_free_count = 0;
+		current_search_start_idx = 1;
+		for (uint32_t i = 1; i < devInfo->gtt_total_pages_managed; ++i) {
+			if (!_gtt_is_bit_set(i, devInfo->gtt_page_bitmap)) {
+				if (consecutive_free_count == 0) current_search_start_idx = i;
+				consecutive_free_count++;
+				if (consecutive_free_count == num_pages) {
+					for (uint32_t k = 0; k < num_pages; ++k) {
+						_gtt_set_bit(current_search_start_idx + k, devInfo->gtt_page_bitmap);
+					}
+					devInfo->gtt_free_pages_count -= num_pages;
+					*gtt_page_offset_out = current_search_start_idx;
+					mutex_unlock(&devInfo->gtt_allocator_lock);
+					TRACE("GTT Alloc: Retry successful. Allocated %lu pages at offset %u. Free: %u\n",
+						num_pages, *gtt_page_offset_out, devInfo->gtt_free_pages_count);
+					return B_OK;
+				}
+			} else {
+				consecutive_free_count = 0;
+			}
+		}
+		mutex_unlock(&devInfo->gtt_allocator_lock); // Release lock if retry also failed
+	} else {
+		TRACE("GTT Alloc: Eviction failed or no objects to evict.\n");
+	}
+
+	TRACE("GTT Alloc: Failed to find/make space for %lu pages. Free pages globally: %u\n",
 		num_pages, devInfo->gtt_free_pages_count);
 	return B_NO_MEMORY;
 }

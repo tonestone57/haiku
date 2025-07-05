@@ -177,7 +177,7 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	status_t status;
 	struct intel_clock_params_t clock_params;
 	char areaName[64];
-	enum gtt_caching_type fb_cache_type = GTT_CACHE_WRITE_COMBINING;
+	enum gtt_caching_type fb_gtt_cache_type = GTT_CACHE_WRITE_COMBINING; // For GPU access via GTT
 	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, targetPortId);
 
 	if (!mode || targetPipe == PRIV_PIPE_INVALID || !port_state) return B_BAD_VALUE;
@@ -224,7 +224,27 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	}
 
 	// --- Framebuffer Setup (No MMIO, GTT mapping handles its own FW if needed for flush) ---
-	/* ... (framebuffer area logic as before) ... */
+	// This section is responsible for creating/configuring devInfo->framebuffer_bo
+	// Ensure it's created with I915_BO_ALLOC_PINNED and I915_BO_ALLOC_CACHING_WC.
+	// Example conceptual creation:
+	// if (devInfo->framebuffer_bo == NULL || devInfo->framebuffer_bo->size < new_fb_size) {
+	//    if (devInfo->framebuffer_bo) { /* unmap and put old bo */ }
+	//    uint32_t fb_flags = I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED | I915_BO_ALLOC_CACHING_WC;
+	//    // Add tiling flags if framebuffer should be tiled
+	//    // if (enable_fb_tiling) fb_flags |= I915_BO_ALLOC_TILED_X;
+	//    status = intel_i915_gem_object_create(devInfo, new_fb_size, fb_flags, &devInfo->framebuffer_bo);
+	//    if (status != B_OK) goto modeset_fail_fw;
+	//    // Stride for framebuffer_bo must be correctly calculated here by gem_object_create or display driver
+	//    // and area created. Then GTT map it.
+	// }
+	// The existing code for framebuffer area creation and GTT mapping follows...
+	// Assume new_bytes_per_row holds the correct hardware stride (linear or tiled).
+	/* ... (existing framebuffer area logic, then GTT map using fb_gtt_cache_type) ... */
+	// After GTT mapping:
+	// devInfo->shared_info->framebuffer_physical = devInfo->framebuffer_bo->phys_pages_list[0]; // If needed by accelerant directly
+	// devInfo->framebuffer_phys_addr = devInfo->framebuffer_bo->phys_pages_list[0]; // For shared info
+	// devInfo->framebuffer_gtt_offset = devInfo->framebuffer_bo->gtt_offset_pages;
+
 
 	// --- Program Hardware for New Mode ---
 	// Forcewake is already held from the top of this function.

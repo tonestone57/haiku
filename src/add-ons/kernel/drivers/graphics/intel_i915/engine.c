@@ -65,7 +65,7 @@ intel_engine_init(intel_i915_device_info* devInfo,
 	engine->ring_size_bytes = DEFAULT_RING_BUFFER_SIZE;
 	ring_num_pages = engine->ring_size_bytes / B_PAGE_SIZE;
 	status = intel_i915_gem_object_create(devInfo, engine->ring_size_bytes,
-		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &engine->ring_buffer_obj);
+		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED, &engine->ring_buffer_obj);
 	if (status != B_OK) { mutex_destroy(&engine->lock); return status; }
 	status = intel_i915_gem_object_map_cpu(engine->ring_buffer_obj, (void**)&engine->ring_cpu_map);
 	if (status != B_OK) { /* cleanup */ intel_i915_gem_object_put(engine->ring_buffer_obj); mutex_destroy(&engine->lock); return status; }
@@ -78,7 +78,7 @@ intel_engine_init(intel_i915_device_info* devInfo,
 	seqno_num_pages = B_PAGE_SIZE / B_PAGE_SIZE;
 	snprintf(areaName, sizeof(areaName), "i915_%s_hw_seqno", name);
 	status = intel_i915_gem_object_create(devInfo, B_PAGE_SIZE,
-		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR, &engine->hw_seqno_obj);
+		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED, &engine->hw_seqno_obj);
 	if (status != B_OK) { goto err_cleanup_ring; }
 	status = intel_i915_gem_object_map_cpu(engine->hw_seqno_obj, (void**)&engine->hw_seqno_cpu_map);
 	if (status != B_OK) { intel_i915_gem_object_put(engine->hw_seqno_obj); goto err_cleanup_ring; }

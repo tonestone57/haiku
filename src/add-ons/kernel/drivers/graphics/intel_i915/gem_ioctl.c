@@ -171,6 +171,7 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	intel_i915_gem_relocation_entry* relocs_kernel = NULL; // Kernel copy
 	void* cmd_buffer_kernel_addr = NULL;
 	struct intel_i915_gem_context* ctx = NULL;
+	uint32_t current_exec_seqno = 0; // To tag objects used in this execbuffer
 
 	// Keep track of objects mapped to GTT on-demand by this call for cleanup
 	typedef struct {
@@ -188,11 +189,16 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	if (args.engine_id != RCS0 || devInfo->rcs0 == NULL) return B_BAD_VALUE;
 	engine = devInfo->rcs0;
 
+	// Get a sequence number for this execution to tag objects will be done after submission.
+
 	cmd_obj = (struct intel_i915_gem_object*)_generic_handle_lookup(args.cmd_buffer_handle, HANDLE_TYPE_GEM_OBJECT);
 	if (cmd_obj == NULL) return B_BAD_VALUE;
 	if (args.cmd_buffer_length > cmd_obj->size) { status = B_BAD_VALUE; goto exec_cleanup_cmd_obj; }
 	status = intel_i915_gem_object_map_cpu(cmd_obj, &cmd_buffer_kernel_addr);
 	if (status != B_OK || cmd_buffer_kernel_addr == NULL) { status = (status == B_OK) ? B_ERROR : status; goto exec_cleanup_cmd_obj; }
+
+	// LRU update for cmd_obj will happen after successful submission along with other BOs.
+	// No GTT binding needed for cmd_obj itself in current model as its content is copied to ring.
 
 	if (args.context_handle != 0) {
 		ctx = (struct intel_i915_gem_context*)_generic_handle_lookup(args.context_handle, HANDLE_TYPE_GEM_CONTEXT);

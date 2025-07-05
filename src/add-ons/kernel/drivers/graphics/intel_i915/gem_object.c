@@ -15,6 +15,7 @@
 #include <string.h>
 #include <vm/vm.h>
 #include <kernel/util/atomic.h>
+#include <kernel/util/list.h> // For list_init_link
 
 
 static void
@@ -30,6 +31,168 @@ _intel_i915_gem_object_free_internal(struct intel_i915_gem_object* obj)
 	mutex_destroy(&obj->lock);
 	free(obj);
 }
+
+// --- LRU List Management ---
+
+void
+i915_gem_object_lru_init(struct intel_i915_device_info* devInfo)
+{
+	if (devInfo == NULL) return;
+	list_init_etc(&devInfo->active_lru_list, offsetof(struct intel_i915_gem_object, lru_link));
+	mutex_init_etc(&devInfo->lru_lock, "i915 GEM LRU lock", MUTEX_FLAG_CLONE_NAME);
+	devInfo->last_completed_render_seqno = 0; // Initialize completed sequence number
+	TRACE("GEM LRU: Initialized for device %p\n", devInfo);
+}
+
+void
+i915_gem_object_lru_uninit(struct intel_i915_device_info* devInfo)
+{
+	if (devInfo == NULL) return;
+	// TODO: Should ensure list is empty here or handle objects still in it?
+	// For now, just destroy lock. Objects should be removed as they are freed.
+	mutex_destroy(&devInfo->lru_lock);
+	TRACE("GEM LRU: Uninitialized for device %p\n", devInfo);
+}
+
+// Adds object to the tail of the LRU (Most Recently Used)
+static void
+_i915_gem_object_add_to_lru(struct intel_i915_gem_object* obj)
+{
+	if (obj == NULL || !obj->evictable || obj->dev_priv == NULL) return;
+	// Object must be GTT bound to be on the active LRU
+	if (obj->current_state != I915_GEM_OBJECT_STATE_GTT) return;
+
+	mutex_lock(&obj->dev_priv->lru_lock);
+	if (!list_is_linked(&obj->lru_link)) { // Avoid double-adding
+		list_add_item_to_tail(&obj->dev_priv->active_lru_list, obj);
+		TRACE("GEM LRU: Added obj %p (handle area %" B_PRId32 ") to LRU.\n", obj, obj->backing_store_area);
+	}
+	mutex_unlock(&obj->dev_priv->lru_lock);
+}
+
+// Removes object from LRU
+static void
+_i915_gem_object_remove_from_lru(struct intel_i915_gem_object* obj)
+{
+	if (obj == NULL || obj->dev_priv == NULL) return;
+
+	mutex_lock(&obj->dev_priv->lru_lock);
+	if (list_is_linked(&obj->lru_link)) {
+		list_remove_item(&obj->dev_priv->active_lru_list, obj);
+		TRACE("GEM LRU: Removed obj %p (handle area %" B_PRId32 ") from LRU.\n", obj, obj->backing_store_area);
+	}
+	mutex_unlock(&obj->dev_priv->lru_lock);
+}
+
+// Updates object's position to tail of LRU (Most Recently Used)
+void // Needs to be callable by execbuffer, so not static for now, or execbuffer needs a wrapper
+i915_gem_object_update_lru(struct intel_i915_gem_object* obj)
+{
+	if (obj == NULL || !obj->evictable || obj->dev_priv == NULL) return;
+	// Object must be GTT bound to be on the active LRU
+	if (obj->current_state != I915_GEM_OBJECT_STATE_GTT) return;
+
+	mutex_lock(&obj->dev_priv->lru_lock);
+	if (list_is_linked(&obj->lru_link)) {
+		list_remove_item(&obj->dev_priv->active_lru_list, obj);
+	}
+	list_add_item_to_tail(&obj->dev_priv->active_lru_list, obj);
+	// TRACE("GEM LRU: Updated obj %p (handle area %" B_PRId32 ") to LRU tail.\n", obj, obj->backing_store_area);
+	mutex_unlock(&obj->dev_priv->lru_lock);
+}
+// --- End LRU List Management ---
+
+// Core eviction function: Tries to evict one object from GTT
+// Returns B_OK if an object was successfully evicted, B_ERROR or B_BUSY otherwise.
+// Made non-static to be callable from gtt.c
+status_t
+intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo)
+{
+	if (devInfo == NULL) return B_BAD_VALUE;
+
+	struct intel_i915_gem_object* obj_to_evict = NULL;
+	struct intel_i915_gem_object* iter_obj;
+
+	TRACE("GEM Evict: Attempting to find an object to evict from GTT.\n");
+
+	mutex_lock(&devInfo->lru_lock);
+
+	// Iterate from the head of the LRU (least recently used)
+	list_for_every_entry(&devInfo->active_lru_list, iter_obj, struct intel_i915_gem_object, lru_link) {
+		if (!iter_obj->evictable) {
+			// TRACE("GEM Evict: Skipping non-evictable obj %p in LRU.\n", iter_obj);
+			continue;
+		}
+
+		// GPU Idle Check (Simplified):
+		// Check if the last sequence number that used this object has completed.
+		// This is a basic check. A robust system needs proper fencing/reservation.
+		// We assume devInfo->last_completed_render_seqno is updated elsewhere (e.g., by engine/IRQ).
+		bool is_idle = (int32_t)(devInfo->last_completed_render_seqno - iter_obj->last_used_seqno) >= 0;
+		if (!is_idle && iter_obj->last_used_seqno != 0) { // last_used_seqno = 0 might mean never used or just created
+			// TRACE("GEM Evict: Skipping obj %p, potentially busy (last_used %llu, completed %lu).\n",
+			//    iter_obj, iter_obj->last_used_seqno, devInfo->last_completed_render_seqno);
+			continue;
+		}
+
+		// Dirty Check (Simplified):
+		// For this initial design, we assume objects are "clean" or their system memory
+		// backing is authoritative. If an object were dirty (GPU modified GTT/VRAM copy),
+		// it would need to be written back before eviction or marked to be written back.
+		if (iter_obj->dirty) {
+			// TRACE("GEM Evict: Skipping obj %p, dirty bit set (writeback not implemented).\n", iter_obj);
+			// TODO: Implement writeback if needed, or clear dirty flag appropriately.
+			continue;
+		}
+
+		// Found a candidate
+		obj_to_evict = iter_obj;
+		// Take a reference because unmap_gtt (which calls remove_from_lru) might be called
+		// after we release the lru_lock, or if unmap_gtt doesn't expect the object
+		// to be removed from LRU by itself while it's operating on it.
+		// More simply, _i915_gem_object_remove_from_lru will be called by unmap_gtt.
+		// We just need to ensure the object persists through the unmap call.
+		intel_i915_gem_object_get(obj_to_evict);
+		// We remove it here while holding the LRU lock to prevent races with other eviction attempts
+		// or with updates to this object's LRU status.
+		list_remove_item(&devInfo->active_lru_list, obj_to_evict);
+		// Note: list_remove_item itself doesn't change obj_to_evict->lru_link content if it's not
+		// part of a list_for_every_entry_safe. So, subsequent list_is_linked might be true.
+		// _i915_gem_object_remove_from_lru called by unmap_gtt handles this.
+
+		TRACE("GEM Evict: Selected obj %p (area %" B_PRId32 ", last_used %llu) for eviction.\n",
+			obj_to_evict, obj_to_evict->backing_store_area, obj_to_evict->last_used_seqno);
+		break;
+	}
+
+	mutex_unlock(&devInfo->lru_lock);
+
+	if (obj_to_evict != NULL) {
+		// intel_i915_gem_object_unmap_gtt will also call _i915_gem_object_remove_from_lru,
+		// which is fine as it checks list_is_linked. It will also free the GTT space.
+		status_t unmap_status = intel_i915_gem_object_unmap_gtt(obj_to_evict);
+		intel_i915_gem_object_put(obj_to_evict); // Release the reference taken above.
+
+		if (unmap_status == B_OK) {
+			TRACE("GEM Evict: Successfully unmapped and evicted obj %p.\n", obj_to_evict);
+			return B_OK;
+		} else {
+			TRACE("GEM Evict: Failed to unmap obj %p during eviction: %s. Re-adding to LRU for now.\n",
+				obj_to_evict, strerror(unmap_status));
+			// If unmap failed, GTT space wasn't freed. Add it back to LRU if it was evictable and GTT state.
+			// This is tricky because its state might be inconsistent.
+			// For now, assume unmap_gtt is robust or this object is now in a bad state.
+			// A safer approach might be to not re-add it, or mark it as problematic.
+			// If unmap_gtt sets current_state to SYSTEM, add_to_lru won't re-add it unless state is GTT.
+			// This path implies something went quite wrong.
+			return B_ERROR; // Eviction attempt failed at unmap stage.
+		}
+	}
+
+	TRACE("GEM Evict: No suitable object found for eviction.\n");
+	return B_ERROR; // Or B_BUSY / B_NO_MEMORY if preferred for "couldn't make space"
+}
+// --- End Core Eviction Logic ---
 
 
 status_t
@@ -75,6 +238,18 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 	} else if ((flags & I915_BO_ALLOC_TILING_MASK) == I915_BO_ALLOC_TILED_Y) {
 		obj->tiling_mode = I915_TILING_Y;
 	}
+
+	// Initialize eviction-related fields
+	if (flags & I915_BO_ALLOC_PINNED) {
+		obj->evictable = false;
+	} else {
+		obj->evictable = true;
+	}
+	obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM; // Initially in system mem, not bound
+	obj->dirty = false;
+	obj->last_used_seqno = 0;
+	list_init_link(&obj->lru_link);
+
 
 	// Placeholder for stride calculation and size adjustment for tiling
 	// A real implementation needs bpp, specific tiling geometry, and GPU generation.
@@ -227,6 +402,10 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 		obj->gtt_mapped = true;
 		obj->gtt_offset_pages = gtt_page_offset;
 		obj->gtt_cache_type = cache_type;
+		obj->current_state = I915_GEM_OBJECT_STATE_GTT;
+		if (obj->evictable) { // Only add evictable objects to LRU
+			_i915_gem_object_add_to_lru(obj);
+		}
 
 		// Attempt to allocate and program a fence register if object is tiled (Gen < 9)
 		if (obj->tiling_mode != I915_TILING_NONE && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
@@ -311,6 +490,10 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 
 	intel_i915_device_info* devInfo = obj->dev_priv;
 
+	// Remove from LRU before unmapping and changing state
+	_i915_gem_object_remove_from_lru(obj);
+	obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM;
+
 	// Disable and free fence register if one was used by this object
 	if (obj->fence_reg_id != -1 && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
 		TRACE("GEM: Unmapping tiled object %p, disabling fence %d.\n", obj, obj->fence_reg_id);
@@ -332,11 +515,21 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 		obj->gtt_offset_pages * B_PAGE_SIZE, obj->num_phys_pages);
 
 	if (status == B_OK) {
+		// Now that PTEs are pointing to scratch, free the GTT space in the bitmap allocator
+		if (obj->gtt_offset_pages != (uint32_t)-1 && obj->num_phys_pages > 0) {
+			intel_i915_gtt_free_space(devInfo, obj->gtt_offset_pages, obj->num_phys_pages);
+			TRACE("GEM: GTT space for obj %p (offset %u, %lu pages) freed from bitmap.\n",
+				obj, obj->gtt_offset_pages, obj->num_phys_pages);
+		}
+
 		obj->gtt_mapped = false;
 		obj->gtt_offset_pages = (uint32_t)-1;
+		// obj->gtt_cache_type should remain as it was, or be reset if needed.
 		obj->gtt_mapped_by_execbuf = false; // Clear this flag too
 	} else {
-		TRACE("GEM: Failed to unmap object %p from GTT: %s\n", obj, strerror(status));
+		TRACE("GEM: Failed to unmap PTEs for object %p from GTT: %s\n", obj, strerror(status));
+		// If unmap_memory failed, we probably shouldn't try to free the GTT space
+		// as the state is uncertain.
 	}
 	return status;
 }

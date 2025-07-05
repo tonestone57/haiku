@@ -14,6 +14,7 @@
 #include <user_memcpy.h>
 
 #include "intel_i915_priv.h"
+#include "gem_object.h" // For i915_gem_object_lru_init/uninit
 #include "accelerant.h"
 #include "registers.h"
 #include "gtt.h"
@@ -262,9 +263,10 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		if ((status = intel_i915_gmbus_init(devInfo)) != B_OK) TRACE("GMBUS init failed: %s\n", strerror(status));
 		if ((status = intel_i915_clocks_init(devInfo)) != B_OK) TRACE("Clocks init failed: %s\n", strerror(status));
 		if ((status = intel_i915_pm_init(devInfo)) != B_OK) TRACE("PM init failed: %s\n", strerror(status));
+		i915_gem_object_lru_init(devInfo); // Initialize LRU list for this device
 
 		devInfo->rcs0 = (struct intel_engine_cs*)malloc(sizeof(struct intel_engine_cs));
-		if (devInfo->rcs0 == NULL) { /* full cleanup */ atomic_add(&devInfo->open_count, -1); return B_NO_MEMORY;}
+		if (devInfo->rcs0 == NULL) { /* full cleanup */ i915_gem_object_lru_uninit(devInfo); atomic_add(&devInfo->open_count, -1); return B_NO_MEMORY;}
 		status = intel_engine_init(devInfo, devInfo->rcs0, RCS0, "Render Engine");
 		if (status != B_OK) { free(devInfo->rcs0); devInfo->rcs0 = NULL; /* full cleanup */ atomic_add(&devInfo->open_count, -1); return status; }
 
@@ -284,6 +286,7 @@ static status_t intel_i915_free(void* cookie) {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
 	intel_i915_pm_uninit(devInfo);
 	if (devInfo->rcs0 != NULL) { intel_engine_uninit(devInfo->rcs0); free(devInfo->rcs0); devInfo->rcs0 = NULL; }
+	i915_gem_object_lru_uninit(devInfo); // Uninitialize LRU list
 	intel_i915_display_uninit(devInfo);
 	intel_i915_clocks_uninit(devInfo);
 	intel_i915_gmbus_cleanup(devInfo);

@@ -185,13 +185,119 @@ err_lock:
 	mutex_destroy(&devInfo->gtt_allocator_lock);
 	if (devInfo->gtt_page_bitmap) { free(devInfo->gtt_page_bitmap); devInfo->gtt_page_bitmap = NULL; }
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// --- Initialize Fence Allocator ---
+	intel_i915_fences_init(devInfo); // Initialize fence states
+	// --- End Fence Allocator Init ---
+	return B_OK;
+
+err_gtt_table_area:
+	delete_area(devInfo->gtt_table_area); devInfo->gtt_table_area = -1;
+err_scratch_area:
+	delete_area(devInfo->scratch_page_area); devInfo->scratch_page_area = -1;
+err_lock:
+	mutex_destroy(&devInfo->gtt_allocator_lock);
+	if (devInfo->gtt_page_bitmap) { free(devInfo->gtt_page_bitmap); devInfo->gtt_page_bitmap = NULL; }
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return status;
 }
+
+// --- Fence Register Management ---
+static void
+intel_i915_fences_init(intel_i915_device_info* devInfo)
+{
+	if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 9) {
+		TRACE("Fences: Gen %d, legacy fence registers likely not primary mechanism.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+		mutex_init_etc(&devInfo->fence_allocator_lock, "i915 fence allocator lock", MUTEX_FLAG_CLONE_NAME);
+		for (int i = 0; i < I915_MAX_FENCES; ++i) {
+			devInfo->fence_state[i].used = false;
+		}
+		return;
+	}
+
+	mutex_init_etc(&devInfo->fence_allocator_lock, "i915 fence allocator lock", MUTEX_FLAG_CLONE_NAME);
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) {
+		TRACE("Fences: Failed to get forcewake for disabling fences: %s\n", strerror(fw_status));
+	}
+
+	for (int i = 0; i < I915_MAX_FENCES; ++i) {
+		devInfo->fence_state[i].used = false;
+		devInfo->fence_state[i].gtt_offset_pages = 0;
+		devInfo->fence_state[i].obj_num_pages = 0;
+		devInfo->fence_state[i].tiling_mode = I915_TILING_NONE;
+		devInfo->fence_state[i].obj_stride = 0;
+
+		if (fw_status == B_OK && devInfo->mmio_regs_addr) {
+			// Assuming FENCE_REG_INDEX(i) is base of 64-bit register. Clear low dword.
+			uint32_t fence_reg_low = FENCE_REG_INDEX(i);
+			if (fence_reg_low < devInfo->mmio_aperture_size - 8) { // Basic check
+				intel_i915_write32(devInfo, fence_reg_low, 0);
+				intel_i915_write32(devInfo, fence_reg_low + 4, 0); // Clear high dword
+			}
+		}
+	}
+	if (fw_status == B_OK) {
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	}
+	TRACE("Fences: Initialized %d software fence states and attempted HW disable.\n", I915_MAX_FENCES);
+}
+
+static void
+intel_i915_fences_uninit(intel_i915_device_info* devInfo)
+{
+	mutex_destroy(&devInfo->fence_allocator_lock);
+	TRACE("Fences: Uninitialized (lock destroyed).\n");
+}
+
+int
+intel_i915_fence_alloc(intel_i915_device_info* devInfo)
+{
+	if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 9) {
+		TRACE("Fences: Alloc requested for Gen %d, returning no fence.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+		return -1;
+	}
+
+	mutex_lock(&devInfo->fence_allocator_lock);
+	for (int i = 0; i < I915_MAX_FENCES; ++i) {
+		if (!devInfo->fence_state[i].used) {
+			devInfo->fence_state[i].used = true;
+			// Other fields (gtt_offset_pages etc.) will be set by the caller when programming the fence.
+			mutex_unlock(&devInfo->fence_allocator_lock);
+			TRACE("Fences: Allocated fence register ID %d.\n", i);
+			return i;
+		}
+	}
+	mutex_unlock(&devInfo->fence_allocator_lock);
+	TRACE("Fences: Failed to allocate a fence register, all %d in use.\n", I915_MAX_FENCES);
+	return -1;
+}
+
+void
+intel_i915_fence_free(intel_i915_device_info* devInfo, int fence_id)
+{
+	if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 9) return;
+	if (fence_id < 0 || fence_id >= I915_MAX_FENCES) return;
+
+	mutex_lock(&devInfo->fence_allocator_lock);
+	if (!devInfo->fence_state[fence_id].used) {
+		TRACE("Fences: Warning - Attempt to free already unused fence ID %d.\n", fence_id);
+	}
+	devInfo->fence_state[fence_id].used = false;
+	devInfo->fence_state[fence_id].gtt_offset_pages = 0;
+	devInfo->fence_state[fence_id].obj_num_pages = 0;
+	devInfo->fence_state[fence_id].tiling_mode = I915_TILING_NONE;
+	devInfo->fence_state[fence_id].obj_stride = 0;
+	// Hardware fence register itself is disabled by the caller (e.g., intel_i915_gem_object_unmap_gtt)
+	mutex_unlock(&devInfo->fence_allocator_lock);
+	TRACE("Fences: Freed fence register ID %d.\n", fence_id);
+}
+// --- End Fence Register Management ---
 
 void
 intel_i915_gtt_cleanup(intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL) return;
+	intel_i915_fences_uninit(devInfo); // Cleanup fence allocator
 	mutex_destroy(&devInfo->gtt_allocator_lock);
 	if (devInfo->gtt_page_bitmap != NULL) {
 		free(devInfo->gtt_page_bitmap);

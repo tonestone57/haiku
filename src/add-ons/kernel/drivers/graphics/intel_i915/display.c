@@ -285,7 +285,34 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
 
-	/* ... (update shared info as before) ... */
+	// Update shared info with the new mode details
+	devInfo->shared_info->current_mode = *mode;
+	devInfo->shared_info->bytes_per_row = new_bytes_per_row; // This must be the hardware stride
+	devInfo->shared_info->framebuffer_size = devInfo->framebuffer_alloc_size;
+	devInfo->shared_info->framebuffer_physical = devInfo->framebuffer_phys_addr; // This is physical system memory address
+	                                                                           // The GTT offset is devInfo->framebuffer_gtt_offset
+	// Populate tiling mode for the framebuffer into shared_info
+	if (devInfo->framebuffer_bo != NULL) { // Assuming framebuffer_bo is the GEM object for the FB
+		devInfo->shared_info->fb_tiling_mode = devInfo->framebuffer_bo->tiling_mode;
+		// Ensure bytes_per_row in shared_info IS the object's actual hardware stride
+		if (devInfo->framebuffer_bo->stride != 0) {
+			devInfo->shared_info->bytes_per_row = devInfo->framebuffer_bo->stride;
+		} else if (devInfo->framebuffer_bo->tiling_mode != I915_TILING_NONE) {
+			// This case should ideally not happen if stride calculation is robust.
+			TRACE("Display: WARNING - Framebuffer is tiled but stride is 0 in GEM object! Using linear bpr for shared_info.\n");
+		}
+	} else {
+		devInfo->shared_info->fb_tiling_mode = I915_TILING_NONE;
+	}
+
+	devInfo->pipes[targetPipe].enabled = true;
+	devInfo->pipes[targetPipe].current_mode = *mode; // Cache the successfully set mode
+	port_state->current_pipe_assignment = targetPipe; // Mark port as using this pipe
+
+	TRACE("display_set_mode_internal: Successfully set mode %dx%d on pipe %d, port %d. FB Tiling: %d, Stride: %u\n",
+		mode->virtual_width, mode->virtual_height, targetPipe, targetPortId,
+		devInfo->shared_info->fb_tiling_mode, devInfo->shared_info->bytes_per_row);
+
 	return B_OK;
 
 modeset_fail_port_enabled:

@@ -158,6 +158,8 @@ typedef struct {
 	size_t			framebuffer_size;
 	uint32			bytes_per_row;
 	display_mode	current_mode;
+	// Add tiling mode for current_mode's framebuffer:
+	enum i915_tiling_mode fb_tiling_mode; // Populated by kernel based on FB's properties
 	area_id			mode_list_area;
 	uint32			mode_count;
 	sem_id			vblank_sem;

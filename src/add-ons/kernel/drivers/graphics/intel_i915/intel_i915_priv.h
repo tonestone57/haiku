@@ -132,6 +132,24 @@ static inline int INTEL_GRAPHICS_GEN(uint16_t devid) {
 #define INTEL_INFO_GEN_FROM_DEVICE_ID(devid) INTEL_GRAPHICS_GEN(devid)
 #define INTEL_DISPLAY_GEN(devInfoPtr) INTEL_GRAPHICS_GEN((devInfoPtr)->device_id)
 
+// GEM Object creation flags (extend as needed)
+#define I915_BO_ALLOC_CONTIGUOUS (1 << 0) // Hint that pages should be physically contiguous (not strictly enforced by current area allocator)
+#define I915_BO_ALLOC_CPU_CLEAR  (1 << 1) // Clear buffer with zeros upon allocation
+// Bits 2-4 for tiling mode request
+#define I915_BO_ALLOC_TILING_SHIFT 2
+#define I915_BO_ALLOC_TILING_MASK  (0x3 << I915_BO_ALLOC_TILING_SHIFT) // Max 4 tiling modes (0-3)
+#define I915_BO_ALLOC_TILED_X      (1 << I915_BO_ALLOC_TILING_SHIFT)
+#define I915_BO_ALLOC_TILED_Y      (2 << I915_BO_ALLOC_TILING_SHIFT)
+// Add other flags as needed, e.g. for specific Yf or other variants if they use different flags
+
+// GEM Object Tiling Modes (stored in the object)
+enum i915_tiling_mode {
+	I915_TILING_NONE = 0,
+	I915_TILING_X,
+	I915_TILING_Y,
+	// I915_TILING_Yf (if supported by targeted gens)
+};
+
 // MMIO Access (Forcewake must be handled by caller)
 static inline uint32
 intel_i915_read32(intel_i915_device_info* devInfo, uint32 offset)
@@ -315,6 +333,17 @@ typedef struct intel_i915_device_info {
 	uint32_t	gtt_total_pages_managed;  // Total GTT pages represented by the bitmap
 	                                      // This will be devInfo->gtt_entries_count.
 	uint32_t	gtt_free_pages_count;     // Number of currently free GTT pages (excluding scratch page)
+
+	// Fence Register Management (Gen < 9 primarily)
+#define I915_MAX_FENCES 16 // Common number for i965+
+	struct {
+		bool     used;
+		uint32_t gtt_offset_pages; // Starting GTT page index of the object using this fence
+		uint32_t obj_num_pages;    // Size in pages of the object using this fence
+		enum i915_tiling_mode tiling_mode; // Tiling mode of the object in this fence
+		uint32_t obj_stride;       // Stride of the object in this fence
+	} fence_state[I915_MAX_FENCES];
+	mutex fence_allocator_lock;
 
 	struct intel_vbt_data* vbt; area_id rom_area; uint8_t* rom_base;
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;

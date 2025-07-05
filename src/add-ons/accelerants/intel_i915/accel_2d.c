@@ -203,8 +203,19 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) // Keep existing write enable for 32bpp
-				cmd_dw0 |= (1 << 20); // TODO: Revisit this, might be BLT_WRITE_RGB or similar
+			if (depth_flags == BLT_DEPTH_32)
+				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits based on PRM
+
+			// Check if framebuffer (destination) is tiled
+			// Assuming gInfo->shared_info->fb_tiling_mode is populated by kernel.
+			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
+			// (Reference: Intel PRM Vol 2a: Command Reference: BLITTER, XY_COLOR_BLT_CMD, DW0, Bit 11 "Tiled Surface")
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
+					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
+				}
+				// Add conditions for other Gens if their tile bits differ for this command
+			}
 
 			cmd_buffer_cpu[current_cmd_dword_idx++] = cmd_dw0;
 			// DW1: Destination Pitch
@@ -348,8 +359,16 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) // Keep existing write enable for 32bpp
-				cmd_dw0 |= (1 << 20); // TODO: Revisit this, might be BLT_WRITE_RGB or similar
+			if (depth_flags == BLT_DEPTH_32)
+				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
+
+			// Check if framebuffer (destination) is tiled
+			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
+					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
+				}
+			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
 			// DW1: Destination Pitch
@@ -423,8 +442,16 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) // Keep existing write enable for 32bpp
-				cmd_dw0 |= (1 << 20); // TODO: Revisit this, might be BLT_WRITE_RGB or similar
+			if (depth_flags == BLT_DEPTH_32)
+				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
+
+			// Check if framebuffer (destination) is tiled
+			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
+					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
+				}
+			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
 			// DW1: Destination Pitch
@@ -493,8 +520,20 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space); // Assuming dest format for now
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) // Keep existing write enable for 32bpp
-				cmd_dw0 |= (1 << 20); // TODO: Revisit this, might be BLT_WRITE_RGB or similar
+			if (depth_flags == BLT_DEPTH_32)
+				cmd_dw0 |= (1 << 20); // TODO: Revisit this
+
+			// Check if framebuffer (source and destination) is tiled
+			// For Gen7 (IVB/HSW):
+			// - DW0, Bit 11: Destination Tiled
+			// - DW0, Bit 15: Source Tiled
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
+					cmd_dw0 |= (1 << 11); // Destination Tiled bit
+					cmd_dw0 |= (1 << 15); // Source Tiled bit
+				}
+				// Add conditions for other Gens if their tile bits differ for this command
+			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
 			// DW1: Destination Pitch (bytes_per_row)

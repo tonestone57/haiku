@@ -1,5 +1,6 @@
 /*
  * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
+ * Copyright 2023, Haiku, Inc. All Rights Reserved.
  * Distributed under the terms of the MIT License.
  */
 
@@ -9,36 +10,48 @@
 using namespace Scheduler;
 
 
-static bigtime_t sQuantumLengths[THREAD_MAX_SET_PRIORITY + 1];
-
-const int32 kMaximumQuantumLengthsCount	= 20;
-static bigtime_t sMaximumQuantumLengths[kMaximumQuantumLengthsCount];
+// These static arrays are no longer used by the new MLFQ/DTQ logic directly in ThreadData
+// They were part of the old quantum calculation.
+// static bigtime_t sQuantumLengths[THREAD_MAX_SET_PRIORITY + 1];
+// const int32 kMaximumQuantumLengthsCount	= 20;
+// static bigtime_t sMaximumQuantumLengths[kMaximumQuantumLengthsCount];
 
 
 void
 ThreadData::_InitBase()
 {
+	// Fields related to a specific quantum slice, reset when a new quantum starts
+	fTimeUsedInCurrentQuantum = 0;
+	fCurrentEffectiveQuantum = 0; // Will be set by CalculateDynamicQuantum before running
 	fStolenTime = 0;
-	fQuantumStart = 0;
-	fLastInterruptTime = 0;
+	fQuantumStartWallTime = 0;
+	fLastInterruptTime = 0; // Will be set when thread is scheduled
 
+	// Fields related to sleep/wake state
 	fWentSleep = 0;
 	fWentSleepActive = 0;
 
+	// Queueing state
 	fEnqueued = false;
-	fReady = false;
+	fReady = false; // A new thread is not ready until enqueued and its state is B_THREAD_READY
 
-	fPriorityPenalty = 0;
-	fAdditionalPenalty = 0;
+	// MLFQ specific
+	// fCurrentMlfqLevel is set by Init() or SetMLFQLevel()
+	// fTimeEnteredCurrentLevel is set by SetMLFQLevel() or ResetTimeEnteredCurrentLevel()
+	fTimeEnteredCurrentLevel = 0;
 
-	fEffectivePriority = GetPriority();
-	fBaseQuantum = sQuantumLengths[GetEffectivePriority()];
 
-	fTimeUsed = 0;
-
+	// Load estimation
+	fNeededLoad = 0;
+	fLoadMeasurementEpoch = 0;
 	fMeasureAvailableActiveTime = 0;
-	fLastMeasureAvailableTime = 0;
 	fMeasureAvailableTime = 0;
+	fLastMeasureAvailableTime = 0;
+
+	// Load balancing
+	fLastMigrationTime = 0; // Initialize here
+
+	// fEffectivePriority is computed by _ComputeEffectivePriority() called from Init() methods
 }
 
 
@@ -46,8 +59,10 @@ inline CoreEntry*
 ThreadData::_ChooseCore() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-
 	ASSERT(!gSingleCore);
+	if (gCurrentMode == NULL) { // Safety for early boot or if mode is somehow unset
+		return &gCoreEntries[get_random<int32>() % gCoreCount];
+	}
 	return gCurrentMode->choose_core(this);
 }
 
@@ -56,42 +71,51 @@ inline CPUEntry*
 ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 {
 	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(core != NULL);
 
-	int32 threadPriority = GetEffectivePriority();
+	int32 threadEffectivePriority = GetEffectivePriority(); // The priority used for heap ordering
 
 	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 	ASSERT(!useMask || mask.Matches(core->CPUMask()));
 
-	if (fThread->previous_cpu != NULL && !fThread->previous_cpu->disabled
-			&& (!useMask || mask.GetBit(fThread->previous_cpu->cpu_num))) {
-		CPUEntry* previousCPU
-			= CPUEntry::GetCPU(fThread->previous_cpu->cpu_num);
-		if (previousCPU->Core() == core) {
-			CoreCPUHeapLocker _(core);
-			if (CPUPriorityHeap::GetKey(previousCPU) < threadPriority) {
-				previousCPU->UpdatePriority(threadPriority);
-				rescheduleNeeded = true;
-				return previousCPU;
-			}
+	// Try to reuse the thread's previous CPU on this core if it's suitable
+	if (fThread->previous_cpu != NULL && !gCPU[fThread->previous_cpu->cpu_num].disabled
+		&& CPUEntry::GetCPU(fThread->previous_cpu->cpu_num)->Core() == core
+		&& (!useMask || mask.GetBit(fThread->previous_cpu->cpu_num))) {
+		CPUEntry* previousCPU = CPUEntry::GetCPU(fThread->previous_cpu->cpu_num);
+		CoreCPUHeapLocker _(core); // Protects core's CPU heap
+		if (CPUPriorityHeap::GetKey(previousCPU) < threadEffectivePriority) {
+			previousCPU->UpdatePriority(threadEffectivePriority);
+			rescheduleNeeded = true; // Higher priority thread makes this CPU more desirable
+		} else {
+			rescheduleNeeded = false;
 		}
+		return previousCPU;
 	}
 
-	CoreCPUHeapLocker _(core);
+	// Select the best CPU from the core's CPU heap
+	CoreCPUHeapLocker _(core); // Protects core's CPU heap
 	int32 index = 0;
-	CPUEntry* cpu;
-	do {
-		cpu = core->CPUHeap()->PeekRoot(index++);
-	} while (useMask && cpu != NULL && !mask.GetBit(cpu->ID()));
-	ASSERT(cpu != NULL);
+	CPUEntry* chosenCPU = NULL;
+	CPUEntry* cpuCandidate = NULL;
+	while ((cpuCandidate = core->CPUHeap()->PeekRoot(index++)) != NULL) {
+		if (gCPU[cpuCandidate->ID()].disabled)
+			continue;
+		if (useMask && !mask.GetBit(cpuCandidate->ID()))
+			continue;
+		chosenCPU = cpuCandidate; // Found a suitable CPU
+		break;
+	}
+	ASSERT(chosenCPU != NULL && "Could not find a schedulable CPU on the chosen core");
 
-	if (CPUPriorityHeap::GetKey(cpu) < threadPriority) {
-		cpu->UpdatePriority(threadPriority);
+	if (CPUPriorityHeap::GetKey(chosenCPU) < threadEffectivePriority) {
+		chosenCPU->UpdatePriority(threadEffectivePriority);
 		rescheduleNeeded = true;
-	} else
+	} else {
 		rescheduleNeeded = false;
-
-	return cpu;
+	}
+	return chosenCPU;
 }
 
 
@@ -108,87 +132,38 @@ ThreadData::ThreadData(Thread* thread)
 	fWentSleepActive(0),
 	fEnqueued(false),
 	fReady(false),
-	fCurrentMlfqLevel(NUM_MLFQ_LEVELS - 1), // Default to lowest if not idle
+	fCurrentMlfqLevel(NUM_MLFQ_LEVELS - 1), // Default, overridden by Init
 	fTimeEnteredCurrentLevel(0),
-	fEffectivePriority(0),
+	fEffectivePriority(0), // Will be set by _ComputeEffectivePriority
 	fNeededLoad(0),
 	fLoadMeasurementEpoch(0),
 	fMeasureAvailableActiveTime(0),
 	fMeasureAvailableTime(0),
-	fLastMeasureAvailableTime(0)
+	fLastMeasureAvailableTime(0),
+	fLastMigrationTime(0) // Initialize fLastMigrationTime
 {
-	if (IsIdle()) {
-		fCurrentMlfqLevel = NUM_MLFQ_LEVELS -1; // Idle threads in the lowest queue
-	}
-	_ComputeEffectivePriority(); // Set initial effective priority
+	// _InitBase() is called by Init methods.
+	// _ComputeEffectivePriority() is called by Init methods.
 }
 
 
 void
 ThreadData::Init() // For regular threads
 {
-	_InitBase();
+	_InitBase(); // Initializes most members to zero or default
 	fCore = NULL; // Will be set when first scheduled
 
 	Thread* currentThread = thread_get_current_thread();
-	if (currentThread != NULL && currentThread->scheduler_data != NULL) {
-		// Inherit some properties from creator, if applicable and desired
+	// Check currentThread != fThread to avoid self-inheritance issues if a thread calls Init on itself (should not happen)
+	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
 		ThreadData* currentThreadData = currentThread->scheduler_data;
-		fNeededLoad = currentThreadData->fNeededLoad; // Example inheritance
-		// New threads might start at a default medium-high MLFQ level
-		fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());
+		fNeededLoad = currentThreadData->fNeededLoad;
 	} else {
-		// Default for early threads or if currentThread is not fully set up
-		fNeededLoad = kMaxLoad / 10; // Default load
-		fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());
+		fNeededLoad = kMaxLoad / 10; // Default initial load estimate
 	}
-	ResetTimeEnteredCurrentLevel();
-	fEffectivePriority = GetBasePriority();
-		// Ensure it's not in RT range if it's not an RT thread
-		if (fEffectivePriority >= B_FIRST_REAL_TIME_PRIORITY)
-			fEffectivePriority = B_URGENT_DISPLAY_PRIORITY -1; // Example cap
-	}
-}
-
-
-/* static */ int
-ThreadData::MapPriorityToMLFQLevel(int32 priority)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	// This is a placeholder mapping. Needs careful tuning.
-	// Higher priority value -> lower MLFQ level index (higher effective scheduler prio)
-	if (priority >= B_FIRST_REAL_TIME_PRIORITY) {
-		// Map real-time priorities to the top few levels
-		if (priority >= B_URGENT_PRIORITY) return 0; // Highest RT
-		if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) return 1;
-		return 2; // Other RT
-	}
-	if (priority >= B_URGENT_DISPLAY_PRIORITY) return 3;
-	if (priority >= B_DISPLAY_PRIORITY + 5) return 4;
-	if (priority >= B_DISPLAY_PRIORITY) return 5;
-	if (priority >= B_NORMAL_PRIORITY + 5) return 6;
-	if (priority >= B_NORMAL_PRIORITY) return 7; // Normal priority threads start here
-	if (priority >= B_LOW_PRIORITY + 5) return 8;
-	if (priority >= B_LOW_PRIORITY) return 9;
-	// Spread remaining lower priorities across lower MLFQ levels
-	int level = 10 + ( (B_LOW_PRIORITY - priority) / 2);
-	if (level >= NUM_MLFQ_LEVELS -1 ) return NUM_MLFQ_LEVELS -2; // Penultimate for general low
-	if (level < 10) return 10; // Should not happen if logic is correct
-	return level;
-
-	// Lowest level (NUM_MLFQ_LEVELS - 1) is typically for idle or very demoted.
-}
-
-/* static */ bigtime_t
-ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	// Potentially, scheduler modes could apply a multiplier to kBaseQuanta here
-	// if (gCurrentMode != NULL && gCurrentMode->quantum_multiplier_for_level != NULL) {
-	//     return kBaseQuanta[mlfqLevel] * gCurrentMode->quantum_multiplier_for_level(mlfqLevel);
-	// }
-	return kBaseQuanta[mlfqLevel];
+	fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());
+	ResetTimeEnteredCurrentLevel(); // Sets fTimeEnteredCurrentLevel to now
+	_ComputeEffectivePriority();    // Sets fEffectivePriority based on base priority
 }
 
 
@@ -196,12 +171,12 @@ void
 ThreadData::Init(CoreEntry* core) // For idle threads
 {
 	_InitBase();
-	fCore = core;
-	fReady = true; // Idle threads are always ready for their core
-	fNeededLoad = 0; // Idle threads have no "needed" load
-	fCurrentMlfqLevel = NUM_MLFQ_LEVELS - 1; // Idle threads sit in the lowest level
+	fCore = core; // Idle threads are bound to a core (via their CPU)
+	fReady = true; // Idle threads are always considered ready for their core
+	fNeededLoad = 0; // Idle threads do not contribute to user/kernel load
+	fCurrentMlfqLevel = NUM_MLFQ_LEVELS - 1; // Idle threads sit in the lowest MLFQ level
 	ResetTimeEnteredCurrentLevel();
-	_ComputeEffectivePriority();
+	_ComputeEffectivePriority(); // Sets fEffectivePriority to B_IDLE_PRIORITY
 }
 
 
@@ -215,7 +190,8 @@ ThreadData::Dump() const
 		fTimeUsedInCurrentQuantum, fCurrentEffectiveQuantum);
 	kprintf("\tstolen_time:\t\t%" B_PRId64 " us\n", fStolenTime);
 	kprintf("\tquantum_start_wall:\t%" B_PRId64 " us\n", fQuantumStartWallTime);
-	kprintf("\tneeded_load:\t\t%" B_PRId32 "%%\n", fNeededLoad / 10);
+	kprintf("\tlast_migration_time:\t%" B_PRId64 " us\n", fLastMigrationTime);
+	kprintf("\tneeded_load:\t\t%" B_PRId32 "%%\n", fNeededLoad / (kMaxLoad/100)); // Display as percentage
 	kprintf("\twent_sleep:\t\t%" B_PRId64 "\n", fWentSleep);
 	kprintf("\twent_sleep_active:\t%" B_PRId64 "\n", fWentSleepActive);
 	kprintf("\tcore:\t\t\t%" B_PRId32 "\n",
@@ -229,41 +205,55 @@ bool
 ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 {
 	SCHEDULER_ENTER_FUNCTION();
-
 	bool rescheduleNeeded = false;
-
 	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 
-	if (targetCore != NULL && (useMask && !targetCore->CPUMask().Matches(mask)))
-		targetCore = NULL;
-	if (targetCPU != NULL && (useMask && !mask.GetBit(targetCPU->ID())))
-		targetCPU = NULL;
+	CoreEntry* chosenCore = targetCore; // Use provided targetCore if valid
+	CPUEntry* chosenCPU = targetCPU;   // Use provided targetCPU if valid
 
-	if (targetCore == NULL && targetCPU != NULL)
-		targetCore = targetCPU->Core();
-	else if (targetCore != NULL && targetCPU == NULL)
-		targetCPU = _ChooseCPU(targetCore, rescheduleNeeded);
-	else if (targetCore == NULL && targetCPU == NULL) {
-		targetCore = _ChooseCore();
-		ASSERT(!useMask || mask.Matches(targetCore->CPUMask()));
-		targetCPU = _ChooseCPU(targetCore, rescheduleNeeded);
+	// Validate or choose core
+	if (chosenCore != NULL && useMask && !chosenCore->CPUMask().Matches(mask))
+		chosenCore = NULL; // Provided targetCore doesn't match affinity mask
+
+	if (chosenCore == NULL) { // No valid targetCore provided or it was invalidated
+		if (chosenCPU != NULL && (!useMask || chosenCPU->Core()->CPUMask().Matches(mask))) {
+			// If targetCPU is valid and its core matches affinity, use its core
+			chosenCore = chosenCPU->Core();
+		} else {
+			// Need to choose a new core
+			chosenCore = _ChooseCore(); // This respects affinity implicitly or explicitly
+			ASSERT(!useMask || mask.Matches(chosenCore->CPUMask()));
+			chosenCPU = NULL; // Force re-selection of CPU on the new core
+		}
+	}
+	ASSERT(chosenCore != NULL);
+
+	// Validate or choose CPU on the chosenCore
+	if (chosenCPU != NULL && (chosenCPU->Core() != chosenCore || (useMask && !mask.GetBit(chosenCPU->ID()))))
+		chosenCPU = NULL; // Provided targetCPU is not on chosenCore or violates affinity
+
+	if (chosenCPU == NULL) {
+		chosenCPU = _ChooseCPU(chosenCore, rescheduleNeeded);
+	}
+	// _ChooseCPU already considers if reschedule is needed based on priority.
+
+	ASSERT(chosenCPU != NULL);
+
+	// Update load accounting if core changes
+	if (fCore != chosenCore) {
+		if (fCore != NULL && fReady && !IsIdle())
+			fCore->RemoveLoad(fNeededLoad, true); // Remove load from old core
+
+		fLoadMeasurementEpoch = chosenCore->LoadMeasurementEpoch() - 1; // Ensure load is re-evaluated against new core
+		fCore = chosenCore; // Associate with new core
+
+		if (fReady && !IsIdle())
+			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, true); // Add load to new core
 	}
 
-	ASSERT(targetCore != NULL);
-	ASSERT(targetCPU != NULL);
-
-	if (fCore != targetCore) {
-		if (fCore != NULL && fReady && !IsIdle()) // Remove load from old core if applicable
-			fCore->RemoveLoad(fNeededLoad, true);
-
-		fLoadMeasurementEpoch = targetCore->LoadMeasurementEpoch() - 1;
-		fCore = targetCore; // Associate with new core
-
-		if (fReady && !IsIdle()) // Add load to new core
-			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, true);
-	}
-
+	targetCore = chosenCore;
+	targetCPU = chosenCPU;
 	return rescheduleNeeded;
 }
 
@@ -273,31 +263,20 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle() || IsRealTime()) {
-		// Idle threads effectively have infinite quantum until a real task appears.
-		// Real-time threads get their full base quantum, not dynamically adjusted by load.
 		return GetBaseQuantumForLevel(fCurrentMlfqLevel);
 	}
 
 	bigtime_t baseQuantum = GetBaseQuantumForLevel(fCurrentMlfqLevel);
-
-	// cpu can be NULL if called in a context where the thread isn't yet assigned to a CPU.
-	// In such cases, or if CPU load tracking is off, return base quantum.
-	if (cpu == NULL || !gTrackCPULoad) // gTrackCPULoad implies gKernelKDistFactor is meaningful
+	if (cpu == NULL || !gTrackCPULoad)
 		return baseQuantum;
 
 	float cpuLoad = cpu->GetInstantaneousLoad();
-
-	// DTQ formula: Q_eff = Q_base * (1 + k_dist * (1 - L_cpu))
-	// Ensure factors are positive. cpuLoad is [0, 1].
 	float multiplier = 1.0f + (gKernelKDistFactor * (1.0f - cpuLoad));
-	if (multiplier < 0.1f) multiplier = 0.1f; // Prevent overly small or negative quantum
+	if (multiplier < 0.1f) multiplier = 0.1f;
 
 	bigtime_t dynamicQuantum = (bigtime_t)(baseQuantum * multiplier);
-
-	// Clamp the quantum
 	dynamicQuantum = std::max(kMinEffectiveQuantum, dynamicQuantum);
 	dynamicQuantum = std::min(kMaxEffectiveQuantum, dynamicQuantum);
-
 	return dynamicQuantum;
 }
 
@@ -306,28 +285,16 @@ void
 ThreadData::UnassignCore(bool running)
 {
 	SCHEDULER_ENTER_FUNCTION();
-
 	if (fCore != NULL && !IsIdle()) {
-		// If the thread was considered ready and contributing to load, remove its load
-		if (fReady)
+		if (fReady || running) // If it was contributing to load
 			fCore->RemoveLoad(fNeededLoad, true);
 	}
-
-	// If the thread is not going to run immediately elsewhere (e.g. truly unassigned vs migrating)
-	if (!running) {
+	if (!running) { // If not just temporarily unassigning for migration logic
 		fCore = NULL;
 	}
-	// fReady state will be updated by GoesAway() or Dies() if it's not running
+	// If running is true, it means it's currently the running thread on this core's CPU,
+	// but is being preempted for migration. Its fCore might be updated by ChooseCoreAndCPU later.
 }
-
-
-// /* static */ void
-// ThreadData::ComputeQuantumLengths()
-// {
-// 	// This function's role changes. It might be used by scheduler modes
-// 	// to populate kBaseQuanta or mode-specific multipliers for kBaseQuanta.
-// 	// For now, kBaseQuanta is static in scheduler_common.h.
-// }
 
 
 void
@@ -336,20 +303,33 @@ ThreadData::_ComputeNeededLoad()
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!IsIdle());
 
-	int32 oldSystemLoad = fNeededLoad; // Using fNeededLoad as system load for now
-	int32 newSystemLoad = compute_load(fLastMeasureAvailableTime,
-		fMeasureAvailableActiveTime, oldSystemLoad, fMeasureAvailableTime);
-
-	if (newSystemLoad < 0) // Not enough data
-		newSystemLoad = oldSystemLoad;
-
-
-	if (oldSystemLoad == newSystemLoad)
+	// Use fMeasureAvailableTime and fMeasureAvailableActiveTime to compute recent CPU usage percentage
+	// These are updated in Continues(), GoesAway(), UpdateActivity().
+	bigtime_t period = fMeasureAvailableTime - fLastMeasureAvailableTime;
+	if (period <= 0) // Not enough time elapsed or data to make a new estimate
 		return;
 
-	if (fCore != NULL)
-		fCore->ChangeLoad(newSystemLoad - oldSystemLoad);
-	fNeededLoad = newSystemLoad;
+	int32 currentLoadPercentage = 0;
+	if (period > 0) {
+		currentLoadPercentage = (int32)((fMeasureAvailableActiveTime * kMaxLoad) / period);
+	}
+	currentLoadPercentage = std::max(0, std::min(kMaxLoad, currentLoadPercentage));
+
+	// Simple EWMA for fNeededLoad
+	// alpha could be a constant, e.g., 0.25 or 0.5
+	const float alpha = 0.5f;
+	int32 newNeededLoad = (int32)(alpha * currentLoadPercentage + (1.0f - alpha) * fNeededLoad);
+	newNeededLoad = std::max(0, std::min(kMaxLoad, newNeededLoad));
+
+
+	if (fCore != NULL && newNeededLoad != fNeededLoad) {
+		fCore->ChangeLoad(newNeededLoad - fNeededLoad);
+	}
+	fNeededLoad = newNeededLoad;
+
+	// Reset measurement window for next calculation
+	fLastMeasureAvailableTime = fMeasureAvailableTime; // fMeasureAvailableTime is current time
+	fMeasureAvailableActiveTime = 0; // Reset active time accumulator for the new window
 }
 
 
@@ -357,22 +337,59 @@ void
 ThreadData::_ComputeEffectivePriority() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// With MLFQ, the "effective priority" is primarily its current MLFQ level.
-	// The original numerical priority is used for initial mapping and for RT threads.
 	if (IsIdle())
 		fEffectivePriority = B_IDLE_PRIORITY;
 	else if (IsRealTime())
 		fEffectivePriority = GetBasePriority();
 	else {
-		// For non-RT threads, map MLFQ level back to a comparable priority value if needed,
-		// or simply use the MLFQ level for sorting within RunQueue.
-		// For now, let effective priority be the base priority.
-		// The actual scheduling queue is fMlfq[fCurrentMlfqLevel].
 		fEffectivePriority = GetBasePriority();
-		// Ensure it's not in RT range if it's not an RT thread
+		// Ensure non-RT threads do not use RT priority values, even if their base is set high.
 		if (fEffectivePriority >= B_FIRST_REAL_TIME_PRIORITY)
-			fEffectivePriority = B_URGENT_DISPLAY_PRIORITY -1; // Example cap
+			fEffectivePriority = B_URGENT_DISPLAY_PRIORITY - 1; // Cap at highest non-RT
+		if (fEffectivePriority < _GetMinimalPriority()) // Ensure it doesn't go below a sane minimum
+			fEffectivePriority = _GetMinimalPriority();
 	}
+}
+
+
+/* static */ int
+ThreadData::MapPriorityToMLFQLevel(int32 priority)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	// Higher Haiku priority value == more important.
+	// Lower MLFQ level index == more important.
+	if (priority >= B_URGENT_PRIORITY) return 0;       // Top RT
+	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) return 1; // Other RT
+	if (priority >= B_URGENT_DISPLAY_PRIORITY) return 2;    // High interactive
+	if (priority >= B_DISPLAY_PRIORITY + 5) return 3;
+	if (priority >= B_DISPLAY_PRIORITY) return 4;
+	if (priority >= B_NORMAL_PRIORITY + 5) return 5;
+	if (priority >= B_NORMAL_PRIORITY) return 6;       // Normal
+	if (priority >= B_LOW_PRIORITY + 5) return 7;
+	if (priority >= B_LOW_PRIORITY) return 8;
+	// Spread remaining lower priorities. Levels 9 to NUM_MLFQ_LEVELS - 2
+	// (NUM_MLFQ_LEVELS - 1 is for idle)
+	// Example: if B_LOW_PRIORITY is 5, B_IDLE_PRIORITY is 0. Range is 5.
+	// If NUM_MLFQ_LEVELS = 16, remaining levels are 9,10,11,12,13,14 (6 levels)
+	// Max value for (B_LOW_PRIORITY - 1 - priority) is (B_LOW_PRIORITY - 1 - B_LOWEST_ACTIVE_PRIORITY)
+	if (priority < B_LOWEST_ACTIVE_PRIORITY) return NUM_MLFQ_LEVELS - 2; // Catch all very low
+
+	int range = B_LOW_PRIORITY - B_LOWEST_ACTIVE_PRIORITY;
+	int levelsToSpread = (NUM_MLFQ_LEVELS - 2) - 9 + 1; // Levels from 9 to N-2
+	if (range <= 0 || levelsToSpread <=0) return 9; // Default if range is too small
+
+	int levelOffset = ((B_LOW_PRIORITY - 1 - priority) * levelsToSpread) / range;
+	int mappedLevel = 9 + levelOffset;
+
+	return std::min(NUM_MLFQ_LEVELS - 2, std::max(9, mappedLevel));
+}
+
+/* static */ bigtime_t
+ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
+	return kBaseQuanta[mlfqLevel];
 }
 
 
@@ -381,12 +398,11 @@ ThreadData::_ScaleQuantum(bigtime_t maxQuantum, bigtime_t minQuantum,
 	int32 maxPriority, int32 minPriority, int32 priority)
 {
 	SCHEDULER_ENTER_FUNCTION();
-
 	ASSERT(priority <= maxPriority);
 	ASSERT(priority >= minPriority);
-
+	if (maxPriority == minPriority) return minQuantum; // Avoid division by zero
 	bigtime_t result = (maxQuantum - minQuantum) * (priority - minPriority);
-	result /= maxPriority - minPriority;
+	result /= (maxPriority - minPriority);
 	return maxQuantum - result;
 }
 
@@ -394,4 +410,3 @@ ThreadData::_ScaleQuantum(bigtime_t maxQuantum, bigtime_t minQuantum,
 ThreadProcessing::~ThreadProcessing()
 {
 }
-

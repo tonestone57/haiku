@@ -81,6 +81,11 @@ public:
 	inline	bigtime_t	TimeEnteredCurrentLevel() const;
 	inline	void		ResetTimeEnteredCurrentLevel(); // Called on level change or unblock
 
+	// --- Load Balancing Specific ---
+	inline	bigtime_t	LastMigrationTime() const;
+	inline	void		SetLastMigrationTime(bigtime_t time);
+
+
 	// --- State and Lifecycle ---
 	inline	void		Continues(); // When thread continues on a CPU
 	inline	void		GoesAway();  // When thread is about to sleep/wait
@@ -106,52 +111,52 @@ public:
 	// Static utility methods
 	static	int			MapPriorityToMLFQLevel(int32 priority);
 	static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel);
-	// ComputeQuantumLengths might be deprecated or adapted for scheduler modes to influence kBaseQuanta
-	// static	void		ComputeQuantumLengths();
 
 
 private:
 			void		_ComputeNeededLoad();
-			// _ComputeEffectivePriority is now simpler, directly related to base priority for level mapping
 			void		_ComputeEffectivePriority() const;
 
 
 			bigtime_t	fStolenTime;
-			bigtime_t	fQuantumStartWallTime; // system_time() when Q_eff started
+			bigtime_t	fQuantumStartWallTime;
 			bigtime_t	fLastInterruptTime;
 
 			bigtime_t	fWentSleep;
-			bigtime_t	fWentSleepActive; // Core's active time when thread slept
+			bigtime_t	fWentSleepActive;
 
 			bool		fEnqueued;
-			bool		fReady; // Is the thread ready to run (not sleeping/waiting)
+			bool		fReady;
 
 			Thread*		fThread;
 
 	// MLFQ specific fields
 			int			fCurrentMlfqLevel;
-			bigtime_t	fTimeEnteredCurrentLevel; // For aging
+			bigtime_t	fTimeEnteredCurrentLevel;
 
-	mutable	int32		fEffectivePriority; // Priority used for MLFQ level mapping
+	mutable	int32		fEffectivePriority;
 
-			// DTQ specific fields
-			bigtime_t	fTimeUsedInCurrentQuantum; // Time consumed in current Q_eff
-			bigtime_t	fCurrentEffectiveQuantum;  // The Q_eff set for this slice
+	// DTQ specific fields
+			bigtime_t	fTimeUsedInCurrentQuantum;
+			bigtime_t	fCurrentEffectiveQuantum;
 
-			// Load estimation fields (similar to before)
+	// Load estimation fields
 			bigtime_t	fMeasureAvailableActiveTime;
 			bigtime_t	fMeasureAvailableTime;
 			bigtime_t	fLastMeasureAvailableTime;
 			int32		fNeededLoad;
 			uint32		fLoadMeasurementEpoch;
 
-			CoreEntry*	fCore; // Core this thread is currently associated with
+	// Load balancing fields
+			bigtime_t	fLastMigrationTime;
+
+
+			CoreEntry*	fCore;
 };
 
 class ThreadProcessing {
 public:
 	virtual				~ThreadProcessing();
-
 	virtual	void		operator()(ThreadData* thread) = 0;
 };
 
@@ -162,8 +167,6 @@ inline int32
 ThreadData::_GetMinimalPriority() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// This function might be less relevant if explicit MLFQ levels define floors.
-	// For now, keep original logic if some part of old penalty system is retained.
 	const int32 kDivisor = 5;
 	const int32 kMaximalPriority = 25;
 	const int32 kMinimalPriority = B_LOWEST_ACTIVE_PRIORITY;
@@ -174,8 +177,6 @@ ThreadData::_GetMinimalPriority() const
 inline bool
 ThreadData::IsRealTime() const
 {
-	// Base this on the original thread priority for now.
-	// Alternatively, top N MLFQ levels could be designated real-time.
 	return GetBasePriority() >= B_FIRST_REAL_TIME_PRIORITY;
 }
 
@@ -189,7 +190,7 @@ inline bool
 ThreadData::HasCacheExpired() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (gCurrentMode == NULL) return true; // Safety
+	if (gCurrentMode == NULL) return true;
 	return gCurrentMode->has_cache_expired(this);
 }
 
@@ -198,7 +199,7 @@ ThreadData::Rebalance() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
-	if (gCurrentMode == NULL) return fCore; // Safety
+	if (gCurrentMode == NULL) return fCore;
 	return gCurrentMode->rebalance(this);
 }
 
@@ -206,9 +207,6 @@ inline int32
 ThreadData::GetEffectivePriority() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// For MLFQ, effective priority used for queue selection is tied to its current level.
-	// This might just return the thread's base priority or a value derived from fCurrentMlfqLevel.
-	// For simplicity now, let it be tied to base priority until level mapping is fully done.
 	return fEffectivePriority;
 }
 
@@ -240,9 +238,8 @@ ThreadData::SetStolenInterruptTime(bigtime_t interruptTime)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle()) return;
-	interruptTime -= fLastInterruptTime; // Time spent in current interrupt
-	fStolenTime += interruptTime;        // Add to total stolen in this quantum
-	// fLastInterruptTime is updated by CPUEntry when thread is scheduled
+	interruptTime -= fLastInterruptTime;
+	fStolenTime += interruptTime;
 }
 
 // --- Quantum Management ---
@@ -264,7 +261,6 @@ ThreadData::GetQuantumLeft()
 	SCHEDULER_ENTER_FUNCTION();
 	if (fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum)
 		return 0;
-	// Note: Stolen time is now accounted for when fTimeUsedInCurrentQuantum is updated.
 	return fCurrentEffectiveQuantum - fTimeUsedInCurrentQuantum;
 }
 
@@ -284,17 +280,10 @@ ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle())
 		return false;
-
-	// Time used is updated by UpdateActivity.
-	// If yielded, it's considered ended for demotion/RR purposes.
 	if (hasYielded) {
-		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum; // Mark as fully used
+		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum;
 		return true;
 	}
-
-	// If preempted for other reasons (e.g., higher prio task), quantum is not "ended"
-	// for demotion purposes, but its used time is preserved.
-	// If not preempted and not yielded, it implies the quantum timer fired.
 	return fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum;
 }
 
@@ -327,6 +316,19 @@ ThreadData::ResetTimeEnteredCurrentLevel()
 	fTimeEnteredCurrentLevel = system_time();
 }
 
+// --- Load Balancing Specific ---
+inline bigtime_t
+ThreadData::LastMigrationTime() const
+{
+	return fLastMigrationTime;
+}
+
+inline void
+ThreadData::SetLastMigrationTime(bigtime_t time)
+{
+	fLastMigrationTime = time;
+}
+
 
 // --- State and Lifecycle ---
 inline void
@@ -334,7 +336,7 @@ ThreadData::Continues()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fReady);
-	if (gTrackCoreLoad && !IsIdle()) // Idle threads don't contribute to user load
+	if (gTrackCoreLoad && !IsIdle())
 		_ComputeNeededLoad();
 }
 
@@ -344,20 +346,19 @@ ThreadData::GoesAway()
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fReady);
 
-	fLastInterruptTime = 0; // Reset for next scheduling
+	fLastInterruptTime = 0;
 	fWentSleep = system_time();
 	if (fCore != NULL)
 		fWentSleepActive = fCore->GetActiveTime();
 	else
 		fWentSleepActive = 0;
 
-
 	if (gTrackCoreLoad && !IsIdle()) {
-		// Update available time before removing load
 		bigtime_t currentTime = system_time();
 		fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
 		fMeasureAvailableTime = currentTime;
-		fLoadMeasurementEpoch = fCore->RemoveLoad(fNeededLoad, false);
+		if (fCore != NULL) // Check fCore before dereferencing
+			fLoadMeasurementEpoch = fCore->RemoveLoad(fNeededLoad, false);
 	}
 	fReady = false;
 }
@@ -368,27 +369,25 @@ ThreadData::Dies()
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED);
 	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
-		// Ensure load is removed if it was ready
-		if (fReady)
+		if (fReady) // Only remove load if it was considered ready
 			fCore->RemoveLoad(fNeededLoad, true);
 	}
-	fReady = false; // Mark as not ready
+	fReady = false;
 }
 
 inline void
 ThreadData::MarkEnqueued(CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	fCore = core; // Associate with the core it's running/enqueued on
-	if (!fReady) { // Thread is waking up
+	fCore = core;
+	if (!fReady) {
 		if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
 			bigtime_t timeSlept = system_time() - fWentSleep;
 			bool updateLoad = timeSlept > 0;
-
 			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, !updateLoad);
 			if (updateLoad) {
 				fMeasureAvailableTime += timeSlept;
-				_ComputeNeededLoad(); // Recompute load based on new availability
+				_ComputeNeededLoad();
 			}
 		}
 		fReady = true;
@@ -402,7 +401,6 @@ ThreadData::MarkDequeued()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	fEnqueued = false;
-	// fCore remains associated until explicitly unassigned or thread dies/migrates
 }
 
 
@@ -414,10 +412,8 @@ ThreadData::UpdateActivity(bigtime_t active)
 		return;
 
 	fTimeUsedInCurrentQuantum += active;
-	// Account for stolen time. Stolen time is added to fStolenTime by SetStolenInterruptTime.
-	// We subtract it here so fTimeUsedInCurrentQuantum accurately reflects thread's own CPU usage.
 	fTimeUsedInCurrentQuantum -= fStolenTime;
-	fStolenTime = 0; // Reset stolen time for the next interval
+	fStolenTime = 0;
 
 	if (gTrackCoreLoad) {
 		fMeasureAvailableTime += active;

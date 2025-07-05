@@ -38,6 +38,7 @@ static status_t intel_i915_close(void* cookie);
 static status_t intel_i915_free(void* cookie);
 // ... (other static declarations)
 static status_t intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length);
+static enum pch_info_priv intel_i915_detect_pch(intel_i915_device_info* devInfo);
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -217,6 +218,121 @@ extern "C" device_hooks* find_device(const char* name) { /* ... */
 	return NULL;
 }
 
+// This function is adapted from intel_extreme/driver.cpp
+// It now uses the _MATCH defines from intel_i915_priv.h
+static enum pch_info_priv
+intel_i915_detect_pch(intel_i915_device_info* devInfo) // devInfo passed for context, gPCI is global
+{
+	pci_info info;
+	if (gPCI == NULL) {
+		TRACE("detect_pch: gPCI not initialized!\n");
+		return PCH_NONE;
+	}
+
+	for (int32 i = 0; gPCI->get_nth_pci_info(i, &info) == B_OK; i++) {
+		// Look for the LPC Interface / ISA Bridge
+		if (info.vendor_id != 0x8086 || info.class_base != PCI_bridge || info.class_sub != PCI_isa)
+			continue;
+
+		uint16_t device_id = info.device_id;
+		uint16_t masked_id = device_id & INTEL_PCH_DEVICE_ID_MASK; // Mask to compare with _TYPE defines
+		TRACE("detect_pch: Found Intel ISA bridge, DeviceID: 0x%04x, MaskedID: 0x%04x\n", device_id, masked_id);
+
+		// Check against PCH series based on typical LPC device IDs.
+		// The _MATCH defines in intel_i915_priv.h should be used here.
+		// Example: #define INTEL_PCH_LPT_MATCH (0x8c00) if mask is 0xff00
+		// The actual PCH device IDs can vary slightly for different SKUs within a series.
+		// The list below tries to map known PCH LPC IDs to our enum.
+		// This list needs to be kept updated with new PCH generations.
+
+		if ((masked_id == INTEL_PCH_ADP_S_MATCH) || (masked_id == INTEL_PCH_ADP_P_MATCH) ||
+			(masked_id == INTEL_PCH_ADP_M_MATCH) || (masked_id == INTEL_PCH_ADP_N_MATCH) ||
+			// Explicit Alder Lake LPC IDs from a quick search (verify against PRM/datasheets)
+			(device_id == 0x7aa7) || (device_id == 0x7a87) || // ADP-S
+			(device_id == 0x5182) || (device_id == 0x51a7) || // ADP-P/M
+			(device_id == 0x5482) || (device_id == 0x54a7)    // ADP-N
+			) {
+			TRACE("detect_pch: Found Alder Lake PCH (Gen12+)\n");
+			return PCH_ADP;
+		}
+		if ((masked_id == INTEL_PCH_TGP_LP_MATCH) || (masked_id == INTEL_PCH_TGP_H_MATCH) ||
+			(device_id == 0xa082) || (device_id == 0xa083) || // TGP-LP
+			(device_id == 0x4382) || (device_id == 0x4383)) {   // TGP-H
+			TRACE("detect_pch: Found Tiger Lake PCH (Gen12)\n");
+			return PCH_TGP;
+		}
+		if (masked_id == INTEL_PCH_JSP_N_MATCH || device_id == 0x4b03) { // Jasper Lake is SoC
+			TRACE("detect_pch: Found Jasper Lake PCH (SoC) (Gen12)\n");
+			return PCH_JSP;
+		}
+		if (masked_id == INTEL_PCH_ICP_LP_MATCH || masked_id == INTEL_PCH_ICP_N_MATCH ||
+			device_id == 0x3482 || device_id == 0x3483 || // ICL-LP
+			device_id == 0x3882 || device_id == 0x3883 ) { // ICL-N
+			TRACE("detect_pch: Found Ice Lake PCH (Gen11)\n");
+			return PCH_ICP;
+		}
+		// Cannon Point / Coffee Lake / Comet Lake / Gemini Lake PCHs
+		// These PCH generations (CNP, CMP, GLK) often share LPC ID prefixes or have overlapping series.
+		// Prioritize more specific full IDs if known, then fall back to masked IDs.
+		// Gemini Lake is SoC, LPC might be 0x31cc for example.
+		if (device_id == 0x31cc) { TRACE("detect_pch: Found Gemini Lake PCH (SoC)\n"); return PCH_CNP; } // Group with CNP
+		// Comet Lake LPC IDs (examples: 0x0284, 0x0684, 0xa3c0 series)
+		if ((device_id & 0xfff0) == 0x02c0 || (device_id & 0xfff0) == 0x06c0 || (device_id & 0xffc0) == 0xa3c0) {
+			TRACE("detect_pch: Found Comet Lake PCH\n"); return PCH_CNP; // Group with CNP
+		}
+		if (masked_id == INTEL_PCH_CNP_MATCH || masked_id == INTEL_PCH_CNP_LP_MATCH) {
+			TRACE("detect_pch: Found Cannon Point PCH (or similar Gen9.5/10)\n");
+			return PCH_CNP;
+		}
+		// Skylake / Kaby Lake PCHs
+		if (masked_id == INTEL_PCH_SPT_MATCH || masked_id == INTEL_PCH_SPT_LP_MATCH || masked_id == INTEL_PCH_KBP_MATCH) {
+			// Example specific IDs from intel_extreme: 0xa141 (SPT), 0xa2c1 (KBP)
+			if (device_id == 0xa141 || device_id == 0xa145 || device_id == 0xa146 || /* SPT */
+			    device_id == 0x9d41 || device_id == 0x9d45 || device_id == 0x9d46 || /* SPT-LP */
+			    device_id == 0xa2c1 || device_id == 0xa2c5 || device_id == 0xa2c6 /* KBP */) {
+				TRACE("detect_pch: Found Sunrise Point / Kaby Lake PCH (Gen9)\n");
+				return PCH_SPT;
+			}
+			// Fallback if mask matches but not these specific IDs
+			if (masked_id == INTEL_PCH_SPT_MATCH || masked_id == INTEL_PCH_SPT_LP_MATCH || masked_id == INTEL_PCH_KBP_MATCH) {
+				TRACE("detect_pch: Found Sunrise Point / Kaby Lake PCH (Gen9) by mask\n");
+				return PCH_SPT;
+			}
+		}
+		// Broadwell PCH (Wildcat Point) - These have IDs like 0x8CCx, 0x9CCx
+		// The INTEL_PCH_DEVICE_ID_MASK (0xff00) might not be ideal here.
+		// Let's check the full ID prefix.
+		if (((device_id & 0xFFF0) >= 0x8CC0 && (device_id & 0xFFF0) <= 0x8CCF) || // WPT
+		    ((device_id & 0xFFF0) >= 0x9CC0 && (device_id & 0xFFF0) <= 0x9CCF)) { // WPT-LP
+			TRACE("detect_pch: Found Wildcat Point PCH (Gen8 BDW)\n");
+			return PCH_LPT; // Grouping with LPT as display capabilities are similar to Haswell PCH
+		}
+		// Haswell PCH (Lynx Point)
+		if (masked_id == INTEL_PCH_LPT_MATCH || masked_id == INTEL_PCH_LPT_LP_MATCH) {
+			TRACE("detect_pch: Found Lynx Point PCH (Gen7 HSW)\n");
+			return PCH_LPT;
+		}
+		// Ivy Bridge PCH (Panther Point) / Sandy Bridge PCH (Cougar Point)
+		if (masked_id == INTEL_PCH_PPT_MATCH || masked_id == INTEL_PCH_CPT_MATCH) {
+			TRACE("detect_pch: Found Panther Point / Cougar Point PCH (Gen7 IVB / Gen6 SNB)\n");
+			return PCH_CPT;
+		}
+		// IronLake PCH (Ibex Peak)
+		if (masked_id == INTEL_PCH_IBX_MATCH) {
+			TRACE("detect_pch: Found Ibex Peak PCH (Gen5)\n");
+			return PCH_IBX;
+		}
+		// Atom NM10 (Pineview PCH) - older, if needed for some listed GPUs
+		if (masked_id == INTEL_PCH_NM10_MATCH) {
+			TRACE("detect_pch: Found NM10 PCH (Atom Pineview)\n");
+			return PCH_NONE; // Or a specific PCH_NM10 if display logic differs significantly from no-PCH
+		}
+	}
+	TRACE("detect_pch: No recognized PCH detected.\n");
+	return PCH_NONE;
+}
+
+
 static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 	// ... (find devInfo) ...
 	intel_i915_device_info* devInfo = NULL; char areaName[64]; status_t status;
@@ -226,6 +342,10 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 	if (devInfo == NULL) return B_BAD_VALUE;
 
 	if (atomic_add(&devInfo->open_count, 1) == 0) {
+		// Detect PCH type first as it might influence subsequent initializations
+		devInfo->pch_type = intel_i915_detect_pch();
+		TRACE("intel_i915_open: Detected PCH type: %d\n", devInfo->pch_type);
+
 		// ... (MMIO, GTTMMADR, Shared Info mapping) ...
 		snprintf(areaName, sizeof(areaName), "i915_0x%04x_gmb", devInfo->device_id);
 		devInfo->mmio_area_id = map_physical_memory(areaName, devInfo->mmio_physical_address, devInfo->mmio_aperture_size,
@@ -319,8 +439,24 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
 	switch (op) {
-		case B_GET_ACCELERANT_SIGNATURE: /* ... */ return B_OK;
-		case INTEL_I915_GET_SHARED_INFO: /* ... */ return B_OK;
+		case B_GET_ACCELERANT_SIGNATURE:
+			if (buffer == NULL || length == 0) return B_BAD_VALUE;
+			{
+				const char* signature = "intel_i915.accelerant";
+				size_t sig_len = strlen(signature) + 1;
+				if (length < sig_len) return B_BUFFER_OVERFLOW;
+				if (user_memcpy(buffer, signature, sig_len) != B_OK) return B_BAD_ADDRESS;
+				return B_OK;
+			}
+		case INTEL_I915_GET_SHARED_INFO:
+			if (buffer == NULL || length != sizeof(intel_i915_get_shared_area_info_args)) return B_BAD_VALUE;
+			if (devInfo->shared_info_area < B_OK) return B_NO_INIT; // Shared info not created
+			{
+				intel_i915_get_shared_area_info_args args;
+				args.shared_area = devInfo->shared_info_area;
+				if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
+				return B_OK;
+			}
 		case INTEL_I915_SET_DISPLAY_MODE: {
 			display_mode user_mode;
 			if (user_memcpy(&user_mode, buffer, sizeof(display_mode))!=B_OK) return B_BAD_ADDRESS;

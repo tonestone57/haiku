@@ -121,10 +121,30 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 
 			// XY_COLOR_BLT command (Gen7 example)
 			// DW0: Opcode (0x50), Length (0x03 for 5 DWs total), ColorDepth, ROP
-			cmd_buffer_cpu[current_cmd_dword_idx++] = (0x50 << 22) /* XY_COLOR_BLT */
+			uint32 cmd_dw0 = (0x50 << 22) /* XY_COLOR_BLT */
 				| (cmd_dwords_per_span - 2) /* Command length (payload DWs) */
-				| (1 << 20) /* 32bpp */
 				| (0xF0 << 16); /* ROP: PATCOPY (solid fill) */
+
+			switch (gInfo->shared_info->current_mode.space) {
+				case B_RGB32_LITTLE:
+				case B_RGBA32_LITTLE:
+					cmd_dw0 |= (2 << 20); // 32bpp
+					break;
+				case B_RGB16_LITTLE: // 565
+					cmd_dw0 |= (1 << 20); // 16bpp
+					break;
+				case B_RGB15_LITTLE: // 555
+				case B_RGBA15_LITTLE:
+					cmd_dw0 |= (3 << 20); // 16bpp_555
+					break;
+				case B_CMAP8:
+					cmd_dw0 |= (0 << 20); // 8bpp
+					break;
+				default:
+					cmd_dw0 |= (2 << 20); // Default to 32bpp
+					TRACE("fill_span: Unknown colorspace 0x%x, defaulting to 32bpp for BLT cmd\n", gInfo->shared_info->current_mode.space);
+			}
+			cmd_buffer_cpu[current_cmd_dword_idx++] = cmd_dw0;
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_cmd_dword_idx++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1 (top-left)
@@ -201,9 +221,29 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 			// XY_COLOR_BLT command (Gen7 example)
 			// DW0: Command (Opcode, Length, Flags)
 			//      Opcode: 0x50 (XY_COLOR_BLT), Length: 3 (5 DWs total: DW0-DW4), ColorDepth, ROP
-			cmd_buffer_cpu[current_dword++] = (0x50 << 22) | (3 << 0) /* length = 5 DWs - 2 */
-				| (1 << 20) /* 32bpp, needs to match framebuffer */
+			uint32 cmd_dw0_fill = (0x50 << 22) | (3 << 0) /* length = 5 DWs - 2 */
 				| (0xF0 << 16); /* ROP: PATCOPY (for solid fill) */
+
+			switch (gInfo->shared_info->current_mode.space) {
+				case B_RGB32_LITTLE:
+				case B_RGBA32_LITTLE:
+					cmd_dw0_fill |= (2 << 20); // 32bpp
+					break;
+				case B_RGB16_LITTLE:
+					cmd_dw0_fill |= (1 << 20); // 16bpp (565)
+					break;
+				case B_RGB15_LITTLE:
+				case B_RGBA15_LITTLE:
+					cmd_dw0_fill |= (3 << 20); // 16bpp (555)
+					break;
+				case B_CMAP8:
+					cmd_dw0_fill |= (0 << 20); // 8bpp
+					break;
+				default:
+					cmd_dw0_fill |= (2 << 20); // Default to 32bpp
+					TRACE("fill_rectangle: Unknown colorspace 0x%x, defaulting to 32bpp for BLT cmd\n", gInfo->shared_info->current_mode.space);
+			}
+			cmd_buffer_cpu[current_dword++] = cmd_dw0_fill;
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
@@ -270,10 +310,30 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 
 			// XY_COLOR_BLT command (Gen7 example)
 			// DW0: Opcode (0x50), Length (3 for 5 DWs total: DW0-DW4), ColorDepth, ROP
-			cmd_buffer_cpu[current_dword++] = (0x50 << 22) /* XY_COLOR_BLT */
+			uint32 cmd_dw0_invert = (0x50 << 22) /* XY_COLOR_BLT */
 				| (3 << 0) /* length = 5 DWs - 2 */
-				| (1 << 20) /* 32bpp, needs to match framebuffer */
 				| (0x55 << 16); /* ROP: DSTINVERT (0x5555) */
+
+			switch (gInfo->shared_info->current_mode.space) {
+				case B_RGB32_LITTLE:
+				case B_RGBA32_LITTLE:
+					cmd_dw0_invert |= (2 << 20); // 32bpp
+					break;
+				case B_RGB16_LITTLE:
+					cmd_dw0_invert |= (1 << 20); // 16bpp (565)
+					break;
+				case B_RGB15_LITTLE:
+				case B_RGBA15_LITTLE:
+					cmd_dw0_invert |= (3 << 20); // 16bpp (555)
+					break;
+				case B_CMAP8:
+					cmd_dw0_invert |= (0 << 20); // 8bpp
+					break;
+				default:
+					cmd_dw0_invert |= (2 << 20); // Default to 32bpp
+					TRACE("invert_rectangle: Unknown colorspace 0x%x, defaulting to 32bpp for BLT cmd\n", gInfo->shared_info->current_mode.space);
+			}
+			cmd_buffer_cpu[current_dword++] = cmd_dw0_invert;
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
@@ -335,9 +395,29 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 
 			// XY_SRC_COPY_BLT command (Gen7 example)
 			// DW0: Command (Opcode 0x53, Length 0x4 (6 DWs total), ColorDepth, ROP)
-			cmd_buffer_cpu[current_dword++] = (0x53 << 22) | (4 << 0)
-				| (1 << 20) // 32bpp
-				| (0xCC << 16); // ROP: SRCCOPY
+			uint32 cmd_dw0_blit = (0x53 << 22) | (4 << 0) /* length = 6 DWs - 2 */
+				| (0xCC << 16); /* ROP: SRCCOPY */
+
+			switch (gInfo->shared_info->current_mode.space) {
+				case B_RGB32_LITTLE:
+				case B_RGBA32_LITTLE:
+					cmd_dw0_blit |= (2 << 20); // 32bpp
+					break;
+				case B_RGB16_LITTLE:
+					cmd_dw0_blit |= (1 << 20); // 16bpp (565)
+					break;
+				case B_RGB15_LITTLE:
+				case B_RGBA15_LITTLE:
+					cmd_dw0_blit |= (3 << 20); // 16bpp (555)
+					break;
+				case B_CMAP8:
+					cmd_dw0_blit |= (0 << 20); // 8bpp
+					break;
+				default:
+					cmd_dw0_blit |= (2 << 20); // Default to 32bpp
+					TRACE("s2s_blit: Unknown colorspace 0x%x, defaulting to 32bpp for BLT cmd\n", gInfo->shared_info->current_mode.space);
+			}
+			cmd_buffer_cpu[current_dword++] = cmd_dw0_blit;
 			// DW1: Destination Pitch (bytes_per_row)
 			//      (If clipping: (Dest Right << 16) | Dest Top)
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;

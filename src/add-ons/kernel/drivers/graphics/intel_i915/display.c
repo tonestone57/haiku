@@ -135,8 +135,34 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 		// intel_i915_display_set_mode_internal will handle its own forcewake
 		intel_i915_display_set_mode_internal(devInfo, &initial_mode_to_set, PRIV_PIPE_A,
 			preferred_port_for_initial_modeset->logical_port_id);
-	} else { /* ... (set shared_info current_mode to 0) ... */ }
-	/* ... (populate shared_info preferred_mode_suggestion, primary_edid, min/max_pixel_clock - no MMIO) ... */
+		devInfo->shared_info->current_mode = initial_mode_to_set; // Also update shared_info after successful set
+	} else {
+		memset(&devInfo->shared_info->current_mode, 0, sizeof(display_mode));
+		TRACE("Display: No initial mode set, current_mode in shared_info zeroed.\n");
+	}
+
+	// Populate other shared_info fields
+	if (devInfo->preferred_mode_suggestion.timing.pixel_clock > 0) {
+		devInfo->shared_info->preferred_mode_suggestion = devInfo->preferred_mode_suggestion;
+	} else if (global_mode_count > 0) {
+		devInfo->shared_info->preferred_mode_suggestion = global_mode_list[0]; // Fallback to first parsed mode
+	}
+	if (devInfo->ports[0].edid_valid) { // Assuming port 0 is primary for this info
+		memcpy(devInfo->shared_info->primary_edid_block, devInfo->ports[0].edid_data, EDID_BLOCK_SIZE);
+		devInfo->shared_info->primary_edid_valid = true;
+	}
+	// TODO: Populate min/max_pixel_clock from actual hardware capabilities / PLL limits
+	// For now, using generic safe values. These should be Gen-specific.
+	devInfo->shared_info->min_pixel_clock = 25000;  // 25 MHz
+	devInfo->shared_info->max_pixel_clock = 400000; // 400 MHz (example for Gen7-ish)
+	if (IS_HASWELL(devInfo->device_id)) {
+		devInfo->shared_info->max_pixel_clock = 650000; // HSW DDI can go higher
+	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+		devInfo->shared_info->max_pixel_clock = 350000; // IVB limit might be lower for some outputs
+	}
+	TRACE("Display Init: Shared info populated. MinClock: %u, MaxClock: %u\n",
+		devInfo->shared_info->min_pixel_clock, devInfo->shared_info->max_pixel_clock);
+
 	return B_OK;
 }
 

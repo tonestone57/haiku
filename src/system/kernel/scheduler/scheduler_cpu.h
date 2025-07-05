@@ -61,49 +61,67 @@ public:
 	inline				void			LockScheduler();
 	inline				void			UnlockScheduler();
 
+	// LockRunQueue/UnlockRunQueue now protect the entire MLFQ array and fMlfqHighestNonEmptyLevel
 	inline				void			LockRunQueue();
 	inline				void			UnlockRunQueue();
 
-						void			PushFront(ThreadData* thread,
-											int32 priority);
-						void			PushBack(ThreadData* thread,
-											int32 priority);
-						void			Remove(ThreadData* thread);
-						ThreadData*		PeekThread() const;
-						ThreadData*		PeekIdleThread() const;
+						// AddThread now takes an MLFQ level and a flag for front/back
+						void			AddThread(ThreadData* thread, int mlfqLevel, bool addToFront);
+						// RemoveThread gets the level from ThreadData (design decision)
+						void			RemoveThread(ThreadData* thread);
+						// Explicit removal from a specific queue, used internally or by balancing
+						void			RemoveFromQueue(ThreadData* thread, int mlfqLevel);
 
+						// Returns head of highest priority non-empty MLFQ or NULL
+						ThreadData*		PeekNextThread() const;
+						// Returns the index of the highest priority non-empty MLFQ, or -1
+	inline				int				HighestMLFQLevel() const { return fMlfqHighestNonEmptyLevel; }
+
+						ThreadData*		PeekIdleThread() const; // Idle threads are special, may not be in MLFQ
+
+						// UpdatePriority now reflects the overall highest priority task this CPU might pick
 						void			UpdatePriority(int32 priority);
 
-	inline				int32			GetLoad() const	{ return fLoad; }
-						void			ComputeLoad();
 
+	inline				int32			GetLoad() const	{ return fLoad; } // Overall average load
+						void			ComputeLoad(); // Updates fLoad and potentially fInstantaneousLoad
+	inline				float			GetInstantaneousLoad() const { return fInstantaneousLoad; }
+						void			UpdateInstantaneousLoad(bigtime_t now); // Called periodically
+
+						// ChooseNextThread needs to be aware of MLFQ structure
 						ThreadData*		ChooseNextThread(ThreadData* oldThread,
-											bool putAtBack);
+											bool putAtBack, int oldMlfqLevel);
 
 						void			TrackActivity(ThreadData* oldThreadData,
 											ThreadData* nextThreadData);
 
+						// StartQuantumTimer now takes the dynamically calculated quantum
 						void			StartQuantumTimer(ThreadData* thread,
-											bool wasPreempted);
+											bool wasPreempted, bigtime_t dynamicQuantum);
 
 	static inline		CPUEntry*		GetCPU(int32 cpu);
 
 private:
+						void			_UpdateHighestMLFQLevel(); // Recalculates fMlfqHighestNonEmptyLevel
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
 
 	static				int32			_RescheduleEvent(timer* /* unused */);
-	static				int32			_UpdateLoadEvent(timer* /* unused */);
+	static				int32			_UpdateLoadEvent(timer* /* unused */); // May also update fInstantaneousLoad
 
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
 						rw_spinlock 	fSchedulerModeLock;
 
-						ThreadRunQueue	fRunQueue;
-						spinlock		fQueueLock;
+						ThreadRunQueue	fMlfq[NUM_MLFQ_LEVELS]; // One run queue per MLFQ level
+						int32			fMlfqHighestNonEmptyLevel; // Cache: -1 if all empty, else highest index
+						spinlock		fQueueLock; // Protects fMlfq and fMlfqHighestNonEmptyLevel
 
-						int32			fLoad;
+						int32			fLoad; // Overall average load, as before
+						float			fInstantaneousLoad; // For DTQ calculation (0.0 to 1.0)
+						bigtime_t		fLastInstantLoadUpdate; // Timestamp of last fInstantaneousLoad update
+
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
@@ -140,23 +158,26 @@ public:
 
 	inline				CPUPriorityHeap*	CPUHeap();
 
+	// ThreadCount now sums threads from all its CPUs' MLFQs
 	inline				int32			ThreadCount() const;
 
-	inline				void			LockRunQueue();
-	inline				void			UnlockRunQueue();
-
-						void			PushFront(ThreadData* thread,
-											int32 priority);
-						void			PushBack(ThreadData* thread,
-											int32 priority);
-						void			Remove(ThreadData* thread);
-						ThreadData*		PeekThread() const;
+	// Core-level run queues are removed; threads are on CPU-specific MLFQs
+	// inline				void			LockRunQueue();
+	// inline				void			UnlockRunQueue();
+	// void			PushFront(ThreadData* thread,
+	// 										int32 priority);
+	// void			PushBack(ThreadData* thread,
+	// 										int32 priority);
+	// void			Remove(ThreadData* thread);
+	// ThreadData*		PeekThread() const;
 
 	inline				bigtime_t		GetActiveTime() const;
 	inline				void			IncreaseActiveTime(
 											bigtime_t activeTime);
 
-	inline				int32			GetLoad() const;
+	inline				int32			GetLoad() const; // Overall average load of the core
+	inline				float			GetInstantaneousLoad() const { return fInstantaneousLoad; } // Avg of its CPUs' instantaneous loads
+	inline				void			UpdateInstantaneousLoad(); // Recalculates core's instantaneous load from its CPUs
 	inline				uint32			LoadMeasurementEpoch() const
 											{ return fLoadMeasurementEpoch; }
 
@@ -190,14 +211,14 @@ private:
 						CPUPriorityHeap	fCPUHeap;
 						spinlock		fCPULock;
 
-						int32			fThreadCount;
-						ThreadRunQueue	fRunQueue;
-						spinlock		fQueueLock;
+						// fThreadCount and fRunQueue removed from CoreEntry
+						// Each CPUEntry on this core will have its own MLFQ
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
 
-						int32			fLoad;
+						int32			fLoad; // Overall average load, as before
+						float			fInstantaneousLoad; // For DTQ (avg of its CPUs), 0.0 to 1.0
 						int32			fCurrentLoad;
 						uint32			fLoadMeasurementEpoch;
 						bool			fHighLoad;

@@ -423,9 +423,11 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
 			cmd_buffer_cpu[current_dword++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
-			// DW3: Destination X2, Y2 (exclusive end coordinates: X1 + Width, Y1 + Height)
-			cmd_buffer_cpu[current_dword++] = ((blit->dest_left + blit->width) & 0xFFFF)
-				| (((blit->dest_top + blit->height) & 0xFFFF) << 16);
+			// DW3: Destination X2, Y2 (exclusive end coordinates)
+			// blit_params width/height are 0-indexed (0 means 1 pixel/line)
+			// So, actual width = blit->width + 1. X2_exclusive = dest_left + actual_width.
+			cmd_buffer_cpu[current_dword++] = ((blit->dest_left + blit->width + 1) & 0xFFFF)
+				| (((blit->dest_top + blit->height + 1) & 0xFFFF) << 16);
 			// DW4: Source GTT Offset (base of the source surface, which is the framebuffer)
 			//      The command uses this as the base, and DW5 (SrcX1, SrcY1) is relative to this.
 			//      For screen-to-screen this is GTT offset of source.

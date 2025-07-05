@@ -39,8 +39,6 @@ using namespace Scheduler;
 class Scheduler::DebugDumper {
 public:
 	static	void		DumpCPURunQueue(CPUEntry* cpu);
-	// DumpCoreRunQueue is removed as CoreEntry no longer has its own run queue.
-	// static	void		DumpCoreRunQueue(CoreEntry* core);
 	static	void		DumpCoreLoadHeapEntry(CoreEntry* core);
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 
@@ -72,7 +70,7 @@ ThreadRunQueue::Dump() const
 
 			kprintf("%p  %-7" B_PRId32 " %-8" B_PRId32 " %-16" B_PRId32 " %-10d %s\n",
 				thread, thread->id, thread->priority,
-				threadData->GetEffectivePriority(), // This might be just base priority now
+				threadData->GetEffectivePriority(),
 				threadData->CurrentMLFQLevel(),
 				thread->name);
 		}
@@ -84,15 +82,15 @@ CPUEntry::CPUEntry()
 	:
 	fLoad(0),
 	fInstantaneousLoad(0.0f),
-	fLastInstantLoadUpdate(0),
+	fInstLoadLastUpdateTimeSnapshot(0), // Will be set in Init
+	fInstLoadLastActiveTimeSnapshot(0), // Will be set in Init
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false),
-	fMlfqHighestNonEmptyLevel(-1) // Initialize to -1 (all empty)
+	fMlfqHighestNonEmptyLevel(-1)
 {
 	B_INITIALIZE_RW_SPINLOCK(&fSchedulerModeLock);
 	B_INITIALIZE_SPINLOCK(&fQueueLock);
-	// fMlfq array elements are default constructed.
 }
 
 
@@ -103,8 +101,9 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fCore = core;
 	fMlfqHighestNonEmptyLevel = -1;
 	fInstantaneousLoad = 0.0f;
-	fLastInstantLoadUpdate = system_time(); // Initialize with current time
-	// ThreadRunQueue objects in fMlfq are already constructed by CPUEntry constructor.
+	// Initialize snapshots for instantaneous load calculation
+	fInstLoadLastUpdateTimeSnapshot = system_time();
+	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 }
 
 
@@ -113,7 +112,8 @@ CPUEntry::Start()
 {
 	fLoad = 0;
 	fInstantaneousLoad = 0.0f;
-	fLastInstantLoadUpdate = system_time();
+	fInstLoadLastUpdateTimeSnapshot = system_time();
+	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fCore->AddCPU(this);
 }
 
@@ -148,11 +148,9 @@ CPUEntry::AddThread(ThreadData* thread, int mlfqLevel, bool addToFront)
 	else
 		fMlfq[mlfqLevel].PushBack(thread, thread->GetEffectivePriority());
 
-	thread->MarkEnqueued(this->Core()); // ThreadData needs to know its core
+	thread->MarkEnqueued(this->Core());
 
-	// Update highest non-empty level if this thread made a higher (lower index)
-	// priority queue non-empty, or if no queue was previously non-empty.
-	if (fMlfq[mlfqLevel].PeekMaximum() != NULL) { // Check if the queue is indeed not empty now
+	if (fMlfq[mlfqLevel].PeekMaximum() != NULL) {
 		if (fMlfqHighestNonEmptyLevel == -1 || mlfqLevel < fMlfqHighestNonEmptyLevel) {
 			fMlfqHighestNonEmptyLevel = mlfqLevel;
 		}
@@ -165,7 +163,6 @@ CPUEntry::RemoveThread(ThreadData* thread)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(thread->IsEnqueued());
-	// Assumes fQueueLock is held by the caller (typically reschedule)
 	RemoveFromQueue(thread, thread->CurrentMLFQLevel());
 }
 
@@ -174,12 +171,12 @@ void
 CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(thread->IsEnqueued()); // It should be marked enqueued to be here
+	ASSERT(thread->IsEnqueued());
 	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
 	ASSERT(fQueueLock.IsOwned());
 
 	fMlfq[mlfqLevel].Remove(thread);
-	// Caller (reschedule or set_thread_priority) is responsible for threadData->MarkDequeued()
+	// Note: Caller is responsible for threadData->MarkDequeued()
 
 	if (mlfqLevel == fMlfqHighestNonEmptyLevel && fMlfq[mlfqLevel].PeekMaximum() == NULL) {
 		_UpdateHighestMLFQLevel();
@@ -194,7 +191,7 @@ CPUEntry::PeekNextThread() const
 	ASSERT(fQueueLock.IsOwned());
 
 	if (fMlfqHighestNonEmptyLevel == -1)
-		return NULL; // All queues are empty
+		return NULL;
 	return fMlfq[fMlfqHighestNonEmptyLevel].PeekMaximum();
 }
 
@@ -205,11 +202,11 @@ CPUEntry::_UpdateHighestMLFQLevel()
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fQueueLock.IsOwned());
 
-	fMlfqHighestNonEmptyLevel = -1; // Assume all empty
-	for (int i = 0; i < NUM_MLFQ_LEVELS; i++) { // Iterate from highest prio (0) to lowest
+	fMlfqHighestNonEmptyLevel = -1;
+	for (int i = 0; i < NUM_MLFQ_LEVELS; i++) {
 		if (fMlfq[i].PeekMaximum() != NULL) {
 			fMlfqHighestNonEmptyLevel = i;
-			return; // Found the highest non-empty level
+			return;
 		}
 	}
 }
@@ -219,13 +216,10 @@ ThreadData*
 CPUEntry::PeekIdleThread() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// The idle thread for this CPU is stored in gCPU[fCPUNumber].idle_thread
-	// Its ThreadData can be accessed via scheduler_data.
 	Thread* idle = gCPU[fCPUNumber].idle_thread;
 	if (idle != NULL && idle->scheduler_data != NULL) {
 		return idle->scheduler_data;
 	}
-
 	panic("PeekIdleThread: Idle thread for CPU %" B_PRId32 " not found.", fCPUNumber);
 	return NULL;
 }
@@ -258,18 +252,14 @@ CPUEntry::ComputeLoad()
 
 	bigtime_t now = system_time();
 	int oldLoad = compute_load(fMeasureTime, fMeasureActiveTime, fLoad, now);
-	// compute_load updates fMeasureTime and fMeasureActiveTime for the next interval
-	// and returns the previous load value before update, or -1 if not enough time passed.
 
-	if (oldLoad < 0) // Not enough data yet or interval too short
+	if (oldLoad < 0)
 		return;
-
-	// fLoad is now the new average load for the CPUEntry
 
 	if (fLoad > kVeryHighLoad && gCurrentMode != NULL)
 		gCurrentMode->rebalance_irqs(false);
 
-	UpdateInstantaneousLoad(now); // Update instantaneous load as well
+	UpdateInstantaneousLoad(now);
 }
 
 void
@@ -278,37 +268,44 @@ CPUEntry::UpdateInstantaneousLoad(bigtime_t now)
 	SCHEDULER_ENTER_FUNCTION();
 	if (!gTrackCPULoad || gCPU[fCPUNumber].disabled) {
 		fInstantaneousLoad = 0.0f;
-		fLastInstantLoadUpdate = now;
-		if (fCore) // Also update core if CPU becomes disabled/untracked
+		fInstLoadLastUpdateTimeSnapshot = now;
+		fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
+		if (fCore)
 			fCore->UpdateInstantaneousLoad();
 		return;
 	}
 
-	// Determine current sample: 1.0 if busy, 0.0 if idle.
-	// A CPU is busy if its running thread is not NULL and not the idle thread.
-	// The gCPU[fCPUNumber].running_thread is the most up-to-date info.
-	float currentSample = 0.0f;
-	Thread* runningThread = gCPU[fCPUNumber].running_thread;
-	if (runningThread != NULL && !thread_is_idle_thread(runningThread)) {
-		currentSample = 1.0f;
-	}
+	bigtime_t currentTotalActiveTime = gCPU[fCPUNumber].active_time;
+	float currentActivitySample = 0.0f;
 
-	// Initialize fInstantaneousLoad on first meaningful call or if time jumped significantly
-	if (fLastInstantLoadUpdate == 0 || now < fLastInstantLoadUpdate /* time warp */ ) {
-		fInstantaneousLoad = currentSample;
+	if (fInstLoadLastUpdateTimeSnapshot == 0 || now < fInstLoadLastUpdateTimeSnapshot || now == fInstLoadLastUpdateTimeSnapshot) {
+		// First call, time warp, or no time elapsed: Base on current thread.
+		Thread* runningThread = gCPU[fCPUNumber].running_thread;
+		if (runningThread != NULL && !thread_is_idle_thread(runningThread)) {
+			currentActivitySample = 1.0f; // Currently busy
+		} else {
+			currentActivitySample = 0.0f; // Currently idle
+		}
+		fInstantaneousLoad = currentActivitySample; // Initialize directly
 	} else {
-		// EWMA calculation:
-		// new_load = alpha * current_sample + (1 - alpha) * old_load
-		fInstantaneousLoad = (kInstantLoadEWMAAlpha * currentSample)
+		bigtime_t timeDelta = now - fInstLoadLastUpdateTimeSnapshot;
+		bigtime_t activeTimeDelta = currentTotalActiveTime - fInstLoadLastActiveTimeSnapshot;
+
+		if (activeTimeDelta < 0) activeTimeDelta = 0; // active_time can wrap with u longstanding idle
+		if (activeTimeDelta > timeDelta) activeTimeDelta = timeDelta; // Cap active time by period
+
+		currentActivitySample = (float)activeTimeDelta / timeDelta;
+		currentActivitySample = std::max(0.0f, std::min(1.0f, currentActivitySample)); // Clamp sample
+
+		fInstantaneousLoad = (kInstantLoadEWMAAlpha * currentActivitySample)
 			+ ((1.0f - kInstantLoadEWMAAlpha) * fInstantaneousLoad);
 	}
 
-	// Clamp the load factor to ensure it stays within [0.0, 1.0]
 	fInstantaneousLoad = std::max(0.0f, std::min(1.0f, fInstantaneousLoad));
-	fLastInstantLoadUpdate = now;
 
-	// After this CPUEntry updates its instantaneous load,
-	// notify its CoreEntry to update its own aggregated instantaneous load.
+	fInstLoadLastActiveTimeSnapshot = currentTotalActiveTime;
+	fInstLoadLastUpdateTimeSnapshot = now;
+
 	if (fCore) {
 		fCore->UpdateInstantaneousLoad();
 	}
@@ -322,18 +319,16 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool putAtBack, int oldMlfqLev
 	ASSERT(fQueueLock.IsOwned());
 
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
-		&& oldThread->Core() == this->Core()) { // oldThread is valid and belongs here
-		// AddThread handles MarkEnqueued
+		&& oldThread->Core() == this->Core()) {
 		AddThread(oldThread, oldThread->CurrentMLFQLevel(), !putAtBack);
 	}
 
-	ThreadData* nextThreadData = PeekNextThread(); // Gets from highest non-empty MLFQ level
+	ThreadData* nextThreadData = PeekNextThread();
 
 	if (nextThreadData != NULL) {
-		// The caller (reschedule) will remove it from the queue and MarkDequeued
-		// This function just "chooses" by peeking.
+		// Caller (reschedule) removes it.
 	} else {
-		nextThreadData = PeekIdleThread(); // Fallback to idle if all MLFQs are empty
+		nextThreadData = PeekIdleThread();
 		if (nextThreadData == NULL) {
 			panic("CPUEntry::ChooseNextThread: No idle thread found for CPU %" B_PRId32, ID());
 		}
@@ -353,17 +348,11 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 	Thread* oldThread = oldThreadData->GetThread();
 
 	if (!thread_is_idle_thread(oldThread)) {
-		// oldThreadData->StopCPUTime() was called at the start of reschedule.
-		// The thread's kernel_time/user_time are now updated to 'now'.
-		// cpuEntry->last_kernel_time/last_user_time were set when oldThread *started* its slice.
 		bigtime_t activeKernelTime = oldThread->kernel_time - cpuEntry->last_kernel_time;
 		bigtime_t activeUserTime = oldThread->user_time - cpuEntry->last_user_time;
 		bigtime_t activeTime = activeKernelTime + activeUserTime;
 
-		if (activeTime < 0) {
-			// This can happen due to time warps or very short slices. Treat as no time.
-			activeTime = 0;
-		}
+		if (activeTime < 0) activeTime = 0;
 
 		WriteSequentialLocker locker(cpuEntry->active_time_lock);
 		cpuEntry->active_time += activeTime;
@@ -383,11 +372,8 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 
 	Thread* nextThread = nextThreadData->GetThread();
 	if (!thread_is_idle_thread(nextThread)) {
-		// Set start times for the nextThread's slice
 		cpuEntry->last_kernel_time = nextThread->kernel_time;
 		cpuEntry->last_user_time = nextThread->user_time;
-		// last_interrupt_time for the next thread is set when it starts running (after context switch)
-		// but we need to pass the current global interrupt time for stolen time calculation.
 		nextThreadData->SetLastInterruptTime(gCPU[fCPUNumber].interrupt_time);
 	}
 }
@@ -423,32 +409,20 @@ CPUEntry::_RequestPerformanceLevel(ThreadData* threadData)
 		return;
 	}
 
-	int32 loadToConsider = 0;
-	if (fCore != NULL) {
-		// Use core's instantaneous load if available and makes sense
-		loadToConsider = static_cast<int32>(fCore->GetInstantaneousLoad() * kMaxLoad);
-	} else {
-		// Fallback if core is somehow NULL (should not happen for an active CPUEntry)
-		// or use thread's own estimated load if more appropriate
-		loadToConsider = threadData->GetLoad(); // This is fNeededLoad (average)
-	}
-
-	// Let's prefer the CPU's own instantaneous load for its frequency request
-	loadToConsider = static_cast<int32>(this->GetInstantaneousLoad() * kMaxLoad);
-
+	int32 loadToConsider = static_cast<int32>(this->GetInstantaneousLoad() * kMaxLoad);
 
 	ASSERT_PRINT(loadToConsider >= 0 && loadToConsider <= kMaxLoad, "load is out of range %"
 		B_PRId32, loadToConsider);
 
 	if (loadToConsider < kTargetLoad) {
 		int32 delta = kTargetLoad - loadToConsider;
-		delta = (delta * kCPUPerformanceScaleMax) / (kTargetLoad > 0 ? kTargetLoad : 1) ; // Scale relative to target
+		delta = (delta * kCPUPerformanceScaleMax) / (kTargetLoad > 0 ? kTargetLoad : 1) ;
 		decrease_cpu_performance(delta);
 	} else {
 		int32 range = kMaxLoad - kTargetLoad;
-		if (range <=0) range = 1; // Avoid division by zero
+		if (range <=0) range = 1;
 		int32 delta = loadToConsider - kTargetLoad;
-		delta = (delta * kCPUPerformanceScaleMax) / range; // Scale relative to range above target
+		delta = (delta * kCPUPerformanceScaleMax) / range;
 		increase_cpu_performance(delta);
 	}
 }
@@ -474,7 +448,7 @@ CPUEntry::_UpdateLoadEvent(timer* /* unused */)
 
 	CoreEntry* core = cpu->Core();
 	if (core)
-		core->ChangeLoad(0); // Triggers core's average load update cycle
+		core->ChangeLoad(0);
 
 	cpu->fUpdateLoadEvent = false;
 
@@ -503,7 +477,7 @@ CPUPriorityHeap::Dump()
 		int32 cpu = entry->ID();
 		int32 key = GetKey(entry);
 		kprintf("%3" B_PRId32 " %8" B_PRId32 " %3" B_PRId32 "%% %3.2f\n", cpu, key,
-			entry->GetLoad() / (kMaxLoad/100), entry->GetInstantaneousLoad()); // Use kMaxLoad for %
+			entry->GetLoad() / (kMaxLoad/100), entry->GetInstantaneousLoad());
 
 		RemoveRoot();
 		sDebugCPUHeap.Insert(entry, key);
@@ -555,11 +529,9 @@ CoreEntry::UpdateInstantaneousLoad()
 	float totalCpuInstantaneousLoad = 0.0f;
 	int32 enabledCpuCountOnCore = 0;
 
-	// fCPUSet stores all CPUs belonging to this core.
-	// We need to iterate these and check if they are enabled.
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (fCPUSet.GetBit(i)) { // Is CPU 'i' part of this core?
-			if (!gCPU[i].disabled) { // Is CPU 'i' enabled?
+		if (fCPUSet.GetBit(i)) {
+			if (!gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
 				totalCpuInstantaneousLoad += cpuEntry->GetInstantaneousLoad();
 				enabledCpuCountOnCore++;
@@ -567,15 +539,13 @@ CoreEntry::UpdateInstantaneousLoad()
 		}
 	}
 
-	WriteSpinLocker loadLocker(fLoadLock); // Protects write to fInstantaneousLoad
+	WriteSpinLocker loadLocker(fLoadLock);
 	if (enabledCpuCountOnCore > 0) {
 		fInstantaneousLoad = totalCpuInstantaneousLoad / enabledCpuCountOnCore;
 	} else {
-		// If all CPUs on this core are disabled, or the core has no CPUs (should not happen for valid core)
 		fInstantaneousLoad = 0.0f;
 	}
-	fInstantaneousLoad = std::max(0.0f, std::min(1.0f, fInstantaneousLoad)); // Clamp
-	// loadLocker is automatically released.
+	fInstantaneousLoad = std::max(0.0f, std::min(1.0f, fInstantaneousLoad));
 }
 
 
@@ -584,10 +554,10 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	SpinLocker locker(fCPULock); // Protects fCPUHeap
-	for (int32 i = 0; i < fCPUHeap.Count(); i++) { // Iterate over CPUs actually in this core's heap
-		CPUEntry* cpuEntry = fCPUHeap.ElementAt(i); // Assumes ElementAt is safe for heap iteration
-		if (cpuEntry != NULL) { // Should always be non-NULL if Count() > 0
+	SpinLocker locker(fCPULock);
+	for (int32 i = 0; i < fCPUHeap.Count(); i++) {
+		CPUEntry* cpuEntry = fCPUHeap.ElementAt(i);
+		if (cpuEntry != NULL) {
 			cpuEntry->LockRunQueue();
 			for (int j = 0; j < NUM_MLFQ_LEVELS; j++) {
 				ThreadRunQueue::ConstIterator iter = cpuEntry->fMlfq[j].GetConstIterator();
@@ -615,14 +585,13 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
 		fHighLoad = false;
-		// Ensure not to insert if already present, though Init should only be called once
 		if (!MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked())
 			gCoreLoadHeap.Insert(this, 0);
 		fPackage->AddIdleCore(this);
 	}
-	fCPUSet.SetBit(cpu->ID()); // Add to the set of CPUs on this core
+	fCPUSet.SetBit(cpu->ID());
 
-	SpinLocker lock(fCPULock); // Protect fCPUHeap
+	SpinLocker lock(fCPULock);
 	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY);
 }
 
@@ -634,31 +603,30 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	ASSERT(fIdleCPUCount > 0);
 
 	fIdleCPUCount--;
-	fCPUSet.ClearBit(cpu->ID()); // Remove from the set of CPUs on this core
+	fCPUSet.ClearBit(cpu->ID());
 
-	// Remove from CPUHeap first
 	{
-		SpinLocker lock(fCPULock); // Protect fCPUHeap
-		if (CPUPriorityHeap::Link(cpu)->IsLinked()) // Check if it's in the heap
+		SpinLocker lock(fCPULock);
+		if (CPUPriorityHeap::Link(cpu)->IsLinked())
 			fCPUHeap.Remove(cpu);
 	}
 
 
-	if (--fCPUCount == 0) { // This was the last CPU on this core
-		thread_map(CoreEntry::_UnassignThread, this); // Unassign non-pinned threads from this core
+	if (--fCPUCount == 0) {
+		thread_map(CoreEntry::_UnassignThread, this);
 
-		WriteSpinLocker heapsLock(gCoreHeapsLock); // Protect global heaps
-		if (MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked()) { // Check if it's in any heap
+		WriteSpinLocker heapsLock(gCoreHeapsLock);
+		if (MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked()) {
 			if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 			else gCoreLoadHeap.Remove(this);
 		}
 		heapsLock.Unlock();
-		fPackage->RemoveIdleCore(this); // Core becomes fully idle from package perspective
+		fPackage->RemoveIdleCore(this);
 	}
 
 	ASSERT(cpu->GetLoad() >= 0 && cpu->GetLoad() <= kMaxLoad);
-	_UpdateLoad(true); // Recalculate average load for the core
-	UpdateInstantaneousLoad(); // Recalculate instantaneous load for the core
+	_UpdateLoad(true);
+	UpdateInstantaneousLoad();
 }
 
 
@@ -671,12 +639,11 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (fCPUCount > 0) {
 		int32 currentTotalLoadSum = 0;
 		int32 activeCPUsForLoad = 0;
-		// Must lock fCPULock to safely iterate fCPUHeap and access CPUEntry loads
 		SpinLocker cpuHeapLocker(fCPULock);
-		for (int32 i = 0; i < fCPUHeap.Count(); i++) { // Iterate actual CPUs on this core
-			CPUEntry* cpu = fCPUHeap.ElementAt(i); // Assuming ElementAt is safe
+		for (int32 i = 0; i < fCPUHeap.Count(); i++) {
+			CPUEntry* cpu = fCPUHeap.ElementAt(i);
 			if (cpu != NULL && !gCPU[cpu->ID()].disabled) {
-				currentTotalLoadSum += cpu->GetLoad(); // Use CPUEntry's average load
+				currentTotalLoadSum += cpu->GetLoad();
 				activeCPUsForLoad++;
 			}
 		}
@@ -692,12 +659,12 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (!intervalEnded && !forceUpdate)
 		return;
 
-	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock); // Protects gCoreLoadHeap & gCoreHighLoadHeap
-	WriteSpinLocker loadLocker(fLoadLock); // Protects fLoad, fCurrentLoad, fLastLoadUpdate, fLoadMeasurementEpoch
+	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
+	WriteSpinLocker loadLocker(fLoadLock);
 
 	int32 oldKey = MinMaxHeapLinkImpl<CoreEntry, int32>::GetKey(this);
 	fLoad = newAverageLoad;
-	fCurrentLoad = newAverageLoad; // fCurrentLoad tracks the sum that becomes the new fLoad
+	fCurrentLoad = newAverageLoad;
 
 	if (intervalEnded) {
 		fLoadMeasurementEpoch++;
@@ -705,20 +672,18 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	}
 	loadLocker.Unlock();
 
-	fLoad = std::min(fLoad, kMaxLoad); // Clamp
+	fLoad = std::min(fLoad, kMaxLoad);
 
 	if (oldKey == fLoad && MinMaxHeapLinkImpl<CoreEntry, int32>::IsLinked()) {
 		coreHeapsLocker.Unlock();
 		return;
 	}
 
-	// Remove from old heap if it was there
 	if (MinMaxHeapLinkImpl<CoreEntry, int32>::IsLinked()) {
 		if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 		else gCoreLoadHeap.Remove(this);
 	}
 
-	// Add to new heap
 	if (fLoad > kHighLoad) {
 		gCoreHighLoadHeap.Insert(this, fLoad);
 		fHighLoad = true;
@@ -736,7 +701,7 @@ CoreEntry::_UnassignThread(Thread* thread, void* data)
 	CoreEntry* core = static_cast<CoreEntry*>(data);
 	ThreadData* threadData = thread->scheduler_data;
 	if (threadData->Core() == core && thread->pinned_to_cpu == 0)
-		threadData->UnassignCore(thread_is_running(thread)); // Pass running status
+		threadData->UnassignCore(thread_is_running(thread));
 }
 
 
@@ -788,15 +753,11 @@ void
 PackageEntry::AddIdleCore(CoreEntry* core)
 {
 	WriteSpinLocker lock(fCoreLock);
-	// fCoreCount should be incremented when a CoreEntry is logically added to this package,
-	// typically during system init when CPUEntries are added to CoreEntries and Cores to Packages.
-	// This function is about tracking idle state.
-	// If core->Init already set its package, fCoreCount for package might be set elsewhere or upon core->AddCPU.
-	// For now, assume fCoreCount is managed correctly.
+	fCoreCount++;
 	fIdleCoreCount++;
 	fIdleCores.Add(core);
 
-	if (fIdleCoreCount == 1 && fCoreCount > 0) { // Package was fully busy (or just got its first core), now has one idle core
+	if (fIdleCoreCount == 1 && fCoreCount > 0) {
 		WriteSpinLocker globalLock(gIdlePackageLock);
 		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
 			gIdlePackageList.Add(this);
@@ -808,7 +769,7 @@ void
 PackageEntry::RemoveIdleCore(CoreEntry* core)
 {
 	WriteSpinLocker lock(fCoreLock);
-	fIdleCores.Remove(core); // Should only be called if core was in fIdleCores
+	fIdleCores.Remove(core);
 	fIdleCoreCount--;
 
 	if (fIdleCoreCount == 0 && fCoreCount > 0) {
@@ -852,7 +813,7 @@ DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
 	kprintf("%4" B_PRId32 " %11" B_PRId32 "%% %8.2f %7" B_PRId32 " %5" B_PRIu32 "\n",
 		entry->ID(),
-		entry->GetLoad() / (kMaxLoad/100), // Average load as %
+		entry->GetLoad() / (kMaxLoad/100),
 		entry->GetInstantaneousLoad(),
 		entry->ThreadCount(),
 		entry->LoadMeasurementEpoch());
@@ -884,7 +845,6 @@ DebugDumper::_AnalyzeCoreThreads(Thread* thread, void* data)
 {
 	CoreThreadsData* threadsData = static_cast<CoreThreadsData*>(data);
 	if (thread->scheduler_data->Core() == threadsData->fCore) {
-		// This was for core-level run queue load, no longer directly applicable.
 	}
 }
 
@@ -937,7 +897,7 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 	for(int32 i = 0; i < gPackageCount; ++i) {
 		ReadSpinLocker lock(gPackageEntries[i].fCoreLock);
 		kprintf("  %2" B_PRId32 ": %2" B_PRId32 " / %2" B_PRId32 "\n",
-			gPackageEntries[i].fPackageID, // Assuming fPackageID exists
+			gPackageEntries[i].fPackageID,
 			gPackageEntries[i].fIdleCoreCount,
 			gPackageEntries[i].fCoreCount);
 	}

@@ -171,6 +171,7 @@ i915_ppgtt_create(struct intel_i915_device_info* devInfo, struct i915_ppgtt** pp
 	initial_free_node->size = ppgtt->vma_size;
 	// initial_free_node->obj = NULL; // If this field were used
 	list_add_item_to_tail(&ppgtt->free_vma_list, initial_free_node);
+	ppgtt->needs_tlb_invalidate = false; // Initialize flag
 
 	TRACE("PPGTT: Created instance %p. PD BO area %" B_PRId32 ", GTT offset %u pages. VMA size 0x%Lx\n",
 		ppgtt, ppgtt->pd_bo->backing_store_area, ppgtt->pd_bo->gtt_offset_pages, ppgtt->vma_size);
@@ -541,8 +542,8 @@ i915_ppgtt_bind_object(struct i915_ppgtt* ppgtt, struct intel_i915_gem_object* o
 
 	if (status == B_OK) {
 		*ppgtt_addr_out = allocated_gpu_va; // Return the allocated GPU VA
-		// TODO: TLB invalidation needed by caller.
-		TRACE("PPGTT Bind: Object area %" B_PRId32 " successfully bound to VA 0x%Lx.\n",
+		ppgtt->needs_tlb_invalidate = true; // Signal that a flush is needed
+		TRACE("PPGTT Bind: Object area %" B_PRId32 " successfully bound to VA 0x%Lx. TLB flush needed.\n",
 			obj->backing_store_area, allocated_gpu_va);
 	} else {
 		// If binding failed (either PT creation or a map within the loop),
@@ -608,16 +609,23 @@ i915_ppgtt_unbind_object(struct i915_ppgtt* ppgtt, uint64_t ppgtt_addr, size_t s
 	if (status == B_OK) {
 		// Successfully cleared PTEs, now free the VA range
 		i915_ppgtt_free_va_range(ppgtt, ppgtt_addr, size);
-		TRACE("PPGTT Unbind: VA range 0x%Lx, size %lu, freed and returned to VMA manager.\n", ppgtt_addr, size);
+		ppgtt->needs_tlb_invalidate = true; // Signal that a flush is needed
+		TRACE("PPGTT Unbind: VA range 0x%Lx, size %lu, freed and returned to VMA manager. TLB flush needed.\n", ppgtt_addr, size);
 	} else {
 		TRACE("PPGTT Unbind: Errors occurred while clearing PTEs for VA 0x%Lx, size %lu. VA range NOT freed.\n", ppgtt_addr, size);
 		// If clearing PTEs failed, the VA range might still be considered "in use" or in an inconsistent state.
 		// Not freeing it from VMA might be safer to avoid accidental re-allocation of a partially unbound range.
 		// However, this could lead to VA space leak if the error is transient or only affects some pages.
 		// For now, we only free VA if PTE clearing loop reported success.
+		// Still, if some PTEs were cleared, a TLB flush might be warranted.
+		if (num_pages_to_unmap > 0) { // Check if any attempt to clear PTEs was made
+			ppgtt->needs_tlb_invalidate = true;
+			TRACE("PPGTT Unbind: Setting TLB invalidate flag despite PTE clear errors, as some might have changed.\n");
+		}
 	}
 
-	// TODO: TLB invalidation needed after unbinding.
-	TRACE("PPGTT Unbind: Completed for VA 0x%Lx, size %lu. TLB Invalidation needed.\n", ppgtt_addr, size);
+	// TLB invalidation flag is now set if any PTEs were (or were attempted to be) modified.
+	TRACE("PPGTT Unbind: Completed for VA 0x%Lx, size %lu. TLB Invalidation flag status: %s.\n",
+		ppgtt_addr, size, ppgtt->needs_tlb_invalidate ? "SET" : "NOT SET");
 	return status; // Return status of PTE clearing operations
 }

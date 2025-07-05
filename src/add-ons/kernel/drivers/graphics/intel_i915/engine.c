@@ -333,6 +333,64 @@ intel_engine_emit_flush_and_seqno_write(struct intel_engine_cs* engine, uint32_t
 	return B_OK;
 }
 
+
+// Emits an MI_FLUSH_DW command with TLB invalidation and other relevant cache flushes.
+status_t
+intel_engine_emit_tlb_invalidate(struct intel_engine_cs* engine)
+{
+	if (engine == NULL || engine->ring_cpu_map == NULL)
+		return B_NO_INIT;
+
+	uint32_t offset_in_dwords;
+	// MI_FLUSH_DW (1DW) + MI_NOOP (1DW for padding/safety) = 2 DWORDS
+	const uint32_t cmd_len_dwords = 2;
+	status_t status;
+
+	// Caller should hold forcewake if MI_FLUSH_DW needs it, though often it doesn't
+	// if the engine is already active. For safety, it's good practice.
+	// However, this function is called from execbuffer which holds FW.
+
+	status = intel_engine_get_space(engine, cmd_len_dwords, &offset_in_dwords);
+	if (status != B_OK) {
+		TRACE("Engine %s: Failed to get space for TLB invalidate: %s\n", engine->name, strerror(status));
+		return status;
+	}
+
+	uint32_t flush_dw_flags = 0;
+	// For Gen7, typical flags for a comprehensive flush that includes TLB:
+	// Bit 0: Invalidate Texture Cache and Gfx Data Cache
+	// Bit 1: TLB Invalidate
+	// Bit 4: Store L3 Messages (ensures L3 is flushed to mem before other invalidations)
+	// Other bits might be relevant for specific caches (Instruction, VF, etc.)
+	// These defines should be in registers.h
+	#ifndef MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE
+	#define MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE (1 << 0)
+	#endif
+	#ifndef MI_FLUSH_DW_INVALIDATE_TLB
+	#define MI_FLUSH_DW_INVALIDATE_TLB           (1 << 1)
+	#endif
+	#ifndef MI_FLUSH_DW_STORE_L3_MESSAGES
+	#define MI_FLUSH_DW_STORE_L3_MESSAGES        (1 << 4)
+	#endif
+
+	flush_dw_flags = MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE |
+	                 MI_FLUSH_DW_INVALIDATE_TLB |
+	                 MI_FLUSH_DW_STORE_L3_MESSAGES;
+
+	// MI_FLUSH_DW command: DW0 = Header (Opcode, Type, Length=0 for 1DW) | Flags
+	uint32_t mi_flush_dw_cmd = MI_FLUSH_DW_CMD_TYPE_MI | MI_FLUSH_DW_CMD_OPCODE |
+	                           MI_FLUSH_DW_LENGTH_1DW | flush_dw_flags;
+
+	intel_engine_write_dword(engine, offset_in_dwords++, mi_flush_dw_cmd);
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP); // Padding
+
+	intel_engine_advance_tail(engine, cmd_len_dwords);
+
+	TRACE("Engine %s: Emitted TLB Invalidate (MI_FLUSH_DW 0x%08x).\n", engine->name, mi_flush_dw_cmd);
+	return B_OK;
+}
+
+
 status_t
 intel_wait_for_seqno(struct intel_engine_cs* engine, uint32_t target_seqno, bigtime_t timeout_micros)
 {

@@ -33,6 +33,8 @@ struct i915_ppgtt {
 	struct list allocated_vma_list; // List of i915_ppgtt_vma_node for allocated ranges (optional tracking)
 	// struct mutex vma_lock;      // Consider if ppgtt->lock is sufficient or separate lock needed. For now, use ppgtt->lock.
 
+	bool needs_tlb_invalidate;     // Flag to signal execbuffer to flush TLBs for this PPGTT
+
 	// Other PPGTT-specific info, e.g., generation, flags
 };
 

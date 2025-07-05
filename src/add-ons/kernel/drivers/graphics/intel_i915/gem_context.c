@@ -78,6 +78,12 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	ctx->last_used_engine = NUM_ENGINES; // Assuming NUM_ENGINES is a valid 'invalid/unassigned' engine ID from engine.h
 	ctx->scheduling_priority = DEFAULT_CONTEXT_PRIORITY; // DEFAULT_CONTEXT_PRIORITY is in gem_context.h
 
+	// Initialize per-engine states
+	for (int i = 0; i < NUM_ENGINES; i++) {
+		ctx->engine_states[i].last_submitted_seqno = 0;
+		ctx->engine_states[i].last_completed_seqno = 0;
+	}
+
 	status = mutex_init_etc(&ctx->lock, "i915 GEM context lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) {
 		free(ctx);

@@ -26,6 +26,14 @@ struct i915_hw_ppgtt; // Forward declaration for Per-Process GTT structure
 
 #define DEFAULT_CONTEXT_PRIORITY 0 // Example default
 
+// Structure to hold per-engine state for a context
+struct intel_context_engine_state {
+	uint32_t last_submitted_seqno; // Last HW sequence number submitted by this context to this engine
+	uint32_t last_completed_seqno; // Last known HW sequence number completed by this context on this engine
+	// Add other per-engine state for this context if needed in the future,
+	// e.g., pointer to engine-specific save/restore areas, usage stats.
+};
+
 typedef struct intel_i915_gem_context {
 	intel_i915_device_info* dev_priv;
 	uint32_t id; // Unique context ID
@@ -43,9 +51,11 @@ typedef struct intel_i915_gem_context {
 	enum intel_engine_id last_used_engine; // Last engine this context was submitted to
 	uint8_t scheduling_priority;     // Software scheduling priority for this context
 
-	// TODO: Add more specific engine state if needed, e.g., per-engine sequence numbers,
-	//       or specific state objects for different engine types if context can be
-	//       configured differently per engine class.
+	// Per-engine software state for this context
+	struct intel_context_engine_state engine_states[NUM_ENGINES]; // Indexed by enum intel_engine_id
+
+	// TODO: Add more specific context-global state if needed,
+	//       e.g., overall context status, GPU virtual address space manager for PPGTT.
 
 } intel_i915_gem_context;
 

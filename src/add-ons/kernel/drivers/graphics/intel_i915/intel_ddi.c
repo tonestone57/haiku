@@ -328,12 +328,34 @@ intel_ddi_setup_audio(intel_i915_device_info* devInfo, intel_output_port_state* 
 	TRACE("DDI: Sent Audio InfoFrame. DIP_CTL(0x%x)=0x%x\n", dip_ctl_reg, dip_ctl_val);
 
 	// Program Transcoder Audio Control
-	uint32_t trans_aud_ctl_reg = TRANS_AUD_CTL(pipe);
-	uint32_t aud_val = intel_i915_read32(devInfo, trans_aud_ctl_reg);
-	aud_val |= TRANS_AUD_ENABLE_IVB; // Use IVB name, assuming similar bit for HSW if reg is same
-	// TODO: Set sample rate (TRANS_AUD_SAMPLE_RATE_48) and channel bits (TRANS_AUD_CHANNELS_2)
-	intel_i915_write32(devInfo, trans_aud_ctl_reg, aud_val);
-	TRACE("DDI: Enabled audio on Transcoder for pipe %d (Reg 0x%x Val 0x%08lx)\n", pipe, trans_aud_ctl_reg, aud_val);
+	uint32_t aud_ctl_st_reg;
+	// Select the correct AUD_CTL_ST register based on pipe/transcoder
+	// This assumes a direct mapping; complex routing might need more logic.
+	if (pipe == PRIV_PIPE_A) aud_ctl_st_reg = AUD_CTL_ST_A;
+	else if (pipe == PRIV_PIPE_B) aud_ctl_st_reg = AUD_CTL_ST_B;
+	else if (pipe == PRIV_PIPE_C) aud_ctl_st_reg = AUD_CTL_ST_C; // HSW+
+	else {
+		TRACE("DDI: Invalid pipe %d for audio setup.\n", pipe);
+		return;
+	}
+
+	uint32_t aud_val = intel_i915_read32(devInfo, aud_ctl_st_reg);
+	aud_val |= AUD_CTL_ST_ENABLE; // Enable audio output
+
+	// Set Sample Rate to 48kHz
+	aud_val &= ~AUD_CTL_ST_SAMPLE_RATE_MASK;
+	aud_val |= AUD_CTL_ST_SAMPLE_RATE_48KHZ;
+
+	// Set Channel Count to 2 (Stereo)
+	aud_val &= ~AUD_CTL_ST_CHANNEL_COUNT_MASK;
+	aud_val |= AUD_CTL_ST_CHANNELS_2;
+
+	// TODO: Configure other necessary bits in AUD_CTL_ST if needed,
+	// e.g., N Value selection, audio format (LPCM is often default).
+
+	intel_i915_write32(devInfo, aud_ctl_st_reg, aud_val);
+	TRACE("DDI: Configured audio on Transcoder pipe %d (Reg 0x%x Val 0x%08lx) for 2ch 48kHz LPCM.\n",
+		pipe, aud_ctl_st_reg, aud_val);
 }
 
 [end of src/add-ons/kernel/drivers/graphics/intel_i915/intel_ddi.c]

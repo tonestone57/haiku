@@ -90,6 +90,18 @@ static const float kInstantLoadEWMAAlpha = 0.4f;
 
 // --- End MLFQ and DTQ Definitions ---
 
+// --- Mode-Settable Global Parameters ---
+// These are set by scheduler_set_operation_mode via mode's switch_to_mode
+extern float gKernelKDistFactor; // Already declared as extern
+extern float gSchedulerBaseQuantumMultiplier;
+extern float gSchedulerAgingThresholdMultiplier;
+enum SchedulerLoadBalancePolicy {
+	SCHED_LOAD_BALANCE_SPREAD,
+	SCHED_LOAD_BALANCE_CONSOLIDATE
+};
+extern SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy;
+// --- End Mode-Settable Global Parameters ---
+
 
 const int kLowLoad = kMaxLoad * 20 / 100;
 const int kTargetLoad = kMaxLoad * 55 / 100;

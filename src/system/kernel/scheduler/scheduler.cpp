@@ -56,6 +56,13 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // Initialize DTQ factor
 
+// Definitions for global mode-tunable parameters
+// These are extern in scheduler_common.h
+float gSchedulerBaseQuantumMultiplier = 1.0f;
+float gSchedulerAgingThresholdMultiplier = 1.0f;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+
+
 }	// namespace Scheduler
 
 using namespace Scheduler;

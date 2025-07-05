@@ -1,10 +1,12 @@
 /*
  * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
+ * Copyright 2023, Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  */
 
 
 #include <util/AutoLock.h>
+#include <debug.h> // For dprintf
 
 #include "scheduler_common.h"
 #include "scheduler_cpu.h"
@@ -16,183 +18,193 @@
 using namespace Scheduler;
 
 
-const bigtime_t kCacheExpire = 100000;
+// Original cache expire constant for this mode
+const bigtime_t kLowLatencyCacheExpire = 100000; // 100ms
 
 
 static void
-switch_to_mode()
+low_latency_switch_to_mode()
 {
+	gKernelKDistFactor = 0.3f; // Moderate DTQ sensitivity
+	gSchedulerBaseQuantumMultiplier = 1.0f;    // Standard base quanta
+	gSchedulerAgingThresholdMultiplier = 1.0f; // Standard aging
+	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+
+	// sSmallTaskCore is specific to power_saving.cpp, no direct interaction needed here.
+
+	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier);
 }
 
 
 static void
-set_cpu_enabled(int32 /* cpu */, bool /* enabled */)
+low_latency_set_cpu_enabled(int32 /* cpu */, bool /* enabled */)
 {
+	// Low latency mode typically doesn't have special CPU enable/disable logic
+	// beyond the system-wide handling. Power saving mode might.
 }
 
 
 static bool
-has_cache_expired(const ThreadData* threadData)
+low_latency_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (threadData->WentSleepActive() == 0)
-		return false;
+	if (threadData == NULL || threadData->WentSleepActive() == 0)
+		return true; // No valid sleep data or threadData, assume expired
+
 	CoreEntry* core = threadData->Core();
-	bigtime_t activeTime = core->GetActiveTime();
-	return activeTime - threadData->WentSleepActive() > kCacheExpire;
+	if (core == NULL) // Thread not associated with a core, assume expired
+		return true;
+
+	bigtime_t coreActiveTime = core->GetActiveTime();
+	return coreActiveTime - threadData->WentSleepActive() > kLowLatencyCacheExpire;
 }
 
 
 static CoreEntry*
-choose_core(const ThreadData* threadData)
+low_latency_choose_core(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(threadData != NULL);
 
-	// wake new package
-	PackageEntry* package = gIdlePackageList.Last();
-	if (package == NULL) {
-		// wake new core
-		package = PackageEntry::GetMostIdlePackage();
-	}
+	// Try to find an idle package first, then an idle core on any package.
+	PackageEntry* package = gIdlePackageList.Last(); // LIFO for idle packages
+	CoreEntry* chosenCore = NULL;
 
-	int32 index = 0;
-	CPUSet mask = threadData->GetCPUMask();
-	const bool useMask = !mask.IsEmpty();
+	CPUSet affinityMask = threadData->GetCPUMask();
+	const bool useAffinityMask = !affinityMask.IsEmpty();
 
-	CoreEntry* core = NULL;
 	if (package != NULL) {
+		// Iterate idle cores on this package
+		int32 index = 0;
 		do {
-			core = package->GetIdleCore(index++);
-		} while (useMask && core != NULL && !core->CPUMask().Matches(mask));
+			chosenCore = package->GetIdleCore(index++);
+			if (chosenCore != NULL && useAffinityMask && !chosenCore->CPUMask().Matches(affinityMask))
+				chosenCore = NULL; // Skip if core doesn't match affinity
+		} while (chosenCore == NULL && package->GetIdleCore(index -1) != NULL); // Check if GetIdleCore returned NULL because of index
 	}
-	if (core == NULL) {
-		ReadSpinLocker coreLocker(gCoreHeapsLock);
-		index = 0;
-		// no idle cores, use least occupied core
-		do {
-			core = gCoreLoadHeap.PeekMinimum(index++);
-		} while (useMask && core != NULL && !core->CPUMask().Matches(mask));
-		if (core == NULL) {
-			index = 0;
+
+	// If no suitable idle core on an idle package, try most idle package
+	if (chosenCore == NULL) {
+		package = PackageEntry::GetMostIdlePackage(); // Package with most idle cores
+		if (package != NULL) {
+			int32 index = 0;
 			do {
-				core = gCoreHighLoadHeap.PeekMinimum(index++);
-			} while (useMask && core != NULL && !core->CPUMask().Matches(mask));
+				chosenCore = package->GetIdleCore(index++);
+				if (chosenCore != NULL && useAffinityMask && !chosenCore->CPUMask().Matches(affinityMask))
+					chosenCore = NULL;
+			} while (chosenCore == NULL && package->GetIdleCore(index-1) != NULL);
 		}
 	}
 
-	ASSERT(core != NULL);
-	return core;
+	// If still no core, pick the least loaded core respecting affinity
+	if (chosenCore == NULL) {
+		ReadSpinLocker coreLocker(gCoreHeapsLock);
+		int32 index = 0;
+		do {
+			chosenCore = gCoreLoadHeap.PeekMinimum(index++); // Least loaded from normal heap
+			if (chosenCore != NULL && useAffinityMask && !chosenCore->CPUMask().Matches(affinityMask))
+				chosenCore = NULL;
+		} while (chosenCore == NULL && gCoreLoadHeap.PeekMinimum(index-1) != NULL);
+
+		if (chosenCore == NULL) { // Try high load heap if normal is exhausted or all filtered by affinity
+			index = 0;
+			do {
+				chosenCore = gCoreHighLoadHeap.PeekMinimum(index++);
+				if (chosenCore != NULL && useAffinityMask && !chosenCore->CPUMask().Matches(affinityMask))
+					chosenCore = NULL;
+			} while (chosenCore == NULL && gCoreHighLoadHeap.PeekMinimum(index-1) != NULL);
+		}
+	}
+
+	ASSERT(chosenCore != NULL && "Could not choose a core in low_latency_choose_core");
+	return chosenCore;
 }
 
 
+// The old thread-specific rebalance is deprecated. Load balancing is now global.
 static CoreEntry*
-rebalance(const ThreadData* threadData)
+low_latency_rebalance_deprecated(const ThreadData* threadData)
 {
-	SCHEDULER_ENTER_FUNCTION();
-
-	CoreEntry* core = threadData->Core();
-	ASSERT(core != NULL);
-
-	// Get the least loaded core.
-	ReadSpinLocker coreLocker(gCoreHeapsLock);
-	CPUSet mask = threadData->GetCPUMask();
-	const bool useMask = !mask.IsEmpty();
-
-	int32 index = 0;
-	CoreEntry* other;
-	do {
-		other = gCoreLoadHeap.PeekMinimum(index++);
-		if (other != NULL && (useMask && other->CPUMask().IsEmpty()))
-			panic("other->CPUMask().IsEmpty()\n");
-	} while (useMask && other != NULL && !other->CPUMask().Matches(mask));
-
-	if (other == NULL) {
-		index = 0;
-		do {
-			other = gCoreHighLoadHeap.PeekMinimum(index++);
-		} while (useMask && other != NULL && !other->CPUMask().Matches(mask));
-	}
-	coreLocker.Unlock();
-	ASSERT(other != NULL);
-
-	// Check if the least loaded core is significantly less loaded than
-	// the current one.
-	int32 coreLoad = core->GetLoad();
-	int32 otherLoad = other->GetLoad();
-	if (other == core || otherLoad + kLoadDifference >= coreLoad)
-		return core;
-
-	// Check whether migrating the current thread would result in both core
-	// loads become closer to the average.
-	int32 difference = coreLoad - otherLoad - kLoadDifference;
-	ASSERT(difference > 0);
-
-	int32 threadLoad = threadData->GetLoad() / core->CPUCount();
-	return difference >= threadLoad ? other : core;
+	// This function is no longer the primary load balancing mechanism.
+	// Global scheduler_perform_load_balance handles it.
+	// Return current core to indicate no change from this path.
+	return threadData->Core();
 }
 
 
 static void
-rebalance_irqs(bool idle)
+low_latency_rebalance_irqs(bool idle)
 {
 	SCHEDULER_ENTER_FUNCTION();
-
-	if (idle)
+	if (idle || gSingleCore) // No IRQ balancing if CPU is idle or single core
 		return;
 
-	cpu_ent* cpu = get_cpu_struct();
-	SpinLocker locker(cpu->irqs_lock);
+	cpu_ent* current_cpu_struct = get_cpu_struct();
+	SpinLocker locker(current_cpu_struct->irqs_lock);
 
-	irq_assignment* chosen = NULL;
-	irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpu->irqs);
-
-	int32 totalLoad = 0;
+	irq_assignment* chosenIRQ = NULL;
+	irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
+	int32 totalLoadOnThisCPU = 0;
 	while (irq != NULL) {
-		if (chosen == NULL || chosen->load < irq->load)
-			chosen = irq;
-		totalLoad += irq->load;
-		irq = (irq_assignment*)list_get_next_item(&cpu->irqs, irq);
+		if (chosenIRQ == NULL || chosenIRQ->load < irq->load)
+			chosenIRQ = irq;
+		totalLoadOnThisCPU += irq->load;
+		irq = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 	}
-
 	locker.Unlock();
 
-	if (chosen == NULL || totalLoad < kLowLoad)
+	if (chosenIRQ == NULL || totalLoadOnThisCPU < kLowLoad) // No significant IRQ load or no IRQs
 		return;
 
-	ReadSpinLocker coreLocker(gCoreHeapsLock);
-	CoreEntry* other = gCoreLoadHeap.PeekMinimum();
-	if (other == NULL)
-		other = gCoreHighLoadHeap.PeekMinimum();
-	coreLocker.Unlock();
+	// Find a less loaded core/CPU for this IRQ
+	CoreEntry* targetCore = NULL;
+	ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
+	targetCore = gCoreLoadHeap.PeekMinimum(); // Least loaded core
+	if (targetCore == NULL && gCoreHighLoadHeap.Count() > 0) // Fallback if all cores are "high load"
+		targetCore = gCoreHighLoadHeap.PeekMinimum();
+	coreHeapsLocker.Unlock();
 
-	int32 newCPU = other->CPUHeap()->PeekRoot()->ID();
+	if (targetCore == NULL || targetCore == CoreEntry::GetCore(current_cpu_struct->cpu_num))
+		return; // No other core or target is current core
 
-	ASSERT(other != NULL);
-
-	CoreEntry* core = CoreEntry::GetCore(cpu->cpu_num);
-	if (other == core)
+	// Check if target core is significantly less loaded (overall system load)
+	if (targetCore->GetLoad() + kLoadDifference >= CoreEntry::GetCore(current_cpu_struct->cpu_num)->GetLoad())
 		return;
-	if (other->GetLoad() + kLoadDifference >= core->GetLoad())
-		return;
 
-	assign_io_interrupt_to_cpu(chosen->irq, newCPU);
+	// Select a CPU on the target core (e.g., its least loaded CPU)
+	CPUEntry* targetCPU = NULL;
+	targetCore->LockCPUHeap();
+	if (targetCore->CPUHeap()->Count() > 0) {
+		// A simple heuristic: pick the first CPU in its heap (which is sorted by priority,
+		// implying it's likely an idle or less busy CPU if available).
+		// A better heuristic would be to pick the CPU with lowest instantaneous load.
+		targetCPU = targetCore->CPUHeap()->PeekRoot(); // Peek the CPU with highest available priority (likely idle)
+	}
+	targetCore->UnlockCPUHeap();
+
+	if (targetCPU != NULL && targetCPU->ID() != current_cpu_struct->cpu_num) {
+		TRACE_SCHED("low_latency_rebalance_irqs: Moving IRQ %d from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+			chosenIRQ->irq, current_cpu_struct->cpu_num, targetCPU->ID());
+		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+	}
 }
 
 
 scheduler_mode_operations gSchedulerLowLatencyMode = {
-	"low latency",
+	"low latency", // name
 
-	1000,
-	100,
-	{ 2, 5 },
+	// Old quantum fields - largely superseded by kBaseQuanta & DTQ.
+	// Kept for now if any minor utility still refers to them, or to inform multiplier logic.
+	1000,    // base_quantum (e.g. 1ms) - could inform sModeBaseQuantumMultiplier
+	100,     // minimal_quantum - kMinEffectiveQuantum is now global
+	{ 2, 5 },// quantum_multipliers - logic is now different
+	5000,    // maximum_latency - DTQ and aging manage this implicitly
 
-	5000,
-
-	switch_to_mode,
-	set_cpu_enabled,
-	has_cache_expired,
-	choose_core,
-	rebalance,
-	rebalance_irqs,
+	low_latency_switch_to_mode,
+	low_latency_set_cpu_enabled,
+	low_latency_has_cache_expired,
+	low_latency_choose_core,        // Still used for initial placement
+	NULL, //low_latency_rebalance_deprecated, // Deprecated, set to NULL
+	low_latency_rebalance_irqs,
 };
-

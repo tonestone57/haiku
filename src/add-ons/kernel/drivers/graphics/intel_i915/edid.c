@@ -29,10 +29,8 @@ parse_dtd(const uint8_t* dtd, display_mode* mode)
 {
 	memset(mode, 0, sizeof(display_mode));
 
-	// Bytes 0-1: Pixel clock in 10kHz units. 0 means not a DTD.
-	mode->timing.pixel_clock = ((uint16_t)dtd[1] << 8 | dtd[0]) * 10; // Convert to kHz
-	if (mode->timing.pixel_clock == 0)
-		return false; // Not a DTD
+	mode->timing.pixel_clock = ((uint16_t)dtd[1] << 8 | dtd[0]) * 10;
+	if (mode->timing.pixel_clock == 0) return false;
 
 	mode->timing.h_display = dtd[2] | ((dtd[4] & 0xF0) << 4);
 	mode->timing.h_total = mode->timing.h_display + (dtd[3] | ((dtd[4] & 0x0F) << 8));
@@ -47,207 +45,98 @@ parse_dtd(const uint8_t* dtd, display_mode* mode)
 	if (dtd[17] & 0x04) mode->timing.flags |= B_POSITIVE_VSYNC;
 	if (dtd[17] & 0x02) mode->timing.flags |= B_POSITIVE_HSYNC;
 
-	uint8_t stereo_mode_bits = (dtd[17] & 0x60) >> 5;
-	if (stereo_mode_bits != 0) {
-		TRACE("EDID DTD: Stereo mode indicated (bits65=0x%x, bit0=0x%x). Not handled.\n",
-			stereo_mode_bits, (dtd[17] & 0x01));
-	}
-	uint8_t sync_type_bits = (dtd[17] & 0x18) >> 3;
-	if (sync_type_bits != 0x03) { // 0x03 is Digital Separate Sync
-		TRACE("EDID DTD: Non-standard digital sync type 0x%x specified. Using H/V polarity bits.\n", sync_type_bits);
-	}
+	uint8_t stereo = (dtd[17] & 0x60) >> 5;
+	if (stereo != 0) TRACE("EDID DTD: Stereo mode 0x%x indicated (not handled).\n", stereo);
+	uint8_t sync_type = (dtd[17] & 0x18) >> 3;
+	if (sync_type != 0x03) TRACE("EDID DTD: Non-separate sync type 0x%x.\n", sync_type);
 
 	mode->virtual_width = mode->timing.h_display;
 	mode->virtual_height = mode->timing.v_display;
-	mode->h_display_start = 0; mode->v_display_start = 0;
 	mode->space = B_RGB32_LITTLE;
-
-	TRACE("EDID: Parsed DTD: %dx%d @ clock %" B_PRIu32 "kHz, H(%u %u %u %u) V(%u %u %u %u) Flags:0x%lx\n",
-		mode->timing.h_display, mode->timing.v_display, mode->timing.pixel_clock,
-		mode->timing.h_display, mode->timing.h_sync_start, mode->timing.h_sync_end, mode->timing.h_total,
-		mode->timing.v_display, mode->timing.v_sync_start, mode->timing.v_sync_end, mode->timing.v_total,
-		mode->timing.flags);
 	return true;
 }
 
-// CVT Calculation (Coordinated Video Timings)
 static bool
 calculate_cvt_timing(uint16_t h_active, uint16_t v_active, uint8_t v_refresh_req,
                        bool reduced_blanking_preferred, display_mode* mode)
 {
-	if (mode == NULL || h_active == 0 || v_active == 0 || v_refresh_req == 0)
-		return false;
-
-	// TRACE("CVT: Attempting calculation for H:%u V:%u Refresh:%uHz RB_pref:%d\n",
-	//	h_active, v_active, v_refresh_req, reduced_blanking_preferred);
-
+	if (!mode || !h_active || !v_active || !v_refresh_req) return false;
 	memset(&mode->timing, 0, sizeof(timing_t));
-	mode->virtual_width = h_active;
-	mode->virtual_height = v_active;
-	mode->timing.h_display = h_active;
-	mode->timing.v_display = v_active;
+	mode->virtual_width = h_active; mode->virtual_height = v_active;
+	mode->timing.h_display = h_active; mode->timing.v_display = v_active;
 	mode->space = B_RGB32_LITTLE;
-	mode->h_display_start = 0;
-	mode->v_display_start = 0;
 
-	// CVT Constants
-	const uint32_t CELL_GRAN_RND_PIXELS = 8;
-	const uint32_t CLOCK_STEP_KHZ = 250;
+	const uint32_t CELL_GRAN_RND_PIXELS = 8, CLOCK_STEP_KHZ = 250;
+	const uint32_t RB_MIN_VBLANK_US = 460, RB_H_BLANK_PIXELS = 160, RB_H_SYNC_PIXELS = 32;
+	const uint32_t RB_V_FPORCH_LINES = 3, RB_V_SYNC_LINES = 8, RB_MIN_V_BPORCH_LINES = 6;
+	const uint32_t STD_C_M_US = 600, STD_C_C_PERCENT_X10 = 400, STD_MIN_V_PORCH_LINES = 3;
+	const uint32_t STD_MIN_V_SYNC_BP_US = 550, STD_HSYNC_PERCENT = 8;
+	const int32_t STD_CALC_C_PRIME_X100 = 3000, STD_CALC_M_PRIME_US_X100 = 30000;
 
-	// CVT-RB (Reduced Blanking) Constants - VESA CVT v1.2 Table A.1 (for RB Formula v2)
-	const uint32_t RB_MIN_VBLANK_US = 460;
-	const uint32_t RB_H_BLANK_PIXELS = 160;
-	const uint32_t RB_H_SYNC_PIXELS = 32;
-	const uint32_t RB_V_FPORCH_LINES = 3;
-	const uint32_t RB_V_SYNC_LINES = 8;
-	const uint32_t RB_MIN_V_BPORCH_LINES = 6; // Derived from typical needs for 460us total VBlank
+	uint32_t h_total, v_total, h_sync_width, h_front_porch, h_back_porch;
+	uint32_t v_sync_width, v_front_porch, v_back_porch, pixel_clock_khz = 0;
+	bool use_rb = reduced_blanking_preferred && (v_refresh_req >= 50);
 
-	// Standard CVT Constants
-	const uint32_t STD_C_M_US = 600;
-	const uint32_t STD_C_C_PERCENT = 40;
-	const uint32_t STD_MIN_V_PORCH_LINES = 3;
-	const uint32_t STD_MIN_V_SYNC_BP_US = 550;
-	const uint32_t STD_HSYNC_PERCENT = 8;
-
-	uint32_t h_total, v_total;
-	uint32_t h_sync_start, h_sync_end, h_front_porch, h_back_porch, h_sync_width;
-	uint32_t v_sync_start, v_sync_end, v_front_porch, v_back_porch, v_sync_width;
-	uint32_t pixel_clock_khz = 0;
-
-	bool use_reduced_blanking = reduced_blanking_preferred && (v_refresh_req >= 50);
-
-	if (use_reduced_blanking) {
-		// TRACE("CVT: Using Reduced Blanking formulas.\n");
-
+	if (use_rb) {
 		h_total = h_active + RB_H_BLANK_PIXELS;
 		h_total = ((h_total + CELL_GRAN_RND_PIXELS - 1) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
-
 		uint32_t ideal_h_period_ns = 0;
 		if (v_active > 0) {
-			uint64_t total_frame_time_ns = 1000000000ULL / v_refresh_req;
-			uint64_t min_vblank_time_ns = (uint64_t)RB_MIN_VBLANK_US * 1000;
-			if (total_frame_time_ns > min_vblank_time_ns) {
-				ideal_h_period_ns = (uint32_t)((total_frame_time_ns - min_vblank_time_ns) / v_active);
-			}
+			uint64_t tf_ns = 1000000000ULL / v_refresh_req;
+			uint64_t mvb_ns = (uint64_t)RB_MIN_VBLANK_US * 1000;
+			if (tf_ns > mvb_ns) ideal_h_period_ns = (uint32_t)((tf_ns - mvb_ns) / v_active);
 		}
+		uint32_t vbi_for_time = ideal_h_period_ns > 0 ? (((uint64_t)RB_MIN_VBLANK_US * 1000 + ideal_h_period_ns - 1) / ideal_h_period_ns) : 0;
+		uint32_t vbi_struct = RB_V_FPORCH_LINES + RB_V_SYNC_LINES + RB_MIN_V_BPORCH_LINES;
+		uint32_t actual_vbi = MAX(vbi_struct, vbi_for_time);
+		if(actual_vbi == 0) actual_vbi = vbi_struct > 0 ? vbi_struct : 15;
+		v_total = v_active + actual_vbi;
 
-		uint32_t vbi_lines_for_time = 0;
-		if (ideal_h_period_ns > 0) {
-			vbi_lines_for_time = ((uint64_t)RB_MIN_VBLANK_US * 1000 + ideal_h_period_ns - 1) / ideal_h_period_ns;
-		}
-
-		uint32_t v_blank_from_structure = RB_V_FPORCH_LINES + RB_V_SYNC_LINES + RB_MIN_V_BPORCH_LINES;
-		uint32_t actual_v_blank_lines = MAX(v_blank_from_structure, vbi_lines_for_time);
-		if (actual_v_blank_lines == 0 && v_blank_from_structure > 0) actual_v_blank_lines = v_blank_from_structure;
-		if (actual_v_blank_lines == 0) actual_v_blank_lines = 15; // Absolute fallback
-
-		v_total = v_active + actual_v_blank_lines;
-
-		uint64_t temp_pixel_clock_hz = (uint64_t)h_total * v_total * v_refresh_req;
-		pixel_clock_khz = (uint32_t)((temp_pixel_clock_hz + 500) / 1000);
+		pixel_clock_khz = (uint32_t)(((uint64_t)h_total * v_total * v_refresh_req + 500) / 1000);
 		pixel_clock_khz = ((pixel_clock_khz + CLOCK_STEP_KHZ / 2) / CLOCK_STEP_KHZ) * CLOCK_STEP_KHZ;
+		if (!pixel_clock_khz) return false;
 
-		if (pixel_clock_khz == 0) return false;
-
-		h_sync_width = RB_H_SYNC_PIXELS;
-		h_sync_width = ((h_sync_width + CELL_GRAN_RND_PIXELS / 2) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
-		h_front_porch = 48; // Typical RB HFP
+		h_sync_width = ((RB_H_SYNC_PIXELS + CELL_GRAN_RND_PIXELS / 2) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
+		h_front_porch = ( (RB_H_BLANK_PIXELS - h_sync_width) / 2 );
 		h_front_porch = (h_front_porch / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
 		h_back_porch = RB_H_BLANK_PIXELS - h_front_porch - h_sync_width;
-		if ((h_active + h_front_porch + h_sync_width + h_back_porch) != h_total) {
+		if ((h_active + h_front_porch + h_sync_width + h_back_porch) != h_total)
 			h_back_porch = h_total - (h_active + h_front_porch + h_sync_width);
-		}
 
-		v_sync_width = RB_V_SYNC_LINES;
-		v_front_porch = RB_V_FPORCH_LINES;
-		v_back_porch = actual_v_blank_lines - v_front_porch - v_sync_width;
+		v_sync_width = RB_V_SYNC_LINES; v_front_porch = RB_V_FPORCH_LINES;
+		v_back_porch = actual_vbi - v_front_porch - v_sync_width;
 		if ((int32_t)v_back_porch < 0) v_back_porch = RB_MIN_V_BPORCH_LINES;
-
 		mode->timing.flags = B_POSITIVE_HSYNC | B_NEGATIVE_VSYNC;
-
-	} else {
-		// --- Standard CVT Calculations (integer arithmetic attempt) ---
-		// TRACE("CVT: Using Standard Blanking formulas.\n");
-
-		// 1. Required Field Refresh Rate (Hz)
-		//    If Interlaced: V_FIELD_RATE_RQD = VRefresh_req * 2 (not handled here, assume progressive)
-		//    Else: V_FIELD_RATE_RQD = VRefresh_req
-		uint32_t v_field_rate_rqd = v_refresh_req;
-
-		// 2. Horizontal Pixels (pixels)
-		uint32_t h_pixels_rnd = h_active; // Already known
-
-		// 3. Vertical Lines
-		uint32_t v_lines_rnd = v_active; // Assuming progressive
-
-		// 4. Estimate H Period (us)
-		//    H_PERIOD_EST = ((1000000 / V_FIELD_RATE_RQD) - MIN_VSYNC_BP_US) / (V_LINES_RND + MIN_V_PORCH_LINES)
-		uint64_t h_period_est_num = (1000000000ULL / v_field_rate_rqd) - ((uint64_t)STD_MIN_V_SYNC_BP_US * 1000); // Numerator in ns
-		uint32_t h_period_est_den = v_lines_rnd + STD_MIN_V_PORCH_LINES;
-		if (h_period_est_den == 0) { TRACE("CVT-STD: h_period_est_den is zero.\n"); return false; }
-		uint32_t h_period_est_ns = h_period_est_num / h_period_est_den; // HPeriod in ns
-		if (h_period_est_ns == 0) { TRACE("CVT-STD: Estimated HPeriod is zero.\n"); return false; }
-
-		// 5. Calculate V_SYNC_BP (Vertical Sync + Back Porch) (lines)
-		uint32_t v_sync_bp_lines = (STD_MIN_V_SYNC_BP_US * 1000 + h_period_est_ns - 1) / h_period_est_ns; // ceil
-
-		// 6. Calculate V_TOTAL_LINES
+	} else { // Standard CVT
+		uint32_t h_period_est_ns = (((1000000000ULL / v_refresh_req) - (uint64_t)STD_MIN_V_SYNC_BP_US * 1000)) / (v_active + STD_MIN_V_PORCH_LINES);
+		if (!h_period_est_ns) return false;
+		uint32_t v_sync_bp_lines = (STD_MIN_V_SYNC_BP_US * 1000 + h_period_est_ns -1) / h_period_est_ns;
 		v_total = v_active + v_sync_bp_lines + STD_MIN_V_PORCH_LINES;
 
-		// 7. Calculate Ideal Blanking Duty Cycle (%)
-		//    IDEAL_DUTY_CYCLE = STD_C_C_PERCENT - (STD_C_M_US * 1000 / H_PERIOD_EST_NS)
-		//    To avoid floats, scale and use integer arithmetic.
-		//    Let H_PERIOD_EST_US = h_period_est_ns / 1000
-		//    IDEAL_DUTY_CYCLE_X1000 = (STD_C_C_PERCENT * 10) - (STD_C_M_US * 1000 / H_PERIOD_EST_US)
-		//                            = (STD_C_C_PERCENT * 10) - (STD_C_M_US * 1000 * 1000 / h_period_est_ns)
-		int32_t ideal_duty_cycle_x1000_num = (int32_t)STD_C_C_PERCENT * 10 * (int32_t)h_period_est_ns;
-		int32_t ideal_duty_cycle_x1000_den_sub = (int32_t)STD_C_M_US * 1000 * 1000; // M' * 1000
-		int32_t ideal_duty_cycle_x1000 = (ideal_duty_cycle_x1000_num - ideal_duty_cycle_x1000_den_sub) / (int32_t)h_period_est_ns;
+		int32_t h_blank_perc_x100 = STD_CALC_C_PRIME_X100 - (STD_CALC_M_PRIME_US_X100 * 100 / (h_period_est_ns/10));
+		if (h_blank_perc_x100 < 2000) h_blank_perc_x100 = 2000; // Min 20%
+		uint32_t h_blank_den = 10000 - h_blank_perc_x100;
+		if (!h_blank_den) return false;
+		uint32_t h_blank = ((uint64_t)h_active * h_blank_perc_x100 + h_blank_den/2) / h_blank_den;
+		h_blank = ((h_blank + (2*CELL_GRAN_RND_PIXELS)/2) / (2*CELL_GRAN_RND_PIXELS)) * (2*CELL_GRAN_RND_PIXELS);
+		h_total = h_active + h_blank;
 
-		if (ideal_duty_cycle_x1000 < 200) ideal_duty_cycle_x1000 = 200; // Min 20% blanking duty cycle (scaled by 1000)
-
-		// 8. Calculate H_BLANK (pixels)
-		//    H_BLANK = HActive * IDEAL_DUTY_CYCLE / (100 - IDEAL_DUTY_CYCLE)
-		uint32_t h_blank_pixels_num = (uint32_t)h_active * ideal_duty_cycle_x1000;
-		uint32_t h_blank_pixels_den = 1000 - ideal_duty_cycle_x1000; // Denominator is (100% - IDC%) * 10
-		if (h_blank_pixels_den == 0) { TRACE("CVT-STD: h_blank_pixels_den is zero.\n"); return false; }
-		uint32_t h_blank_pixels = (h_blank_pixels_num + h_blank_pixels_den / 2) / h_blank_pixels_den; // round
-
-		// Round HBlank to nearest multiple of 2 * CELL_GRAN_RND_PIXELS (i.e., 16 for cell_gran=8)
-		uint32_t blank_round_gran = 2 * CELL_GRAN_RND_PIXELS;
-		h_blank_pixels = ((h_blank_pixels + blank_round_gran / 2) / blank_round_gran) * blank_round_gran;
-
-		// 9. Calculate H_TOTAL (pixels)
-		h_total = h_active + h_blank_pixels;
-
-		// 10. Calculate Pixel Clock (kHz)
-		pixel_clock_khz = (uint32_t)(((uint64_t)h_total * v_total * v_field_rate_rqd + 500) / 1000);
+		pixel_clock_khz = (uint32_t)(((uint64_t)h_total * v_total * v_refresh_req + 500) / 1000);
 		pixel_clock_khz = ((pixel_clock_khz + CLOCK_STEP_KHZ / 2) / CLOCK_STEP_KHZ) * CLOCK_STEP_KHZ;
-		if (pixel_clock_khz == 0) { TRACE("CVT-STD: Calculated pixel clock is zero.\n"); return false; }
+		if (!pixel_clock_khz) return false;
 
-		// 11. Horizontal Sync Width (pixels)
-		h_sync_width = (STD_HSYNC_PERCENT * h_total + 50) / 100; // Round HSync% * HTotal
-		h_sync_width = ((h_sync_width + CELL_GRAN_RND_PIXELS / 2) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
+		h_sync_width = ((STD_HSYNC_PERCENT * h_total + 50) / 100);
+		h_sync_width = ((h_sync_width + CELL_GRAN_RND_PIXELS/2) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
+		h_front_porch = (h_blank / 2) - h_sync_width;
+		h_front_porch = (h_front_porch / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
+		h_back_porch = h_blank - h_front_porch - h_sync_width;
+		if ((h_active + h_front_porch + h_sync_width + h_back_porch) != h_total)
+			h_back_porch = h_total - (h_active + h_front_porch + h_sync_width);
 
-		// 12. Horizontal Front & Back Porch
-		h_front_porch = (h_blank_pixels / 2) - h_sync_width;
-		h_front_porch = (h_front_porch / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS; // Ensure multiple of cell gran
-		h_back_porch = h_blank_pixels - h_front_porch - h_sync_width;
-
-		// 13. Vertical Sync Width & Front/Back Porch
-		v_sync_width = 5; // Common default for standard CVT (e.g. VESA spec suggests 3-8 for "VSYNC_RND")
-		                  // Some implementations use a fixed value from a table or a small constant.
-		v_front_porch = STD_MIN_V_PORCH_LINES;
-		// v_sync_bp_lines was total VSync + VBackPorch
+		v_sync_width = 5; v_front_porch = STD_MIN_V_PORCH_LINES;
 		v_back_porch = v_sync_bp_lines - v_sync_width;
-		if ((int32_t)v_back_porch < 0) { // Should not happen if v_sync_bp_lines >= v_sync_width
-			TRACE("CVT-STD: Calculated negative v_back_porch. Adjusting.\n");
-			v_back_porch = STD_MIN_V_PORCH_LINES; // Fallback to a minimum
-			// This might mean v_total needs recalculation if VSync width is too large for calculated VSync+BP.
-			// For now, proceed, but this indicates a potential formula issue or edge case.
-		}
-
-		// Sync Polarities for Standard CVT: +H, -V
+		if((int32_t)v_back_porch < 0) v_back_porch = STD_MIN_V_PORCH_LINES;
+		v_total = v_active + v_front_porch + v_sync_width + v_back_porch; // Re-affirm v_total
 		mode->timing.flags = B_POSITIVE_HSYNC | B_NEGATIVE_VSYNC;
 	}
 
@@ -259,213 +148,310 @@ calculate_cvt_timing(uint16_t h_active, uint16_t v_active, uint8_t v_refresh_req
 		mode->timing.v_total = v_total;
 		mode->timing.v_sync_start = v_active + v_front_porch;
 		mode->timing.v_sync_end = v_active + v_front_porch + v_sync_width;
-
-		// TRACE("CVT: Calculated mode - Clock:%" B_PRIu32 "kHz H(%u %u-%u %u) V(%u %u-%u %u) Flags:0x%lx\n",
-		//	mode->timing.pixel_clock,
-		//	mode->timing.h_display, mode->timing.h_sync_start, mode->timing.h_sync_end, mode->timing.h_total,
-		//	mode->timing.v_display, mode->timing.v_sync_start, mode->timing.v_sync_end, mode->timing.v_total,
-		//	mode->timing.flags);
 		return true;
 	}
-
-	// TRACE("CVT: Calculation failed to produce a usable mode.\n");
 	return false;
 }
 
+// Helper to get display_mode timings for a given CEA VIC
+static bool
+get_vic_timings(uint8_t vic, display_mode* mode)
+{
+	if (mode == NULL) return false;
+	memset(mode, 0, sizeof(display_mode));
+	mode->space = B_RGB32_LITTLE;
 
-// Placeholder for parsing EDID extension blocks
+	switch (vic) {
+		case 1: // 640x480p @ 59.94/60Hz (VGA)
+			mode->virtual_width = 640; mode->virtual_height = 480;
+			mode->timing = (timing_t){ 25175, 640, 656, 752, 800, 480, 490, 492, 525, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+			return true;
+		case 4: // 1280x720p @ 59.94/60Hz (720p60)
+			mode->virtual_width = 1280; mode->virtual_height = 720;
+			mode->timing = (timing_t){ 74250, 1280, 1390, 1430, 1650, 720, 725, 730, 750, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+			return true;
+		case 5: // 1920x1080i @ 59.94/60Hz (1080i60)
+			mode->virtual_width = 1920; mode->virtual_height = 1080;
+			mode->timing = (timing_t){ 74250, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125, B_TIMING_INTERLACED | B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+			// CEA-861 defines timings per field for interlaced, but display_mode is per frame.
+			// VActive for 1080i is 540 lines per field. VTotal is 562.5 lines per field (1125 total).
+			// VSyncStart = VActive + VFrontPorch. VFP=2 fields. VSync=5 fields. VBP=15.5 fields.
+			// For display_mode, v_display = 1080.
+			// VFP_total_lines = 2*2 = 4. VSync_total_lines = 2*5 = 10.
+			// mode->timing.v_sync_start = 1080 + 4; mode->timing.v_sync_end = 1080 + 4 + 10; mode->timing.v_total = 1125;
+			return true;
+		case 16: // 1920x1080p @ 59.94/60Hz (1080p60)
+			mode->virtual_width = 1920; mode->virtual_height = 1080;
+			mode->timing = (timing_t){ 148500, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+			return true;
+		case 19: // 1280x720p @ 50Hz (720p50)
+			mode->virtual_width = 1280; mode->virtual_height = 720;
+			mode->timing = (timing_t){ 74250, 1280, 1720, 1760, 1980, 720, 725, 730, 750, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+			return true;
+		case 31: // 1920x1080p @ 50Hz (1080p50)
+			mode->virtual_width = 1920; mode->virtual_height = 1080;
+			mode->timing = (timing_t){ 148500, 1920, 2448, 2492, 2640, 1080, 1084, 1089, 1125, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+			return true;
+		default:
+			// TRACE("VIC: No timing data for VIC %u\n", vic);
+			return false;
+	}
+}
+
 int
 intel_i915_parse_edid_extension_block(const uint8_t* ext_block_data,
 	display_mode* modes, int* current_mode_count, int max_modes)
 {
-	if (ext_block_data == NULL || modes == NULL || current_mode_count == NULL || max_modes <= 0)
-		return 0; // Or B_BAD_VALUE if we change return type
+	if (!ext_block_data || !modes || !current_mode_count || max_modes <= 0) return 0;
 
 	uint8_t extension_tag = ext_block_data[0];
-	TRACE("EDID Extension: Found block with tag 0x%02x.\n", extension_tag);
+	// TRACE("EDID Extension: Found block with tag 0x%02x.\n", extension_tag);
+	int modes_added_this_block = 0;
 
-	int modes_added_from_this_block = 0;
+	if (extension_tag == 0x02) { // CEA EDID Timing Extension
+		uint8_t cea_version = ext_block_data[1];
+		uint8_t dtd_offset = ext_block_data[2];
+		uint8_t features = ext_block_data[3];
+		// TRACE("EDID CEA v%u block. DTD offset: %u, Features: 0x%02x\n", cea_version, dtd_offset, features);
 
-	switch (extension_tag) {
-		case 0x02: // CEA EDID Timing Extension (CEA-861-B/C/D/E/F)
-		{
-			uint8_t cea_version = ext_block_data[1];
-			uint8_t dtd_offset = ext_block_data[2]; // Offset to first DTD from start of extension block
-			uint8_t features = ext_block_data[3];  // Byte 3: Num native DTDs and other flags
-
-			TRACE("EDID Extension: CEA-861 Version %u block found. DTD offset: %u, Features: 0x%02x\n",
-				cea_version, dtd_offset, features);
-
-			int num_native_dtds = 0;
-			if (cea_version >= 2) { // Number of DTDs is in byte 3 for version 2+
-				num_native_dtds = features & 0x0F; // Lower 4 bits
+		// Parse DTDs from CEA block
+		int num_dtds_cea = (cea_version >= 2) ? (features & 0x0F) : 0;
+		if (dtd_offset >= 4 && dtd_offset < EDID_BLOCK_SIZE) {
+			int dtds_to_try = num_dtds_cea;
+			if (cea_version < 2 || (num_dtds_cea == 0 && dtd_offset >= 4)) { // Heuristic for v1 or if count is 0 but offset seems valid
+				dtds_to_try = (EDID_BLOCK_SIZE - dtd_offset) / 18;
 			}
-
-			if (dtd_offset >= 4 && dtd_offset < EDID_BLOCK_SIZE) { // DTDs must start after header and within block (dtd_offset can be 0 if no DTDs)
-				const uint8_t* dtd_ptr = ext_block_data + dtd_offset;
-				int dtds_to_parse = num_native_dtds;
-
-				if (dtd_offset == 0 && num_native_dtds > 0) {
-					TRACE("EDID CEA: num_native_dtds is %d but dtd_offset is %u. Assuming no DTDs via offset.\n", num_native_dtds, dtd_offset);
-					dtds_to_parse = 0;
-				} else if (dtd_offset < 4 && dtd_offset != 0) {
-					TRACE("EDID CEA: Invalid dtd_offset %u. Assuming no DTDs via offset.\n", dtd_offset);
-					dtds_to_parse = 0;
-				}
-
-
-				if (dtd_offset >=4 && (cea_version < 2 || (cea_version >=2 && num_native_dtds == 0))) {
-					dtds_to_parse = (EDID_BLOCK_SIZE - dtd_offset) / 18;
-					TRACE("EDID CEA: Version %u, num_native_dtds=%d (from byte 3). Will try to parse up to %d DTDs from offset %u.\n",
-						cea_version, (features & 0x0F), dtds_to_parse, dtd_offset);
-				}
-
-
-				for (int i = 0; i < dtds_to_parse && (*current_mode_count < max_modes); i++) {
-					if (dtd_ptr + (i * 18) + 18 > ext_block_data + EDID_BLOCK_SIZE) {
-						TRACE("EDID CEA: DTD %d would exceed block boundary.\n", i);
-						break;
+			for (int i = 0; i < dtds_to_try && *current_mode_count < max_modes; i++) {
+				const uint8_t* dtd_ptr = ext_block_data + dtd_offset + (i * 18);
+				if (dtd_ptr + 18 > ext_block_data + EDID_BLOCK_SIZE) break;
+				display_mode new_mode;
+				if (parse_dtd(dtd_ptr, &new_mode)) {
+					bool duplicate = false;
+					for(int k=0; k<*current_mode_count; ++k) if(memcmp(&modes[k].timing, &new_mode.timing, sizeof(timing_t))==0) {duplicate=true; break;}
+					if (!duplicate) {
+						modes[*current_mode_count] = new_mode;
+						(*current_mode_count)++;
+						modes_added_this_block++;
 					}
-					display_mode new_mode;
-					if (parse_dtd(dtd_ptr + (i * 18), &new_mode)) {
-						bool duplicate = false;
-						for (int k = 0; k < *current_mode_count; k++) {
-							if (modes[k].virtual_width == new_mode.virtual_width &&
-								modes[k].virtual_height == new_mode.virtual_height &&
-								modes[k].timing.pixel_clock == new_mode.timing.pixel_clock &&
-								((modes[k].timing.flags & B_TIMING_INTERLACED) == (new_mode.timing.flags & B_TIMING_INTERLACED)) ) {
-								duplicate = true;
-								break;
-							}
-						}
-						if (!duplicate) {
-							modes[*current_mode_count] = new_mode;
-							(*current_mode_count)++;
-							modes_added_from_this_block++;
-							TRACE("EDID CEA: Added DTD %d from extension block.\n", i);
-						} else {
-							TRACE("EDID CEA: Duplicate DTD %d from extension block skipped.\n", i);
-						}
-					} else {
-						TRACE("EDID CEA: DTD %d in extension block is invalid or end of DTDs.\n", i);
-						break;
-					}
-				}
-			} else if (num_native_dtds > 0 && (dtd_offset < 4 && dtd_offset !=0)) {
-				TRACE("EDID CEA: Warning - num_native_dtds (from byte 3) is %d but dtd_offset %d is invalid.\n", num_native_dtds, dtd_offset);
+				} else break; // Stop if not a valid DTD
 			}
-
-			uint8_t data_block_collection_start_offset = 4;
-			if (dtd_offset >= 4 && dtd_offset < EDID_BLOCK_SIZE) {
-				int actual_dtds_present_count = 0;
-				if (cea_version >= 2) actual_dtds_present_count = features & 0x0F;
-				else if (dtd_offset >=4) actual_dtds_present_count = (EDID_BLOCK_SIZE - dtd_offset) / 18;
-
-
-				if (actual_dtds_present_count > 0 && (dtd_offset + actual_dtds_present_count * 18) <= EDID_BLOCK_SIZE) {
-					data_block_collection_start_offset = dtd_offset + actual_dtds_present_count * 18;
-				} else if (num_native_dtds == 0 && dtd_offset == 0) {
-					data_block_collection_start_offset = 4;
-				} else if (dtd_offset >=4 && num_native_dtds == 0 && (cea_version < 2 || (features & 0x0F) == 0) ) {
-					data_block_collection_start_offset = dtd_offset;
-				}
-
-
-			}
-			if (data_block_collection_start_offset < EDID_BLOCK_SIZE -1 ) {
-				TRACE("EDID CEA: Data Block Collection potentially starts at offset %u. Parsing STUBBED.\n", data_block_collection_start_offset);
-			}
-
-			break;
 		}
-		case 0x10: // Video Timing Block Extension (VTBE) - Less common
-			TRACE("EDID Extension: VTBE block found. Parsing STUBBED.\n");
-			break;
-		case 0x40: // DisplayID Extension
-			TRACE("EDID Extension: DisplayID block found. Parsing STUBBED.\n");
-			break;
-		default:
-			TRACE("EDID Extension: Unknown extension block tag 0x%02x. Skipping.\n", extension_tag);
-			break;
+
+		// Parse Data Block Collection (DBC)
+		uint8_t dbc_offset = 4; // Default start of DBC
+		if (dtd_offset > 0 && num_dtds_cea > 0) { // If DTDs were declared and offset is valid
+			if (dtd_offset >= 4 && (dtd_offset + num_dtds_cea * 18) <= EDID_BLOCK_SIZE) {
+				dbc_offset = dtd_offset + num_dtds_cea * 18;
+			}
+		} else if (dtd_offset > 4 && num_dtds_cea == 0) { // DTDs might be there but not counted by byte 3
+			const uint8_t* dtd_check_ptr = ext_block_data + dtd_offset;
+			int potential_dtds = 0;
+			while(dtd_check_ptr + 18 <= ext_block_data + EDID_BLOCK_SIZE) {
+				if ( ((uint16_t)dtd_check_ptr[1] << 8 | dtd_check_ptr[0]) * 10 == 0 ) break; // Pixel clock 0 means end
+				potential_dtds++;
+				dtd_check_ptr += 18;
+			}
+			if (potential_dtds > 0) dbc_offset = dtd_offset + potential_dtds * 18;
+			else dbc_offset = dtd_offset; // No DTDs found at offset, data blocks start there
+		}
+
+
+		while (dbc_offset < EDID_BLOCK_SIZE) {
+			uint8_t block_header = ext_block_data[dbc_offset];
+			if (block_header == 0x00) break; // Padding or end
+			uint8_t tag = (block_header & 0xE0) >> 5;
+			uint8_t len = block_header & 0x1F;
+			if (dbc_offset + 1 + len > EDID_BLOCK_SIZE) break;
+			const uint8_t* data = ext_block_data + dbc_offset + 1;
+
+			if (tag == 0x02 /* Video Data Block */) {
+				// TRACE("EDID CEA: Video Data Block (len %u) at offset %u.\n", len, dbc_offset);
+				for (uint8_t k = 0; k < len && (*current_mode_count < max_modes); k++) {
+					uint8_t vic = data[k] & 0x7F;
+					display_mode vic_mode;
+					if (get_vic_timings(vic, &vic_mode)) {
+						bool duplicate = false;
+						for(int m=0; m<*current_mode_count; ++m) if(memcmp(&modes[m].timing, &vic_mode.timing, sizeof(timing_t))==0) {duplicate=true; break;}
+						if (!duplicate) {
+							modes[*current_mode_count] = vic_mode;
+							(*current_mode_count)++;
+							modes_added_this_block++;
+							// TRACE("  Added mode from VIC %u: %dx%d\n", vic, vic_mode.virtual_width, vic_mode.virtual_height);
+						}
+					}
+				}
+			} else if (tag == 0x01) { /* Audio Data Block */ }
+			else if (tag == 0x03) { /* Vendor Specific Data Block */ }
+			else if (tag == 0x04) { /* Speaker Allocation Data Block */ }
+			dbc_offset += (1 + len);
+		}
+	} else {
+		// TRACE("EDID Extension: Unknown tag 0x%02x.\n", extension_tag);
 	}
-	return modes_added_from_this_block;
+	return modes_added_this_block;
 }
 
-	// Parse Standard Timing Identifiers (bytes 38-53 / 0x26-0x35)
-	// TODO: Implement GTF/CVT calculations for full mode details.
-	// For now, we'll extract HActive, VActive (derived), and VRefresh.
-	// These won't be added as usable modes until GTF/CVT is done.
-	TRACE("EDID: Parsing Standard Timings (up to 8 descriptors - full calculation pending GTF/CVT):\n");
+
+int
+intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_modes)
+{
+	int mode_count = 0;
+	const struct edid_v1_info* edid = (const struct edid_v1_info*)edid_data;
+
+	if (edid_data == NULL || modes == NULL || max_modes <= 0)
+		return B_BAD_VALUE;
+
+	if (edid->header[0] != 0x00 || edid->header[1] != 0xFF || edid->header[2] != 0xFF ||
+		edid->header[3] != 0xFF || edid->header[4] != 0xFF || edid->header[5] != 0xFF ||
+		edid->header[6] != 0xFF || edid->header[7] != 0x00) {
+		TRACE("EDID: Invalid header signature.\n");
+		return B_BAD_DATA;
+	}
+
+	if (!edid_checksum_valid(edid_data)) {
+		TRACE("EDID: Checksum invalid.\n");
+		return B_BAD_DATA;
+	}
+
+	// TRACE("EDID: Version %d.%d, Manufacturer: %c%c%c, Product ID: 0x%04X\n",
+	//	edid->edid_version, edid->edid_revision,
+	//	((edid->manufacturer_id >> 10) & 0x1F) + 'A' - 1,
+	//	((edid->manufacturer_id >> 5) & 0x1F) + 'A' - 1,
+	//	(edid->manufacturer_id & 0x1F) + 'A' - 1,
+	//	edid->product_id);
+
+	for (int i = 0; i < 4; i++) {
+		if (mode_count >= max_modes) break;
+		if (parse_dtd(edid->detailed_timings[i], &modes[mode_count])) {
+			mode_count++;
+		}
+	}
+
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x80)) {
+		modes[mode_count].virtual_width = 720; modes[mode_count].virtual_height = 400;
+		modes[mode_count].timing = (timing_t){ 28322, 720, 738, 846, 900, 400, 412, 414, 449, B_POSITIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (edid->established_timings_1 & 0x40) {
+		TRACE("EDID: Est. Timing 720x400@88Hz not added (unclear std).\n");
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x20)) {
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 25175, 640, 656, 752, 800, 480, 490, 492, 525, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	// ... (rest of established timings) ...
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x10)) { // 640x480 @ 67Hz (Apple Mac II)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 30240, 640, 664, 704, 832, 480, 489, 492, 520, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x08)) { // 640x480 @ 72Hz (VESA)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 31500, 640, 664, 704, 832, 480, 489, 492, 520, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x04)) { // 640x480 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 640; modes[mode_count].virtual_height = 480;
+		modes[mode_count].timing = (timing_t){ 31500, 640, 656, 720, 840, 480, 481, 484, 500, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x02)) { // 800x600 @ 56Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 36000, 800, 824, 896, 1024, 600, 601, 603, 625, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_1 & 0x01)) { // 800x600 @ 60Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 40000, 800, 840, 968, 1056, 600, 601, 605, 628, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x80)) { // 800x600 @ 72Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 50000, 800, 856, 976, 1040, 600, 637, 643, 666, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x40)) { // 800x600 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 800; modes[mode_count].virtual_height = 600;
+		modes[mode_count].timing = (timing_t){ 49500, 800, 816, 896, 1056, 600, 601, 604, 625, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x20)) { // 832x624 @ 75Hz (Apple Mac II)
+		modes[mode_count].virtual_width = 832; modes[mode_count].virtual_height = 624;
+		modes[mode_count].timing = (timing_t){ 57284, 832, 864, 928, 1152, 624, 625, 628, 667, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x10)) { // 1024x768 @ 87Hz (IBM, interlaced) (8514/A)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 44900, 1024, 1040, 1136, 1376, 768, 772, 776, 808, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC | B_TIMING_INTERLACED };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x08)) { // 1024x768 @ 60Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 65000, 1024, 1048, 1184, 1344, 768, 771, 777, 806, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x04)) { // 1024x768 @ 70Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 75000, 1024, 1048, 1184, 1328, 768, 771, 777, 806, B_NEGATIVE_VSYNC | B_NEGATIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x02)) { // 1024x768 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 1024; modes[mode_count].virtual_height = 768;
+		modes[mode_count].timing = (timing_t){ 78750, 1024, 1040, 1152, 1312, 768, 769, 772, 800, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->established_timings_2 & 0x01)) { // 1280x1024 @ 75Hz (VESA)
+		modes[mode_count].virtual_width = 1280; modes[mode_count].virtual_height = 1024;
+		modes[mode_count].timing = (timing_t){ 135000, 1280, 1296, 1440, 1688, 1024, 1025, 1028, 1066, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+	if (mode_count < max_modes && (edid->manufacturer_reserved_established_timings_3 & 0x80)) { // 1152x870 @ 75Hz (Apple MacII)
+		modes[mode_count].virtual_width = 1152; modes[mode_count].virtual_height = 870;
+		modes[mode_count].timing = (timing_t){ 100000, 1152, 1184, 1248, 1472, 870, 871, 874, 900, B_POSITIVE_VSYNC | B_POSITIVE_HSYNC };
+		modes[mode_count++].space = B_RGB32_LITTLE;
+	}
+
+	// Parse Standard Timing Identifiers
+	// TRACE("EDID: Parsing Standard Timings (up to 8 descriptors - full calculation pending GTF/CVT):\n");
 	for (int i = 0; i < 8; i++) {
 		const uint8_t* std_timing = &edid->standard_timings[i*2];
-		if (std_timing[0] == 0x01 && std_timing[1] == 0x01) {
-			// Unused descriptor
-			continue;
-		}
-		if (std_timing[0] == 0x00) { // Invalid X resolution if byte 1 is 0
-			TRACE("EDID: Standard Timing #%d: Invalid X resolution (byte 1 is 0x00).\n", i);
-			continue;
-		}
+		if (std_timing[0] == 0x01 && std_timing[1] == 0x01) continue;
+		if (std_timing[0] == 0x00) continue;
 
 		uint16_t h_active_std = (std_timing[0] + 31) * 8;
 		uint8_t aspect_ratio_bits = (std_timing[1] & 0xC0) >> 6;
 		uint8_t v_refresh_std = (std_timing[1] & 0x3F) + 60;
 		uint16_t v_active_std = 0;
 
-		const char* aspect_str = "Unknown";
-		switch (aspect_ratio_bits) {
-			case 0x00:
-				if (edid->edid_version > 1 || (edid->edid_version == 1 && edid->edid_revision >= 3)) {
-					v_active_std = h_active_std * 10 / 16;
-					aspect_str = "16:10";
-				} else {
-					v_active_std = h_active_std * 10 / 16;
-					aspect_str = "1:1 (interpreted as 16:10)";
-				}
-				break;
-			case 0x01:
-				v_active_std = h_active_std * 3 / 4;
-				aspect_str = "4:3";
-				break;
-			case 0x02:
-				v_active_std = h_active_std * 4 / 5;
-				aspect_str = "5:4";
-				break;
-			case 0x03:
-				v_active_std = h_active_std * 9 / 16;
-				aspect_str = "16:9";
-				break;
+		if (edid->edid_version > 1 || (edid->edid_version == 1 && edid->edid_revision >= 3)) {
+			switch (aspect_ratio_bits) {
+				case 0x00: v_active_std = h_active_std * 10 / 16; break;
+				case 0x01: v_active_std = h_active_std * 3 / 4;   break;
+				case 0x02: v_active_std = h_active_std * 4 / 5;   break;
+				case 0x03: v_active_std = h_active_std * 9 / 16;  break;
+			}
+		} else {
+			switch (aspect_ratio_bits) {
+				case 0x00: v_active_std = h_active_std * 10 / 16; break; // Approx 1:1 as 16:10
+				case 0x01: v_active_std = h_active_std * 3 / 4; break;
+				case 0x02: v_active_std = h_active_std * 4 / 5; break;
+				case 0x03: v_active_std = h_active_std * 9 / 16; break;
+			}
 		}
 
-		// TRACE("EDID: Standard Timing #%d: HActive=%u, Aspect=%s (VActive ~%u), VRefresh=%uHz.\n",
-		//	i, h_active_std, aspect_str, v_active_std, v_refresh_std);
 		if (mode_count < max_modes && v_active_std > 0) {
 			display_mode* new_mode = &modes[mode_count];
-			if (calculate_cvt_timing(h_active_std, v_active_std, v_refresh_std, true /* prefer RB for std timings */, new_mode)) {
+			if (calculate_cvt_timing(h_active_std, v_active_std, v_refresh_std, true, new_mode)) {
 				bool duplicate = false;
-				for (int k = 0; k < mode_count; k++) {
-					if (modes[k].virtual_width == new_mode->virtual_width &&
-						modes[k].virtual_height == new_mode->virtual_height &&
-						modes[k].timing.pixel_clock == new_mode->timing.pixel_clock &&
-						((modes[k].timing.flags & B_TIMING_INTERLACED) == (new_mode->timing.flags & B_TIMING_INTERLACED)) ) {
-						duplicate = true;
-						// TRACE("EDID: Duplicate mode from Standard Timing (CVT) skipped: %ux%u @ %uHz\n",
-						//	new_mode->virtual_width, new_mode->virtual_height, v_refresh_std);
-						break;
-					}
-				}
+				for(int k=0; k<mode_count; ++k) if(memcmp(&modes[k].timing, &new_mode->timing, sizeof(timing_t))==0) {duplicate=true; break;}
 				if (!duplicate) {
 					mode_count++;
-					TRACE("EDID: Added mode from Standard Timing (via CVT): %ux%u @ %uHz\n",
-						new_mode->virtual_width, new_mode->virtual_height, v_refresh_std);
+					// TRACE("EDID: Added mode from Standard Timing (CVT): %ux%u @ %uHz\n",
+					//	new_mode->virtual_width, new_mode->virtual_height, v_refresh_std);
 				}
 			}
 		}
-	}
-
-
-	if (mode_count == 0) {
-		TRACE("EDID: No DTDs found or parsed.\n");
 	}
 
 	return mode_count;
@@ -480,8 +466,7 @@ intel_i915_get_vesa_fallback_modes(display_mode* modes, int max_modes)
 	if (count < max_modes) {
 		display_mode* m = &modes[count++];
 		memset(m, 0, sizeof(display_mode));
-		m->virtual_width = 1024;
-		m->virtual_height = 768;
+		m->virtual_width = 1024; m->virtual_height = 768;
 		m->space = B_RGB32_LITTLE;
 		m->timing = (timing_t){ 65000, 1024, 1048, 1184, 1344, 768, 771, 777, 806, B_POSITIVE_HSYNC | B_POSITIVE_VSYNC };
 	}
@@ -489,11 +474,12 @@ intel_i915_get_vesa_fallback_modes(display_mode* modes, int max_modes)
 	if (count < max_modes) {
 		display_mode* m = &modes[count++];
 		memset(m, 0, sizeof(display_mode));
-		m->virtual_width = 800;
-		m->virtual_height = 600;
+		m->virtual_width = 800; m->virtual_height = 600;
 		m->space = B_RGB32_LITTLE;
 		m->timing = (timing_t){ 40000, 800, 840, 968, 1056, 600, 601, 605, 628, B_POSITIVE_HSYNC | B_POSITIVE_VSYNC };
 	}
-	TRACE("EDID: Added %d fallback VESA modes.\n", count);
+	// TRACE("EDID: Added %d fallback VESA modes.\n", count);
 	return count;
 }
+
+[end of src/add-ons/kernel/drivers/graphics/intel_i915/edid.c]

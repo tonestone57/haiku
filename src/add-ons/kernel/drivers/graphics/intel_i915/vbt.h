@@ -380,19 +380,22 @@ struct bdb_lvds_lfp_data_entry { // One entry from Block 42
 	uint8_t panel_index; // Matches index in lvds_options.panel_type if multiple panels
 	uint8_t reserved0;
 	struct generic_dtd_entry_vbt dtd; // The 18-byte DTD
-	// After DTD, additional panel-specific data like power sequence, BPC, dual channel, PWM freq
-	// These are highly VBT version dependent.
-	// Example fields (conceptual, from Haiku's old vbt.h and common VBTs):
-	uint16_t panel_power_on_delay_ms; // T1
-	uint16_t panel_backlight_on_delay_ms; // T2
-	uint16_t panel_backlight_off_delay_ms; // T3
-	uint16_t panel_power_off_delay_ms; // T4
-	uint16_t panel_power_cycle_delay_ms; // T5
-	uint8_t  bits_per_color; // Direct value (6, 8, 10, 12)
-	uint8_t  lvds_misc_bits; // Bit 0: Dual channel, Bit 1: SSC enabled, etc.
-	uint16_t pwm_frequency_hz;
-	uint8_t  backlight_control_source_raw; // 0=CPU PWM, 1=PCH PWM, 2=eDP AUX
-	// ... other fields ...
+	// Fields commonly found after DTD in LFP Data Entries:
+	uint8_t panel_color_depth_bits; // Bits 1:0 => 00b: 6 bpc (18-bit), 01b: 8 bpc (24-bit), 10b: 10 bpc (30-bit), 11b: 12 bpc (36-bit)
+	                                // Higher bits might be reserved or for other flags.
+	uint8_t lvds_misc_bits;         // Bit 0: Dual Channel mode (1=Dual, 0=Single)
+	                                // Bit 1: SSC (Spread Spectrum Clock) enabled for LVDS
+	                                // Other bits reserved or for other features.
+	// Power sequence timings might also be here in some VBT versions,
+	// but often they are in BDB_LFP_POWER (Block 44) or Driver Features for eDP.
+	// For now, keeping it to BPC and Dual Channel.
+	// uint16_t t1_power_on_to_vdd_ms;
+	// uint16_t t2_vdd_to_panel_on_ms;
+	// uint16_t t3_panel_off_to_vdd_off_ms;
+	// uint16_t t4_vdd_off_to_power_cycle_ms;
+	// uint16_t t5_power_cycle_to_vdd_on_ms;
+	// uint16_t backlight_on_delay_ms;
+	// uint16_t backlight_off_delay_ms;
 } __attribute__((packed));
 
 // Block 43: LFP Backlight Control Data
@@ -431,6 +434,32 @@ struct bdb_edp_power_seq_entry { // From FreeBSD's edp_power_seq, adapted
 	uint16_t t11_t12_ms; // VDD Off period (T11 + T12 from eDP spec)
 } __attribute__((packed));
 
+// Driver Features Sub-block 0x05: eDP Configuration
+#define BDB_SUB_BLOCK_EDP_CONFIG 0x05
+struct bdb_edp_config_entry { // As per common VBT interpretations
+	uint8_t panel_type_index; // Index to match against LVDS options panel_type or LFP data entries
+	uint8_t vswing_preemph_config_index; // Index into a VS/PE table if provided by VBT, or direct value
+	uint16_t edp_txt_override; // Potentially eDP Txt override value
+	// Other reserved bytes might follow, or specific flags
+	uint8_t reserved[4]; // Example, size can vary by VBT version
+} __attribute__((packed));
+
+// The BDB_EDP_CONFIG sub-block might contain an array of these entries,
+// or a more complex structure with a table of VS/PE values.
+// For now, we'll assume it points to an array of bdb_edp_config_entry.
+// A more complete structure would be:
+// struct bdb_edp_vswing_preemph_table_entry {
+//    uint8_t preemph;
+//    uint8_t vswing;
+// };
+// struct bdb_driver_features_edp_config {
+//    uint8_t panel_count; // Number of panel specific entries
+//    struct bdb_edp_config_entry entries[16]; // Max 16 entries
+//    struct bdb_edp_vswing_preemph_table_entry vswing_preemph_table[NUM_VS_PE_ENTRIES];
+// };
+// For simplicity in this step, we'll focus on parsing the config_index from bdb_edp_config_entry.
+
+
 // Block 27: eDP specific configuration
 struct bdb_edp_power_seq { // Simplified, full power seq is in bdb_edp_power_seq_entry
 	uint16_t t1_t3_ms;
@@ -452,13 +481,13 @@ struct bdb_edp_link_params {
 struct bdb_edp {
 	// Array of power sequences, one per panel type (index from LVDS options)
 	struct bdb_edp_power_seq power_seqs[16]; // Max 16 panel types
-	uint32_t color_depth; // Bitmask of supported color depths (e.g., 18, 24, 30 bit)
+	uint32_t color_depth; // Bitmask of supported color depths (e.g., 6 BPC = (1<<0), 8 BPC = (1<<1), etc.)
 	// Array of link parameters, one per panel type
 	struct bdb_edp_link_params link_params[16];
 	// Fields for BDB version >= 173
-	// uint8_t sdp_port_id_bits;
+	uint8_t sdp_port_id_bits; /* BDB version >= 173. Defines which DDI port (A-E) this eDP is on if SDP (Self Discover Port) is used. */
 	// Fields for BDB version >= 188
-	// uint16_t edp_panel_misc_bits_override;
+	uint16_t edp_panel_misc_bits_override; /* BDB version >= 188. Allows VBT to override panel's self-reported capabilities. */
 } __attribute__((packed));
 
 // Block 9: Panel Self Refresh (PSR) parameters
@@ -481,6 +510,35 @@ struct bdb_psr {
 	// If it were an array:
 	// struct bdb_psr_data_entry panel_psr_params[16];
 } __attribute__((packed));
+
+// Block 52: MIPI Configuration
+struct bdb_mipi_config {
+	// Structure is complex and version dependent.
+	// For placeholder parsing, we might just acknowledge its presence or read a header.
+	// Example: uint8_t panel_type_index; (to link to a specific MIPI panel)
+	//          uint16_t dsi_ctrl_flags;
+	//          ... timing parameters, sequences ...
+	// For now, just a header to identify it.
+	uint8_t block_id; // Should be BDB_MIPI_CONFIG
+	uint16_t block_size;
+	// uint8_t data[...]; // Actual data follows
+} __attribute__((packed));
+
+// Block 53: MIPI Sequence Block (often for power sequencing)
+struct bdb_mipi_sequence {
+	// Similar to MIPI_CONFIG, structure is complex.
+	// Contains sequences of commands/delays for MIPI panel init/deinit.
+	uint8_t block_id; // Should be BDB_MIPI_SEQUENCE
+	uint16_t block_size;
+	// uint8_t data[...];
+} __attribute__((packed));
+
+// Block 58: Generic DTD Block
+#define MAX_VBT_GENERIC_DTDS 4 // Store up to 4 generic DTDs from VBT
+// The block itself is just an array of 18-byte DTDs (struct generic_dtd_entry_vbt).
+// The bdb_generic_dtds structure would typically just be a header indicating num_dtds if any,
+// or the block is simply a sequence of DTDs.
+// For simplicity, we'll parse it as a direct sequence in the handler.
 
 
 // TODO: Add other relevant BDB block structures for other features.
@@ -517,6 +575,9 @@ struct intel_vbt_data {
 	bool     has_edp_vbt_settings; // True if BDB_EDP block was found and parsed
 	uint8_t  edp_default_vs_level;  // Voltage Swing Level (0-3)
 	uint8_t  edp_default_pe_level;  // Pre-Emphasis Level (0-3)
+	uint32_t edp_color_depth_bits; // Parsed from BDB_EDP.color_depth
+	uint8_t  edp_sdp_port_id_bits; // Parsed from BDB_EDP.sdp_port_id_bits (if VBT ver >= 173)
+	uint16_t edp_panel_misc_bits_override; // Parsed from BDB_EDP.edp_panel_misc_bits_override (if VBT ver >= 188)
 	// TODO: Add other eDP specific things like max link rate override from VBT if needed
 
 	// LFP Data Pointers (from BDB Block 41)
@@ -531,6 +592,15 @@ struct intel_vbt_data {
 	// PSR (Panel Self Refresh) data
 	bool has_psr_data;
 	struct bdb_psr_data_entry psr_params; // Store params for the primary panel (or global if only one)
+
+	// Generic DTDs (from BDB_GENERIC_DTD Block 58)
+	uint8_t num_generic_dtds;
+	display_mode generic_dtds[MAX_VBT_GENERIC_DTDS];
+
+	// Placeholder flags for MIPI data presence
+	bool has_mipi_config;    // True if BDB_MIPI_CONFIG (Block 52) was found
+	bool has_mipi_sequence;  // True if BDB_MIPI_SEQUENCE (Block 53) was found
+	// Actual MIPI data would need more complex storage if fully parsed.
 };
 
 

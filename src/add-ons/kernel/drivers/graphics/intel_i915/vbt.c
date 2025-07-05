@@ -593,13 +593,38 @@ intel_vbt_get_lfp_panel_dtd_by_index(intel_i915_device_info* devInfo, uint8_t pa
 		devInfo->vbt->lfp_panel_dtd = *mode_out;
 		devInfo->vbt->has_lfp_data = true;
 
-		// TODO: Further parse other fields from lfp_data_entry if needed,
-		// e.g., lfp_data_entry->panel_power_on_delay_ms, bits_per_color, lvds_misc_bits etc.
-		// These could override or supplement data from BDB_LVDS_OPTIONS or BDB_LFP_BACKLIGHT.
-		// For example:
-		// if (lfp_data_entry->bits_per_color != 0) devInfo->vbt->lfp_bits_per_color = lfp_data_entry->bits_per_color;
-		// devInfo->vbt->lfp_is_dual_channel = (lfp_data_entry->lvds_misc_bits & 1); // Example bit
-		// if (lfp_data_entry->pwm_frequency_hz != 0) devInfo->vbt->lvds_pwm_freq_hz = lfp_data_entry->pwm_frequency_hz;
+		// Check if table_size allows reading panel_color_depth_bits and lvds_misc_bits
+		// offsetof(struct bdb_lvds_lfp_data_entry, panel_color_depth_bits) would be panel_index(1) + reserved0(1) + sizeof(dtd)(18) = 20
+		size_t min_size_for_bpc_dual = offsetof(struct bdb_lvds_lfp_data_entry, lvds_misc_bits) + sizeof(lfp_data_entry->lvds_misc_bits);
+
+		if (ptr_entry->table_size >= min_size_for_bpc_dual) {
+			uint8_t bpc_code = lfp_data_entry->panel_color_depth_bits & 0x03; // Lower 2 bits
+			switch (bpc_code) {
+				case 0: devInfo->vbt->lfp_bits_per_color = 6; break;
+				case 1: devInfo->vbt->lfp_bits_per_color = 8; break;
+				case 2: devInfo->vbt->lfp_bits_per_color = 10; break;
+				case 3: devInfo->vbt->lfp_bits_per_color = 12; break;
+				default: // Should not happen with 2 bits
+					TRACE("VBT: LFP Data Entry: Unknown BPC code %u, defaulting to 6-bit.\n", bpc_code);
+					devInfo->vbt->lfp_bits_per_color = 6;
+					break;
+			}
+			devInfo->vbt->lfp_is_dual_channel = (lfp_data_entry->lvds_misc_bits & 0x01) != 0;
+			// bool ssc_enabled = (lfp_data_entry->lvds_misc_bits & 0x02) != 0; // Example for SSC
+
+			TRACE("VBT: LFP Data Entry (panel %u): BPC %u, DualChannel %d (RawDepthBits 0x%x, RawMiscBits 0x%x)\n",
+				panel_index, devInfo->vbt->lfp_bits_per_color, devInfo->vbt->lfp_is_dual_channel,
+				lfp_data_entry->panel_color_depth_bits, lfp_data_entry->lvds_misc_bits);
+
+			// Update the specific port_state for this LFP if one is found matching panel_index
+			// This is tricky because panel_index from LFP data might not directly map to devInfo->ports index.
+			// Usually, BDB_LVDS_OPTIONS.panel_type gives an index that refers to one of these LFP entries.
+			// For now, we are storing globally in devInfo->vbt. Individual port_state updates
+			// might happen in parse_bdb_lvds_options if it iterates its panel_type.
+		} else {
+			TRACE("VBT: LFP Data Entry (panel %u, offset 0x%x, size %u) too small for BPC/DualChannel fields (min_req %lu).\n",
+				panel_index, ptr_entry->offset, ptr_entry->table_size, min_size_for_bpc_dual);
+		}
 
 		return true;
 	} else {
@@ -755,8 +780,33 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 				TRACE("VBT: eDP Power Seq sub-block too small (%u vs %lu).\n",
 					sub_size, sizeof(struct bdb_edp_power_seq_entry));
 			}
+		} else if (sub_id == BDB_SUB_BLOCK_EDP_CONFIG) {
+			if (sub_size >= sizeof(struct bdb_edp_config_entry)) { // Assuming at least one entry
+				const struct bdb_edp_config_entry* edp_cfg_entry =
+					(const struct bdb_edp_config_entry*)sub_data;
+				// For now, just trace the first entry's indices.
+				// A full implementation would iterate if there are multiple entries,
+				// match panel_type_index, and use vswing_preemph_config_index
+				// to look up actual VS/PE values from a table potentially also in this sub-block.
+				TRACE("VBT Driver Features: eDP Config Sub-block: PanelTypeIdx %u, VS/PECfgIdx %u, TxtOvrd 0x%x\n",
+					edp_cfg_entry->panel_type_index,
+					edp_cfg_entry->vswing_preemph_config_index,
+					edp_cfg_entry->edp_txt_override);
+
+				// Placeholder: If we want to store the first found config index:
+				// if (devInfo->vbt->num_child_devices > 0 && edp_cfg_entry->panel_type_index < devInfo->vbt->num_child_devices) {
+				//    intel_output_port_state* port = &devInfo->ports[edp_cfg_entry->panel_type_index]; // Risky if index doesn't match port array
+				//    if (port->type == PRIV_OUTPUT_EDP) {
+				//        // port->edp_vswing_preemph_vbt_index = edp_cfg_entry->vswing_preemph_config_index;
+				//    }
+				// }
+				// The TODO is to actually use this data to override/select VS/PE.
+			} else {
+				TRACE("VBT: eDP Config sub-block (ID 0x%x) too small (%u vs %lu expected for entry).\n",
+					sub_id, sub_size, sizeof(struct bdb_edp_config_entry));
+			}
 		}
-		// TODO: Parse other sub-blocks like eDP config (VS/PE) if relevant sub-IDs are known.
+		// TODO: Parse other sub-blocks if relevant sub-IDs are known.
 		current_sub_ptr += 3 + sub_size;
 	}
 }
@@ -813,7 +863,40 @@ parse_bdb_edp(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16
 	} else {
 		TRACE("VBT: eDP panel_index %u out of bounds for link_params/power_seqs.\n", panel_index);
 	}
-	// TODO: Parse color_depth and other fields from bdb_edp if needed.
+
+	devInfo->vbt->edp_color_depth_bits = edp_block->color_depth;
+	TRACE("VBT: eDP Block: Parsed color_depth_bits: 0x%08lx\n", devInfo->vbt->edp_color_depth_bits);
+
+	if (devInfo->vbt->bdb_header->version >= 173) {
+		// Check if block_size is large enough for sdp_port_id_bits.
+		// offsetof(struct bdb_edp, sdp_port_id_bits)
+		// For safety, this requires knowing the exact layout and size before this field.
+		// Let's assume a simplified check for now if block_size implies its presence.
+		// A robust check would be:
+		// if (block_size >= offsetof(struct bdb_edp, sdp_port_id_bits) + sizeof(edp_block->sdp_port_id_bits)) {
+		if (block_size >= (sizeof(edp_block->power_seqs) + sizeof(edp_block->color_depth) + sizeof(edp_block->link_params) + sizeof(edp_block->sdp_port_id_bits))) {
+			devInfo->vbt->edp_sdp_port_id_bits = edp_block->sdp_port_id_bits;
+			TRACE("VBT: eDP Block (BDB Ver %u): Parsed sdp_port_id_bits: 0x%02x\n",
+				devInfo->vbt->bdb_header->version, devInfo->vbt->edp_sdp_port_id_bits);
+		} else {
+			TRACE("VBT: eDP Block (BDB Ver %u): block_size %u too small for sdp_port_id_bits.\n",
+				devInfo->vbt->bdb_header->version, block_size);
+		}
+	}
+
+	if (devInfo->vbt->bdb_header->version >= 188) {
+		// Similar size check for edp_panel_misc_bits_override
+		// if (block_size >= offsetof(struct bdb_edp, edp_panel_misc_bits_override) + sizeof(edp_block->edp_panel_misc_bits_override)) {
+		if (block_size >= (sizeof(edp_block->power_seqs) + sizeof(edp_block->color_depth) + sizeof(edp_block->link_params) + sizeof(edp_block->sdp_port_id_bits) + sizeof(edp_block->edp_panel_misc_bits_override))) {
+			devInfo->vbt->edp_panel_misc_bits_override = edp_block->edp_panel_misc_bits_override;
+			TRACE("VBT: eDP Block (BDB Ver %u): Parsed edp_panel_misc_bits_override: 0x%04x\n",
+				devInfo->vbt->bdb_header->version, devInfo->vbt->edp_panel_misc_bits_override);
+		} else {
+			TRACE("VBT: eDP Block (BDB Ver %u): block_size %u too small for edp_panel_misc_bits_override.\n",
+				devInfo->vbt->bdb_header->version, block_size);
+		}
+	}
+	// The TODO to parse color_depth and other fields is now addressed for these specific fields.
 }
 
 static void
@@ -846,6 +929,73 @@ parse_bdb_psr(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16
 		TRACE("VBT: PSR explicitly disabled by VBT (psr_feature_enable bit 0 is not set).\n");
 		devInfo->vbt->has_psr_data = false; // Mark as not usable if VBT disables it
 	}
+}
+
+static void
+parse_bdb_mipi_config(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt) return;
+	TRACE("VBT: Found MIPI Configuration Block (ID %u, Size %u). Parsing STUBBED.\n",
+		BDB_MIPI_CONFIG, block_size);
+	devInfo->vbt->has_mipi_config = true;
+	// TODO: Implement full parsing if MIPI DSI support is added.
+	// This would involve interpreting panel type index, DSI control flags,
+	// PCH DSI configuration, and sequences of GPIO/I2C/DSI commands.
+}
+
+static void
+parse_bdb_mipi_sequence(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt) return;
+	TRACE("VBT: Found MIPI Sequence Block (ID %u, Size %u). Parsing STUBBED.\n",
+		BDB_MIPI_SEQUENCE, block_size);
+	devInfo->vbt->has_mipi_sequence = true;
+	// TODO: Implement full parsing if MIPI DSI support is added.
+	// This block contains sequences of operations (e.g., for power on/off).
+}
+
+static void
+parse_bdb_generic_dtds(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt) return;
+	TRACE("VBT: Parsing Generic DTD Block (ID %u, Size %u).\n", BDB_GENERIC_DTD, block_size);
+
+	devInfo->vbt->num_generic_dtds = 0;
+	int dtd_size = sizeof(struct generic_dtd_entry_vbt); // This is 18 bytes
+
+	if (block_size % dtd_size != 0) {
+		TRACE("VBT: Generic DTD block size %u is not a multiple of DTD size %d.\n",
+			block_size, dtd_size);
+		// Some VBTs might have a header byte count before DTDs, or other variations.
+		// For now, assume it's purely an array of DTDs.
+	}
+
+	int num_dtds_in_block = block_size / dtd_size;
+	TRACE("VBT: Generic DTD block contains %d potential DTDs.\n", num_dtds_in_block);
+
+	for (int i = 0; i < num_dtds_in_block && devInfo->vbt->num_generic_dtds < MAX_VBT_GENERIC_DTDS; i++) {
+		const uint8_t* dtd_ptr = block_data + (i * dtd_size);
+		display_mode mode;
+		if (parse_dtd(dtd_ptr, &mode)) {
+			if (mode.timing.pixel_clock > 0) { // Basic validation that it's a valid DTD
+				devInfo->vbt->generic_dtds[devInfo->vbt->num_generic_dtds++] = mode;
+				TRACE("VBT: Stored Generic DTD #%u: %dx%d @ %" B_PRIu32 "kHz.\n",
+					devInfo->vbt->num_generic_dtds, mode.timing.h_display, mode.timing.v_display, mode.timing.pixel_clock);
+			} else {
+				TRACE("VBT: Generic DTD #%d in block is invalid (pixel clock 0 after parse_dtd).\n", i);
+			}
+		} else {
+			TRACE("VBT: Failed to parse Generic DTD #%d in block (parse_dtd returned false).\n", i);
+			// This might mean it's not a DTD (e.g., pixel clock was 0 in raw data),
+			// or it's padding. Stop if parse_dtd fails for non-zero clock DTDs.
+			// If it was a 0-clock DTD, it might be an intentional terminator.
+			if (((uint16_t)dtd_ptr[1] << 8 | dtd_ptr[0]) * 10 != 0) {
+				// If it looked like it should have been a DTD but failed to parse, stop.
+				break;
+			}
+		}
+	}
+	TRACE("VBT: Stored %u Generic DTDs.\n", devInfo->vbt->num_generic_dtds);
 }
 
 
@@ -980,7 +1130,16 @@ intel_i915_vbt_init(intel_i915_device_info* devInfo)
 			case BDB_PSR: // Block 9
 				parse_bdb_psr(devInfo, current_block_data, block_size_val);
 				break;
-			// TODO: Add cases for other blocks if needed and their structures are defined.
+			case BDB_MIPI_CONFIG: // Block 52
+				parse_bdb_mipi_config(devInfo, current_block_data, block_size_val);
+				break;
+			case BDB_MIPI_SEQUENCE: // Block 53
+				parse_bdb_mipi_sequence(devInfo, current_block_data, block_size_val);
+				break;
+			case BDB_GENERIC_DTD: // Block 58
+				parse_bdb_generic_dtds(devInfo, current_block_data, block_size_val);
+				break;
+			// TODO: Add cases for other blocks like BDB_COMPRESSION_PARAMETERS (56) if needed.
 			default:
 				TRACE("VBT: Skipping BDB block ID 0x%x (unhandled or unknown).\n", block_id);
 				break;

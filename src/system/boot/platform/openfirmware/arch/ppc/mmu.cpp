@@ -930,7 +930,7 @@ arch_mmu_init(void)
 		gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
 		gKernelArgs.arch_args.exception_handlers.size = vectorSize;
 
-		dprintf("Dynamically mapped exception handler area at VA/PA 0x%p.\n", exceptionHandlers);
+		dprintf("JULES_DEBUG_MMU_PATCH_V1: Attempted map. ExceptionHandlers is now %p.\n", exceptionHandlers);
 	}
 
 	// Set the Open Firmware memory callback. From now on the Open Firmware
@@ -946,6 +946,7 @@ arch_mmu_init(void)
 
 	ppc_set_page_table(physicalTable, tableSize);
 	invalidate_tlb();
+	dprintf("JULES_DEBUG_MMU_V2: SDR1 set with table at phys %p, size %lu. TLB invalidated.\n", physicalTable, tableSize);
 
 	if (!realMode) {
 		// clear BATs
@@ -953,10 +954,12 @@ arch_mmu_init(void)
 		reset_dbats();
 		ppc_sync();
 		isync();
+		dprintf("JULES_DEBUG_MMU_V2: BATs reset.\n");
 	}
 
 	set_msr(MSR_MACHINE_CHECK_ENABLED | MSR_FP_AVAILABLE
 		| MSR_INST_ADDRESS_TRANSLATION | MSR_DATA_ADDRESS_TRANSLATION);
+	dprintf("JULES_DEBUG_MMU_V2: MSR set to enable HW translation. Current MSR: 0x%lx.\n", get_msr());
 
 	// set kernel args
 

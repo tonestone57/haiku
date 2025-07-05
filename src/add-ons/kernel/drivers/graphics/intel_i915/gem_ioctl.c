@@ -243,10 +243,14 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx_rels;
 				}
 				// Map the object into the allocated GTT space
-				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, GTT_CACHE_WRITE_COMBINING); // Default WC for now
+				enum gtt_caching_type reloc_gtt_cache_type = GTT_CACHE_WRITE_COMBINING; // Default
+				if (target_obj->cpu_caching == I915_CACHING_UNCACHED) {
+					reloc_gtt_cache_type = GTT_CACHE_UNCACHED;
+				}
+				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, reloc_gtt_cache_type);
 				if (status != B_OK) {
-					TRACE("EXECBUFFER: Failed to map reloc target_handle %lu to GTT offset %u. Error: %s\n",
-						reloc->target_handle, gtt_page_offset_for_target, strerror(status));
+					TRACE("EXECBUFFER: Failed to map reloc target_handle %lu (CPU cache %d, GTT cache %d) to GTT offset %u. Error: %s\n",
+						reloc->target_handle, target_obj->cpu_caching, reloc_gtt_cache_type, gtt_page_offset_for_target, strerror(status));
 					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages); // Free the GTT space
 					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx_rels;
 				}

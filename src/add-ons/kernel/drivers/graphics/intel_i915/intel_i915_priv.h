@@ -140,7 +140,14 @@ static inline int INTEL_GRAPHICS_GEN(uint16_t devid) {
 #define I915_BO_ALLOC_TILING_MASK  (0x3 << I915_BO_ALLOC_TILING_SHIFT) // Max 4 tiling modes (0-3)
 #define I915_BO_ALLOC_TILED_X      (1 << I915_BO_ALLOC_TILING_SHIFT)
 #define I915_BO_ALLOC_TILED_Y      (2 << I915_BO_ALLOC_TILING_SHIFT)
-// Add other flags as needed, e.g. for specific Yf or other variants if they use different flags
+
+// Bits 5-6 for CPU caching mode request (relative to BO_ALLOC flags)
+#define I915_BO_ALLOC_CACHING_SHIFT 4 // Shift by 2 bits from tiling (mask was 0x3 << 2, so used bits 2,3)
+#define I915_BO_ALLOC_CACHING_MASK  (0x3 << I915_BO_ALLOC_CACHING_SHIFT) // Max 4 caching modes (0-3)
+#define I915_BO_ALLOC_CACHING_UNCACHED (1 << I915_BO_ALLOC_CACHING_SHIFT) // Prefer WC if available
+#define I915_BO_ALLOC_CACHING_WC       (2 << I915_BO_ALLOC_CACHING_SHIFT) // Write-Combining
+#define I915_BO_ALLOC_CACHING_WB       (3 << I915_BO_ALLOC_CACHING_SHIFT) // Write-Back (Cached)
+// Default (0) means driver/system default (likely WB)
 
 // GEM Object Tiling Modes (stored in the object)
 enum i915_tiling_mode {
@@ -148,6 +155,14 @@ enum i915_tiling_mode {
 	I915_TILING_X,
 	I915_TILING_Y,
 	// I915_TILING_Yf (if supported by targeted gens)
+};
+
+// GEM Object CPU Caching Modes (stored in the object)
+enum i915_caching_mode {
+	I915_CACHING_DEFAULT = 0,    // System default (likely WB)
+	I915_CACHING_UNCACHED,       // True Uncached (via B_MTRRT_UC)
+	I915_CACHING_WC,             // Write-Combining (via B_MTRRT_WC)
+	I915_CACHING_WB              // Write-Back (via B_MTRRT_WB)
 };
 
 // MMIO Access (Forcewake must be handled by caller)

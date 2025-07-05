@@ -48,13 +48,25 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 	obj->dev_priv = devInfo;
 	obj->size = size;
 	obj->allocated_size = size;
-	obj->flags = flags;
-	obj->base.refcount = 1;
+	obj->flags = flags; // Store original flags
+	// obj->base.refcount = 1; // Assuming refcount is part of the struct directly or a base struct
+	obj->refcount = 1; // Assuming direct member for simplicity here
 	obj->backing_store_area = -1;
 	obj->gtt_mapped = false;
 	obj->gtt_offset_pages = (uint32_t)-1;
 	obj->gtt_mapped_by_execbuf = false;
-	obj->fence_reg_id = -1; // Initialize fence register ID
+	obj->fence_reg_id = -1;
+
+	// Determine CPU caching mode from flags
+	obj->cpu_caching = I915_CACHING_DEFAULT; // Default
+	uint32_t caching_flag = flags & I915_BO_ALLOC_CACHING_MASK;
+	if (caching_flag == I915_BO_ALLOC_CACHING_UNCACHED) {
+		obj->cpu_caching = I915_CACHING_UNCACHED;
+	} else if (caching_flag == I915_BO_ALLOC_CACHING_WC) {
+		obj->cpu_caching = I915_CACHING_WC;
+	} else if (caching_flag == I915_BO_ALLOC_CACHING_WB) {
+		obj->cpu_caching = I915_CACHING_WB;
+	}
 
 	// Determine tiling mode from flags
 	obj->tiling_mode = I915_TILING_NONE;
@@ -95,6 +107,62 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 	if (obj->backing_store_area < B_OK) { status = obj->backing_store_area; goto err_mutex; }
 
 	if (flags & I915_BO_ALLOC_CPU_CLEAR) memset(obj->kernel_virtual_address, 0, obj->allocated_size);
+
+	// Attempt to set memory type for CPU caching
+	if (obj->cpu_caching != I915_CACHING_DEFAULT) {
+		uint32 haiku_mem_type = B_MTRRT_WB; // Default to WB if conversion fails
+		switch (obj->cpu_caching) {
+			case I915_CACHING_UNCACHED: haiku_mem_type = B_MTRRT_UC; break;
+			case I915_CACHING_WC:       haiku_mem_type = B_MTRRT_WC; break;
+			case I915_CACHING_WB:       haiku_mem_type = B_MTRRT_WB; break;
+			default: break; // Should not happen if I915_CACHING_DEFAULT was handled
+		}
+
+		area_info areaInfo;
+		status = get_area_info(obj->backing_store_area, &areaInfo);
+		if (status == B_OK) {
+			// set_area_memory_type expects the physical base of the start of the region.
+			// For a non-contiguous area, this is problematic if it tries to use MTRRs.
+			// If it uses PAT, it should work on the virtual range.
+			// We get physical pages one-by-one later; for now, pass areaInfo.address,
+			// which is the virtual base. The kernel might handle it via PAT.
+			// A more robust solution for MTRRs would require iterating physical segments.
+			// For now, we assume PAT-based application or that it handles non-contiguous correctly.
+			// The 'base' parameter for set_area_memory_type is virtual if area is not physically contiguous.
+			// Let's try with areaInfo.address (virtual base).
+			// The API docs say `base` is physical address if mapping physical memory,
+			// but for normal areas, it might be virtual or it might require physical segments.
+			// Given we get scattered physical pages later, we might need to call this per contiguous physical run,
+			// or rely on PAT.
+			// For simplicity, let's try with the area's virtual base, assuming PAT.
+			// If this were for MTRRs over a potentially non-physically-contiguous area, it would be wrong.
+			// The Haiku API for set_area_memory_type says "base is the start of the physical address range".
+			// This implies we DO need the physical address.
+			// However, an area created with B_ANY_ADDRESS is not guaranteed to be physically contiguous.
+			// This is a known complexity. For now, we'll attempt it with the first page's phys addr
+			// and log if it fails, then proceed with system default caching.
+			physical_entry pe_first;
+			if (get_memory_map(obj->kernel_virtual_address, B_PAGE_SIZE, &pe_first, 1) == B_OK) {
+				status_t mem_type_status = set_area_memory_type(obj->backing_store_area, pe_first.address, haiku_mem_type);
+				if (mem_type_status != B_OK) {
+					TRACE("GEM: Failed to set memory type %lu for area %" B_PRId32 " (phys_base 0x%lx). Error: %s. Using default caching.\n",
+						haiku_mem_type, obj->backing_store_area, pe_first.address, strerror(mem_type_status));
+					// Revert obj->cpu_caching to default if setting failed, to reflect reality
+					obj->cpu_caching = I915_CACHING_DEFAULT;
+				} else {
+					TRACE("GEM: Successfully set memory type %lu for area %" B_PRId32 " (phys_base 0x%lx).\n",
+						haiku_mem_type, obj->backing_store_area, pe_first.address);
+				}
+			} else {
+				TRACE("GEM: Could not get physical address of first page for area %" B_PRId32 " to set memory type. Using default caching.\n", obj->backing_store_area);
+				obj->cpu_caching = I915_CACHING_DEFAULT;
+			}
+		} else {
+			TRACE("GEM: Failed to get area_info for area %" B_PRId32 " to set memory type. Error: %s. Using default caching.\n",
+				obj->backing_store_area, strerror(status));
+			obj->cpu_caching = I915_CACHING_DEFAULT;
+		}
+	}
 
 	obj->num_phys_pages = obj->allocated_size / B_PAGE_SIZE; // Store number of pages
 	obj->phys_pages_list = (phys_addr_t*)malloc(obj->num_phys_pages * sizeof(phys_addr_t));

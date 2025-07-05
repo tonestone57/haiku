@@ -68,7 +68,14 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 
 	intel_i915_write32(devInfo, GT_IMR, 0xFFFFFFFF); // Mask all GT interrupts
 	devInfo->cached_gt_ier_val = GT_IIR_PM_INTERRUPT_GEN7; // Enable PM summary interrupt
-	// TODO: Enable other GT interrupts if needed (e.g., User Interrupts for GEM) by ORing them to cached_gt_ier_val
+
+	// Enable User Interrupt
+	// Assuming GT_USER_INTERRUPT_GEN7 is defined in registers.h (e.g., (1U << 8))
+	// If not, this will need adjustment based on the actual define.
+	#define GT_USER_INTERRUPT_GEN7 (1U << 8) // Placeholder if not in registers.h
+	devInfo->cached_gt_ier_val |= GT_USER_INTERRUPT_GEN7;
+	TRACE("irq_init: Enabling User Interrupt (GT_IER bit 0x%x)\n", GT_USER_INTERRUPT_GEN7);
+
 	intel_i915_write32(devInfo, GT_IER, devInfo->cached_gt_ier_val);
 	(void)intel_i915_read32(devInfo, GT_IER); // Posting read
 	TRACE("irq_init: GT_IER (0x206C) set to 0x%08" B_PRIx32 "\n", devInfo->cached_gt_ier_val);
@@ -136,6 +143,17 @@ intel_i915_interrupt_handler(void* data)
 	// GT Interrupt Handling
 	gt_iir = intel_i915_read32(devInfo, GT_IIR);
 	uint32 active_gt_irqs = gt_iir & devInfo->cached_gt_ier_val;
+
+	// Handle User Interrupt first if present
+	// Assuming GT_USER_INTERRUPT_GEN7 is defined (placeholder was (1U << 8))
+	if (active_gt_irqs & GT_USER_INTERRUPT_GEN7) {
+		intel_i915_write32(devInfo, GT_IIR, GT_USER_INTERRUPT_GEN7); // Ack User Interrupt
+		handledStatus = B_HANDLED_INTERRUPT;
+		// TRACE("IRQ: GT User Interrupt detected and acknowledged.\n");
+		// Actual work (e.g., waking waiters) is typically handled by GEM exec logic
+		// based on sequence numbers or other events, not directly in IRQ handler.
+		// This ensures the interrupt line is cleared.
+	}
 
 	if (active_gt_irqs & GT_IIR_PM_INTERRUPT_GEN7) {
 		TRACE("IRQ: GT PM Interrupt (summary bit) detected (GT_IIR: 0x%08" B_PRIx32 ")\n", gt_iir);

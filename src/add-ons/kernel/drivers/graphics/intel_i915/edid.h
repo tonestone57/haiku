@@ -76,6 +76,12 @@ int intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max
 // Generates a list of common VESA fallback modes.
 int intel_i915_get_vesa_fallback_modes(display_mode* modes, int max_modes);
 
+// Parses an EDID extension block (e.g., CEA-861).
+// Appends any found modes to the `modes` array, updating `current_mode_count`.
+// Returns the number of new modes added from this extension block.
+int intel_i915_parse_edid_extension_block(const uint8_t* ext_block_data,
+	display_mode* modes, int* current_mode_count, int max_modes);
+
 #ifdef __cplusplus
 }
 #endif

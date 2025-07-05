@@ -80,11 +80,44 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI ||
 			port->type == PRIV_OUTPUT_ANALOG) {
 			if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
-				// intel_i915_gmbus_read_edid_block handles its own forcewake
+				// Read Block 0
 				if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, edid_buffer, 0) == B_OK) {
-					memcpy(port->edid_data, edid_buffer, EDID_BLOCK_SIZE);
-					port->edid_valid = true;
-					port->num_modes = intel_i915_parse_edid(port->edid_data, port->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+					memcpy(port->edid_data, edid_buffer, EDID_BLOCK_SIZE); // Store block 0
+					port->edid_valid = true; // Base EDID is valid
+					int current_port_mode_count = intel_i915_parse_edid(port->edid_data, port->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+					port->num_modes = current_port_mode_count;
+
+					// Check for extensions
+					const struct edid_v1_info* base_edid = (const struct edid_v1_info*)port->edid_data;
+					uint8_t num_extensions = base_edid->extension_flag;
+					TRACE("Display Init: Port %d, EDID Block 0 parsed, %d modes. Extensions to follow: %u\n",
+						port->logical_port_id, current_port_mode_count, num_extensions);
+
+					// Read and parse extension blocks
+					for (uint8_t ext_idx = 0; ext_idx < num_extensions; ext_idx++) {
+						if (current_port_mode_count >= PRIV_MAX_EDID_MODES_PER_PORT) {
+							TRACE("Display Init: Port %d, max modes reached, skipping further EDID extensions.\n", port->logical_port_id);
+							break;
+						}
+						uint8_t extension_block_buffer[EDID_BLOCK_SIZE];
+						if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, extension_block_buffer, ext_idx + 1) == B_OK) {
+							// Store extension block if space allows (port->edid_data is currently only 1 block)
+							// For now, just parse it. A larger buffer in port_state would be needed to store all blocks.
+							// Or, intel_i915_parse_edid_extension_block could take the raw buffer directly.
+							TRACE("Display Init: Port %d, successfully read EDID extension block %u.\n", port->logical_port_id, ext_idx + 1);
+							// intel_i915_parse_edid_extension_block(extension_block_buffer,
+							intel_i915_parse_edid_extension_block(extension_block_buffer,
+							   port->modes, // Pass the start of the port's mode array
+							   &current_port_mode_count, // Pass pointer to update count
+							   PRIV_MAX_EDID_MODES_PER_PORT);
+							// Update the port's total number of modes.
+							port->num_modes = current_port_mode_count;
+						} else {
+							TRACE("Display Init: Port %d, failed to read EDID extension block %u.\n", port->logical_port_id, ext_idx + 1);
+						}
+					}
+
+
 					if (port->num_modes > 0) {
 						port->connected = true;
 						if (port->modes[0].timing.pixel_clock != 0) port->preferred_mode = port->modes[0];

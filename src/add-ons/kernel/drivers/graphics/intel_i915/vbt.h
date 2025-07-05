@@ -415,7 +415,7 @@ struct bdb_lfp_backlight_data {
 	uint8_t entry_size; // Size of each lfp_backlight_data_entry
 	struct bdb_lfp_backlight_data_entry data[16]; // For up to 16 panel types
 	// uint8_t level[16]; // Brightness levels (obsolete after BDB 233)
-	// struct lfp_backlight_control_method backlight_control[16]; // Newer VBTs
+	struct bdb_lfp_backlight_control_method backlight_control[16]; /* BDB Ver 190+ */
 	// ... other fields for brightness levels, precision, HDR ...
 } __attribute__((packed));
 
@@ -431,7 +431,59 @@ struct bdb_edp_power_seq_entry { // From FreeBSD's edp_power_seq, adapted
 	uint16_t t11_t12_ms; // VDD Off period (T11 + T12 from eDP spec)
 } __attribute__((packed));
 
-// TODO: Add other relevant BDB block structures as needed (e.g., BDB_EDP, BDB_PSR)
+// Block 27: eDP specific configuration
+struct bdb_edp_power_seq { // Simplified, full power seq is in bdb_edp_power_seq_entry
+	uint16_t t1_t3_ms;
+	uint16_t t8_ms;
+	uint16_t t9_ms;
+	uint16_t t10_ms;
+	uint16_t t11_t12_ms;
+} __attribute__((packed));
+
+struct bdb_edp_link_params {
+	uint8_t rate:4;      // enum bdb_edp_vbt_max_link_rate
+	uint8_t lanes:4;
+	uint8_t preemphasis:4;
+	uint8_t vswing:4;
+	// Newer VBTs (>=173) might have more fields like sdp_port_id_bits, panel_misc_bits_override
+	// For simplicity, focusing on common VS/PE for now.
+} __attribute__((packed));
+
+struct bdb_edp {
+	// Array of power sequences, one per panel type (index from LVDS options)
+	struct bdb_edp_power_seq power_seqs[16]; // Max 16 panel types
+	uint32_t color_depth; // Bitmask of supported color depths (e.g., 18, 24, 30 bit)
+	// Array of link parameters, one per panel type
+	struct bdb_edp_link_params link_params[16];
+	// Fields for BDB version >= 173
+	// uint8_t sdp_port_id_bits;
+	// Fields for BDB version >= 188
+	// uint16_t edp_panel_misc_bits_override;
+} __attribute__((packed));
+
+// Block 9: Panel Self Refresh (PSR) parameters
+struct bdb_psr_data_entry {
+	uint8_t psr_version; // 0=PSR1, 1=PSR2 with Y-coordinate for SU
+	uint8_t psr_feature_enable; // Bit 0: Enable PSR, Bit 1: Use VBT SU entry times
+	uint16_t psr_idle_frames;
+	uint16_t psr_su_entry_frames; // Setup Update frames for PSR1
+	// PSR2 specific fields may follow, or be part of a larger/versioned struct.
+	// For example, PSR2 might have different setup times or Y-coord requirements.
+	// This is a simplified version for initial parsing.
+} __attribute__((packed));
+
+struct bdb_psr {
+	// Depending on VBT version, this might be a single entry or an array.
+	// For BDB version < 206, it's often a single global entry.
+	// For BDB version >= 206, it can be per-panel type.
+	// Let's assume a single entry for now for simplicity.
+	struct bdb_psr_data_entry psr_global_params;
+	// If it were an array:
+	// struct bdb_psr_data_entry panel_psr_params[16];
+} __attribute__((packed));
+
+
+// TODO: Add other relevant BDB block structures for other features.
 
 // --- Main VBT Data Structure for Driver ---
 #define MAX_VBT_CHILD_DEVICES 16 // Increased from 8
@@ -466,6 +518,19 @@ struct intel_vbt_data {
 	uint8_t  edp_default_vs_level;  // Voltage Swing Level (0-3)
 	uint8_t  edp_default_pe_level;  // Pre-Emphasis Level (0-3)
 	// TODO: Add other eDP specific things like max link rate override from VBT if needed
+
+	// LFP Data Pointers (from BDB Block 41)
+	uint8_t num_lfp_data_entries; // Number of entries in lfp_data_ptrs
+	struct bdb_lvds_lfp_data_ptrs_entry lfp_data_ptrs[MAX_VBT_CHILD_DEVICES]; // Store up to MAX_VBT_CHILD_DEVICES panel data pointers
+
+	// Boot display preferences (from BDB_GENERAL_DEFINITIONS)
+	uint8_t boot_device_bits[2]; // Raw VBT boot_display[2]
+	uint8_t primary_boot_device_type; // Parsed primary boot device (e.g., DEVICE_TYPE_LFP_BIT)
+	uint8_t secondary_boot_device_type; // Parsed secondary
+
+	// PSR (Panel Self Refresh) data
+	bool has_psr_data;
+	struct bdb_psr_data_entry psr_params; // Store params for the primary panel (or global if only one)
 };
 
 

@@ -418,9 +418,39 @@ parse_bdb_general_definitions(intel_i915_device_info* devInfo, const uint8_t* bl
 	if (devInfo->vbt->features.child_dev_size == 0) { // Check if already set by a block parsed earlier (unlikely)
 		devInfo->vbt->features.child_dev_size = defs->child_dev_size;
 	}
-	TRACE("VBT: Parsed General Definitions. Child dev size: %u, CRT DDC Pin: 0x%x\n",
-		defs->child_dev_size, defs->crt_ddc_gmbus_pin);
-	// TODO: Parse boot_display and other fields if needed.
+
+	// Parse boot_display fields
+	devInfo->vbt->boot_device_bits[0] = defs->boot_display[0];
+	devInfo->vbt->boot_device_bits[1] = defs->boot_display[1];
+
+	// Simple parsing of primary boot device for now. A more complex system
+	// might iterate through preferred devices if the first isn't available.
+	// These defines are conceptual and should match VBT spec.
+	#define BDB_BOOT_DEVICE_LFP      (1 << 0)
+	#define BDB_BOOT_DEVICE_CRT      (1 << 1)
+	#define BDB_BOOT_DEVICE_EFP1_TV  (1 << 2) // Typically TV
+	#define BDB_BOOT_DEVICE_EFP2_DIG (1 << 3) // Typically digital (DVI/HDMI/DP)
+	#define BDB_BOOT_DEVICE_EFP3_DIG (1 << 4) // Typically digital
+	#define BDB_BOOT_DEVICE_EFP4_DIG (1 << 5) // Gen6+
+	#define BDB_BOOT_DEVICE_EFP5_DIG (1 << 6) // Gen7+
+
+	devInfo->vbt->primary_boot_device_type = 0; // None
+	if (defs->boot_display[0] & BDB_BOOT_DEVICE_LFP) {
+		devInfo->vbt->primary_boot_device_type = BDB_BOOT_DEVICE_LFP;
+	} else if (defs->boot_display[0] & BDB_BOOT_DEVICE_EFP2_DIG) { // Prioritize Digital EFP2
+		devInfo->vbt->primary_boot_device_type = BDB_BOOT_DEVICE_EFP2_DIG;
+	} else if (defs->boot_display[0] & BDB_BOOT_DEVICE_EFP3_DIG) {
+		devInfo->vbt->primary_boot_device_type = BDB_BOOT_DEVICE_EFP3_DIG;
+	} else if (defs->boot_display[0] & BDB_BOOT_DEVICE_CRT) {
+		devInfo->vbt->primary_boot_device_type = BDB_BOOT_DEVICE_CRT;
+	} // Add more EFP/TV checks if needed.
+
+	TRACE("VBT: Parsed General Definitions. Child dev size: %u, CRT DDC Pin: 0x%x, "
+		"BootDisplay[0]=0x%02x, BootDisplay[1]=0x%02x, PrimaryBootDeviceParsed=0x%x\n",
+		defs->child_dev_size, defs->crt_ddc_gmbus_pin,
+		defs->boot_display[0], defs->boot_display[1], devInfo->vbt->primary_boot_device_type);
+	// The TODO is now addressed by parsing and storing the values.
+	// Using these values to influence initial modeset is a separate step if decided necessary.
 }
 
 static void
@@ -472,6 +502,19 @@ parse_bdb_lvds_options(intel_i915_device_info* devInfo, const uint8_t* block_dat
 			devInfo->ports[i].panel_is_dual_channel = devInfo->vbt->lfp_is_dual_channel;
 		}
 	}
+
+	// Attempt to parse the DTD for the selected panel_type_idx
+	if (devInfo->vbt->num_lfp_data_entries > 0) {
+		display_mode lfp_mode;
+		if (intel_vbt_get_lfp_panel_dtd_by_index(devInfo, panel_type_idx, &lfp_mode)) {
+			// Successfully parsed DTD. devInfo->vbt->lfp_panel_dtd and has_lfp_data are set by the call.
+			TRACE("VBT LVDS Options: Successfully got DTD for panel_type index %u.\n", panel_type_idx);
+		} else {
+			TRACE("VBT LVDS Options: Failed to get DTD for panel_type index %u.\n", panel_type_idx);
+		}
+	} else {
+		TRACE("VBT LVDS Options: No LFP data pointers loaded, cannot get DTD for panel_type index %u.\n", panel_type_idx);
+	}
 }
 
 static void
@@ -493,24 +536,79 @@ parse_bdb_lvds_lfp_data(intel_i915_device_info* devInfo, const uint8_t* block_da
 	// For now, assume the first entry if this block is directly pointed to,
 	// or use panel_type index from bdb_lvds_options to find the right DTD.
 
-	// Placeholder: Assume block_data points to the relevant bdb_lvds_lfp_data_entry
-	// This needs to be fixed by using BDB_LVDS_LFP_DATA_PTRS to get the correct offset.
-	if (block_size >= sizeof(struct bdb_lvds_lfp_data_entry)) {
-		const struct bdb_lvds_lfp_data_entry* entry = (const struct bdb_lvds_lfp_data_entry*)block_data;
-		if (parse_dtd((const uint8_t*)&entry->dtd, &devInfo->vbt->lfp_panel_dtd)) {
-			devInfo->vbt->has_lfp_data = true;
-			TRACE("VBT: Parsed LFP DTD from Block 42: %dx%d\n",
-				devInfo->vbt->lfp_panel_dtd.timing.h_display, devInfo->vbt->lfp_panel_dtd.timing.v_display);
-			// Further parsing of BPC, dual channel from this entry if available
-			// devInfo->vbt->lfp_bits_per_color = entry->bits_per_color;
-			// devInfo->vbt->lfp_is_dual_channel = (entry->lvds_misc_bits & 1);
-			// devInfo->vbt->lvds_pwm_freq_hz = entry->pwm_frequency_hz;
-			// Update port_state for the LFP port too.
-		}
-	} else {
-		TRACE("VBT: LFP Data block (ID %u) too small (%u) for an entry.\n", BDB_LVDS_LFP_DATA, block_size);
-	}
+	// This function is called when BDB_LVDS_LFP_DATA (Block 42) is found.
+	// Block 42 contains a collection of panel data entries.
+	// Specific DTDs are extracted using pointers from BDB_LVDS_LFP_DATA_PTRS (Block 41)
+	// via the intel_vbt_get_lfp_panel_dtd_by_index function, which is typically
+	// called from parse_bdb_lvds_options based on the panel_type index.
+	TRACE("VBT: Encountered LFP Data Block (ID %u, size %u). Specific DTDs parsed via LFP Data Ptrs and panel_index.\n",
+		BDB_LVDS_LFP_DATA, block_size);
+	// The actual parsing of a DTD from this block is now handled by
+	// intel_vbt_get_lfp_panel_dtd_by_index, so this function primarily acknowledges the block's presence.
 }
+
+static bool
+intel_vbt_get_lfp_panel_dtd_by_index(intel_i915_device_info* devInfo, uint8_t panel_index, display_mode* mode_out)
+{
+	if (!devInfo || !devInfo->vbt || !mode_out) {
+		TRACE("VBT Error: Invalid parameters to intel_vbt_get_lfp_panel_dtd_by_index.\n");
+		return false;
+	}
+
+	if (devInfo->vbt->num_lfp_data_entries == 0) {
+		TRACE("VBT: No LFP data pointer entries available (Block 41 likely not parsed or empty).\n");
+		return false;
+	}
+
+	if (panel_index >= devInfo->vbt->num_lfp_data_entries) {
+		TRACE("VBT Error: panel_index %u out of bounds for LFP data pointers (max %u).\n",
+			panel_index, devInfo->vbt->num_lfp_data_entries);
+		return false;
+	}
+
+	const struct bdb_lvds_lfp_data_ptrs_entry* ptr_entry = &devInfo->vbt->lfp_data_ptrs[panel_index];
+
+	// Offset in ptr_entry is from the start of the BDB block.
+	const uint8_t* lfp_entry_ptr = devInfo->vbt->bdb_data_start + ptr_entry->offset;
+
+	// Validate that the calculated pointer and size are within the BDB data bounds.
+	if (ptr_entry->offset + ptr_entry->table_size > devInfo->vbt->bdb_data_size ||
+		ptr_entry->table_size < sizeof(struct bdb_lvds_lfp_data_entry)) {
+		TRACE("VBT Error: Invalid LFP data pointer entry for panel_index %u. "
+			"Offset 0x%x, Size %u. BDB data size %lu.\n",
+			panel_index, ptr_entry->offset, ptr_entry->table_size, devInfo->vbt->bdb_data_size);
+		return false;
+	}
+
+	const struct bdb_lvds_lfp_data_entry* lfp_data_entry =
+		(const struct bdb_lvds_lfp_data_entry*)lfp_entry_ptr;
+
+	// The DTD is directly within this entry.
+	if (parse_dtd((const uint8_t*)&lfp_data_entry->dtd, mode_out)) {
+		TRACE("VBT: Successfully parsed DTD for LFP panel_index %u: %dx%d at %" B_PRIu32 "kHz.\n",
+			panel_index, mode_out->timing.h_display, mode_out->timing.v_display, mode_out->timing.pixel_clock);
+
+		// Store this as the globally preferred LFP DTD for now.
+		// If multiple LFPs are supported, this might need to be per-LFP-port.
+		devInfo->vbt->lfp_panel_dtd = *mode_out;
+		devInfo->vbt->has_lfp_data = true;
+
+		// TODO: Further parse other fields from lfp_data_entry if needed,
+		// e.g., lfp_data_entry->panel_power_on_delay_ms, bits_per_color, lvds_misc_bits etc.
+		// These could override or supplement data from BDB_LVDS_OPTIONS or BDB_LFP_BACKLIGHT.
+		// For example:
+		// if (lfp_data_entry->bits_per_color != 0) devInfo->vbt->lfp_bits_per_color = lfp_data_entry->bits_per_color;
+		// devInfo->vbt->lfp_is_dual_channel = (lfp_data_entry->lvds_misc_bits & 1); // Example bit
+		// if (lfp_data_entry->pwm_frequency_hz != 0) devInfo->vbt->lvds_pwm_freq_hz = lfp_data_entry->pwm_frequency_hz;
+
+		return true;
+	} else {
+		TRACE("VBT: Failed to parse DTD for LFP panel_index %u from VBT offset 0x%x.\n",
+			panel_index, ptr_entry->offset);
+	}
+	return false;
+}
+
 
 static void
 parse_bdb_lfp_backlight(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
@@ -533,34 +631,61 @@ parse_bdb_lfp_backlight(intel_i915_device_info* devInfo, const uint8_t* block_da
 		if (devInfo->ports[i].type == PRIV_OUTPUT_LVDS || devInfo->ports[i].type == PRIV_OUTPUT_EDP) {
 			// Assuming this backlight entry applies to this panel
 			// VBT type: 0=None, 1=PMIC, 2=PWM. Haiku VBT_BACKLIGHT_*: 0=CPU_PWM, 1=PCH_PWM, 2=EDP_AUX
-			// This mapping needs refinement. For now, if type is PWM, assume CPU PWM.
-			if (entry->type == 2 /* BDB_BACKLIGHT_TYPE_PWM */) {
-				devInfo->ports[i].backlight_control_source = VBT_BACKLIGHT_CPU_PWM; // Default to CPU PWM
-			// TODO: Distinguish CPU vs PCH PWM if VBT provides that info (e.g. via lfp_backlight_control_method from newer VBTs)
-			// For now, VBT_BACKLIGHT_CPU_PWM is a general "PWM" type.
-			// The actual registers (CPU or PCH) might be determined by devInfo->pch_type later.
-			} else if (devInfo->ports[i].type == PRIV_OUTPUT_EDP && entry->type == 0 /* None/AUX? */) {
-				// Some VBTs might use type=0 and rely on eDP AUX for backlight if PP_CONTROL EDP_BLC_ENABLE is not enough.
-				// This is a fallback/guess. Explicit EDP_AUX source is better.
-				devInfo->ports[i].backlight_control_source = VBT_BACKLIGHT_EDP_AUX;
+			uint8_t new_bl_source = VBT_BACKLIGHT_CPU_PWM; // Default
+			bool pwm_type_from_controller_field = false;
+
+			// Check BDB version for backlight_control field availability
+			// BDB version 190 seems to be a common threshold for this field.
+			if (devInfo->vbt->bdb_header->version >= 190 &&
+				block_size >= (sizeof(uint8_t) + // entry_size
+								sizeof(struct bdb_lfp_backlight_data_entry) * (entry_index + 1) +
+								sizeof(struct bdb_lfp_backlight_control_method) * (entry_index + 1) )) {
+				// Check if the access to backlight_control[entry_index] is valid
+				// The size check above should be more robust.
+				// The actual size of bdb_lfp_backlight_data depends on the number of entries,
+				// which isn't directly in this block. Assume entry_index is valid (e.g. 0).
+				const struct bdb_lfp_backlight_control_method* control_method =
+					&bl_data->backlight_control[entry_index]; // Use entry_index (usually 0 for single panel)
+
+				TRACE("VBT LFP Backlight: BDB ver %u >= 190. Control method type: %u, controller: %u\n",
+					devInfo->vbt->bdb_header->version, control_method->type, control_method->controller);
+
+				if (control_method->type == 2 /* PWM type from control_method.type */) {
+					if (control_method->controller == 0) { // CPU PWM
+						new_bl_source = VBT_BACKLIGHT_CPU_PWM;
+						pwm_type_from_controller_field = true;
+					} else if (control_method->controller == 1) { // PCH PWM
+						new_bl_source = VBT_BACKLIGHT_PCH_PWM;
+						pwm_type_from_controller_field = true;
+					} else {
+						TRACE("VBT LFP Backlight: Unknown PWM controller type %u from VBT.\n", control_method->controller);
+						// Fallback to old logic based on entry->type
+					}
+				} else if (control_method->type == 0 && devInfo->ports[i].type == PRIV_OUTPUT_EDP) {
+					// Type 0 might mean AUX for eDP if controller field is also indicative or not PWM
+					new_bl_source = VBT_BACKLIGHT_EDP_AUX;
+					pwm_type_from_controller_field = true; // Indicate we used this path
+				}
 			}
+
+			if (!pwm_type_from_controller_field) {
+				// Fallback to legacy entry->type if newer fields not present or definitive
+				if (entry->type == 2 /* BDB_BACKLIGHT_TYPE_PWM */) {
+					new_bl_source = VBT_BACKLIGHT_CPU_PWM; // Default to CPU PWM if controller field not used
+				} else if (devInfo->ports[i].type == PRIV_OUTPUT_EDP && entry->type == 0 /* None/AUX? */) {
+					new_bl_source = VBT_BACKLIGHT_EDP_AUX;
+				}
+			}
+			devInfo->ports[i].backlight_control_source = new_bl_source;
+
 			// Store PWM frequency and polarity
 			devInfo->ports[i].backlight_pwm_freq_hz = entry->pwm_freq_hz;
-			devInfo->ports[i].backlight_pwm_active_low = entry->active_low_pwm; // Assuming active_low_pwm is bit 1 of type or a separate field
-			                                                                // From FreeBSD: active_low_pwm is bit 0 of data[x].type
-			                                                                // struct lfp_backlight_data_entry { u8 type:2; u8 active_low_pwm:1; ... }
-			                                                                // So, active_low_pwm is indeed bit 0 of the first byte of entry.
-			                                                                // The Haiku structure needs this field. Let's assume it's there for now.
-			                                                                // Re-checking FreeBSD: struct lfp_backlight_data_entry { u8 type:2; u8 active_low_pwm:1; u8 obsolete1:5; ... }
-			                                                                // So, entry->active_low_pwm should work if Haiku's struct matches.
-			                                                                // Haiku's current struct bdb_lfp_backlight_data_entry does not have active_low_pwm explicitly.
-			                                                                // It has: { u8 type:2; u8 active_low_pwm:1; u8 obsolete1:5; ... }
-			                                                                // This means the current Haiku struct *does* have it.
+			devInfo->ports[i].backlight_pwm_active_low = entry->active_low_pwm;
 
-			TRACE("VBT LFP Backlight: Port %d, PWM Freq %u Hz, TypeRaw %u, ActiveLow %d -> BL_Src %u.\n",
+			TRACE("VBT LFP Backlight: Port %d, PWM Freq %u Hz, EntryTypeRaw %u, ActiveLow %d -> BL_Src %u (from_ctrl_field: %d).\n",
 				i, devInfo->ports[i].backlight_pwm_freq_hz, entry->type,
 				devInfo->ports[i].backlight_pwm_active_low,
-				devInfo->ports[i].backlight_control_source);
+				devInfo->ports[i].backlight_control_source, pwm_type_from_controller_field);
 			break; // Assuming one LFP for now
 		}
 	}
@@ -633,6 +758,93 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 		}
 		// TODO: Parse other sub-blocks like eDP config (VS/PE) if relevant sub-IDs are known.
 		current_sub_ptr += 3 + sub_size;
+	}
+}
+
+static void
+parse_bdb_edp(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt || devInfo->vbt->bdb_header == NULL)
+		return;
+
+	if (block_size < sizeof(struct bdb_edp)) {
+		TRACE("VBT: eDP block (ID %u) too small (%u vs %lu expected).\n",
+			BDB_EDP, block_size, sizeof(struct bdb_edp));
+		return;
+	}
+	const struct bdb_edp* edp_block = (const struct bdb_edp*)block_data;
+
+	// Assuming the first entry in link_params is for the primary/default eDP panel,
+	// or that panel_type from LVDS_OPTIONS would be used as an index.
+	// For simplicity, use index 0 if available.
+	uint8_t panel_index = 0; // Default to the first panel entry.
+	                       // This should ideally be derived from lvds_options->panel_type
+	                       // if BDB_LVDS_OPTIONS is parsed before BDB_EDP.
+
+	if (panel_index < (sizeof(edp_block->link_params) / sizeof(edp_block->link_params[0]))) {
+		const struct bdb_edp_link_params* params = &edp_block->link_params[panel_index];
+		devInfo->vbt->edp_default_vs_level = params->vswing;
+		devInfo->vbt->edp_default_pe_level = params->preemphasis;
+		devInfo->vbt->has_edp_vbt_settings = true; // Mark that we found some eDP settings
+
+		TRACE("VBT: Parsed eDP Block (panel_idx %u): VS=%u, PE=%u, RateBits=0x%x, Lanes=0x%x\n",
+			panel_index, params->vswing, params->preemphasis, params->rate, params->lanes);
+
+		// Power sequences might also be in this block for older VBTs, or referenced.
+		// The current bdb_edp struct has power_seqs array.
+		// If BDB_DRIVER_FEATURES/BDB_SUB_BLOCK_EDP_POWER_SEQ is also present,
+		// it might override these. For now, let's try to parse from here too if not already set.
+		if (!devInfo->vbt->has_edp_power_seq && panel_index < (sizeof(edp_block->power_seqs) / sizeof(edp_block->power_seqs[0]))) {
+			const struct bdb_edp_power_seq* pwr = &edp_block->power_seqs[panel_index];
+			// Check if these values are non-zero before overriding defaults
+			if (pwr->t1_t3_ms || pwr->t8_ms || pwr->t9_ms || pwr->t10_ms || pwr->t11_t12_ms) {
+				devInfo->vbt->panel_power_t1_ms = pwr->t1_t3_ms;
+				devInfo->vbt->panel_power_t2_ms = pwr->t8_ms;
+				devInfo->vbt->panel_power_t3_ms = pwr->t9_ms;
+				devInfo->vbt->panel_power_t4_ms = pwr->t10_ms;
+				devInfo->vbt->panel_power_t5_ms = pwr->t11_t12_ms;
+				devInfo->vbt->has_edp_power_seq = true;
+				TRACE("VBT: Parsed eDP power sequence from eDP Block: T1=%u, T2=%u, T3=%u, T4=%u, T5=%u (ms)\n",
+					devInfo->vbt->panel_power_t1_ms, devInfo->vbt->panel_power_t2_ms,
+					devInfo->vbt->panel_power_t3_ms, devInfo->vbt->panel_power_t4_ms,
+					devInfo->vbt->panel_power_t5_ms);
+			}
+		}
+	} else {
+		TRACE("VBT: eDP panel_index %u out of bounds for link_params/power_seqs.\n", panel_index);
+	}
+	// TODO: Parse color_depth and other fields from bdb_edp if needed.
+}
+
+static void
+parse_bdb_psr(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt || devInfo->vbt->bdb_header == NULL)
+		return;
+
+	// Assuming the BDB_PSR block directly contains bdb_psr_data_entry for global/primary panel.
+	// If it's an array indexed by panel_type, this needs adjustment based on VBT version.
+	// For BDB version < 206, it's often a single global entry.
+	// For now, assume a single entry.
+	if (block_size < sizeof(struct bdb_psr_data_entry)) {
+		TRACE("VBT: PSR block (ID %u) too small (%u vs %lu expected for entry).\n",
+			BDB_PSR, block_size, sizeof(struct bdb_psr_data_entry));
+		return;
+	}
+	const struct bdb_psr_data_entry* psr_entry = (const struct bdb_psr_data_entry*)block_data;
+
+	devInfo->vbt->has_psr_data = true;
+	memcpy(&devInfo->vbt->psr_params, psr_entry, sizeof(struct bdb_psr_data_entry));
+
+	TRACE("VBT: Parsed PSR Block: Version %u, FeatureEnable 0x%02x, IdleFrames %u, SUFrames %u\n",
+		psr_entry->psr_version, psr_entry->psr_feature_enable,
+		psr_entry->psr_idle_frames, psr_entry->psr_su_entry_frames);
+
+	// Actual PSR enablement in hardware is a complex separate task.
+	// This parsing step just makes the VBT parameters available.
+	if (!(psr_entry->psr_feature_enable & 0x01)) { // Bit 0: PSR Enable
+		TRACE("VBT: PSR explicitly disabled by VBT (psr_feature_enable bit 0 is not set).\n");
+		devInfo->vbt->has_psr_data = false; // Mark as not usable if VBT disables it
 	}
 }
 
@@ -728,11 +940,47 @@ intel_i915_vbt_init(intel_i915_device_info* devInfo)
 			case BDB_LVDS_BACKLIGHT: // Block 43
 				parse_bdb_lfp_backlight(devInfo, current_block_data, block_size_val);
 				break;
+			case BDB_LVDS_LFP_DATA_PTRS: // Block 41
+				if (block_size_val >= sizeof(uint8_t)) { // Min size for lvds_entries
+					const struct bdb_lvds_lfp_data_ptrs* ptrs_block =
+						(const struct bdb_lvds_lfp_data_ptrs*)current_block_data;
+					devInfo->vbt->num_lfp_data_entries = ptrs_block->lvds_entries;
+					if (devInfo->vbt->num_lfp_data_entries > MAX_VBT_CHILD_DEVICES) {
+						TRACE("VBT: Warning: num_lfp_data_entries (%u) > MAX_VBT_CHILD_DEVICES (%u). Clamping.\n",
+							devInfo->vbt->num_lfp_data_entries, MAX_VBT_CHILD_DEVICES);
+						devInfo->vbt->num_lfp_data_entries = MAX_VBT_CHILD_DEVICES;
+					}
+					// Validate overall size of the ptrs_block based on lvds_entries
+					size_t expected_min_size = sizeof(uint8_t) +
+						devInfo->vbt->num_lfp_data_entries * sizeof(struct bdb_lvds_lfp_data_ptrs_entry);
+					if (block_size_val >= expected_min_size) {
+						memcpy(devInfo->vbt->lfp_data_ptrs, ptrs_block->ptr,
+							devInfo->vbt->num_lfp_data_entries * sizeof(struct bdb_lvds_lfp_data_ptrs_entry));
+						TRACE("VBT: Parsed LFP Data Ptrs: %u entries.\n", devInfo->vbt->num_lfp_data_entries);
+						for (uint8_t i = 0; i < devInfo->vbt->num_lfp_data_entries; i++) {
+							TRACE("  Entry %u: Offset 0x%04x, Size %u\n", i,
+								devInfo->vbt->lfp_data_ptrs[i].offset, devInfo->vbt->lfp_data_ptrs[i].table_size);
+						}
+					} else {
+						TRACE("VBT: LFP Data Ptrs block (ID %u) size %u too small for %u entries (expected min %lu).\n",
+							block_id, block_size_val, ptrs_block->lvds_entries, expected_min_size);
+						devInfo->vbt->num_lfp_data_entries = 0; // Mark as invalid
+					}
+				} else {
+					TRACE("VBT: LFP Data Ptrs block (ID %u) too small (%u bytes) for even lvds_entries.\n",
+						block_id, block_size_val);
+				}
+				break;
+			case BDB_EDP: // Block 27
+				parse_bdb_edp(devInfo, current_block_data, block_size_val);
+				break;
 			case BDB_DRIVER_FEATURES: // Block 12 (was 57 in Haiku's old enum)
 				parse_bdb_driver_features(devInfo, current_block_data, block_size_val);
 				break;
-			// TODO: Add cases for BDB_LVDS_LFP_DATA_PTRS (41), BDB_EDP (27), BDB_PSR (9) etc.
-			//       if they are needed and their structures are defined.
+			case BDB_PSR: // Block 9
+				parse_bdb_psr(devInfo, current_block_data, block_size_val);
+				break;
+			// TODO: Add cases for other blocks if needed and their structures are defined.
 			default:
 				TRACE("VBT: Skipping BDB block ID 0x%x (unhandled or unknown).\n", block_id);
 				break;

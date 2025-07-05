@@ -259,7 +259,14 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	uint32_t ref_clk=0, dpll_tgt_freq=clocks->adjusted_pixel_clock_khz;
 
 	if(IS_HASWELL(devInfo->device_id)){ bool use_spll=false;
-		if(port_state->type==PRIV_OUTPUT_HDMI&&port_state->hw_port_index==0)use_spll=true; // TODO VBT check
+		// On Haswell, HDMI on DDI A (hw_port_index 0) typically uses SPLL.
+		// Other DDIs (B, C, D, E) for HDMI/DP would use WRPLLs.
+		// This is a common hardware configuration. VBT indicates which DDI is HDMI,
+		// but usually not a specific flag to choose SPLL vs WRPLL for DDI A.
+		// The VBT's main role here is to confirm that DDI A is indeed an HDMI port.
+		if(port_state->type==PRIV_OUTPUT_HDMI && port_state->hw_port_index==0) { // DDI A as HDMI
+			use_spll=true;
+		}
 		if(use_spll){clocks->selected_dpll_id=DPLL_ID_SPLL_HSW;clocks->is_wrpll=false;
 			uint32_t spll_ctl=intel_i915_read32(devInfo,SPLL_CTL_HSW);
 			if((spll_ctl&SPLL_REF_SEL_MASK_HSW)==SPLL_REF_LCPLL_HSW){ref_clk=get_hsw_lcpll_link_rate_khz(devInfo); TRACE("Clocks: HSW SPLL using LCPLL ref: %u kHz\n",ref_clk);}

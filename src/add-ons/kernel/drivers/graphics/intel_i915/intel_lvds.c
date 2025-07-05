@@ -220,8 +220,84 @@ intel_lvds_panel_power_off(intel_i915_device_info* devInfo, intel_output_port_st
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }
 
-status_t intel_lvds_configure_panel_fitter(intel_i915_device_info* d, enum pipe_id_priv p, bool e, const display_mode* nm, const display_mode* sm) {
-	TRACE("LVDS: Configure Panel Fitter STUBBED for pipe %d, enable %d\n", p, e);
+status_t
+intel_lvds_configure_panel_fitter(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
+	bool enable, const display_mode* native_mode, const display_mode* scaled_mode)
+{
+	if (!devInfo || !devInfo->mmio_regs_addr)
+		return B_NO_INIT;
+	if (pipe >= PRIV_MAX_PIPES || (enable && (!native_mode || !scaled_mode)))
+		return B_BAD_VALUE;
+
+	intel_output_port_state* lvds_port = NULL;
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if ((devInfo->ports[i].type == PRIV_OUTPUT_LVDS || devInfo->ports[i].type == PRIV_OUTPUT_EDP)
+			&& devInfo->ports[i].current_pipe_assignment == pipe) {
+			lvds_port = &devInfo->ports[i];
+			break;
+		}
+	}
+	if (!lvds_port) {
+		// This might happen if fitter is configured before port is fully assigned.
+		// For now, let's assume we need a valid port to set the border flag.
+		// If no LVDS/eDP port is associated with this pipe, panel fitting is likely irrelevant for LVDS_BORDER_EN.
+		TRACE("LVDS PF: No LVDS/eDP port found for pipe %d to set border state.\n", pipe);
+	}
+
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK)
+		return fw_status;
+
+	uint32_t pf_ctl_reg = PF_CTL(pipe);
+	uint32_t pf_win_pos_reg = PF_WIN_POS(pipe);
+	uint32_t pf_win_sz_reg = PF_WIN_SZ(pipe);
+	uint32_t pf_ctl_val = intel_i915_read32(devInfo, pf_ctl_reg);
+
+	if (enable) {
+		TRACE("LVDS PF: Enabling Panel Fitter for pipe %d. Native: %dx%d, Scaled: %dx%d\n",
+			pipe, native_mode->timing.h_display, native_mode->timing.v_display,
+			scaled_mode->timing.h_display, scaled_mode->timing.v_display);
+
+		// Simple centered scaling:
+		// Position of scaled image within native panel resolution
+		uint16_t win_x = (native_mode->timing.h_display > scaled_mode->timing.h_display)
+			? (native_mode->timing.h_display - scaled_mode->timing.h_display) / 2 : 0;
+		uint16_t win_y = (native_mode->timing.v_display > scaled_mode->timing.v_display)
+			? (native_mode->timing.v_display - scaled_mode->timing.v_display) / 2 : 0;
+
+		intel_i915_write32(devInfo, pf_win_pos_reg, (win_y << 16) | win_x);
+		intel_i915_write32(devInfo, pf_win_sz_reg,
+			(scaled_mode->timing.v_display << 16) | scaled_mode->timing.h_display);
+
+		pf_ctl_val = PF_ENABLE | PF_PIPE_SEL(pipe); // Assuming pipe index matches PF_PIPE_SEL values
+		// Add a common filter, e.g., Medium 3x3. Exact filter choice can be refined.
+		// pf_ctl_val |= PF_FILTER_MED_3x3; // This bit might vary by Gen.
+
+		// Determine if border is needed.
+		// If scaled size is less than native size, a border will exist.
+		// The LVDS_BORDER_EN bit makes this border black (typically).
+		if (lvds_port != NULL) {
+			if (scaled_mode->timing.h_display < native_mode->timing.h_display ||
+				scaled_mode->timing.v_display < native_mode->timing.v_display) {
+				lvds_port->lvds_border_enabled = true;
+				TRACE("LVDS PF: Border enabled for pipe %d due to scaling.\n", pipe);
+			} else {
+				lvds_port->lvds_border_enabled = false;
+			}
+		}
+	} else {
+		TRACE("LVDS PF: Disabling Panel Fitter for pipe %d.\n", pipe);
+		pf_ctl_val &= ~PF_ENABLE;
+		if (lvds_port != NULL) {
+			lvds_port->lvds_border_enabled = false;
+		}
+	}
+
+	intel_i915_write32(devInfo, pf_ctl_reg, pf_ctl_val);
+	(void)intel_i915_read32(devInfo, pf_ctl_reg); // Posting read
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }
 
@@ -285,13 +361,19 @@ intel_lvds_port_enable(intel_i915_device_info* devInfo, intel_output_port_state*
 		}
 
 		// Dual Channel
-		if (port_state->panel_is_dual_channel) { // From VBT
+		if (port->panel_is_dual_channel) { // Use 'port' not 'port_state' as it's the input param
 			lvds_val |= LVDS_DUAL_CHANNEL_EN; // Same bit for PCH_LVDS and CPU_LVDS
 		} else {
 			lvds_val &= ~LVDS_DUAL_CHANNEL_EN;
 		}
 
-		// TODO: LVDS_BORDER_EN if panel fitting is used.
+		// LVDS Border Enable
+		if (port->lvds_border_enabled) {
+			lvds_val |= LVDS_BORDER_ENABLE; // Assuming LVDS_BORDER_ENABLE is defined in registers.h
+			TRACE("LVDS Port Enable: Enabling border for LVDS port %d on pipe %d.\n", port->logical_port_id, pipe);
+		} else {
+			lvds_val &= ~LVDS_BORDER_ENABLE;
+		}
 
 		lvds_val |= LVDS_PORT_EN; // Enable LVDS port
 		intel_i915_write32(devInfo, lvds_reg, lvds_val);

@@ -223,6 +223,7 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	uint8_t  backlight_control_source; // 0=CPU PWM, 1=PCH PWM, 2=eDP AUX (conceptual values)
 	bool     backlight_pwm_active_low; // True if PWM signal is active low for brightness
 	uint16_t backlight_pwm_freq_hz;    // PWM frequency from VBT
+	bool     lvds_border_enabled;      // For panel fitter border
 	// DPCD-derived properties (for DP/eDP ports)
 	uint8_t  dpcd_revision;
 	uint8_t  dp_max_link_rate; // Value from DPCD_MAX_LINK_RATE (e.g., 0x06, 0x0A, 0x14)

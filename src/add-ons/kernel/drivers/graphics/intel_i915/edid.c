@@ -250,12 +250,103 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 	}
 	// Other bits in byte 37 are reserved or for specific manufacturer use in older EDID versions.
 
+// In edid.c, placeholder for CVT calculation
+static bool
+calculate_cvt_timing(uint16_t h_active, uint16_t v_active, uint8_t v_refresh,
+                       bool reduced_blanking, display_mode* mode)
+{
+	if (mode == NULL) return false;
+
+	// CVT calculation is complex. This is a major TODO.
+	// For now, just fill in the knowns and log that calculation is needed.
+	mode->virtual_width = h_active;
+	mode->virtual_height = v_active;
+	mode->timing.h_display = h_active;
+	mode->timing.v_display = v_active;
+	// mode->timing.pixel_clock = ... calculated ...
+	// mode->timing.h_sync_start = ... calculated ...
+	// mode->timing.h_sync_end = ... calculated ...
+	// mode->timing.h_total = ... calculated ...
+	// mode->timing.v_sync_start = ... calculated ...
+	// mode->timing.v_sync_end = ... calculated ...
+	// mode->timing.v_total = ... calculated ...
+	// mode->timing.flags = ... (set B_POSITIVE_HSYNC/VSYNC based on CVT output) ...
+
+	// Default to some safe values or indicate calculation is pending
+	mode->timing.pixel_clock = 0; // Mark as incomplete
+	mode->space = B_RGB32_LITTLE;
+	mode->h_display_start = 0;
+	mode->v_display_start = 0;
+
+	TRACE("CVT: Calc for %ux%u @ %uHz (RB: %d) - NOT YET IMPLEMENTED. Mode not usable.\n",
+		h_active, v_active, v_refresh, reduced_blanking);
+
+	return false; // Return false until fully implemented
+}
+
+
+// Placeholder for parsing EDID extension blocks
+int
+intel_i915_parse_edid_extension_block(const uint8_t* ext_block_data,
+	display_mode* modes, int* current_mode_count, int max_modes)
+{
+	if (ext_block_data == NULL || modes == NULL || current_mode_count == NULL || max_modes <= 0)
+		return 0; // Or B_BAD_VALUE if we change return type
+
+	uint8_t extension_tag = ext_block_data[0];
+	TRACE("EDID Extension: Found block with tag 0x%02x.\n", extension_tag);
+
+	int modes_added_from_this_block = 0;
+
+	switch (extension_tag) {
+		case 0x02: // CEA EDID Timing Extension (CEA-861-B/C/D/E/F)
+			TRACE("EDID Extension: CEA-861 block found. Parsing STUBBED.\n");
+			// TODO: Implement CEA-861 parsing.
+			// This involves:
+			// 1. Checking version (byte 1).
+			// 2. Finding DTD offset (byte 2).
+			// 3. Parsing DTDs from that offset until end of block or no more DTDs.
+			// 4. Parsing Data Block Collections (Video Data Blocks, Audio Data Blocks, etc.).
+			//    Video Data Blocks can contain Short Video Descriptors (SVDs) which map to VICs (Video Identification Codes).
+			//    VICs can then be translated into full display_mode timings.
+			//
+			// Example structure for a DTD within CEA extension:
+			// const uint8_t* dtd_start = ext_block_data + dtd_offset;
+			// int num_dtds_in_cea = ... ; // from byte 3 or by iterating
+			// for (int i = 0; i < num_dtds_in_cea && *current_mode_count < max_modes; i++) {
+			//   if (parse_dtd(dtd_start + i * 18, &modes[*current_mode_count])) {
+			//     (*current_mode_count)++;
+			//     modes_added_from_this_block++;
+			//   }
+			// }
+			break;
+		case 0x10: // Video Timing Block Extension (VTBE) - Less common
+			TRACE("EDID Extension: VTBE block found. Parsing STUBBED.\n");
+			break;
+		case 0x40: // DisplayID Extension
+			TRACE("EDID Extension: DisplayID block found. Parsing STUBBED.\n");
+			break;
+		// Add other extension tags as needed
+		default:
+			TRACE("EDID Extension: Unknown extension block tag 0x%02x. Skipping.\n", extension_tag);
+			break;
+	}
+	return modes_added_from_this_block;
+}
+
 	// Parse Standard Timing Identifiers (bytes 38-53 / 0x26-0x35)
-	TRACE("EDID: Parsing Standard Timings (up to 8 descriptors):\n");
+	// TODO: Implement GTF/CVT calculations for full mode details.
+	// For now, we'll extract HActive, VActive (derived), and VRefresh.
+	// These won't be added as usable modes until GTF/CVT is done.
+	TRACE("EDID: Parsing Standard Timings (up to 8 descriptors - full calculation pending GTF/CVT):\n");
 	for (int i = 0; i < 8; i++) {
 		const uint8_t* std_timing = &edid->standard_timings[i*2];
 		if (std_timing[0] == 0x01 && std_timing[1] == 0x01) {
 			// Unused descriptor
+			continue;
+		}
+		if (std_timing[0] == 0x00) { // Invalid X resolution if byte 1 is 0
+			TRACE("EDID: Standard Timing #%d: Invalid X resolution (byte 1 is 0x00).\n", i);
 			continue;
 		}
 
@@ -293,23 +384,39 @@ intel_i915_parse_edid(const uint8_t* edid_data, display_mode* modes, int max_mod
 				break;
 		}
 
-		TRACE("EDID: Standard Timing #%d: HActive=%u, Aspect=%s (VActive ~%u), VRefresh=%uHz\n",
+		TRACE("EDID: Standard Timing #%d: HActive=%u, Aspect=%s (VActive ~%u), VRefresh=%uHz.\n",
 			i, h_active, aspect_str, v_active, v_refresh);
-		TRACE("       (Full timing calculation via GTF/CVT needed to make this a usable mode - NOT ADDED YET)\n");
-		// if (mode_count < max_modes && v_active > 0) {
-		//   display_mode* new_mode = &modes[mode_count];
-		//   memset(new_mode, 0, sizeof(display_mode));
-		//   new_mode->virtual_width = h_active;
-		//   new_mode->virtual_height = v_active; // This is an approximation from aspect ratio
-		//   new_mode->space = B_RGB32_LITTLE;
-		//   // TODO: Populate new_mode->timing using GTF or CVT formula based on h_active, v_active, v_refresh.
-		//   // This is a complex calculation and requires implementing the respective standards.
-		//   // Without it, these Standard Timing Identifiers cannot be used to form a complete display_mode.
-		//   // Example: new_mode->timing.pixel_clock = calculate_gtf_pixel_clock(h_active, v_active, v_refresh); etc.
-		//   // For now, these modes are effectively skipped.
-		//   // mode_count++; // Do not increment mode_count until GTF/CVT is implemented.
-		// }
+		if (mode_count < max_modes && v_active > 0) { // Ensure v_active was successfully derived
+			display_mode* new_mode = &modes[mode_count];
+			// Standard Timings typically use CVT.
+			// A more robust implementation would check EDID Feature Support flags for CVT RB (Reduced Blanking) support
+			// and pass 'true' for reduced_blanking if supported and refresh rate is appropriate (e.g. > 50Hz for RB).
+			// For now, try standard CVT (non-reduced blanking).
+			if (calculate_cvt_timing(h_active, v_active, v_refresh, false /*reduced_blanking*/, new_mode)) {
+				// Check for duplicates before adding
+				bool duplicate = false;
+				for (int k = 0; k < mode_count; k++) {
+					if (modes[k].virtual_width == new_mode->virtual_width &&
+						modes[k].virtual_height == new_mode->virtual_height &&
+						modes[k].timing.pixel_clock == new_mode->timing.pixel_clock &&
+						((modes[k].timing.flags & B_TIMING_INTERLACED) == (new_mode->timing.flags & B_TIMING_INTERLACED)) ) {
+						duplicate = true;
+						TRACE("EDID: Duplicate mode from Standard Timing (CVT) skipped: %ux%u @ %uHz\n",
+							new_mode->virtual_width, new_mode->virtual_height, v_refresh);
+						break;
+					}
+				}
+				if (!duplicate) {
+					// Since calculate_cvt_timing currently returns false, this block won't be hit in practice.
+					// When CVT is implemented and returns true, this will add the mode.
+					mode_count++;
+					TRACE("EDID: Added mode from Standard Timing (via CVT): %ux%u @ %uHz\n",
+						new_mode->virtual_width, new_mode->virtual_height, v_refresh);
+				}
+			}
+		}
 	}
+	// The TODO for Standard Timings is now structured; full mode generation depends on CVT implementation.
 
 
 	// TODO: Handle EDID extensions if edid->extension_flag > 0.

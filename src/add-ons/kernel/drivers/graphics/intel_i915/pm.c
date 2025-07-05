@@ -128,16 +128,15 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 		TRACE("PM: Reading RP_STATE_CAP MSR for Haswell (0x%lx)\n", (uint32)MSR_HSW_RP_STATE_CAP);
 	} else if (IS_SANDYBRIDGE(devInfo->device_id) ||
 			   IS_IVYBRIDGE(devInfo->device_id) ||
-			   IS_BROADWELL(devInfo->device_id) ||
-			   IS_SKYLAKE(devInfo->device_id) || // IS_GEN9(devInfo->device_id) could also be used if it covers SKL, KBL, CFL
-			   IS_KABYLAKE(devInfo->device_id) || // Assuming KBL/CFL also use 0x65E
-			   IS_COFFEELAKE(devInfo->device_id) ||
-			   IS_COMETLAKE(devInfo->device_id) ) {
+			   IS_BROADWELL(devInfo->device_id) || // Gen8
+			   IS_GEN9(devInfo->device_id) ||      // Covers SKL, KBL, CFL, CML, GLK
+			   IS_GEN11(devInfo->device_id) ||     // Covers ICL, JSL
+			   IS_GEN12(devInfo->device_id)) {     // Covers TGL, ADL, DG1 etc.
 		rp_state_cap = rdmsr(MSR_RP_STATE_CAP_GEN6_GEN9);
-		TRACE("PM: Reading RP_STATE_CAP MSR for Gen6-Gen9 (SNB/IVB/BDW/SKL/KBL/CFL/CML) (0x%lx)\n", (uint32)MSR_RP_STATE_CAP_GEN6_GEN9);
+		TRACE("PM: Reading RP_STATE_CAP MSR for Gen6-Gen12 (excluding HSW) (0x%lx)\n", (uint32)MSR_RP_STATE_CAP_GEN6_GEN9);
 	}
-	// TODO: Add MSR reads for other Gens (e.g., Gen11, Gen12) if their MSRs differ
-	// or if this generic MSR is not applicable. The interpretation of bits might also change.
+	// TODO: Verify MSR address and interpretation for future Gens beyond Gen12.
+	// Actual frequency control mechanisms for Gen11+ are more complex and rely on MMIO/firmware.
 
 	if (rp_state_cap != 0) {
 		devInfo->rps_state->max_p_state_val = (rp_state_cap >> 0) & 0xFF; // Max P-state (lowest GPU freq value)

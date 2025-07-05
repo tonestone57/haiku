@@ -12,25 +12,26 @@
 #define _PIPE_A_BASE			0x70000
 #define _PIPE_B_BASE			0x71000
 #define _PIPE_C_BASE			0x72000
-#define _TRANSCODER_EDP_BASE	0x7F000 // Example, check PRM
+#define _TRANSCODER_EDP_BASE	0x7F000 // Example, check PRM for actual EDP transcoder base if different
 
+// TRANSCONF is used for Transcoder Configuration (e.g., 0x70008 for Pipe A's transcoder)
 #define TRANSCONF(pipe)			(_PIPE(pipe) + 0x0008)
 	#define TRANSCONF_ENABLE				(1U << 31)
-	#define TRANSCONF_STATE_ENABLE_IVB		(1U << 30)
-	#define TRANSCONF_INTERLACE_MODE_MASK_IVB (3U << 21)
+	#define TRANSCONF_STATE_ENABLE_IVB		(1U << 30) // Read-only status on HSW, R/W on IVB
+	#define TRANSCONF_INTERLACE_MODE_MASK_IVB (3U << 21) // For IVB and some HSW
 		#define TRANSCONF_PROGRESSIVE_IVB			(0U << 21)
-		#define TRANSCONF_INTERLACED_FIELD0_IVB		(2U << 21)
-		#define TRANSCONF_INTERLACEMODE_INTERLACED_IVB (2U << 21)
-	#define TRANSCONF_PIPE_SEL_MASK_IVB		(3U << 24)
+		#define TRANSCONF_INTERLACED_FIELD0_IVB		(2U << 21) // Example for one field type
+		#define TRANSCONF_INTERLACEMODE_INTERLACED_IVB (2U << 21) // Generic interlaced
+	#define TRANSCONF_PIPE_SEL_MASK_IVB		(3U << 24) // Not present on HSW TRANS_CONF
 		#define TRANSCONF_PIPE_SEL_A_IVB		(0U << 24)
 		#define TRANSCONF_PIPE_SEL_B_IVB		(1U << 24)
 		#define TRANSCONF_PIPE_SEL_C_IVB		(2U << 24)
-	#define TRANSCONF_PIPE_BPC_MASK			(7U << 5)
+	#define TRANSCONF_PIPE_BPC_MASK			(7U << 5)  // Bits 7:5
 	#define TRANSCONF_PIPE_BPC_SHIFT		5
-		#define TRANSCONF_PIPE_BPC_6_FIELD	0
-		#define TRANSCONF_PIPE_BPC_8_FIELD	1
-		#define TRANSCONF_PIPE_BPC_10_FIELD	2
-		#define TRANSCONF_PIPE_BPC_12_FIELD	3
+		#define TRANSCONF_PIPE_BPC_6_FIELD	0 // 6 bpc field value for TRANSCONF
+		#define TRANSCONF_PIPE_BPC_8_FIELD	1 // 8 bpc field value
+		#define TRANSCONF_PIPE_BPC_10_FIELD	2 // 10 bpc field value
+		#define TRANSCONF_PIPE_BPC_12_FIELD	3 // 12 bpc field value
 	#define TRANSCONF_OUTPUT_COLORSPACE_MASK	(1U << 8) // HSW: YUV vs RGB
 		#define TRANSCONF_OUTPUT_COLORSPACE_RGB		(0U << 8)
 		#define TRANSCONF_OUTPUT_COLORSPACE_YUV_HSW	(1U << 8)
@@ -45,16 +46,21 @@
 	#define TRANSCONF_FRAME_START_DELAY_SHIFT	16
 	#define TRANSCONF_MSA_TIMING_DELAY_MASK		(3U << 14) // HSW: Bits 15:14
 
+#define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
+#define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE : \
+                           ((trans) == 1 ? _PIPE_B_BASE : \
+                           ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
+
 
 // --- Interrupt Registers ---
-#define DEIMR			0x4400c // Display Engine Interrupt Mask Register
-#define DEIIR           0x44000 // Display Engine Interrupt Identity Register
-#define DEIER           0x44008 // Display Engine Interrupt Enable Register
+#define DEIMR			0x4400c
+#define DEIIR           0x44000
+#define DEIER           0x44008
 	#define DE_MASTER_IRQ_CONTROL   (1U << 31)
-	#define DE_PIPEA_VBLANK_IVB     (1U << 7)  // IVB+ Pipe A VBlank
-	#define DE_PIPEB_VBLANK_IVB     (1U << 15) // IVB+ Pipe B VBlank
-	#define DE_PIPEC_VBLANK_IVB     (1U << 23) // IVB+ Pipe C VBlank (HSW+)
-	#define DE_PCH_EVENT_IVB        (1U << 18) // PCH events (hotplug, etc.)
+	#define DE_PIPEA_VBLANK_IVB     (1U << 7)
+	#define DE_PIPEB_VBLANK_IVB     (1U << 15)
+	#define DE_PIPEC_VBLANK_IVB     (1U << 23)
+	#define DE_PCH_EVENT_IVB        (1U << 18)
 
 #define GT_IIR					0x2064
 #define GT_IMR					0x2068
@@ -71,11 +77,11 @@
 #define HWS_PGA			0x02080
 
 // --- GMBUS Registers ---
-#define GMBUS0				0x5100 // Clock/Port Select
-#define GMBUS1				0x5104 // Command/Status
-#define GMBUS2				0x5108 // Status
-#define GMBUS3				0x510C // Data Buffer
-#define GMBUS4				0x5110 // Index for Indexed I2C
+#define GMBUS0				0x5100
+#define GMBUS1				0x5104
+#define GMBUS2				0x5108
+#define GMBUS3				0x510C
+#define GMBUS4				0x5110
 
 // --- Clocking Registers (Gen7 Focus: IVB/HSW) ---
 #define LCPLL_CTL				0x130040
@@ -86,7 +92,7 @@
 		#define LCPLL_LINK_RATE_1350	1
 		#define LCPLL_LINK_RATE_1620	2
 		#define LCPLL_LINK_RATE_2700	3
-		#define LCPLL_LINK_RATE_5400_HSW 4 // For HSW LCPLL0, not typically LCPLL1 source
+		#define LCPLL_LINK_RATE_5400_HSW 4
 	#define LCPLL_CD_SOURCE_FCLK_HSW (1U << 27)
 	#define LCPLL_CD_SOURCE_LCPLL_HSW (0U << 27)
 
@@ -135,8 +141,8 @@
 	#define DPLL_MODE_LVDS_IVB             (0U << 24)
 	#define DPLL_MODE_DP_IVB               (2U << 24)
 	#define DPLL_MODE_HDMI_DVI_IVB         (4U << 24)
-	#define DPLL_PORT_TRANS_SELECT_IVB_MASK (1U << 23) // For DPLL A/B, selects which transcoder it feeds
-	#define DPLL_REF_CLK_SEL_IVB_MASK		(3U << 27) // Selects SSC, LCPLL, or external for DPLL ref.
+	#define DPLL_PORT_TRANS_SELECT_IVB_MASK (1U << 23)
+	#define DPLL_REF_CLK_SEL_IVB_MASK		(3U << 27)
 
 #define DPLL_MD_A_IVB           0x601C
 #define DPLL_MD_B_IVB           0x6020
@@ -155,7 +161,7 @@
 	#define HSW_WRPLL_M2_FRAC_MASK      (0x3FFU << 22)
 	#define HSW_WRPLL_M2_FRAC_SHIFT     22
 	#define HSW_WRPLL_M2_FRAC_ENABLE    (1U << 21)
-	#define HSW_WRPLL_M2_INT_MASK       (0x7FU << 14) // Corrected based on common 7-bit M2_INT
+	#define HSW_WRPLL_M2_INT_MASK       (0x7FU << 14)
 	#define HSW_WRPLL_M2_INT_SHIFT      14
 	#define HSW_WRPLL_N_DIV_MASK        (0x7FU << 7)
 	#define HSW_WRPLL_N_DIV_SHIFT       7
@@ -168,7 +174,7 @@
 #define SPLL_CTL_HSW			0x46020
 	#define SPLL_PLL_ENABLE_HSW     (1U << 31)
 	#define SPLL_PLL_LOCK_HSW       (1U << 30)
-	#define SPLL_REF_SEL_MASK_HSW	(1U << 26) // Assumes 1 bit for LCPLL vs SSC
+	#define SPLL_REF_SEL_MASK_HSW	(1U << 26)
 	#define SPLL_REF_LCPLL_HSW      (0U << 26)
 	#define SPLL_REF_SSC_HSW        (1U << 26)
 	#define SPLL_SSC_ENABLE_HSW     (1U << 24)
@@ -182,57 +188,50 @@
 	#define SPLL_N_MASK_HSW         (0x3FU << SPLL_N_SHIFT_HSW)
 
 // --- Power Management ---
-#define RENDER_C_STATE_CONTROL_HSW	0x83D0 // RC_CTL on HSW
+#define RENDER_C_STATE_CONTROL_HSW	0x83D0
 	#define HSW_RC_CTL_RC6_ENABLE		(1U << 0)
 	#define HSW_RC_CTL_RC6p_ENABLE		(1U << 1)
 	#define HSW_RC_CTL_RC6pp_ENABLE		(1U << 2)
-	#define HSW_RC_CTL_RC_STATE_MASK	(7U << 16) // Bits 18:16 for current RC state
+	#define HSW_RC_CTL_RC_STATE_MASK	(7U << 16)
 	#define HSW_RC_CTL_RC_STATE_SHIFT	16
 		#define HSW_RC_STATE_RC0		0x0
-		#define HSW_RC_STATE_RC6		0x4 // Example, check PRM
+		#define HSW_RC_STATE_RC6		0x4
 		#define HSW_RC_STATE_RC6p		0x5
 		#define HSW_RC_STATE_RC6pp		0x6
-
-#define RC_CONTROL_IVB			0xA090 // RC_CTL on IVB
+#define RC_CONTROL_IVB			0xA090
 	#define IVB_RC_CTL_RC6_ENABLE		(1U << 0)
 	#define IVB_RC_CTL_RC6P_ENABLE		(1U << 1)
 	#define IVB_RC_CTL_RC6PP_ENABLE		(1U << 2)
-#define RC_STATE_IVB			0xA094 // Current RC state on IVB (bits 2:0)
-
+#define RC_STATE_IVB			0xA094
 #define GEN6_RPNSWREQ				0xA008
-	#define RPNSWREQ_TARGET_PSTATE_SHIFT 0 // Bits 7:0 for target P-state
+	#define RPNSWREQ_TARGET_PSTATE_SHIFT 0
 #define GEN6_RP_CONTROL				0xA024
 	#define RP_CONTROL_RPS_ENABLE		(1U << 31)
-	#define RP_CONTROL_MODE_HW_AUTONOMOUS (0U << 29) // Default
+	#define RP_CONTROL_MODE_HW_AUTONOMOUS (0U << 29)
 	#define RP_CONTROL_MODE_SW_CONTROL    (1U << 29)
 #define GEN6_RP_INTERRUPT_LIMITS	0xA02C
-	#define RP_INT_LIMITS_LOW_PSTATE_SHIFT  0  // Max P-state for down interrupt (8 bits)
-	#define RP_INT_LIMITS_HIGH_PSTATE_SHIFT 16 // Min P-state for up interrupt (8 bits)
+	#define RP_INT_LIMITS_LOW_PSTATE_SHIFT  0
+	#define RP_INT_LIMITS_HIGH_PSTATE_SHIFT 16
 #define GEN6_RP_DOWN_TIMEOUT		0xA010
 #define GEN6_RP_UP_TIMEOUT			0xA014
 #define GEN6_RP_DOWN_THRESHOLD		0xA01C
 #define GEN6_RP_UP_THRESHOLD		0xA018
-#define RPSTAT0					0xA00C // Contains current P-state
-	#define CUR_PSTATE_IVB_HSW_MASK		(0xFFU << 23) // Bits 30:23 for IVB/HSW
+#define RPSTAT0					0xA00C
+	#define CUR_PSTATE_IVB_HSW_MASK		(0xFFU << 23)
 	#define CUR_PSTATE_IVB_HSW_SHIFT	23
-
 #define PMIMR					0xA168
 #define PMISR					0xA164
 	#define PM_INTR_RPS_UP_THRESHOLD	(1U << 5)
 	#define PM_INTR_RPS_DOWN_THRESHOLD	(1U << 6)
 	#define PM_INTR_RC6_THRESHOLD		(1U << 8)
-
-#define GEN6_RC6_THRESHOLD_IDLE_IVB	0xA0B0 // Example, check PRM
-#define HSW_RC6_THRESHOLD_IDLE		0x138154 // Example, check PRM
-
+#define GEN6_RC6_THRESHOLD_IDLE_IVB	0xA0B0
+#define HSW_RC6_THRESHOLD_IDLE		0x138154
 // MSRs
 #define MSR_IVB_RP_STATE_CAP	0x0000065E
 #define MSR_HSW_RP_STATE_CAP	0x00138098
-
 // Fuses
-#define FUSE_STRAP_HSW			0xC2014 // Example address, check HSW PRM for exact offset
-	#define HSW_EXTREF_FREQ_100MHZ_BIT (1U << 22) // External Reference Frequency is 100MHz (for SSC)
-
+#define FUSE_STRAP_HSW			0xC2014
+	#define HSW_EXTREF_FREQ_100MHZ_BIT (1U << 22)
 
 // --- FDI Registers (Ivy Bridge PCH Link) ---
 #define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100)
@@ -247,7 +246,7 @@
 	#define FDI_TX_CTL_LANE_MASK_IVB		(0xFU << 19)
 		#define FDI_TX_CTL_LANE_1_IVB		(1U << 19)
 		#define FDI_TX_CTL_LANE_2_IVB		(3U << 19)
-		#define FDI_TX_CTL_LANE_3_IVB		(5U << 19) // For IVB 3 lanes
+		#define FDI_TX_CTL_LANE_3_IVB		(5U << 19)
 		#define FDI_TX_CTL_LANE_4_IVB		(7U << 19)
 	#define FDI_TX_CTL_VOLTAGE_SWING_MASK_IVB (7U << FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB)
 	#define FDI_TX_CTL_PRE_EMPHASIS_MASK_IVB  (3U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB)
@@ -263,8 +262,7 @@
 	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_1_IVB	(1U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB)
 	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_2_IVB	(2U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB)
 	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_3_IVB	(3U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB)
-	#define FDI_PCDCLK_CHG_STATUS_IVB		(1U << 7) // PCH Display Clock Change Status (Read Only)
-
+	#define FDI_PCDCLK_CHG_STATUS_IVB		(1U << 7)
 
 #define FDI_RX_CTL(pipe)		(_PIPE(pipe) + 0x10C)
 	#define FDI_RX_ENABLE					(1U << 31)
@@ -274,9 +272,8 @@
 		#define FDI_RX_CTL_LANE_3_IVB		(5U << 19)
 		#define FDI_RX_CTL_LANE_4_IVB		(7U << 19)
 	#define FDI_RX_PLL_ENABLE_IVB			(1U << 13)
-	#define FDI_FS_ERRC_ENABLE_IVB			(1U << 7) // Frame Start Error Correction Enable
-	#define FDI_FE_ERRC_ENABLE_IVB			(1U << 6) // Frame End Error Correction Enable
-
+	#define FDI_FS_ERRC_ENABLE_IVB			(1U << 7)
+	#define FDI_FE_ERRC_ENABLE_IVB			(1U << 6)
 
 #define FDI_RX_IIR(pipe)		(_PIPE(pipe) + 0x110)
 	#define FDI_RX_BIT_LOCK_IVB		(1U << 1)
@@ -285,7 +282,7 @@
 #define FDI_TX_NVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x108)
 #define FDI_RX_MVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x114)
 #define FDI_RX_NVAL_IVB_REG(pipe)		(_PIPE(pipe) + 0x118)
-	#define FDI_MVAL_TU_SIZE(tu)		(((tu) - 1) << 16) // TU Size (N-1 encoding)
+	#define FDI_MVAL_TU_SIZE(tu)		(((tu) - 1) << 16)
 
 // --- DDI Buffer Control (DDI_BUF_CTL) for HSW/IVB ---
 	#define DDI_BUF_CTL_HSW_DP_VS_PE_MASK         (0x1EU)
@@ -305,7 +302,6 @@
 	#define PORT_BUF_CTL_IVB_EDP_VS_PE_SHIFT      0
 	#define PORT_BUF_CTL_IVB_EDP_VS_SHIFT         0
 	#define PORT_BUF_CTL_IVB_EDP_PE_SHIFT         2
-
 
 // --- DisplayPort DPCD Defines (standard addresses) ---
 #define DPCD_DPCD_REV                       0x000
@@ -373,48 +369,83 @@
 
 
 // --- HDMI Audio / InfoFrame Registers ---
-// The TRANS_AUD_CTL(pipe) macro needs to point to the correct base for audio control.
-// For HSW/IVB, AUD_CTL_ST_A is 0x6502C, AUD_CTL_ST_B is 0x6512C etc.
-// This is different from _PIPE(pipe) + 0x650.
-// Let's define specific registers for AUD_CTL_ST for now.
-#define AUD_CTL_ST_A            0x6502C // HSW/IVB Transcoder A Audio Control & Status
-#define AUD_CTL_ST_B            0x6512C // HSW/IVB Transcoder B Audio Control & Status
-#define AUD_CTL_ST_C            0x6522C // HSW Transcoder C Audio Control & Status
-// Replace usage of TRANS_AUD_CTL(pipe) with these specific registers or a new macro.
-	#define AUD_CTL_ST_ENABLE			(1U << 31) // Audio Output Enable
-	#define AUD_CTL_ST_SAMPLE_RATE_MASK		(0xFU << 20) // Bits 23:20 - N_VALUE_INDEX_AUDIO
+// Actual register addresses for audio control (IVB/HSW)
+#define _AUD_CONFIG_A_IVBHSW		0x65000 // For Transcoder A
+#define _AUD_M_CTS_ENABLE_A_IVBHSW	0x65028
+#define AUD_CTL_ST_A            0x6502C
+#define _AUD_CONFIG_B_IVBHSW		0x65100 // For Transcoder B
+#define _AUD_M_CTS_ENABLE_B_IVBHSW	0x65128
+#define AUD_CTL_ST_B            0x6512C
+#define _AUD_CONFIG_C_HSW		0x65200 // For Transcoder C (HSW+)
+#define _AUD_M_CTS_ENABLE_C_HSW	0x65228
+#define AUD_CTL_ST_C            0x6522C
+
+// Generic macros to get register based on transcoder ID
+// These assume transcoder_id 0=A, 1=B, 2=C
+#define HSW_AUD_CFG(transcoder_id) \
+	( (transcoder_id == 0) ? _AUD_CONFIG_A_IVBHSW : \
+	  ((transcoder_id == 1) ? _AUD_CONFIG_B_IVBHSW : _AUD_CONFIG_C_HSW) )
+#define HSW_AUD_M_CTS_ENABLE(transcoder_id) \
+	( (transcoder_id == 0) ? _AUD_M_CTS_ENABLE_A_IVBHSW : \
+	  ((transcoder_id == 1) ? _AUD_M_CTS_ENABLE_B_IVBHSW : _AUD_M_CTS_ENABLE_C_HSW) )
+// AUD_CTL_ST already defined specifically
+
+	#define AUD_CTL_ST_ENABLE			(1U << 31)
+	#define AUD_CTL_ST_SAMPLE_RATE_MASK		(0xFU << 20)
 	#define AUD_CTL_ST_SAMPLE_RATE_SHIFT	20
 		#define AUD_CTL_ST_SAMPLE_RATE_48KHZ		(0x0U << AUD_CTL_ST_SAMPLE_RATE_SHIFT)
 		#define AUD_CTL_ST_SAMPLE_RATE_44_1KHZ	(0x2U << AUD_CTL_ST_SAMPLE_RATE_SHIFT)
 		#define AUD_CTL_ST_SAMPLE_RATE_32KHZ	(0x3U << AUD_CTL_ST_SAMPLE_RATE_SHIFT)
-	#define AUD_CTL_ST_CHANNEL_COUNT_MASK	(0xFU << 16) // Bits 19:16 - CH_COUNT_AUDIO
+	#define AUD_CTL_ST_CHANNEL_COUNT_MASK	(0xFU << 16)
 	#define AUD_CTL_ST_CHANNEL_COUNT_SHIFT	16
-		#define AUD_CTL_ST_CHANNELS_2		(0x1U << AUD_CTL_ST_CHANNEL_COUNT_SHIFT) // Stereo
+		#define AUD_CTL_ST_CHANNELS_2		(0x1U << AUD_CTL_ST_CHANNEL_COUNT_SHIFT)
+
+// Bitfields for HSW_AUD_CFG
+	#define AUD_CONFIG_N_PROG_ENABLE		(1U << 28)
+	#define AUD_CONFIG_N_VALUE_INDEX		(1U << 29)
+	#define AUD_CONFIG_UPPER_N_MASK			(0xFFU << 20)
+	#define AUD_CONFIG_UPPER_N_SHIFT		20
+	#define AUD_CONFIG_LOWER_N_MASK			(0xFFFFU << 4) // Check: PRM indicates N[19:4] for lower
+	#define AUD_CONFIG_LOWER_N_SHIFT		4
+	#define AUD_CONFIG_N(n_val)				(REG_FIELD_PREP(AUD_CONFIG_UPPER_N_MASK, ((n_val) >> 16) & 0xFF) | \
+											 REG_FIELD_PREP(AUD_CONFIG_LOWER_N_MASK, (n_val) & 0xFFFF))
+	#define AUD_CONFIG_PIXEL_CLOCK_HDMI_MASK	(0xFU << 16)
+	#define AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT	16
+		#define AUD_CONFIG_HDMI_CLOCK_25200		(0x1U << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+		#define AUD_CONFIG_HDMI_CLOCK_27000		(0x2U << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+		#define AUD_CONFIG_HDMI_CLOCK_74250		(0x7U << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+		#define AUD_CONFIG_HDMI_CLOCK_148500	(0x9U << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+		#define AUD_CONFIG_HDMI_CLOCK_297000	(0xBU << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+		#define AUD_CONFIG_HDMI_CLOCK_594000	(0xDU << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
+	#define AUD_CONFIG_DISABLE_NCTS			(1U << 3)
+
+// Bitfields for HSW_AUD_M_CTS_ENABLE
+	#define AUD_M_CTS_M_PROG_ENABLE		(1U << 20)
+	#define AUD_M_CTS_M_VALUE_INDEX		(1U << 21)
+	#define AUD_CONFIG_M_MASK			(0xFFFFF)      // Bits 19:0 for M value (actually 24 bits on some docs: M[23:0])
+	                                                       // Let's assume 20 bits for now.
 
 // Video DIP (Data Island Packet) Control and Data Registers
-// These are also per-pipe/transcoder. Example for Pipe A / Transcoder A.
-// For HSW, these are DDI-specific: HSW_TVIDEO_DIP_CTL_DDI(ddi_port_idx)
-// For IVB, these are pipe-specific: VIDEO_DIP_CTL(pipe)
-#define VIDEO_DIP_CTL(pipe)				(_PIPE(pipe) + 0x600) // Example base, adjust as per PRM (e.g. 0x70070 for Pipe A on IVB)
-	#define VIDEO_DIP_ENABLE_AVI_IVB		(1U << 20) // Enable AVI InfoFrame
-	#define VIDEO_DIP_ENABLE_AUDIO_IVB		(1U << 21) // Enable Audio InfoFrame (less common in this reg)
-	#define VIDEO_DIP_PORT_SELECT_MASK_HSW	(3U << 28) // For HSW DDI-specific DIP
-		#define VIDEO_DIP_PORT_SELECT_HSW(ddi_idx) ((ddi_idx) << 28)
-	#define VIDEO_DIP_ENABLE_HSW_GENERIC_MASK_ALL (0x1FU << 16) // Mask for all HSW DIP type enables
-	#define VIDEO_DIP_ENABLE_AVI_HSW		(1U << 16) // Generic enable for AVI on HSW
-	#define VIDEO_DIP_ENABLE_AUDIO_HSW		(1U << 17) // Generic enable for Audio on HSW
-	#define VIDEO_DIP_TYPE_MASK_HSW			(7U << 25) // For HSW, selects packet type
-		#define VIDEO_DIP_TYPE_AVI_HSW		(0U << 25)
-		#define VIDEO_DIP_TYPE_AUDIO_HSW	(1U << 25)
+#define VIDEO_DIP_CTL(pipe)				(_PIPE(pipe) + 0x70070) // IVB: TRANS_DP_CTL / HDMI_DIP_CTL
+	#define VIDEO_DIP_ENABLE_AVI_IVB		(1U << 20)
+	#define VIDEO_DIP_ENABLE_AUDIO_IVB		(1U << 21) // This bit is for Audio Infoframe on some gens like IVB
 	#define VIDEO_DIP_FREQ_MASK_IVB			(3U << 29)
-		#define VIDEO_DIP_FREQ_VSYNC_IVB	(1U << 29) // Send per VSYNC
-	#define VIDEO_DIP_FREQ_MASK_HSW			(3U << 0)  // HSW: Bits 1:0 for frequency
-		#define VIDEO_DIP_FREQ_VSYNC_HSW	(1U << 0)  // Send per VSYNC
+		#define VIDEO_DIP_FREQ_VSYNC_IVB	(1U << 29)
 
-#define VIDEO_DIP_DATA(pipe)			(_PIPE(pipe) + 0x604) // Example base for data packets
-// HSW DDI-specific DIP Data registers
-#define HSW_TVIDEO_DIP_CTL_DDI(ddi_idx)	(0x6B070 + ((ddi_idx) * 0x100)) // DDI_A_REG_VIDEO_DIP_CTL = 0x6B070
-#define HSW_TVIDEO_DIP_DATA_DDI(ddi_idx)	(0x6B074 + ((ddi_idx) * 0x100)) // DDI_A_REG_VIDEO_DIP_DATA
+#define VIDEO_DIP_DATA(pipe)			(_PIPE(pipe) + 0x70074) // IVB: Pipe A Data Island Packet Data
+
+#define HSW_TVIDEO_DIP_CTL_DDI(ddi_idx)	(0x6B070 + ((ddi_idx) * 0x100))
+	#define VIDEO_DIP_PORT_SELECT_MASK_HSW	(3U << 28)
+		#define VIDEO_DIP_PORT_SELECT_HSW(ddi_idx) ((ddi_idx) << 28)
+	#define VIDEO_DIP_ENABLE_HSW_GENERIC_MASK_ALL (0x1FU << 16)
+	#define VIDEO_DIP_ENABLE_AVI_HSW		(1U << 16)
+	#define VIDEO_DIP_ENABLE_AUDIO_HSW		(1U << 17) // For Audio Infoframe
+	#define VIDEO_DIP_TYPE_MASK_HSW			(7U << 25)
+		#define VIDEO_DIP_TYPE_AVI_HSW		(0U << 25)
+		#define VIDEO_DIP_TYPE_AUDIO_HSW	(1U << 25) // For Audio Infoframe
+	#define VIDEO_DIP_FREQ_MASK_HSW			(3U << 0)
+		#define VIDEO_DIP_FREQ_VSYNC_HSW	(1U << 0)
+#define HSW_TVIDEO_DIP_DATA_DDI(ddi_idx)	(0x6B074 + ((ddi_idx) * 0x100))
 
 
 // --- Palette / CLUT Registers ---
@@ -455,3 +486,5 @@
 #define GEN7_LRCA_PDP0_LDW                 0x27
 
 #endif /* INTEL_I915_REGISTERS_H */
+
+[end of src/add-ons/kernel/drivers/graphics/intel_i915/registers.h]

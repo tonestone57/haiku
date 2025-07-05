@@ -85,6 +85,9 @@ static const bigtime_t kAgingThresholds[NUM_MLFQ_LEVELS] = {
 static const bigtime_t kMinEffectiveQuantum = 500;     // 0.5 ms
 static const bigtime_t kMaxEffectiveQuantum = 100000;  // 100 ms
 
+// EWMA alpha for CPUEntry instantaneous load calculation
+static const float kInstantLoadEWMAAlpha = 0.4f;
+
 // --- End MLFQ and DTQ Definitions ---
 
 

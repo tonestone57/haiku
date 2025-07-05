@@ -388,15 +388,36 @@ struct bdb_lvds_lfp_data_entry { // One entry from Block 42
 	                                // Other bits reserved or for other features.
 	// Power sequence timings might also be here in some VBT versions,
 	// but often they are in BDB_LFP_POWER (Block 44) or Driver Features for eDP.
-	// For now, keeping it to BPC and Dual Channel.
-	// uint16_t t1_power_on_to_vdd_ms;
-	// uint16_t t2_vdd_to_panel_on_ms;
-	// uint16_t t3_panel_off_to_vdd_off_ms;
-	// uint16_t t4_vdd_off_to_power_cycle_ms;
-	// uint16_t t5_power_cycle_to_vdd_on_ms;
-	// uint16_t backlight_on_delay_ms;
-	// uint16_t backlight_off_delay_ms;
+	// Adding common LFP power sequence delays that *might* be in this entry.
+	// Their presence needs to be checked against entry table_size.
+	uint16_t t1_vdd_panel_on_ms; // Time from VDD on to panel signals active (e.g. T1+T3 for eDP)
+	uint16_t t2_panel_bl_on_ms;  // Time from panel signals active to backlight on (e.g. T8 for eDP)
+	uint16_t t3_bl_panel_off_ms; // Time from backlight off to panel signals off (e.g. T9 for eDP)
+	uint16_t t4_panel_vdd_off_ms;// Time from panel signals off to VDD off (e.g. T10 for eDP)
+	uint16_t t5_vdd_cycle_ms;    // VDD off cycle time (e.g. T11+T12 for eDP)
+	// Note: PWM frequency and backlight control source are more reliably in BDB_LFP_BACKLIGHT.
+	// Other VBTs might have different fields or no power sequencing here.
 } __attribute__((packed));
+
+// Block 44: LFP Power Management / Sequencing Table (distinct from per-entry data in Block 42)
+struct bdb_lfp_power_entry { // One entry for a panel type
+	uint8_t panel_type_index; // Index to match LVDS options panel_type
+	uint8_t reserved0;        // Often 0xFF or 0x00
+	uint16_t t1_vdd_power_up_delay_ms;      // T1: VDD power up delay
+	uint16_t t2_panel_power_on_delay_ms;    // T2: Panel power on (to data lines active) delay
+	uint16_t t3_backlight_on_delay_ms;    // T3: Backlight on delay (after data lines active)
+	uint16_t t4_backlight_off_delay_ms;   // T4: Backlight off delay (before data lines off)
+	uint16_t t5_panel_power_off_delay_ms;   // T5: Panel power off (data lines off to VDD off) delay
+	uint16_t t6_vdd_power_down_delay_ms;    // T6: VDD power down stabilization time (sometimes called T5_VDD_cycle_off)
+} __attribute__((packed));
+
+struct bdb_lfp_power {
+	uint8_t table_header_size; // Size of this header (e.g. 1 byte for num_entries)
+	uint8_t num_entries;       // Number of bdb_lfp_power_entry in the table
+	// struct bdb_lfp_power_entry entries[]; // Variable number of entries follow
+	// For parsing, we'll iterate num_entries times.
+} __attribute__((packed));
+
 
 // Block 43: LFP Backlight Control Data
 struct bdb_lfp_backlight_data_entry {
@@ -436,28 +457,39 @@ struct bdb_edp_power_seq_entry { // From FreeBSD's edp_power_seq, adapted
 
 // Driver Features Sub-block 0x05: eDP Configuration
 #define BDB_SUB_BLOCK_EDP_CONFIG 0x05
-struct bdb_edp_config_entry { // As per common VBT interpretations
-	uint8_t panel_type_index; // Index to match against LVDS options panel_type or LFP data entries
-	uint8_t vswing_preemph_config_index; // Index into a VS/PE table if provided by VBT, or direct value
-	uint16_t edp_txt_override; // Potentially eDP Txt override value
-	// Other reserved bytes might follow, or specific flags
-	uint8_t reserved[4]; // Example, size can vary by VBT version
+
+struct bdb_dp_vs_pe_entry {
+	uint8_t preemphasis; // Pre-emphasis level (e.g., VBT values 0-3 map to DPCD values)
+	uint8_t vswing;      // Voltage swing level (e.g., VBT values 0-3 map to DPCD values)
 } __attribute__((packed));
 
-// The BDB_EDP_CONFIG sub-block might contain an array of these entries,
-// or a more complex structure with a table of VS/PE values.
-// For now, we'll assume it points to an array of bdb_edp_config_entry.
-// A more complete structure would be:
-// struct bdb_edp_vswing_preemph_table_entry {
-//    uint8_t preemph;
-//    uint8_t vswing;
-// };
-// struct bdb_driver_features_edp_config {
-//    uint8_t panel_count; // Number of panel specific entries
-//    struct bdb_edp_config_entry entries[16]; // Max 16 entries
-//    struct bdb_edp_vswing_preemph_table_entry vswing_preemph_table[NUM_VS_PE_ENTRIES];
-// };
-// For simplicity in this step, we'll focus on parsing the config_index from bdb_edp_config_entry.
+struct bdb_edp_config_entry {
+	uint8_t panel_type_index;          // Index to match LVDS options panel_type
+	uint8_t vswing_preemph_table_index; // Index into the vswing_preemph_table in bdb_driver_features_edp_config
+	uint16_t edp_txt_override_ms;      // eDP Txt override value in ms (e.g. T12 power up/down for some panels)
+	uint8_t reserved[4];
+} __attribute__((packed));
+
+// Structure for the entire BDB_SUB_BLOCK_EDP_CONFIG (0x05)
+struct bdb_driver_features_edp_config {
+	uint8_t panel_count;    // Number of panel specific entries in `config_entries`
+	// struct bdb_edp_config_entry config_entries[]; // Variable based on panel_count
+	// struct bdb_dp_vs_pe_entry vs_pe_table[];      // Variable, follows config_entries
+	// For parsing, we'll handle these as pointers based on panel_count and sub-block size.
+	// For now, we'll define a reasonable max for direct struct usage if simpler.
+	// Let's assume a common case: 1 config_entry, and then the table.
+	// A more robust parser would calculate offsets.
+	// The sub-block size will determine how many entries are actually present.
+	// For simplicity, we will parse the first config_entry and assume the table follows immediately
+	// if the sub_block_size allows. The number of entries in vs_pe_table is often fixed (e.g. 5 or 10).
+	// Let's define a max for the table that might be embedded.
+	#define MAX_VS_PE_TABLE_ENTRIES 10
+	// This structure is conceptual for parsing. The actual layout in VBT is:
+	// panel_count (1 byte)
+	// config_entries (panel_count * sizeof(bdb_edp_config_entry))
+	// vs_pe_table (variable number of entries, often fixed like 5*2 bytes for 5 entries)
+	// The sub-block size from the BDB header (ID, Size) for sub-block 0x05 will be key.
+} __attribute__((packed)); // This top-level struct is mostly for conceptual grouping.
 
 
 // Block 27: eDP specific configuration
@@ -533,6 +565,16 @@ struct bdb_mipi_sequence {
 	// uint8_t data[...];
 } __attribute__((packed));
 
+// Block 56: Compression Parameters
+struct bdb_compression_parameters_header {
+	// This is a conceptual header. The actual VBT block might just start
+	// with version/flags immediately after the BDB Block ID/Size.
+	// For placeholder parsing, we'll read a few bytes if available.
+	uint8_t version; // Example: Version of this compression block structure
+	uint8_t flags;   // Example: Bit 0: FBC enable by VBT, Bit 1: DSC enable by VBT
+	// Specific parameters for FBC, DSC (slice height, bpp targets, etc.) would follow.
+} __attribute__((packed));
+
 // Block 58: Generic DTD Block
 #define MAX_VBT_GENERIC_DTDS 4 // Store up to 4 generic DTDs from VBT
 // The block itself is just an array of 18-byte DTDs (struct generic_dtd_entry_vbt).
@@ -578,7 +620,9 @@ struct intel_vbt_data {
 	uint32_t edp_color_depth_bits; // Parsed from BDB_EDP.color_depth
 	uint8_t  edp_sdp_port_id_bits; // Parsed from BDB_EDP.sdp_port_id_bits (if VBT ver >= 173)
 	uint16_t edp_panel_misc_bits_override; // Parsed from BDB_EDP.edp_panel_misc_bits_override (if VBT ver >= 188)
-	// TODO: Add other eDP specific things like max link rate override from VBT if needed
+	uint8_t  edp_vbt_max_link_rate_idx; // Max link rate index (0=1.62, 1=2.7, 2=5.4 etc.) from VBT BDB_EDP link_params
+	uint8_t  edp_vbt_max_lanes;      // Max lanes (1,2,4) from VBT BDB_EDP link_params
+	// TODO: Add other eDP specific things from VBT if needed
 
 	// LFP Data Pointers (from BDB Block 41)
 	uint8_t num_lfp_data_entries; // Number of entries in lfp_data_ptrs
@@ -601,6 +645,20 @@ struct intel_vbt_data {
 	bool has_mipi_config;    // True if BDB_MIPI_CONFIG (Block 52) was found
 	bool has_mipi_sequence;  // True if BDB_MIPI_SEQUENCE (Block 53) was found
 	// Actual MIPI data would need more complex storage if fully parsed.
+
+	// LFP specific power sequence timings (from LFP Data Entry in Block 42, if present and valid)
+	// These might override the more generic panel_power_tX_ms if specifically found for an LFP.
+	uint16_t lfp_t1_vdd_panel_on_ms;
+	uint16_t lfp_t2_panel_bl_on_ms;
+	uint16_t lfp_t3_bl_panel_off_ms;
+	uint16_t lfp_t4_panel_vdd_off_ms;
+	uint16_t lfp_t5_vdd_cycle_ms;
+	bool     has_lfp_power_seq_from_entry; // True if LFP entry contained & parsed power seq data
+
+	// Compression Parameters (from BDB Block 56)
+	bool     has_compression_params;
+	uint8_t  compression_param_version;
+	uint8_t  compression_param_flags;    // e.g., FBC/DSC enabled by VBT
 };
 
 

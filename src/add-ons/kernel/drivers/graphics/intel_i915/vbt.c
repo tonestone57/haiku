@@ -518,6 +518,106 @@ parse_bdb_lvds_options(intel_i915_device_info* devInfo, const uint8_t* block_dat
 }
 
 static void
+parse_bdb_compression_parameters(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt) return;
+	TRACE("VBT: Parsing Compression Parameters Block (ID %u, Size %u).\n", BDB_COMPRESSION_PARAMETERS, block_size);
+	devInfo->vbt->has_compression_params = false;
+
+	// The structure bdb_compression_parameters_header is conceptual.
+	// Real VBTs might just have a few bytes for flags/version at the start of block_data.
+	// Assuming the first byte is version and second is flags for this placeholder.
+	if (block_size >= 2) { // Need at least 2 bytes for a conceptual version and flags
+		const struct bdb_compression_parameters_header* params =
+			(const struct bdb_compression_parameters_header*)block_data; // Cast to our conceptual header
+
+		devInfo->vbt->has_compression_params = true;
+		devInfo->vbt->compression_param_version = params->version; // First byte
+		devInfo->vbt->compression_param_flags = params->flags;     // Second byte
+
+		TRACE("VBT: Compression Params: Version %u, Flags 0x%02x\n",
+			devInfo->vbt->compression_param_version, devInfo->vbt->compression_param_flags);
+		if (devInfo->vbt->compression_param_flags & 0x01) TRACE("  FBC potentially enabled by VBT.\n");
+		if (devInfo->vbt->compression_param_flags & 0x02) TRACE("  DSC potentially enabled by VBT.\n");
+		// TODO: Parse actual compression details if structure is expanded
+		// and if driver intends to use VBT values for FBC/DSC.
+		// This usually involves more complex structures detailing slice heights,
+		// max bpp, etc., for different compression algorithms.
+	} else {
+		TRACE("VBT: Compression Parameters block too small (%u bytes) for basic info.\n",
+			block_size);
+	}
+}
+
+static void
+parse_bdb_lfp_power(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
+{
+	if (!devInfo || !devInfo->vbt) return;
+	TRACE("VBT: Parsing LFP Power Block (ID %u, Size %u).\n", BDB_LFP_POWER, block_size);
+
+	if (block_size < sizeof(struct bdb_lfp_power)) { // Check for header size
+		TRACE("VBT: LFP Power block too small for header (%u vs %lu).\n",
+			block_size, sizeof(struct bdb_lfp_power));
+		return;
+	}
+	const struct bdb_lfp_power* header = (const struct bdb_lfp_power*)block_data;
+	// The actual entries start after the header. The size of bdb_lfp_power might be just the header part.
+	// Let's assume header->table_header_size is reliable.
+	if (header->table_header_size == 0 || header->table_header_size > block_size) {
+		TRACE("VBT: LFP Power block invalid table_header_size %u.\n", header->table_header_size);
+		return;
+	}
+
+	const struct bdb_lfp_power_entry* entries =
+		(const struct bdb_lfp_power_entry*)(block_data + header->table_header_size);
+	uint8_t num_entries = header->num_entries;
+
+	TRACE("VBT: LFP Power Block: HeaderSize %u, NumEntries %u\n", header->table_header_size, num_entries);
+
+	// Assuming panel_type_index 0 is the one we care about for global LFP settings for now.
+	// This should ideally be matched with the panel_type from BDB_LVDS_OPTIONS for the active panel.
+	uint8_t target_panel_type_idx = 0; // Placeholder for the active/relevant panel index from LVDS_OPTIONS
+
+	for (uint8_t i = 0; i < num_entries; i++) {
+		// Check if current entry is within block bounds
+		if ((const uint8_t*)&entries[i] + sizeof(struct bdb_lfp_power_entry) > block_data + block_size) {
+			TRACE("VBT: LFP Power entry %u would exceed block bounds.\n", i);
+			break;
+		}
+		const struct bdb_lfp_power_entry* entry = &entries[i];
+		TRACE("  LFP Power Entry %u: PanelIdx %u, T1=%u, T2=%u, T3=%u, T4=%u, T5=%u, T6=%u\n",
+			i, entry->panel_type_index,
+			entry->t1_vdd_power_up_delay_ms, entry->t2_panel_power_on_delay_ms,
+			entry->t3_backlight_on_delay_ms, entry->t4_backlight_off_delay_ms,
+			entry->t5_panel_power_off_delay_ms, entry->t6_vdd_power_down_delay_ms);
+
+		if (entry->panel_type_index == target_panel_type_idx) {
+			// These LFP-specific timings from Block 44 should ideally override
+			// any timings parsed from LFP Data Entry (Block 42) or generic eDP sequences.
+			devInfo->vbt->lfp_t1_power_on_to_vdd_ms = entry->t1_vdd_power_up_delay_ms;
+			devInfo->vbt->lfp_t2_vdd_to_data_on_ms = entry->t2_panel_power_on_delay_ms;
+			devInfo->vbt->lfp_t3_data_to_bl_on_ms = entry->t3_backlight_on_delay_ms;
+			devInfo->vbt->lfp_t4_bl_off_to_data_off_ms = entry->t4_backlight_off_delay_ms;
+			devInfo->vbt->lfp_t5_data_off_to_vdd_off_ms = entry->t5_panel_power_off_delay_ms;
+			// The generic panel_power_t5_ms is VDD off cycle time.
+			// VBT T6 (vdd_power_down_delay_ms) is often this cycle time.
+			if (entry->t6_vdd_power_down_delay_ms > 0) {
+				devInfo->vbt->panel_power_t5_ms = entry->t6_vdd_power_down_delay_ms;
+			}
+			devInfo->vbt->has_lfp_specific_power_seq = true;
+			// Mark that these specific timings are now preferred over any from LFP Data Entry (Block 42)
+			devInfo->vbt->has_lfp_power_seq_from_entry = false;
+
+			TRACE("VBT: Applied LFP Power Seq from Block 44 for panel_idx %u.\n", target_panel_type_idx);
+			break; // Found our target panel
+		}
+	}
+	if (!devInfo->vbt->has_lfp_specific_power_seq) {
+		TRACE("VBT: No specific LFP Power Seq entry found for target panel_idx %u in Block 44.\n", target_panel_type_idx);
+	}
+}
+
+static void
 parse_bdb_lvds_lfp_data(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16_t block_size)
 {
 	if (!devInfo || !devInfo->vbt || devInfo->vbt->bdb_header == NULL) return;
@@ -624,6 +724,31 @@ intel_vbt_get_lfp_panel_dtd_by_index(intel_i915_device_info* devInfo, uint8_t pa
 		} else {
 			TRACE("VBT: LFP Data Entry (panel %u, offset 0x%x, size %u) too small for BPC/DualChannel fields (min_req %lu).\n",
 				panel_index, ptr_entry->offset, ptr_entry->table_size, min_size_for_bpc_dual);
+		}
+
+		// Now, try to parse LFP-specific power sequence timings if entry is large enough
+		size_t min_size_for_power_seq = offsetof(struct bdb_lvds_lfp_data_entry, t5_vdd_cycle_ms)
+			+ sizeof(lfp_data_entry->t5_vdd_cycle_ms);
+
+		if (ptr_entry->table_size >= min_size_for_power_seq) {
+			devInfo->vbt->lfp_t1_vdd_panel_on_ms = lfp_data_entry->t1_vdd_panel_on_ms;
+			devInfo->vbt->lfp_t2_panel_bl_on_ms = lfp_data_entry->t2_panel_bl_on_ms;
+			devInfo->vbt->lfp_t3_bl_panel_off_ms = lfp_data_entry->t3_bl_panel_off_ms;
+			devInfo->vbt->lfp_t4_panel_vdd_off_ms = lfp_data_entry->t4_panel_vdd_off_ms;
+			devInfo->vbt->lfp_t5_vdd_cycle_ms = lfp_data_entry->t5_vdd_cycle_ms;
+			devInfo->vbt->has_lfp_power_seq_from_entry = true;
+
+			TRACE("VBT: LFP Data Entry (panel %u): Parsed Power Seq: T1=%u, T2=%u, T3=%u, T4=%u, T5=%u ms\n",
+				panel_index,
+				devInfo->vbt->lfp_t1_vdd_panel_on_ms, devInfo->vbt->lfp_t2_panel_bl_on_ms,
+				devInfo->vbt->lfp_t3_bl_panel_off_ms, devInfo->vbt->lfp_t4_panel_vdd_off_ms,
+				devInfo->vbt->lfp_t5_vdd_cycle_ms);
+			// These could potentially override the generic panel_power_tX_ms values
+			// if this LFP is the one being configured.
+		} else {
+			// TRACE("VBT: LFP Data Entry (panel %u, size %u) too small for power sequence fields (min_req %lu).\n",
+			//	panel_index, ptr_entry->table_size, min_size_for_power_seq);
+			devInfo->vbt->has_lfp_power_seq_from_entry = false;
 		}
 
 		return true;
@@ -800,10 +925,57 @@ parse_bdb_driver_features(intel_i915_device_info* devInfo, const uint8_t* block_
 				//        // port->edp_vswing_preemph_vbt_index = edp_cfg_entry->vswing_preemph_config_index;
 				//    }
 				// }
-				// The TODO is to actually use this data to override/select VS/PE.
+
+				// More detailed parsing attempt:
+				const uint8_t* sub_block_ptr = sub_data;
+				uint8_t panel_count = *sub_block_ptr;
+				sub_block_ptr++;
+				TRACE("VBT eDP Cfg Sub-block: panel_count = %u\n", panel_count);
+
+				const struct bdb_edp_config_entry* entries_ptr = (const struct bdb_edp_config_entry*)sub_block_ptr;
+				uintptr_t table_offset = (uintptr_t)sub_block_ptr + (panel_count * sizeof(struct bdb_edp_config_entry));
+				const struct bdb_dp_vs_pe_entry* vs_pe_table_ptr = (const struct bdb_dp_vs_pe_entry*)table_offset;
+
+				// Assuming panel_type_index 0 is the one we care about for global VBT eDP settings for now.
+				// A more robust solution would match this with the actual eDP port's panel_type_idx.
+				uint8_t target_panel_type_idx = 0; // Example: primary eDP panel
+				bool found_panel_cfg = false;
+
+				for (uint8_t i = 0; i < panel_count; i++) {
+					if ((const uint8_t*)&entries_ptr[i] + sizeof(struct bdb_edp_config_entry) > sub_data + sub_size) {
+						TRACE("VBT eDP Cfg: Not enough data for config_entry %u.\n", i);
+						break;
+					}
+					const struct bdb_edp_config_entry* current_entry = &entries_ptr[i];
+					TRACE("  Entry %u: panel_idx=%u, vs_pe_idx=%u, TxtOvrd=%ums\n", i,
+						current_entry->panel_type_index, current_entry->vswing_preemph_table_index, current_entry->edp_txt_override_ms);
+
+					if (current_entry->panel_type_index == target_panel_type_idx) { // Or match against actual panel's index
+						uint8_t vs_pe_idx = current_entry->vswing_preemph_table_index;
+						// Check if vs_pe_table is within sub-block bounds
+						if ((const uint8_t*)&vs_pe_table_ptr[vs_pe_idx] + sizeof(struct bdb_dp_vs_pe_entry) <= sub_data + sub_size) {
+							devInfo->vbt->edp_default_vswing = vs_pe_table_ptr[vs_pe_idx].vswing;
+							devInfo->vbt->edp_default_preemphasis = vs_pe_table_ptr[vs_pe_idx].preemphasis;
+							devInfo->vbt->has_edp_vbt_settings = true; // Mark that we got specific settings
+							found_panel_cfg = true;
+							TRACE("VBT eDP Cfg: Applied VS/PE for panel_idx %u (table_idx %u): VS=%u, PE=%u\n",
+								current_entry->panel_type_index, vs_pe_idx,
+								devInfo->vbt->edp_default_vswing, devInfo->vbt->edp_default_preemphasis);
+							// Store edp_txt_override_ms if needed
+							// devInfo->vbt->edp_txt_override_ms = current_entry->edp_txt_override_ms;
+						} else {
+							TRACE("VBT eDP Cfg: vs_pe_idx %u out of bounds for table within sub-block.\n", vs_pe_idx);
+						}
+						break; // Found config for our target panel type
+					}
+				}
+				if (!found_panel_cfg) {
+					TRACE("VBT eDP Cfg: No specific VS/PE entry found for target panel_type_idx %u.\n", target_panel_type_idx);
+				}
+
 			} else {
-				TRACE("VBT: eDP Config sub-block (ID 0x%x) too small (%u vs %lu expected for entry).\n",
-					sub_id, sub_size, sizeof(struct bdb_edp_config_entry));
+				TRACE("VBT: eDP Config sub-block (ID 0x%x) too small (%u vs %lu expected for at least one entry + panel_count).\n",
+					sub_id, sub_size, sizeof(uint8_t) + sizeof(struct bdb_edp_config_entry));
 			}
 		}
 		// TODO: Parse other sub-blocks if relevant sub-IDs are known.
@@ -835,9 +1007,11 @@ parse_bdb_edp(intel_i915_device_info* devInfo, const uint8_t* block_data, uint16
 		const struct bdb_edp_link_params* params = &edp_block->link_params[panel_index];
 		devInfo->vbt->edp_default_vs_level = params->vswing;
 		devInfo->vbt->edp_default_pe_level = params->preemphasis;
+		devInfo->vbt->edp_vbt_max_link_rate_idx = params->rate;
+		devInfo->vbt->edp_vbt_max_lanes = params->lanes;
 		devInfo->vbt->has_edp_vbt_settings = true; // Mark that we found some eDP settings
 
-		TRACE("VBT: Parsed eDP Block (panel_idx %u): VS=%u, PE=%u, RateBits=0x%x, Lanes=0x%x\n",
+		TRACE("VBT: Parsed eDP Block (panel_idx %u): VS=%u, PE=%u, RateIdx=0x%x, Lanes=%u\n",
 			panel_index, params->vswing, params->preemphasis, params->rate, params->lanes);
 
 		// Power sequences might also be in this block for older VBTs, or referenced.
@@ -939,8 +1113,15 @@ parse_bdb_mipi_config(intel_i915_device_info* devInfo, const uint8_t* block_data
 		BDB_MIPI_CONFIG, block_size);
 	devInfo->vbt->has_mipi_config = true;
 	// TODO: Implement full parsing if MIPI DSI support is added.
-	// This would involve interpreting panel type index, DSI control flags,
-	// PCH DSI configuration, and sequences of GPIO/I2C/DSI commands.
+	// Full parsing would involve:
+	// - Identifying the target panel (often via a panel_index or child_device_handle).
+	// - Extracting DSI PCLK, virtual channel, lane count, pixel format, BPP.
+	// - Parsing any embedded DTDs for panel timings.
+	// - Reading DSI control flags (e.g., video/command mode, burst mode, EOT).
+	// - Getting pointers/offsets to specific MIPI sequence blocks (from Block 53)
+	//   for init, power on/off, etc.
+	// - Storing all this information, likely in a MIPI-specific part of the
+	//   intel_output_port_state for the relevant DSI port.
 }
 
 static void
@@ -951,7 +1132,17 @@ parse_bdb_mipi_sequence(intel_i915_device_info* devInfo, const uint8_t* block_da
 		BDB_MIPI_SEQUENCE, block_size);
 	devInfo->vbt->has_mipi_sequence = true;
 	// TODO: Implement full parsing if MIPI DSI support is added.
-	// This block contains sequences of operations (e.g., for power on/off).
+	// Full parsing would involve:
+	// - Understanding the sequence block header (e.g., version, number of sequences).
+	// - Iterating through sequence elements within this block.
+	// - Each element defines an operation:
+	//   - GPIO manipulation (set/clear pins for panel control).
+	//   - I2C transactions (to configure panel ICs).
+	//   - DSI packet transmission (DCS commands, generic read/write).
+	//   - Delays (ms or us).
+	// - These sequences are critical for panel initialization, power management,
+	//   and shutdown. The driver would need an interpreter to execute these
+	//   sequences at appropriate times.
 }
 
 static void
@@ -1139,7 +1330,13 @@ intel_i915_vbt_init(intel_i915_device_info* devInfo)
 			case BDB_GENERIC_DTD: // Block 58
 				parse_bdb_generic_dtds(devInfo, current_block_data, block_size_val);
 				break;
-			// TODO: Add cases for other blocks like BDB_COMPRESSION_PARAMETERS (56) if needed.
+			case BDB_LFP_POWER: // Block 44
+				parse_bdb_lfp_power(devInfo, current_block_data, block_size_val);
+				break;
+			case BDB_COMPRESSION_PARAMETERS: // Block 56
+				parse_bdb_compression_parameters(devInfo, current_block_data, block_size_val);
+				break;
+			// TODO: Add cases for other blocks if needed.
 			default:
 				TRACE("VBT: Skipping BDB block ID 0x%x (unhandled or unknown).\n", block_id);
 				break;

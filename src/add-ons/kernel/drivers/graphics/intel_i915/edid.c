@@ -166,58 +166,89 @@ calculate_cvt_timing(uint16_t h_active, uint16_t v_active, uint8_t v_refresh_req
 		mode->timing.flags = B_POSITIVE_HSYNC | B_NEGATIVE_VSYNC;
 
 	} else {
-		// --- Standard CVT Calculations ---
+		// --- Standard CVT Calculations (integer arithmetic attempt) ---
 		// TRACE("CVT: Using Standard Blanking formulas.\n");
 
-		uint32_t v_lines_rnd = v_active;
-		uint64_t total_frame_time_ns = 1000000000ULL / v_refresh_req;
-		uint64_t min_v_sync_bp_ns = (uint64_t)STD_MIN_V_SYNC_BP_US * 1000;
+		// 1. Required Field Refresh Rate (Hz)
+		//    If Interlaced: V_FIELD_RATE_RQD = VRefresh_req * 2 (not handled here, assume progressive)
+		//    Else: V_FIELD_RATE_RQD = VRefresh_req
+		uint32_t v_field_rate_rqd = v_refresh_req;
 
-		if (total_frame_time_ns <= min_v_sync_bp_ns || (v_lines_rnd + STD_MIN_V_PORCH_LINES) == 0) {
-			TRACE("CVT-STD: Invalid intermediate values for H_PERIOD_EST calc.\n"); return false;
-		}
-		uint32_t h_period_est_ns = (uint32_t)((total_frame_time_ns - min_v_sync_bp_ns) / (v_lines_rnd + STD_MIN_V_PORCH_LINES));
+		// 2. Horizontal Pixels (pixels)
+		uint32_t h_pixels_rnd = h_active; // Already known
+
+		// 3. Vertical Lines
+		uint32_t v_lines_rnd = v_active; // Assuming progressive
+
+		// 4. Estimate H Period (us)
+		//    H_PERIOD_EST = ((1000000 / V_FIELD_RATE_RQD) - MIN_VSYNC_BP_US) / (V_LINES_RND + MIN_V_PORCH_LINES)
+		uint64_t h_period_est_num = (1000000000ULL / v_field_rate_rqd) - ((uint64_t)STD_MIN_V_SYNC_BP_US * 1000); // Numerator in ns
+		uint32_t h_period_est_den = v_lines_rnd + STD_MIN_V_PORCH_LINES;
+		if (h_period_est_den == 0) { TRACE("CVT-STD: h_period_est_den is zero.\n"); return false; }
+		uint32_t h_period_est_ns = h_period_est_num / h_period_est_den; // HPeriod in ns
 		if (h_period_est_ns == 0) { TRACE("CVT-STD: Estimated HPeriod is zero.\n"); return false; }
 
-		uint32_t v_sync_bp_lines = (min_v_sync_bp_ns + h_period_est_ns - 1) / h_period_est_ns;
+		// 5. Calculate V_SYNC_BP (Vertical Sync + Back Porch) (lines)
+		uint32_t v_sync_bp_lines = (STD_MIN_V_SYNC_BP_US * 1000 + h_period_est_ns - 1) / h_period_est_ns; // ceil
+
+		// 6. Calculate V_TOTAL_LINES
 		v_total = v_active + v_sync_bp_lines + STD_MIN_V_PORCH_LINES;
 
-		uint32_t h_period_est_us_x10 = h_period_est_ns / 100; // HPeriod in 0.1us units for C_M formula
-		if (h_period_est_us_x10 == 0) { TRACE("CVT-STD: h_period_est_us_x10 is zero.\n"); return false; }
+		// 7. Calculate Ideal Blanking Duty Cycle (%)
+		//    IDEAL_DUTY_CYCLE = STD_C_C_PERCENT - (STD_C_M_US * 1000 / H_PERIOD_EST_NS)
+		//    To avoid floats, scale and use integer arithmetic.
+		//    Let H_PERIOD_EST_US = h_period_est_ns / 1000
+		//    IDEAL_DUTY_CYCLE_X1000 = (STD_C_C_PERCENT * 10) - (STD_C_M_US * 1000 / H_PERIOD_EST_US)
+		//                            = (STD_C_C_PERCENT * 10) - (STD_C_M_US * 1000 * 1000 / h_period_est_ns)
+		int32_t ideal_duty_cycle_x1000_num = (int32_t)STD_C_C_PERCENT * 10 * (int32_t)h_period_est_ns;
+		int32_t ideal_duty_cycle_x1000_den_sub = (int32_t)STD_C_M_US * 1000 * 1000; // M' * 1000
+		int32_t ideal_duty_cycle_x1000 = (ideal_duty_cycle_x1000_num - ideal_duty_cycle_x1000_den_sub) / (int32_t)h_period_est_ns;
 
-		// IdealDutyCycle (%) = C’ – (M’ / HPeriod_est_us) ; C' = 40, M' = 600
-		// Scaled by 1000: (40 * 10) - (600 * 1000 * 10 / h_period_est_us_x10)
-		// (400) - (6000000 / h_period_est_us_x10)
-		int32_t ideal_duty_cycle_x1000 = (int32_t)(STD_C_C_PERCENT * 10) - (int32_t)( ( (uint64_t)STD_C_M_US * 10000 ) / h_period_est_us_x10 );
+		if (ideal_duty_cycle_x1000 < 200) ideal_duty_cycle_x1000 = 200; // Min 20% blanking duty cycle (scaled by 1000)
 
-		if (ideal_duty_cycle_x1000 < 200) ideal_duty_cycle_x1000 = 200; // Clamp to minimum 20% blanking
-
+		// 8. Calculate H_BLANK (pixels)
+		//    H_BLANK = HActive * IDEAL_DUTY_CYCLE / (100 - IDEAL_DUTY_CYCLE)
 		uint32_t h_blank_pixels_num = (uint32_t)h_active * ideal_duty_cycle_x1000;
-		uint32_t h_blank_pixels_den = 1000 - ideal_duty_cycle_x1000;
+		uint32_t h_blank_pixels_den = 1000 - ideal_duty_cycle_x1000; // Denominator is (100% - IDC%) * 10
 		if (h_blank_pixels_den == 0) { TRACE("CVT-STD: h_blank_pixels_den is zero.\n"); return false; }
-		uint32_t h_blank_pixels = (h_blank_pixels_num + h_blank_pixels_den / 2) / h_blank_pixels_den;
+		uint32_t h_blank_pixels = (h_blank_pixels_num + h_blank_pixels_den / 2) / h_blank_pixels_den; // round
 
-		uint32_t blank_gran = 2 * CELL_GRAN_RND_PIXELS; // Standard CVT rounds HBlank to 2 * cell_gran
-		h_blank_pixels = ((h_blank_pixels + blank_gran / 2) / blank_gran) * blank_gran;
+		// Round HBlank to nearest multiple of 2 * CELL_GRAN_RND_PIXELS (i.e., 16 for cell_gran=8)
+		uint32_t blank_round_gran = 2 * CELL_GRAN_RND_PIXELS;
+		h_blank_pixels = ((h_blank_pixels + blank_round_gran / 2) / blank_round_gran) * blank_round_gran;
+
+		// 9. Calculate H_TOTAL (pixels)
 		h_total = h_active + h_blank_pixels;
 
-		pixel_clock_khz = (uint32_t)(((uint64_t)h_total * v_total * v_refresh_req + 500) / 1000);
+		// 10. Calculate Pixel Clock (kHz)
+		pixel_clock_khz = (uint32_t)(((uint64_t)h_total * v_total * v_field_rate_rqd + 500) / 1000);
 		pixel_clock_khz = ((pixel_clock_khz + CLOCK_STEP_KHZ / 2) / CLOCK_STEP_KHZ) * CLOCK_STEP_KHZ;
 		if (pixel_clock_khz == 0) { TRACE("CVT-STD: Calculated pixel clock is zero.\n"); return false; }
 
-		h_sync_width = (STD_HSYNC_PERCENT * h_total + 50) / 100;
+		// 11. Horizontal Sync Width (pixels)
+		h_sync_width = (STD_HSYNC_PERCENT * h_total + 50) / 100; // Round HSync% * HTotal
 		h_sync_width = ((h_sync_width + CELL_GRAN_RND_PIXELS / 2) / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
 
+		// 12. Horizontal Front & Back Porch
 		h_front_porch = (h_blank_pixels / 2) - h_sync_width;
-		h_front_porch = (h_front_porch / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS;
+		h_front_porch = (h_front_porch / CELL_GRAN_RND_PIXELS) * CELL_GRAN_RND_PIXELS; // Ensure multiple of cell gran
 		h_back_porch = h_blank_pixels - h_front_porch - h_sync_width;
 
-		v_sync_width = 5; // Common default for standard CVT
+		// 13. Vertical Sync Width & Front/Back Porch
+		v_sync_width = 5; // Common default for standard CVT (e.g. VESA spec suggests 3-8 for "VSYNC_RND")
+		                  // Some implementations use a fixed value from a table or a small constant.
 		v_front_porch = STD_MIN_V_PORCH_LINES;
+		// v_sync_bp_lines was total VSync + VBackPorch
 		v_back_porch = v_sync_bp_lines - v_sync_width;
-		if ((int32_t)v_back_porch < 0) v_back_porch = STD_MIN_V_PORCH_LINES;
+		if ((int32_t)v_back_porch < 0) { // Should not happen if v_sync_bp_lines >= v_sync_width
+			TRACE("CVT-STD: Calculated negative v_back_porch. Adjusting.\n");
+			v_back_porch = STD_MIN_V_PORCH_LINES; // Fallback to a minimum
+			// This might mean v_total needs recalculation if VSync width is too large for calculated VSync+BP.
+			// For now, proceed, but this indicates a potential formula issue or edge case.
+		}
 
-		mode->timing.flags = B_POSITIVE_HSYNC | B_NEGATIVE_VSYNC; // Typical for Standard CVT
+		// Sync Polarities for Standard CVT: +H, -V
+		mode->timing.flags = B_POSITIVE_HSYNC | B_NEGATIVE_VSYNC;
 	}
 
 	if (pixel_clock_khz > 0) {

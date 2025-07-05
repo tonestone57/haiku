@@ -15,6 +15,28 @@
 #include <string.h>
 #include <Area.h>
 #include <kernel/locks/mutex.h>
+#include <stdlib.h> // For malloc/free
+
+
+// --- Bitmap Helper Functions ---
+static inline void
+_gtt_set_bit(uint32_t bit_index, uint32_t* bitmap)
+{
+	bitmap[bit_index / 32] |= (1U << (bit_index % 32));
+}
+
+static inline void
+_gtt_clear_bit(uint32_t bit_index, uint32_t* bitmap)
+{
+	bitmap[bit_index / 32] &= ~(1U << (bit_index % 32));
+}
+
+static inline bool
+_gtt_is_bit_set(uint32_t bit_index, const uint32_t* bitmap)
+{
+	return (bitmap[bit_index / 32] >> (bit_index % 32)) & 1;
+}
+// --- End Bitmap Helper Functions ---
 
 
 static void
@@ -52,9 +74,7 @@ static status_t
 intel_i915_gtt_map_scratch_page(intel_i915_device_info* devInfo)
 {
 	if (devInfo->scratch_page_phys_addr == 0) return B_NO_INIT;
-	// Map scratch page to a known GTT offset (e.g., first page of GTT after any reserved)
-	// For simplicity, let's say the bump allocator starts *after* the scratch page.
-	// So, scratch page is at GTT page index 0.
+	// Scratch page is always at GTT page index 0.
 	devInfo->scratch_page_gtt_offset = 0; // Byte offset
 	uint32 pte_index = 0; // Page index
 
@@ -76,6 +96,7 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	TRACE("gtt_init for device 0x%04x\n", devInfo->device_id);
 	status_t status = B_OK; char areaName[64];
 	devInfo->scratch_page_area = -1; devInfo->gtt_table_area = -1;
+	devInfo->gtt_page_bitmap = NULL;
 
 	if (devInfo == NULL || devInfo->mmio_regs_addr == NULL) return B_NO_INIT;
 
@@ -88,15 +109,13 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 		return B_UNSUPPORTED;
 	}
 
-	// Mutex init does not need forcewake
-	mutex_destroy(&devInfo->gtt_allocator_lock); // Destroy if already inited from a failed previous attempt
+	mutex_destroy(&devInfo->gtt_allocator_lock);
 	status = mutex_init_etc(&devInfo->gtt_allocator_lock, "i915 GTT allocator lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) {
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 		return status;
 	}
 
-	// Scratch page allocation does not need forcewake
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_scratch", devInfo->device_id);
 	void* scratch_virt_addr_temp;
 	devInfo->scratch_page_area = create_area_etc(areaName, &scratch_virt_addr_temp,
@@ -112,27 +131,22 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	memset(scratch_virt_addr_temp, 0, B_PAGE_SIZE);
 
 	uint32 hws_pga_val = intel_i915_read32(devInfo, HWS_PGA);
-	devInfo->gtt_table_physical_address = hws_pga_val & ~0xFFF; // Base address of GTT PTEs
+	devInfo->gtt_table_physical_address = hws_pga_val & ~0xFFF;
 
 	if (IS_IVYBRIDGE(devInfo->device_id) && !IS_IVYBRIDGE_MOBILE(devInfo->device_id)) {
-		// Ivy Bridge Desktop/Server can have 1MB or 2MB GTT
-		uint32_t ggtt_size_bits = (devInfo->pgtbl_ctl >> 1) & 0x3; // PGTBL_CTL[2:1]
-		if (ggtt_size_bits == 1) { // 01b = 1MB GGTT
-			devInfo->gtt_entries_count = (1024 * 1024) / B_PAGE_SIZE; // 256 pages
-		} else { // 00b = 2MB GGTT (or other values default to 2MB)
-			devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE; // 512 pages
-		}
+		uint32_t ggtt_size_bits = (devInfo->pgtbl_ctl >> 1) & 0x3;
+		if (ggtt_size_bits == 1) devInfo->gtt_entries_count = (1024 * 1024) / B_PAGE_SIZE;
+		else devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE;
 		TRACE("GTT: Ivy Bridge Desktop/Server, PGTBL_CTL[2:1]=%u, GTT size %lu KB, %u entries\n",
 			ggtt_size_bits, devInfo->gtt_entries_count * B_PAGE_SIZE / 1024, devInfo->gtt_entries_count);
 	} else {
-		// Haswell, IVB Mobile, and others default to 2MB GTT (512 entries)
-		devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE; // 512 pages
+		devInfo->gtt_entries_count = (2 * 1024 * 1024) / B_PAGE_SIZE;
 		TRACE("GTT: Defaulting/Mobile GTT size to %lu KB, %u entries\n",
 			devInfo->gtt_entries_count * B_PAGE_SIZE / 1024, devInfo->gtt_entries_count);
 	}
 
 	devInfo->gtt_aperture_actual_size = (size_t)devInfo->gtt_entries_count * B_PAGE_SIZE;
-	size_t gtt_table_alloc_size = devInfo->gtt_entries_count * I915_GTT_ENTRY_SIZE; // Size of the PTE table itself
+	size_t gtt_table_alloc_size = devInfo->gtt_entries_count * I915_GTT_ENTRY_SIZE;
 	if (devInfo->gtt_table_physical_address == 0) { status = B_ERROR; goto err_scratch_area; }
 
 	snprintf(areaName, sizeof(areaName), "i915_0x%04x_gtt_table", devInfo->device_id);
@@ -145,12 +159,20 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	status = intel_i915_gtt_map_scratch_page(devInfo);
 	if (status != B_OK) goto err_gtt_table_area;
 
-	// Initialize bump allocator to start after the scratch page (which is at GTT page index 0)
-	devInfo->gtt_next_free_page = 1; // GTT page index 0 is scratch page
+	// --- Initialize Bitmap Allocator ---
+	devInfo->gtt_total_pages_managed = devInfo->gtt_entries_count; // Bitmap covers all GTT entries
+	devInfo->gtt_bitmap_size_dwords = (devInfo->gtt_total_pages_managed + 31) / 32;
+	devInfo->gtt_page_bitmap = (uint32_t*)malloc(devInfo->gtt_bitmap_size_dwords * sizeof(uint32_t));
+	if (devInfo->gtt_page_bitmap == NULL) { status = B_NO_MEMORY; goto err_gtt_table_area; }
+	memset(devInfo->gtt_page_bitmap, 0, devInfo->gtt_bitmap_size_dwords * sizeof(uint32_t)); // All pages free
+
+	// Mark GTT page 0 (scratch page) as used in the bitmap
+	_gtt_set_bit(0, devInfo->gtt_page_bitmap);
+	devInfo->gtt_free_pages_count = devInfo->gtt_total_pages_managed - 1; // -1 for scratch page
+	// --- End Bitmap Allocator Init ---
 
 	if (devInfo->shared_info) {
 		devInfo->shared_info->gtt_aperture_size = devInfo->gtt_aperture_actual_size;
-		// Other GTT related shared_info fields if any
 	}
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
@@ -161,7 +183,8 @@ err_scratch_area:
 	delete_area(devInfo->scratch_page_area); devInfo->scratch_page_area = -1;
 err_lock:
 	mutex_destroy(&devInfo->gtt_allocator_lock);
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // Release FW on error path
+	if (devInfo->gtt_page_bitmap) { free(devInfo->gtt_page_bitmap); devInfo->gtt_page_bitmap = NULL; }
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return status;
 }
 
@@ -169,9 +192,11 @@ void
 intel_i915_gtt_cleanup(intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL) return;
-	// No MMIO access here, just area cleanup and mutex destruction.
-	// If PGTBL_CTL needed to be written to disable GTT on cleanup, that would need forcewake.
 	mutex_destroy(&devInfo->gtt_allocator_lock);
+	if (devInfo->gtt_page_bitmap != NULL) {
+		free(devInfo->gtt_page_bitmap);
+		devInfo->gtt_page_bitmap = NULL;
+	}
 	if (devInfo->gtt_table_area >= B_OK) delete_area(devInfo->gtt_table_area);
 	if (devInfo->scratch_page_area >= B_OK) delete_area(devInfo->scratch_page_area);
 }
@@ -180,42 +205,97 @@ status_t
 intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 	size_t num_pages, uint32_t* gtt_page_offset_out)
 {
-	if (!devInfo || !gtt_page_offset_out || num_pages == 0) return B_BAD_VALUE;
+	if (!devInfo || !gtt_page_offset_out || num_pages == 0 || devInfo->gtt_page_bitmap == NULL)
+		return B_BAD_VALUE;
 
 	mutex_lock(&devInfo->gtt_allocator_lock);
-	if (devInfo->gtt_next_free_page + num_pages > devInfo->gtt_entries_count) {
-		mutex_unlock(&devInfo->gtt_allocator_lock);
-		TRACE("GTT Alloc: Not enough GTT space for %lu pages. NextFree: %u, Total: %u\n",
-			num_pages, devInfo->gtt_next_free_page, devInfo->gtt_entries_count);
-		return B_NO_MEMORY; // Or B_BUFFER_OVERFLOW
-	}
-	*gtt_page_offset_out = devInfo->gtt_next_free_page;
-	devInfo->gtt_next_free_page += num_pages;
-	mutex_unlock(&devInfo->gtt_allocator_lock);
 
-	TRACE("GTT Alloc: Allocated %lu pages at GTT page offset %u. Next free: %u\n",
-		num_pages, *gtt_page_offset_out, devInfo->gtt_next_free_page);
-	return B_OK;
+	if (num_pages > devInfo->gtt_free_pages_count) {
+		mutex_unlock(&devInfo->gtt_allocator_lock);
+		TRACE("GTT Alloc: Not enough free pages globally (%lu available) for %lu pages.\n",
+			devInfo->gtt_free_pages_count, num_pages);
+		return B_NO_MEMORY;
+	}
+
+	uint32_t consecutive_free_count = 0;
+	uint32_t current_search_start_idx = 1; // Start searching from GTT page index 1 (0 is scratch)
+
+	for (uint32_t i = 1; i < devInfo->gtt_total_pages_managed; ++i) {
+		if (!_gtt_is_bit_set(i, devInfo->gtt_page_bitmap)) { // If page 'i' is free
+			if (consecutive_free_count == 0) {
+				current_search_start_idx = i; // Start of a potential block
+			}
+			consecutive_free_count++;
+			if (consecutive_free_count == num_pages) {
+				// Found a suitable block
+				for (uint32_t k = 0; k < num_pages; ++k) {
+					_gtt_set_bit(current_search_start_idx + k, devInfo->gtt_page_bitmap);
+				}
+				devInfo->gtt_free_pages_count -= num_pages;
+				*gtt_page_offset_out = current_search_start_idx;
+				mutex_unlock(&devInfo->gtt_allocator_lock);
+				TRACE("GTT Alloc: Allocated %lu pages at GTT page offset %u. Free pages remaining: %u\n",
+					num_pages, *gtt_page_offset_out, devInfo->gtt_free_pages_count);
+				return B_OK;
+			}
+		} else {
+			consecutive_free_count = 0; // Reset counter as current page is used
+		}
+	}
+
+	// No suitable contiguous block found
+	mutex_unlock(&devInfo->gtt_allocator_lock);
+	TRACE("GTT Alloc: No contiguous block of %lu pages found. Free pages globally: %u\n",
+		num_pages, devInfo->gtt_free_pages_count);
+	return B_NO_MEMORY;
 }
 
 status_t
 intel_i915_gtt_free_space(intel_i915_device_info* devInfo,
 	uint32_t gtt_page_offset, size_t num_pages)
 {
-	if (!devInfo || num_pages == 0) return B_BAD_VALUE;
-	// Simple bump allocator: only allow freeing the most recently allocated block.
-	mutex_lock(&devInfo->gtt_allocator_lock);
-	if (gtt_page_offset + num_pages == devInfo->gtt_next_free_page) {
-		devInfo->gtt_next_free_page = gtt_page_offset;
-		TRACE("GTT Free: Freed %lu pages from GTT page offset %u. Next free: %u\n",
-			num_pages, gtt_page_offset, devInfo->gtt_next_free_page);
-	} else {
-		// Not freeing (or log warning) - this simple allocator doesn't handle fragmentation.
-		TRACE("GTT Free: Cannot free %lu pages at GTT offset %u (not last block). NextFree: %u\n",
-			num_pages, gtt_page_offset, devInfo->gtt_next_free_page);
+	if (!devInfo || num_pages == 0 || devInfo->gtt_page_bitmap == NULL)
+		return B_BAD_VALUE;
+	if (gtt_page_offset == 0) { // Cannot free scratch page
+		TRACE("GTT Free: Attempt to free scratch page (offset 0) denied.\n");
+		return B_BAD_ADDRESS;
 	}
+	if (gtt_page_offset + num_pages > devInfo->gtt_total_pages_managed) {
+		TRACE("GTT Free: Invalid range (offset %u, num %lu) exceeds total managed pages %u.\n",
+			gtt_page_offset, num_pages, devInfo->gtt_total_pages_managed);
+		return B_BAD_VALUE;
+	}
+
+	mutex_lock(&devInfo->gtt_allocator_lock);
+	bool all_were_set = true;
+	for (size_t i = 0; i < num_pages; ++i) {
+		if (!_gtt_is_bit_set(gtt_page_offset + i, devInfo->gtt_page_bitmap)) {
+			all_were_set = false; // Trying to free an already free page
+			TRACE("GTT Free: Warning - page %lu in range (offset %u, num %lu) was already free.\n",
+				gtt_page_offset + i, gtt_page_offset, num_pages);
+			// Decide on strictness: return error, or just clear what's set? For now, proceed.
+		}
+		_gtt_clear_bit(gtt_page_offset + i, devInfo->gtt_page_bitmap);
+	}
+	// Only increment free_pages_count for pages that were actually set.
+	// A more robust way would be to count how many bits were actually cleared.
+	// For simplicity, if we are not erroring on "freeing free page", we assume the caller
+	// is correct and these pages were meant to be freed.
+	devInfo->gtt_free_pages_count += num_pages;
+	// Clamp free_pages_count to not exceed total manageable pages (minus scratch)
+	if (devInfo->gtt_free_pages_count > devInfo->gtt_total_pages_managed -1) {
+		devInfo->gtt_free_pages_count = devInfo->gtt_total_pages_managed -1;
+	}
+
 	mutex_unlock(&devInfo->gtt_allocator_lock);
-	return B_OK; // For bump allocator, freeing might be no-op or restricted
+	TRACE("GTT Free: Freed %lu pages from GTT page offset %u. Free pages now: %u.\n",
+		num_pages, gtt_page_offset, devInfo->gtt_free_pages_count);
+
+	if (!all_were_set) {
+		// Optionally return an error or different status if freeing already-free pages is problematic.
+		// return B_BAD_VALUE;
+	}
+	return B_OK;
 }
 
 

@@ -173,11 +173,12 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	struct intel_i915_gem_context* ctx = NULL;
 
 	// Keep track of objects mapped to GTT on-demand by this call for cleanup
-	struct {
+	typedef struct {
 		struct intel_i915_gem_object* obj;
 		uint32_t gtt_page_offset; // To know where to free
-		size_t num_pages;
-	} on_demand_gtt_maps[EXECBUF_MAX_ON_DEMAND_GTT_MAPS];
+		size_t num_pages;         // Number of pages allocated
+	} on_demand_gtt_map_info;
+	on_demand_gtt_map_info on_demand_gtt_maps[EXECBUF_MAX_ON_DEMAND_GTT_MAPS];
 	uint32_t on_demand_map_count = 0;
 
 
@@ -234,56 +235,76 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 
 			if (!target_obj->gtt_mapped) {
 				uint32_t gtt_page_offset_for_target;
+				// Use the new bitmap allocator
 				status = intel_i915_gtt_alloc_space(devInfo, target_obj->num_phys_pages, &gtt_page_offset_for_target);
 				if (status != B_OK) {
-					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
+					TRACE("EXECBUFFER: Failed to alloc GTT space for reloc target_handle %lu, size %lu pages. Error: %s\n",
+						reloc->target_handle, target_obj->num_phys_pages, strerror(status));
+					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx_rels;
 				}
+				// Map the object into the allocated GTT space
 				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, GTT_CACHE_WRITE_COMBINING); // Default WC for now
 				if (status != B_OK) {
-					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages);
-					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
+					TRACE("EXECBUFFER: Failed to map reloc target_handle %lu to GTT offset %u. Error: %s\n",
+						reloc->target_handle, gtt_page_offset_for_target, strerror(status));
+					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages); // Free the GTT space
+					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx_rels;
 				}
-				target_obj->gtt_mapped_by_execbuf = true; // Mark for cleanup
+				target_obj->gtt_mapped_by_execbuf = true; // Mark for cleanup by this execbuf call
+
+				// Store info for cleanup
 				if (on_demand_map_count < EXECBUF_MAX_ON_DEMAND_GTT_MAPS) {
-					on_demand_gtt_maps[on_demand_map_count].obj = target_obj; // Store obj to unmap
+					on_demand_gtt_maps[on_demand_map_count].obj = target_obj;
+					// We need to keep a reference if we store it for later cleanup,
+					// because target_obj itself will be put after this relocation.
+					intel_i915_gem_object_get(target_obj);
 					on_demand_gtt_maps[on_demand_map_count].gtt_page_offset = gtt_page_offset_for_target;
 					on_demand_gtt_maps[on_demand_map_count].num_pages = target_obj->num_phys_pages;
 					on_demand_map_count++;
 				} else {
-					// Too many on-demand maps, error or handle differently
-					status = B_ERROR; intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
+					TRACE("EXECBUFFER: Exceeded EXECBUF_MAX_ON_DEMAND_GTT_MAPS limit.\n");
+					// Unmap and free immediately as we can't track it for later full cleanup
+					intel_i915_gem_object_unmap_gtt(target_obj);
+					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages);
+					target_obj->gtt_mapped_by_execbuf = false;
+					status = B_ERROR; intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx_rels;
 				}
 			}
 			uint32_t target_gtt_address = (target_obj->gtt_offset_pages * B_PAGE_SIZE) + reloc->delta;
 			*(uint32_t*)((uint8_t*)cmd_buffer_kernel_addr + reloc->offset) = target_gtt_address;
-			intel_i915_gem_object_put(target_obj); target_obj = NULL;
+			intel_i915_gem_object_put(target_obj); target_obj = NULL; // Release ref from _generic_handle_lookup
 		}
 	}
 
 	uint32_t num_dwords = args.cmd_buffer_length / sizeof(uint32_t);
 	status = intel_engine_get_space(engine, num_dwords, &ring_dword_offset);
-	if (status != B_OK) goto exec_cleanup_ctx;
+	if (status != B_OK) goto exec_cleanup_ctx_rels; // Use the new label
+
 	for (uint32_t i = 0; i < num_dwords; i++) {
 		intel_engine_write_dword(engine, ring_dword_offset + i, ((uint32_t*)cmd_buffer_kernel_addr)[i]);
 	}
 	intel_engine_advance_tail(engine, num_dwords);
 
-exec_cleanup_ctx:
-	if (ctx) intel_i915_gem_context_put(ctx);
-exec_cleanup_mapped_cmd_obj:
-exec_cleanup_cmd_obj:
-	if (cmd_obj) intel_i915_gem_object_put(cmd_obj);
-	if (relocs_kernel) free(relocs_kernel);
-	if (target_obj) intel_i915_gem_object_put(target_obj);
-
+exec_cleanup_ctx_rels: // New label to ensure on_demand_gtt_maps are processed before other puts
 	// Cleanup on-demand GTT mappings for this execbuf
 	for (uint32_t i = 0; i < on_demand_map_count; i++) {
-		if (on_demand_gtt_maps[i].obj && on_demand_gtt_maps[i].obj->gtt_mapped_by_execbuf) {
-			intel_i915_gem_object_unmap_gtt(on_demand_gtt_maps[i].obj); // This will clear gtt_mapped_by_execbuf
-			intel_i915_gtt_free_space(devInfo, on_demand_gtt_maps[i].gtt_page_offset, on_demand_gtt_maps[i].num_pages);
-			// The ref from lookup was already put. The object itself might still exist if other refs exist.
+		if (on_demand_gtt_maps[i].obj) { // Check if obj pointer is valid
+			if (on_demand_gtt_maps[i].obj->gtt_mapped_by_execbuf) {
+				intel_i915_gem_object_unmap_gtt(on_demand_gtt_maps[i].obj); // This will clear gtt_mapped_by_execbuf
+				intel_i915_gtt_free_space(devInfo, on_demand_gtt_maps[i].gtt_page_offset, on_demand_gtt_maps[i].num_pages);
+			}
+			intel_i915_gem_object_put(on_demand_gtt_maps[i].obj); // Release the reference stored for cleanup
+			on_demand_gtt_maps[i].obj = NULL; // Clear to avoid double free if error path is complex
 		}
 	}
+	// Now proceed with other cleanups
+	if (ctx) intel_i915_gem_context_put(ctx);
+/*exec_cleanup_mapped_cmd_obj:*/ // This label seems redundant now
+/*exec_cleanup_cmd_obj:*/
+	if (cmd_obj) intel_i915_gem_object_put(cmd_obj);
+	if (relocs_kernel) free(relocs_kernel);
+	if (target_obj) intel_i915_gem_object_put(target_obj); // Should be NULL if loop completed or error handled inside loop
+
 	return status;
 }
 

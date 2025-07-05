@@ -306,7 +306,16 @@ typedef struct intel_i915_device_info {
 	phys_addr_t	gtt_table_physical_address; uint32_t* gtt_table_virtual_address;
 	area_id gtt_table_area; uint32_t gtt_entries_count; size_t gtt_aperture_actual_size;
 	uint32_t pgtbl_ctl; area_id scratch_page_area; phys_addr_t scratch_page_phys_addr;
-	uint32_t scratch_page_gtt_offset; mutex gtt_allocator_lock; uint32_t gtt_next_free_page;
+	uint32_t scratch_page_gtt_offset; // This is in bytes, corresponds to GTT page 0
+	mutex gtt_allocator_lock;
+
+	// Bitmap GTT Allocator fields
+	uint32_t*	gtt_page_bitmap;          // Bitmap: 1 bit per GTT page
+	uint32_t	gtt_bitmap_size_dwords;   // Size of the bitmap array in dwords
+	uint32_t	gtt_total_pages_managed;  // Total GTT pages represented by the bitmap
+	                                      // This will be devInfo->gtt_entries_count.
+	uint32_t	gtt_free_pages_count;     // Number of currently free GTT pages (excluding scratch page)
+
 	struct intel_vbt_data* vbt; area_id rom_area; uint8_t* rom_base;
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;
 	display_mode current_hw_mode; intel_pipe_hw_state pipes[PRIV_MAX_PIPES];

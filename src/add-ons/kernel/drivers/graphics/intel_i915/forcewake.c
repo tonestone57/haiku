@@ -17,8 +17,9 @@
 #define FORCEWAKE_ACK_TIMEOUT_US 50000 // 50ms timeout for forcewake acknowledge
 
 
-// Placeholder: these would be per-domain refcounts if managing multiple domains
+// Refcounters for different forcewake domains
 static int32 gForcewakeRenderRefCount = 0;
+static int32 gForcewakeMediaRefCount = 0; // New refcounter for media domain
 static mutex gForcewakeLock;
 
 
@@ -27,6 +28,7 @@ intel_i915_forcewake_init(intel_i915_device_info* devInfo)
 {
 	TRACE("Forcewake: init\n");
 	atomic_set(&gForcewakeRenderRefCount, 0);
+	atomic_set(&gForcewakeMediaRefCount, 0); // Initialize media refcounter
 	return mutex_init_etc(&gForcewakeLock, "i915 forcewake lock", MUTEX_FLAG_CLONE_NAME);
 }
 
@@ -106,7 +108,44 @@ intel_i915_forcewake_get(intel_i915_device_info* devInfo, intel_forcewake_domain
 			}
 		}
 	}
-	// TODO: Handle FW_DOMAIN_MEDIA similarly if/when needed
+
+	if (domains & FW_DOMAIN_MEDIA) {
+		if (atomic_add(&gForcewakeMediaRefCount, 1) == 0) { // First one for media
+			// Placeholder defines for HSW media forcewake.
+			// These should be in registers.h and verified.
+			#ifndef FORCEWAKE_MEDIA_HSW_REQ // Allow override from registers.h
+			#define FORCEWAKE_MEDIA_HSW_REQ   (1U << 1)  // Request Media FW (conceptual bit in FORCEWAKE_MT_HSW)
+			#define FORCEWAKE_MEDIA_HSW_BIT   (1U << 17) // Mask bit for Media FW (conceptual bit in FORCEWAKE_MT_HSW)
+			#define FORCEWAKE_ACK_MEDIA_HSW_REG 0xA0E4   // Media FW Ack Register (HSW)
+			#define FW_ACK_MEDIA_HSW_BIT      (1U << 1)  // Media FW Ack bit in FORCEWAKE_ACK_MEDIA_HSW_REG
+			#endif
+
+			if (IS_HASWELL(devInfo->device_id)) {
+				intel_i915_write32(devInfo, FORCEWAKE_MT_HSW, (FORCEWAKE_MEDIA_HSW_BIT << 16) | FORCEWAKE_MEDIA_HSW_REQ);
+				status_t media_status = _wait_for_ack(devInfo, FORCEWAKE_ACK_MEDIA_HSW_REG, FW_ACK_MEDIA_HSW_BIT);
+				if (media_status != B_OK) {
+					TRACE("Forcewake: Failed to acquire media forcewake (status: %s)!\n", strerror(media_status));
+					atomic_add(&gForcewakeMediaRefCount, -1); // Decrement back on failure
+					// If render domain also failed, status will reflect that.
+					// If render succeeded but media failed, update status to reflect media failure.
+					if (status == B_OK) status = media_status;
+				} else {
+					TRACE("Forcewake: Media domain acquired.\n");
+				}
+			} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+				// IVB Media forcewake might be part of general forcewake or different.
+				// For now, assume unsupported or handled by render domain if applicable.
+				TRACE("Forcewake: Media domain GET not specifically implemented for Ivy Bridge. Assuming render FW covers it if needed.\n");
+				// If it's truly separate and needed, this would be an error or B_UNSUPPORTED.
+				// status = B_UNSUPPORTED;
+				// atomic_add(&gForcewakeMediaRefCount, -1);
+			} else {
+				TRACE("Forcewake: Media domain GET not implemented for Gen %d.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+				// status = B_UNSUPPORTED;
+				// atomic_add(&gForcewakeMediaRefCount, -1);
+			}
+		}
+	}
 
 	mutex_unlock(&gForcewakeLock);
 	return status;
@@ -140,7 +179,26 @@ intel_i915_forcewake_put(intel_i915_device_info* devInfo, intel_forcewake_domain
 			// No ACK check for put typically, but some HW might require it or a delay.
 		}
 	}
-	// TODO: Handle FW_DOMAIN_MEDIA
+
+	if (domains & FW_DOMAIN_MEDIA) {
+		if (atomic_add(&gForcewakeMediaRefCount, -1) == 1) { // Last one to release media
+			// Using same placeholder defines as in _get()
+			#ifndef FORCEWAKE_MEDIA_HSW_REQ // Allow override from registers.h
+			#define FORCEWAKE_MEDIA_HSW_REQ   (1U << 1)
+			#define FORCEWAKE_MEDIA_HSW_BIT   (1U << 17)
+			#endif
+
+			if (IS_HASWELL(devInfo->device_id)) {
+				intel_i915_write32(devInfo, FORCEWAKE_MT_HSW, (FORCEWAKE_MEDIA_HSW_BIT << 16) | 0); // Clear request
+				TRACE("Forcewake: Haswell media domain released.\n");
+			} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+				TRACE("Forcewake: Media domain PUT not specifically implemented for Ivy Bridge. Assuming render FW release covers it if needed.\n");
+			} else {
+				TRACE("Forcewake: Media domain PUT not implemented for Gen %d.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+			}
+			// No ACK check for put typically.
+		}
+	}
 
 	mutex_unlock(&gForcewakeLock);
 }

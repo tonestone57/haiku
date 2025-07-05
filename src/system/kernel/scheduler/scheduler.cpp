@@ -793,7 +793,8 @@ scheduler_perform_aging(CPUEntry* cpu)
 		ThreadData* thread_data;
 		int         old_level;
 	};
-	PromotionCandidate candidates[16]; // Max candidates to process per cycle
+	const int kMaxAgingCandidates = 32; // Increased limit
+	PromotionCandidate candidates[kMaxAgingCandidates];
 	int candidateCount = 0;
 	bigtime_t currentTime = system_time();
 
@@ -801,7 +802,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 	for (int level = NUM_MLFQ_LEVELS - 2; level >= 1; level--) { // Iterate relevant levels
 		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[level].GetConstIterator();
 		while (iter.HasNext()) {
-			if (candidateCount >= 16) break; // Stop collecting if candidate list is full
+			if (candidateCount >= kMaxAgingCandidates) break; // Stop collecting if candidate list is full
 			ThreadData* threadData = iter.Next();
 			if (threadData != NULL && !threadData->IsRealTime() &&
 				(currentTime - threadData->TimeEnteredCurrentLevel() > get_mode_adjusted_aging_threshold(level))) {
@@ -820,7 +821,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 				}
 			}
 		}
-		if (candidateCount >= 16) break;
+		if (candidateCount >= kMaxAgingCandidates) break;
 	}
 
 	if (candidateCount > 0) {

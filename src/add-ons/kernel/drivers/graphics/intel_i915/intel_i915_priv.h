@@ -179,6 +179,39 @@ enum i915_gem_object_state {
 #define I915_BO_ALLOC_PINNED            (1 << I915_BO_ALLOC_EVICTION_SHIFT)
 // Default is evictable (if this flag is not set)
 
+// GEM Context Flags
+#define CONTEXT_FLAG_USES_PPGTT (1 << 0)
+
+
+// --- Gen7 PPGTT Hardware Structures Definitions ---
+// Number of Page Directory Pointers in the LRCA used for a 2-level PPGTT.
+// Typically, PDP0 is used to point to the single Page Directory.
+#define GEN7_PPGTT_NUM_PD_ENTRIES_IN_LRCA_PDP0 1 // Using PDP0 for one PD.
+#define GEN7_PPGTT_PD_ENTRIES    1024 // Page Directory Entries per PD page
+#define GEN7_PPGTT_PT_ENTRIES    1024 // Page Table Entries per PT page
+
+// Page Directory Entry (PDE) format for Gen7 full PPGTT (64-bit)
+// Each PDE points to a Page Table.
+typedef uint64_t gen7_ppgtt_pde_t;
+#define GEN7_PDE_PRESENT        (1ULL << 0)
+#define GEN7_PDE_WRITABLE       (1ULL << 1) // If the PT it points to can contain writable PTEs
+// Bits 2-11: Reserved / flags. For simplicity, assume these are 0 for now.
+// Bits 63:12: Page Table Base Address (4KB aligned physical address of the Page Table)
+#define GEN7_PDE_ADDR_MASK      (~0xFFFULL)
+
+// Page Table Entry (PTE) format for Gen7 full PPGTT (64-bit)
+// Each PTE points to a 4KB page of a GEM object.
+typedef uint64_t gen7_ppgtt_pte_t;
+#define GEN7_PTE_PRESENT        (1ULL << 0)
+#define GEN7_PTE_WRITABLE       (1ULL << 1) // If the 4KB page is writable by GPU
+// Cacheability for PPGTT PTEs on Gen7 is typically controlled by MOCS settings referenced
+// in surface state or other commands, not directly by many bits in the PTE itself like GGTT.
+// Some minimal cache control (e.g. UC vs WB via PAT index) might be possible.
+// For now, we focus on Present and Writable.
+// Bits 63:12: Physical Page Address (4KB aligned physical address of the GEM object's page)
+#define GEN7_PTE_ADDR_MASK      (~0xFFFULL)
+// --- End Gen7 PPGTT Definitions ---
+
 
 // Forward declare for list_link if not already available via other Haiku headers.
 // Typically, <kernel/util/list.h> would provide this.

@@ -19,6 +19,7 @@ KernelAddon intel_i915 :
 	forcewake.c
 	intel_lvds.c
 	intel_ddi.c
+	i915_ppgtt.c
 	# Add other source files here as they are created.
 	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a

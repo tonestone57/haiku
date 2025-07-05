@@ -9,6 +9,7 @@
 #include "intel_i915_priv.h"
 #include "gem_object.h"
 #include "gem_context.h"
+#include "i915_ppgtt.h" // For PPGTT functions
 #include "engine.h"
 #include "gtt.h"
 #include "accelerant.h"

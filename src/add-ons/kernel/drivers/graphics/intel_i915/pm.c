@@ -117,22 +117,27 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	}
 
 	uint64 rp_state_cap = 0;
-	// Define MSR_SANDY_BRIDGE_RP_STATE_CAP if not available from headers, assuming it's same as IVB
-	#ifndef MSR_SANDY_BRIDGE_RP_STATE_CAP
-	#define MSR_SANDY_BRIDGE_RP_STATE_CAP MSR_IVB_RP_STATE_CAP // Value is 0x65E
+	// Define MSRs if not available from headers. Common value is 0x65E for many gens.
+	#ifndef MSR_RP_STATE_CAP_GEN6_GEN9 // Generic name for 0x65E used by SNB, IVB, BDW, SKL+
+	#define MSR_RP_STATE_CAP_GEN6_GEN9 0x65E
 	#endif
+	// MSR_HSW_RP_STATE_CAP is assumed to be defined elsewhere (e.g. registers.h)
 
 	if (IS_HASWELL(devInfo->device_id)) {
 		rp_state_cap = rdmsr(MSR_HSW_RP_STATE_CAP);
-	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-		rp_state_cap = rdmsr(MSR_IVB_RP_STATE_CAP);
-	} else if (IS_SANDYBRIDGE(devInfo->device_id)) {
-		// Sandy Bridge uses the same MSR as Ivy Bridge for RP_STATE_CAP
-		rp_state_cap = rdmsr(MSR_SANDY_BRIDGE_RP_STATE_CAP);
-		TRACE("PM: Reading RP_STATE_CAP MSR for Sandy Bridge (0x%lx)\n", (uint32)MSR_SANDY_BRIDGE_RP_STATE_CAP);
+		TRACE("PM: Reading RP_STATE_CAP MSR for Haswell (0x%lx)\n", (uint32)MSR_HSW_RP_STATE_CAP);
+	} else if (IS_SANDYBRIDGE(devInfo->device_id) ||
+			   IS_IVYBRIDGE(devInfo->device_id) ||
+			   IS_BROADWELL(devInfo->device_id) ||
+			   IS_SKYLAKE(devInfo->device_id) || // IS_GEN9(devInfo->device_id) could also be used if it covers SKL, KBL, CFL
+			   IS_KABYLAKE(devInfo->device_id) || // Assuming KBL/CFL also use 0x65E
+			   IS_COFFEELAKE(devInfo->device_id) ||
+			   IS_COMETLAKE(devInfo->device_id) ) {
+		rp_state_cap = rdmsr(MSR_RP_STATE_CAP_GEN6_GEN9);
+		TRACE("PM: Reading RP_STATE_CAP MSR for Gen6-Gen9 (SNB/IVB/BDW/SKL/KBL/CFL/CML) (0x%lx)\n", (uint32)MSR_RP_STATE_CAP_GEN6_GEN9);
 	}
-	// TODO: Add MSR reads for other Gens like Broadwell, Skylake if their MSRs differ
-	// and if their RPS mechanisms are similar enough to use these P-state values.
+	// TODO: Add MSR reads for other Gens (e.g., Gen11, Gen12) if their MSRs differ
+	// or if this generic MSR is not applicable. The interpretation of bits might also change.
 
 	if (rp_state_cap != 0) {
 		devInfo->rps_state->max_p_state_val = (rp_state_cap >> 0) & 0xFF; // Max P-state (lowest GPU freq value)

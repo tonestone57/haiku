@@ -870,7 +870,8 @@ scheduler_perform_aging(CPUEntry* cpu)
 static int32
 _get_cpu_high_priority_task_count_locked(CPUEntry* cpu)
 {
-	ASSERT(cpu->fQueueLock.IsOwned());
+	// Caller MUST hold cpu->fQueueLock
+	// ASSERT(cpu->fQueueLock.IsOwned()); // Cannot assert this directly on a spinlock
 	int32 count = 0;
 	for (int i = 0; i < NUM_MLFQ_LEVELS / 2; i++) {
 		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[i].GetConstIterator();
@@ -1149,26 +1150,70 @@ _user_estimate_max_scheduling_latency(thread_id id)
 		return modeMaxLatency;
 	}
 
+	if (threadData->IsIdle()) {
+		cpu->LockRunQueue();
+		bool otherWork = false;
+		for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) {
+			if (cpu->fMlfq[level].PeekMaximum() != NULL) {
+				otherWork = true;
+				break;
+			}
+		}
+		cpu->UnlockRunQueue();
+		return otherWork ? ((gCurrentMode != NULL) ? gCurrentMode->maximum_latency : kMaxEffectiveQuantum * (NUM_MLFQ_LEVELS / 2)) : 0;
+	}
+
+	bigtime_t timeForAllHigherLevels = 0;
 	cpu->LockRunQueue();
-	int higherOrEqualPriorityThreads = 0;
-	int currentLevel = threadData->CurrentMLFQLevel();
-	for (int i = 0; i <= currentLevel; i++) {
-		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[i].GetConstIterator();
+	int targetThreadLevel = threadData->CurrentMLFQLevel();
+
+	for (int level = 0; level < targetThreadLevel; level++) {
+		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[level].GetConstIterator();
 		while (iter.HasNext()) {
-			iter.Next();
-			higherOrEqualPriorityThreads++;
+			ThreadData* td_in_queue = iter.Next();
+			timeForAllHigherLevels += get_mode_adjusted_base_quantum(td_in_queue->CurrentMLFQLevel());
 		}
 	}
-	cpu->UnlockRunQueue();
 
-	bigtime_t estimatedLatency = get_mode_adjusted_base_quantum(currentLevel)
-		* higherOrEqualPriorityThreads;
-	for (int i = 0; i < currentLevel; i++) {
-		estimatedLatency += get_mode_adjusted_base_quantum(i);
+	bigtime_t timeForSameLevelPreceding = 0;
+	bool selfFoundInQueue = false;
+
+	if ((thread->state == B_THREAD_RUNNING && thread->cpu == &gCPU[cpu->ID()]) || !threadData->IsEnqueued()) {
+		ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+		while(iterCurrentLevelAll.HasNext()){
+			timeForSameLevelPreceding += get_mode_adjusted_base_quantum(iterCurrentLevelAll.Next()->CurrentMLFQLevel());
+		}
+	} else {
+		ThreadRunQueue::ConstIterator iterCurrentLevel = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+		while (iterCurrentLevel.HasNext()) {
+			ThreadData* td_in_queue = iterCurrentLevel.Next();
+			if (td_in_queue == threadData) {
+				selfFoundInQueue = true;
+				break;
+			}
+			timeForSameLevelPreceding += get_mode_adjusted_base_quantum(td_in_queue->CurrentMLFQLevel());
+		}
+		if (!selfFoundInQueue) {
+			timeForSameLevelPreceding = 0;
+			ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+			while(iterCurrentLevelAll.HasNext()){
+				ThreadData* td_in_q = iterCurrentLevelAll.Next();
+                if (td_in_q != threadData) {
+				    timeForSameLevelPreceding += get_mode_adjusted_base_quantum(td_in_q->CurrentMLFQLevel());
+                } else {
+                    selfFoundInQueue = true;
+                }
+			}
+		}
 	}
 
-	if (gCurrentMode != NULL)
+	bigtime_t estimatedLatency = timeForAllHigherLevels + timeForSameLevelPreceding;
+	cpu->UnlockRunQueue();
+
+	if (gCurrentMode != NULL) {
+		estimatedLatency = std::max((bigtime_t)0, estimatedLatency);
 		return std::min(estimatedLatency, gCurrentMode->maximum_latency);
+	}
 
 	return std::min(estimatedLatency, kMaxEffectiveQuantum * (NUM_MLFQ_LEVELS / 2));
 }

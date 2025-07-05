@@ -200,6 +200,19 @@
 	#define SPLL_N_MASK_HSW         (0x3FU << SPLL_N_SHIFT_HSW)
 
 
+// --- Backlight Control Registers ---
+// CPU Backlight (example for IVB+, older gens might differ)
+#define BLC_PWM_CPU_CTL2		0x48250 // Ivy Bridge+ CPU PWM Control Register 2
+	#define BLM_PWM_ENABLE_CPU_IVB		(1U << 31) // PWM Enable
+	#define BLM_POLARITY_ACTIVE_HIGH_CPU (1U << 29) // Backlight Polarity (1 = Active High)
+#define BLC_PWM_CPU_CTL			0x48254 // Ivy Bridge+ CPU PWM Freq/Duty Cycle (was BLC_PWM_CTL1)
+
+// PCH Backlight (example for CPT/LPT/SPT+)
+#define PCH_BLC_PWM_CTL2		0xC8250 // PCH PWM Control Register 2
+	#define BLM_PWM_ENABLE_PCH_HSW		(1U << 31) // PWM Enable (name from HSW context, bit pos often same)
+	#define BLM_POLARITY_ACTIVE_HIGH_PCH (1U << 29) // PWM Polarity (1 = Active High)
+#define PCH_BLC_PWM_CTL1		0xC8254 // PCH PWM Freq/Duty Cycle
+
 // --- Power Management ---
 // ... (RC6/RPS/Forcewake registers as before) ...
 #define RENDER_C_STATE_CONTROL_HSW	0x83D0
@@ -214,8 +227,10 @@
 	#define PM_INTR_RC6_THRESHOLD		(1U << 8)
 
 // MSRs
+#define MSR_SANDY_BRIDGE_RP_STATE_CAP	0x0000065E // Same as IVB for RP state capabilities
 #define MSR_IVB_RP_STATE_CAP	0x0000065E
 #define MSR_HSW_RP_STATE_CAP	0x00138098
+// Add other MSRs for power management as needed for different Gens
 
 
 // --- FDI Registers (Ivy Bridge PCH Link) ---
@@ -373,24 +388,80 @@
 #define LGC_PALETTE_C           0x4B000 // Pipe C Palette (HSW+)
 // Each palette has 256 entries of 32-bit (00:RR:GG:BB) values. Offset = index * 4.
 
-// --- Gen7 Logical Ring Context Area (LRCA) Offsets (Conceptual DWord Offsets from start of context image) ---
+// --- Gen7 Logical Ring Context Area (LRCA) Offsets (DWord Offsets from start of context image) ---
 // These are for the Render Command Streamer (RCS0) context image.
-// Actual hardware context image layout is defined by PRM and can be sparse.
-#define CTX_LR_CONTEXT_CONTROL            0x01 // Logical Ring Context Control Register image
-#define CTX_RING_HEAD                     0x02 // Logical Ring Head Pointer image
-#define CTX_RING_TAIL                     0x03 // Logical Ring Tail Pointer image
-#define CTX_RING_BUFFER_START_REGISTER    0x04 // Logical Ring Buffer Start Address image
-#define CTX_RING_BUFFER_CONTROL_REGISTER  0x05 // Logical Ring Buffer Control image
-#define CTX_BB_CURRENT_HEAD_UDW           0x10 // Batch Buffer Current Head Upper DW image
-#define CTX_BB_CURRENT_HEAD_LDW           0x11 // Batch Buffer Current Head Lower DW image
-#define CTX_BB_STATE                      0x12 // Batch Buffer State image
-#define CTX_SECOND_BB_HEAD_UDW            0x13 // Second Level BB Head Upper DW image
-#define CTX_SECOND_BB_HEAD_LDW            0x14 // Second Level BB Head Lower DW image
-#define CTX_SECOND_BB_STATE               0x15 // Second Level BB State image
-#define CTX_INDIRECT_CTX_OFFSET           0x1A // Indirect Context Offset Register image (for extended context)
-#define CTX_INSTRUCTION_STATE_POINTER     0x0D // Indirect State Pointers (ISP) image (or similar name)
-#define CTX_STATE_BASE_ADDRESS            0x0E // General State Base Address (GSBA) image (or similar name)
-// PDP registers for PPGTT would also be here (e.g., 0x20-0x27 for PDP3-0) if PPGTT is used by the context.
+// Based on Intel PRMs for Gen7 (Ivy Bridge/Haswell). Size often 4KB (0x1000 bytes = 0x400 DWords).
+#define GEN7_LRCA_SIZE                         0x1000 // Bytes
+
+// Offset 0x00: Reserved / Scratch
+#define CTX_CONTEXT_CONTROL                    0x01 // Logical Ring Context Control Register (was CTX_LR_CONTEXT_CONTROL)
+	#define CTX_CTRL_INHIBIT_RESTORE_CTX_END (1U << 0) // Inhibit restore of context at context end (MI_CTX_END)
+	#define CTX_CTRL_FORCE_PD_RESTORE        (1U << 1) // Force Restore Programmed PDPs
+	#define CTX_CTRL_FORCE_RESTORE_ALL       (1U << 2) // Force Restore All Pipeline State
+	#define CTX_CTRL_RS_CTX_ENABLE           (1U << 3) // Restore Stream / Context Enable (enables context state restore)
+
+#define CTX_RING_HEAD_REGISTER_DW0             0x02 // Logical Ring Head Pointer (Lower DW)
+#define CTX_RING_HEAD_REGISTER_DW1             0x03 // Logical Ring Head Pointer (Upper DW) - often 0 for BAR relative
+#define CTX_RING_TAIL_REGISTER_DW0             0x04 // Logical Ring Tail Pointer (Lower DW)
+#define CTX_RING_TAIL_REGISTER_DW1             0x05 // Logical Ring Tail Pointer (Upper DW) - often 0
+#define CTX_RING_BUFFER_START_REGISTER_DW0     0x06 // Logical Ring Buffer Start Address (Lower DW)
+#define CTX_RING_BUFFER_START_REGISTER_DW1     0x07 // Logical Ring Buffer Start Address (Upper DW) - often 0
+#define CTX_RING_BUFFER_CONTROL_REGISTER       0x08 // Logical Ring Buffer Control
+	// RING_CTL_ENABLE, RING_CTL_SIZE_MASK_GEN7 etc. can be used here from general ring control defines.
+
+// Offset 0x09-0x0A: Reserved
+#define CTX_BB_CURRENT_HEAD_REGISTER_DW0       0x0B // Batch Buffer Current Head Pointer (Lower DW) (was CTX_BB_CURRENT_HEAD_LDW)
+#define CTX_BB_CURRENT_HEAD_REGISTER_DW1       0x0C // Batch Buffer Current Head Pointer (Upper DW) (was CTX_BB_CURRENT_HEAD_UDW)
+#define CTX_BB_STATE_REGISTER                  0x0D // Batch Buffer State (was CTX_BB_STATE)
+	#define BB_STATE_VALID_MASK              (1U << 0) // Example, actual bit might vary
+
+#define CTX_SECOND_BB_HEAD_REGISTER_DW0        0x0E // Second Level BB Head Pointer (Lower DW) (was CTX_SECOND_BB_HEAD_LDW)
+#define CTX_SECOND_BB_HEAD_REGISTER_DW1        0x0F // Second Level BB Head Pointer (Upper DW) (was CTX_SECOND_BB_HEAD_UDW)
+#define CTX_SECOND_BB_STATE_REGISTER           0x10 // Second Level BB State (was CTX_SECOND_BB_STATE)
+
+// Offset 0x11: CTX_LRI_CMD_0 (Last Ring Instruction Command 0)
+// Offset 0x12: CTX_LRI_CMD_1 (Last Ring Instruction Command 1)
+
+// Indirect Context and State Pointers
+#define CTX_INDIRECT_CONTEXT_POINTER_DW0       0x1A // Indirect Context Pointer (Lower DW) (was CTX_INDIRECT_CTX_OFFSET)
+#define CTX_INDIRECT_CONTEXT_POINTER_DW1       0x1B // Indirect Context Pointer (Upper DW)
+#define CTX_INDIRECT_CONTEXT_OFFSET_REGISTER   0x1C // Indirect Context Offset Register
+
+#define CTX_INSTRUCTION_STATE_POINTER_DW0      0x1D // Instruction State Pointer (Lower DW) (was CTX_INSTRUCTION_STATE_POINTER)
+#define CTX_INSTRUCTION_STATE_POINTER_DW1      0x1E // Instruction State Pointer (Upper DW)
+
+// PDPs for per-context PPGTT (Page Directory Pointers). Gen7 has 4.
+// The order here matches common representation (PDP0 lowest address in context image).
+// DW Offset: (Intel PRM Vol2a Command Reference: Registers > MI_SET_CONTEXT)
+// For Gen7 Render Engine Context:
+// DW 0x22: PDP3_UDW
+// DW 0x23: PDP3_LDW
+// DW 0x24: PDP2_UDW
+// DW 0x25: PDP2_LDW
+// DW 0x26: PDP1_UDW
+// DW 0x27: PDP1_LDW
+// DW 0x28: PDP0_UDW
+// DW 0x29: PDP0_LDW
+// Let's adjust defines to match this typical layout if it's standard,
+// or use the existing ones if they map to a different PRM section.
+// The previous patch assumed PDP0_LDW was at 0x24. Re-checking typical layouts.
+// Linux i915 often defines these as:
+// PDP0_UDW, PDP0_LDW, PDP1_UDW, PDP1_LDW, ...
+// Let's use a consistent naming:
+#define CTX_PDP3_UDW                           0x22
+#define CTX_PDP3_LDW                           0x23
+#define CTX_PDP2_UDW                           0x24
+#define CTX_PDP2_LDW                           0x25
+#define CTX_PDP1_UDW                           0x26
+#define CTX_PDP1_LDW                           0x27
+#define CTX_PDP0_UDW                           0x28
+#define CTX_PDP0_LDW                           0x29
+
+// Note: CTX_STATE_BASE_ADDRESS is not a standard LRCA entry for Gen7.
+// GSBA is usually a global register (Graphics and State Base Address).
+// If it's meant to be a context-saved version, its offset needs to be verified.
+// Removing for now unless a specific PRM reference for it in LRCA is found.
+// #define CTX_STATE_BASE_ADDRESS            0x0E // General State Base Address (GSBA) image (or similar name)
 
 
 #endif /* INTEL_I915_REGISTERS_H */

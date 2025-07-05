@@ -117,9 +117,14 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	}
 
 	uint64 rp_state_cap = 0;
-	if (IS_HASWELL(devInfo->device_id)) rp_state_cap = rdmsr(MSR_HSW_RP_STATE_CAP);
-	else if (IS_IVYBRIDGE(devInfo->device_id)) rp_state_cap = rdmsr(MSR_IVB_RP_STATE_CAP);
-	// TODO: Add for other Gens (SNB has MSR_SANDY_BRIDGE_RP_STATE_CAP 0x65E like IVB)
+	if (IS_HASWELL(devInfo->device_id)) {
+		rp_state_cap = rdmsr(MSR_HSW_RP_STATE_CAP);
+	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+		rp_state_cap = rdmsr(MSR_IVB_RP_STATE_CAP);
+	} else if (IS_SANDYBRIDGE(devInfo->device_id)) {
+		rp_state_cap = rdmsr(MSR_SANDY_BRIDGE_RP_STATE_CAP);
+	}
+	// TODO: Add for other Gens if applicable and MSRs differ or behavior changes.
 
 	if (rp_state_cap != 0) {
 		devInfo->rps_state->max_p_state_val = (rp_state_cap >> 0) & 0xFF; // Max P-state (lowest GPU freq value)

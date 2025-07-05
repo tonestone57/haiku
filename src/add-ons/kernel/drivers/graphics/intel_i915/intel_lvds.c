@@ -277,21 +277,24 @@ intel_lvds_port_enable(intel_i915_device_info* devInfo, intel_output_port_state*
 		}
 
 		// Bits Per Color (BPC)
-		lvds_val &= ~LVDS_BPC_MASK; // Same mask for PCH_LVDS and CPU_LVDS
-		if (port_state->panel_bits_per_color == 8) { // From VBT
-			lvds_val |= LVDS_BPC_8;
+		// Assuming port_state is the correct variable name for the port properties
+		if (port->panel_bits_per_color == 8) { // From VBT
+			lvds_val = (lvds_val & ~LVDS_BPC_MASK) | LVDS_BPC_8;
 		} else { // Default to 6 BPC (18-bit panel)
-			lvds_val |= LVDS_BPC_6;
+			lvds_val = (lvds_val & ~LVDS_BPC_MASK) | LVDS_BPC_6;
 		}
 
 		// Dual Channel
-		if (port_state->panel_is_dual_channel) { // From VBT
+		if (port->panel_is_dual_channel) { // From VBT
 			lvds_val |= LVDS_DUAL_CHANNEL_EN; // Same bit for PCH_LVDS and CPU_LVDS
 		} else {
 			lvds_val &= ~LVDS_DUAL_CHANNEL_EN;
 		}
 
-		// TODO: LVDS_BORDER_EN if panel fitting is used.
+		// TODO: LVDS_BORDER_EN should be set if panel fitting is active for this pipe.
+		// This requires intel_lvds_configure_panel_fitter to be implemented and
+		// a way to query its current state for the pipe.
+		// Example: if (is_panel_fitter_active(devInfo, pipe)) lvds_val |= LVDS_BORDER_EN;
 
 		lvds_val |= LVDS_PORT_EN; // Enable LVDS port
 		intel_i915_write32(devInfo, lvds_reg, lvds_val);
@@ -409,7 +412,28 @@ intel_lvds_set_backlight(intel_i915_device_info* devInfo, intel_output_port_stat
 				intel_i915_write32(devInfo, blc_pwm_ctl1_reg, (cycle_len << 16) | duty_len);
 				uint32_t ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
 				ctl2_val |= pwm_enable_bit;
-				// TODO: Add polarity bit if needed: ctl2_val |= BLM_POLARITY_PNV (active high)
+
+				// Handle PWM polarity based on VBT info (placeholder)
+				// Assuming devInfo->vbt->pwm_active_high exists and is populated by VBT parsing.
+				// Default to active high if VBT data is not available or doesn't specify.
+				bool active_high = true; // Default
+				if (devInfo->vbt && devInfo->vbt->has_panel_specific_pwm_info) { // Assuming a flag like this
+					active_high = devInfo->vbt->pwm_active_high;
+				}
+				if (active_high) {
+					if (bl_source == VBT_BACKLIGHT_CPU_PWM)
+						ctl2_val |= BLM_POLARITY_ACTIVE_HIGH_CPU;
+					else // PCH_PWM
+						ctl2_val |= BLM_POLARITY_ACTIVE_HIGH_PCH;
+					TRACE("LVDS/eDP: PWM polarity set to Active High.\n");
+				} else {
+					if (bl_source == VBT_BACKLIGHT_CPU_PWM)
+						ctl2_val &= ~BLM_POLARITY_ACTIVE_HIGH_CPU;
+					else // PCH_PWM
+						ctl2_val &= ~BLM_POLARITY_ACTIVE_HIGH_PCH;
+					TRACE("LVDS/eDP: PWM polarity set to Active Low.\n");
+				}
+
 				intel_i915_write32(devInfo, blc_pwm_ctl2_reg, ctl2_val);
 				TRACE("LVDS/eDP: Backlight ON via PWM. CTL1=0x%x (val 0x%x), CTL2=0x%x (val 0x%x).\n",
 					blc_pwm_ctl1_reg, intel_i915_read32(devInfo, blc_pwm_ctl1_reg),

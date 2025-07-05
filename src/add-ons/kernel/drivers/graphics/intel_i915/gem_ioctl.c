@@ -116,7 +116,25 @@ intel_i915_gem_create_ioctl(intel_i915_device_info* devInfo, void* buffer, size_
 	intel_i915_gem_create_args args; struct intel_i915_gem_object* obj; status_t status;
 	if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
-	if (args.size == 0) return B_BAD_VALUE;
+	if (args.size == 0) {
+		TRACE("GEM_CREATE: zero size requested\n");
+		return B_BAD_VALUE;
+	}
+	// Check for a reasonable maximum size, e.g., 256MB for now.
+	// This should ideally be related to available GTT or system memory.
+#define MAX_GEM_OBJECT_SIZE (256 * 1024 * 1024)
+	if (args.size > MAX_GEM_OBJECT_SIZE) {
+		TRACE("GEM_CREATE: requested size %lu exceeds maximum %u\n", args.size, MAX_GEM_OBJECT_SIZE);
+		return B_OUT_OF_MEMORY; // Or B_BAD_VALUE
+	}
+
+	// Basic check for unknown flags. Deeper validation is in gem_object_create.
+	uint32 known_flags = I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_STOLEN_MEM;
+	if ((args.flags & ~known_flags) != 0) {
+		TRACE("GEM_CREATE: unknown flags 0x%lx requested (known: 0x%lx)\n", args.flags, known_flags);
+		// Not failing here, let gem_object_create handle it if it's truly invalid for it.
+	}
+
 	status = intel_i915_gem_object_create(devInfo, args.size, args.flags, &obj);
 	if (status != B_OK) return status;
 	status = _generic_handle_create(obj, HANDLE_TYPE_GEM_OBJECT, &args.handle);
@@ -238,7 +256,8 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 				if (status != B_OK) {
 					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
 				}
-				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, GTT_CACHE_WRITE_COMBINING); // Default WC for now
+				// Default WC for now. Read/write domain flags would influence cache type.
+				status = intel_i915_gem_object_map_gtt(target_obj, gtt_page_offset_for_target, GTT_CACHE_WRITE_COMBINING);
 				if (status != B_OK) {
 					intel_i915_gtt_free_space(devInfo, gtt_page_offset_for_target, target_obj->num_phys_pages);
 					intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
@@ -251,9 +270,20 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 					on_demand_map_count++;
 				} else {
 					// Too many on-demand maps, error or handle differently
+					TRACE("EXECBUFFER: Exceeded max on-demand GTT maps (%u)\n", EXECBUF_MAX_ON_DEMAND_GTT_MAPS);
 					status = B_ERROR; intel_i915_gem_object_put(target_obj); target_obj = NULL; goto exec_cleanup_ctx;
 				}
 			}
+			// TODO: Process reloc->read_domains and reloc->write_domain.
+			// This would involve setting memory domains for the target object
+			// and potentially emitting flushes or fence commands to ensure coherency.
+			// The fields are present in Haiku's intel_i915_gem_relocation_entry,
+			// but their actual processing is not yet implemented.
+			if (reloc->read_domains != 0 || reloc->write_domain != 0) {
+				TRACE("EXECBUFFER: Relocation for target handle %lu has non-zero domains (R:0x%x, W:0x%x) - currently ignored.\n",
+					reloc->target_handle, reloc->read_domains, reloc->write_domain);
+			}
+
 			uint32_t target_gtt_address = (target_obj->gtt_offset_pages * B_PAGE_SIZE) + reloc->delta;
 			*(uint32_t*)((uint8_t*)cmd_buffer_kernel_addr + reloc->offset) = target_gtt_address;
 			intel_i915_gem_object_put(target_obj); target_obj = NULL;

@@ -97,13 +97,14 @@ low_latency_choose_core(const ThreadData* threadData)
 	if (chosenCore == NULL) {
 		ReadSpinLocker coreLocker(gCoreHeapsLock);
 		CoreEntry* candidateCore = NULL;
+		// Iterate through gCoreLoadHeap (less loaded cores)
 		for (int32 i = 0; (candidateCore = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
 			if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 				continue;
 			chosenCore = candidateCore;
 			break;
 		}
-		if (chosenCore == NULL) {
+		if (chosenCore == NULL) { // Fallback to gCoreHighLoadHeap
 			for (int32 i = 0; (candidateCore = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
 				if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 					continue;
@@ -113,9 +114,7 @@ low_latency_choose_core(const ThreadData* threadData)
 		}
 	}
 
-	// As a last resort, if no core found (e.g. affinity mask is too restrictive and no matching core is suitable),
-	// iterate all cores. This should ideally not be reached if affinity is possible.
-	if (chosenCore == NULL) {
+	if (chosenCore == NULL) { // Absolute fallback: iterate all cores
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
 			bool hasEnabledCPU = false;
@@ -129,11 +128,10 @@ low_latency_choose_core(const ThreadData* threadData)
 
 			if (useAffinityMask && !core->CPUMask().Matches(affinityMask))
 				continue;
-			chosenCore = core; // Pick first available matching core
+			chosenCore = core;
 			break;
 		}
 	}
-
 
 	ASSERT(chosenCore != NULL && "Could not choose a core in low_latency_choose_core");
 	return chosenCore;
@@ -178,7 +176,7 @@ low_latency_rebalance_irqs(bool idle)
 	if (targetCore->GetLoad() + kLoadDifference >= currentCore->GetLoad())
 		return;
 
-	CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCore, false /* prefer least busy */, NULL /* no specific thread affinity for IRQ */);
+	CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCore, false, NULL);
 
 	if (targetCPU != NULL && targetCPU->ID() != current_cpu_struct->cpu_num) {
 		TRACE_SCHED("low_latency_rebalance_irqs: Moving IRQ %d from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
@@ -187,37 +185,38 @@ low_latency_rebalance_irqs(bool idle)
 	}
 }
 
-// --- New mode operations for consolidation (Low Latency mode doesn't use them) ---
 
 static CoreEntry*
 low_latency_get_consolidation_target_core(const ThreadData* /* threadToPlace */)
 {
-	return NULL; // Low latency does not consolidate to a specific target core
+	return NULL;
 }
 
 static CoreEntry*
 low_latency_designate_consolidation_core(const CPUSet* /* affinity_mask_or_null */)
 {
-	return NULL; // Low latency does not designate a consolidation core
+	return NULL;
 }
 
 static bool
 low_latency_should_wake_core_for_load(CoreEntry* /* core */, int32 /* thread_load_estimate */)
 {
-	return true; // Low latency prefers to wake cores to spread load
+	return true;
 }
 
 
 scheduler_mode_operations gSchedulerLowLatencyMode = {
-	"low latency",
+	"low latency", // name
 
-	1000, 100, { 2, 5 }, 5000, // Old quantum fields (largely informational now)
+	// Old quantum fields are removed from struct, so not initialized here.
+	// maximum_latency is still part of the struct.
+	5000,    // maximum_latency
 
 	low_latency_switch_to_mode,
 	low_latency_set_cpu_enabled,
 	low_latency_has_cache_expired,
 	low_latency_choose_core,
-	NULL, // rebalance (thread-specific) is deprecated
+	// NULL, // rebalance (thread-specific) - This field is removed from struct
 	low_latency_rebalance_irqs,
 	low_latency_get_consolidation_target_core,
 	low_latency_designate_consolidation_core,

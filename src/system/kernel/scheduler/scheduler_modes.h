@@ -13,21 +13,31 @@
 struct scheduler_mode_operations {
 	const char*				name;
 
-	bigtime_t				base_quantum;
-	bigtime_t				minimal_quantum;
-	bigtime_t				quantum_multipliers[2];
+	// bigtime_t				base_quantum; // DEPRECATED
+	// bigtime_t				minimal_quantum; // DEPRECATED
+	// bigtime_t				quantum_multipliers[2]; // DEPRECATED
 
-	bigtime_t				maximum_latency;
+	bigtime_t				maximum_latency; // Still used by _user_estimate_max_scheduling_latency
 
 	void					(*switch_to_mode)();
 	void					(*set_cpu_enabled)(int32 cpu, bool enabled);
 	bool					(*has_cache_expired)(
 								const Scheduler::ThreadData* threadData);
-	Scheduler::CoreEntry*	(*choose_core)(
+	Scheduler::CoreEntry*	(*choose_core)( // For initial thread placement
 								const Scheduler::ThreadData* threadData);
-	Scheduler::CoreEntry*	(*rebalance)(
-								const Scheduler::ThreadData* threadData);
+
+	// Scheduler::CoreEntry*	(*rebalance)(const Scheduler::ThreadData* threadData); // DEPRECATED
+
 	void					(*rebalance_irqs)(bool idle);
+
+	// --- New operations for power-saving consolidation and load balancing policies ---
+	Scheduler::CoreEntry*	(*get_consolidation_target_core)(
+								const Scheduler::ThreadData* threadToPlace);
+	Scheduler::CoreEntry*	(*designate_consolidation_core)(
+								const CPUSet* affinity_mask_or_null);
+	bool					(*should_wake_core_for_load)(
+								Scheduler::CoreEntry* core,
+								int32 thread_load_estimate);
 };
 
 extern struct scheduler_mode_operations gSchedulerLowLatencyMode;

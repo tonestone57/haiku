@@ -24,6 +24,7 @@ struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData>,
 private:
 	inline	void		_InitBase();
 
+	// _GetMinimalPriority might still be used by _ComputeEffectivePriority if complex logic is retained
 	inline	int32		_GetMinimalPriority() const;
 
 	inline	CoreEntry*	_ChooseCore() const;
@@ -48,8 +49,7 @@ public:
 	inline	bool		HasCacheExpired() const;
 	inline	CoreEntry*	Rebalance() const;
 
-	// Effective priority is used to map to an MLFQ level
-	inline	int32		GetEffectivePriority() const;
+	inline	int32		GetEffectivePriority() const; // Now simpler, based on base priority
 
 	inline	void		StartCPUTime();
 	inline	void		StopCPUTime();
@@ -62,24 +62,18 @@ public:
 	inline	void		SetStolenInterruptTime(bigtime_t interruptTime);
 
 	// --- Quantum Management ---
-			// Calculates Q_eff based on CPU load and base quantum for the thread's level
 			bigtime_t	CalculateDynamicQuantum(CPUEntry* cpu) const;
-			// Gets the Q_eff that was set when StartQuantum was called
 	inline	bigtime_t	GetEffectiveQuantum() const;
-			// Stores the calculated Q_eff for the current slice (called by CPUEntry)
 	inline	void		SetEffectiveQuantum(bigtime_t quantum);
-			// Time remaining in the current Q_eff
 	inline	bigtime_t	GetQuantumLeft();
-			// Call when thread is scheduled, passes its calculated Q_eff
 	inline	void		StartQuantum(bigtime_t effectiveQuantum);
-			// Check if Q_eff has been consumed
 	inline	bool		HasQuantumEnded(bool wasPreempted, bool hasYielded);
 
 	// --- MLFQ Specific ---
 	inline	int			CurrentMLFQLevel() const;
-	inline	void		SetMLFQLevel(int level); // Also resets TimeEnteredCurrentLevel
+	inline	void		SetMLFQLevel(int level);
 	inline	bigtime_t	TimeEnteredCurrentLevel() const;
-	inline	void		ResetTimeEnteredCurrentLevel(); // Called on level change or unblock
+	inline	void		ResetTimeEnteredCurrentLevel();
 
 	// --- Load Balancing Specific ---
 	inline	bigtime_t	LastMigrationTime() const;
@@ -87,36 +81,36 @@ public:
 
 
 	// --- State and Lifecycle ---
-	inline	void		Continues(); // When thread continues on a CPU
-	inline	void		GoesAway();  // When thread is about to sleep/wait
-	inline	void		Dies();      // When thread is exiting
+	inline	void		Continues();
+	inline	void		GoesAway();
+	inline	void		Dies();
 
 	inline	bigtime_t	WentSleep() const	{ return fWentSleep; }
 	inline	bigtime_t	WentSleepActive() const	{ return fWentSleepActive; }
 
-	// Enqueue/Dequeue simplified: actual ops in CPUEntry
-	inline	void		MarkEnqueued(CoreEntry* core); // Sets fCore, fEnqueued, fReady
+	inline	void		MarkEnqueued(CoreEntry* core);
 	inline	void		MarkDequeued();
 
-	inline	void		UpdateActivity(bigtime_t active); // active time used in last burst
+	inline	void		UpdateActivity(bigtime_t active);
 
 	inline	bool		IsEnqueued() const	{ return fEnqueued; }
 
 	inline	int32		GetLoad() const	{ return fNeededLoad; }
 
 	inline	CoreEntry*	Core() const	{ return fCore; }
-			void		UnassignCore(bool running = false); // If thread migrates or core disabled
+			void		UnassignCore(bool running = false);
 
 
 	// Static utility methods
 	static	int			MapPriorityToMLFQLevel(int32 priority);
 	static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel);
+	// static	void				ComputeQuantumLengths(); // REMOVED
 
 
 private:
 			void		_ComputeNeededLoad();
 			void		_ComputeEffectivePriority() const;
-
+			// Penalty system methods and related members are removed.
 
 			bigtime_t	fStolenTime;
 			bigtime_t	fQuantumStartWallTime;
@@ -134,7 +128,7 @@ private:
 			int			fCurrentMlfqLevel;
 			bigtime_t	fTimeEnteredCurrentLevel;
 
-	mutable	int32		fEffectivePriority;
+	mutable	int32		fEffectivePriority; // Still used for RunQueue sorting within MLFQ level
 
 	// DTQ specific fields
 			bigtime_t	fTimeUsedInCurrentQuantum;
@@ -167,8 +161,12 @@ inline int32
 ThreadData::_GetMinimalPriority() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	const int32 kDivisor = 5;
-	const int32 kMaximalPriority = 25;
+	// This function is mainly for capping the effective priority in the old system.
+	// With MLFQ, levels define priority bands. It might still be useful if
+	// _ComputeEffectivePriority uses it to ensure base_priority doesn't
+	// map to an absurdly low effective value for RunQueue sub-sorting.
+	const int32 kDivisor = 5; // Example, this logic might be entirely removed
+	const int32 kMaximalPriority = 25; // Arbitrary cap from old system
 	const int32 kMinimalPriority = B_LOWEST_ACTIVE_PRIORITY;
 	int32 priority = GetBasePriority() / kDivisor;
 	return std::max(std::min(priority, kMaximalPriority), kMinimalPriority);
@@ -199,8 +197,9 @@ ThreadData::Rebalance() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
-	if (gCurrentMode == NULL) return fCore;
-	return gCurrentMode->rebalance(this);
+	if (gCurrentMode == NULL || gCurrentMode->rebalance == NULL) return fCore; // rebalance is deprecated
+	// return gCurrentMode->rebalance(this); // This line should be removed
+	return fCore; // Return current core as rebalance is deprecated
 }
 
 inline int32
@@ -281,9 +280,12 @@ ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
 	if (IsIdle())
 		return false;
 	if (hasYielded) {
-		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum;
+		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum; // Mark as fully used for demotion purposes
 		return true;
 	}
+	// Note: The 'preempted' flag from cpu_ent was used in old penalty logic.
+	// Here, quantum end is simply based on fTimeUsedInCurrentQuantum vs fCurrentEffectiveQuantum.
+	// UpdateActivity is responsible for updating fTimeUsedInCurrentQuantum.
 	return fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum;
 }
 
@@ -357,7 +359,7 @@ ThreadData::GoesAway()
 		bigtime_t currentTime = system_time();
 		fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
 		fMeasureAvailableTime = currentTime;
-		if (fCore != NULL) // Check fCore before dereferencing
+		if (fCore != NULL)
 			fLoadMeasurementEpoch = fCore->RemoveLoad(fNeededLoad, false);
 	}
 	fReady = false;
@@ -369,7 +371,7 @@ ThreadData::Dies()
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED);
 	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
-		if (fReady) // Only remove load if it was considered ready
+		if (fReady)
 			fCore->RemoveLoad(fNeededLoad, true);
 	}
 	fReady = false;

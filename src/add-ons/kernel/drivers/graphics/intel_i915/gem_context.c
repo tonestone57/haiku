@@ -39,6 +39,16 @@ _intel_i915_gem_context_free_internal(struct intel_i915_gem_context* ctx)
 		ctx->hw_image_obj = NULL;
 	}
 
+	// Placeholder for PPGTT cleanup
+	if (ctx->ppgtt != NULL) {
+		// This would involve unbinding all objects, freeing page table GEM objects, etc.
+		// e.g., intel_i915_ppgtt_fini(ctx->ppgtt); or similar hypothetical function.
+		// Since ppgtt is initialized to NULL and not created, this block is currently defensive.
+		TRACE("GEM Context: Freed context ID %lu (PPGTT cleanup STUBBED as ppgtt should be NULL).\n", ctx->id);
+		// If ppgtt was a dynamically allocated struct: free(ctx->ppgtt);
+		// If ppgtt had its own refcounting: i915_ppgtt_put(ctx->ppgtt);
+	}
+
 	mutex_destroy(&ctx->lock);
 	free(ctx);
 }
@@ -62,6 +72,11 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	ctx->id = atomic_add((int32*)&gNextContextID, 1);
 	ctx->refcount = 1;
 	ctx->hw_image_obj = NULL;
+	// Initialize new fields
+	ctx->ppgtt = NULL;
+	ctx->context_flags = 0;
+	ctx->last_used_engine = NUM_ENGINES; // Assuming NUM_ENGINES is a valid 'invalid/unassigned' engine ID from engine.h
+	ctx->scheduling_priority = DEFAULT_CONTEXT_PRIORITY; // DEFAULT_CONTEXT_PRIORITY is in gem_context.h
 
 	status = mutex_init_etc(&ctx->lock, "i915 GEM context lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) {
@@ -111,6 +126,24 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	// or if they need specific pointers (like to PPGTT PDPs, which we are not using yet).
 	// A minimal context might just need to be present for MI_SET_CONTEXT to point to.
 	// More advanced contexts would store register state (ring buffer, pipeline state, etc.).
+
+	// If CONTEXT_FLAG_USES_PPGTT were set in `flags` passed to create (or by default for some systems),
+	// PPGTT initialization would happen here.
+	// Example:
+	// if (flags & CONTEXT_FLAG_USES_PPGTT || (devInfo->device_id & 0xff00) >= 0x0A00 /* Gen7.5+ might default to PPGTT */ ) {
+	//   // status = intel_i915_ppgtt_init(devInfo, ctx); // Hypothetical function
+	//   // if (status != B_OK) {
+	//   //   intel_i915_gem_object_put(ctx->hw_image_obj); // Clean up already created hw_image
+	//   //   mutex_destroy(&ctx->lock);
+	//   //   free(ctx);
+	//   //   return status;
+	//   // }
+	//   // ctx->context_flags |= CONTEXT_FLAG_USES_PPGTT;
+	//   // The LRCA's PDP entries would need to be updated with the GTT addresses of
+	//   // the PPGTT's page directory GEM objects. This typically happens when the
+	//   // context is first submitted to an engine, or if the LRCA is CPU mapped here.
+	//   TRACE("GEM Context: PPGTT initialization STUBBED for context ID %lu.\n", ctx->id);
+	// }
 
 	void* hw_image_cpu_addr;
 	status = intel_i915_gem_object_map_cpu(ctx->hw_image_obj, &hw_image_cpu_addr);

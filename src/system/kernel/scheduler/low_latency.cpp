@@ -18,7 +18,8 @@
 using namespace Scheduler;
 
 
-const bigtime_t kLowLatencyCacheExpire = 100000; // 100ms
+//const bigtime_t kLowLatencyCacheExpire = 100000; // 100ms
+const bigtime_t kLowLatencyCacheExpire = 30000;  // 30ms (New Value)
 
 
 static void
@@ -45,15 +46,28 @@ static bool
 low_latency_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (threadData == NULL || threadData->WentSleepActive() == 0)
+	if (threadData == NULL) // Basic sanity check
 		return true;
 
-	CoreEntry* core = threadData->Core();
-	if (core == NULL)
+	CoreEntry* core = threadData->Core(); // This is the thread's *previous* core
+	if (core == NULL) {
+		// Thread is not currently associated with a specific previous core,
+		// or it's the first time it's being scheduled. Cache affinity is irrelevant.
 		return true;
+	}
 
-	bigtime_t coreActiveTime = core->GetActiveTime();
-	return coreActiveTime - threadData->WentSleepActive() > kLowLatencyCacheExpire;
+	// If WentSleepActive is 0, it means the thread either is new to this core
+	// or the core was idle when the thread last ran on it.
+	// In this case, the cache is only considered potentially warm if the core
+	// has remained mostly idle (i.e., its total active time is still very low).
+	if (threadData->WentSleepActive() == 0) {
+		return core->GetActiveTime() > kLowLatencyCacheExpire;
+	}
+
+	// Standard case: core was active when thread slept on it.
+	// Check how much more active the core has been since.
+	bigtime_t coreActiveTimeSinceThreadSlept = core->GetActiveTime() - threadData->WentSleepActive();
+	return coreActiveTimeSinceThreadSlept > kLowLatencyCacheExpire;
 }
 
 

@@ -19,7 +19,8 @@
 using namespace Scheduler;
 
 
-const bigtime_t kPowerSavingCacheExpire = 100000;
+//const bigtime_t kPowerSavingCacheExpire = 100000;
+const bigtime_t kPowerSavingCacheExpire = 250000; // 250ms (New Value)
 static CoreEntry* sSmallTaskCore = NULL;
 const int32 kConsolidationScoreHysteresisMargin = kMaxLoad / 10; // Only switch if new core is 10% of MaxLoad better
 

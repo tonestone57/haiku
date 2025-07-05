@@ -29,6 +29,10 @@
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
 
+// For strtod in debugger command
+#include <stdlib.h>
+#include <stdio.h>
+
 
 #include "scheduler_common.h"
 #include "scheduler_cpu.h"
@@ -85,6 +89,13 @@ static int32 scheduler_aging_event(timer* unused);
 static void scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
+
+// Debugger command forward declarations
+#if SCHEDULER_TRACING
+static int cmd_scheduler(int argc, char** argv);
+#endif
+static int cmd_scheduler_set_kdf(int argc, char** argv);
+static int cmd_scheduler_get_kdf(int argc, char** argv); // Forward declaration for get_kdf
 
 static timer sAgingTimer;
 static const bigtime_t kAgingCheckInterval = 500000;
@@ -714,6 +725,41 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 }
 
 
+// Forward declaration for the new debugger command function
+#if SCHEDULER_TRACING
+static int cmd_scheduler(int argc, char** argv);
+#endif
+static int cmd_scheduler_set_kdf(int argc, char** argv);
+static int cmd_scheduler_get_kdf(int argc, char** argv);
+
+static void
+init_debug_commands()
+{
+#if SCHEDULER_TRACING
+	add_debugger_command_etc("scheduler", &cmd_scheduler,
+		"Analyze scheduler tracing information",
+		"<thread>\n"
+		"Analyzes scheduler tracing information for a given thread.\n"
+		"  <thread>  - ID of the thread.\n", 0);
+#endif
+
+	add_debugger_command_etc("scheduler_set_kdf", &cmd_scheduler_set_kdf,
+		"Set the scheduler's gKernelKDistFactor",
+		"<factor>\n"
+		"Sets the scheduler's gKernelKDistFactor used in DTQ calculations.\n"
+		"  <factor>  - Floating point value (e.g., 0.3). Recommended range [0.0 - 2.0].\n"
+		"Affects how much quanta are extended on idle/lightly-loaded CPUs.", 0);
+	add_debugger_command_etc("set_kdf", &cmd_scheduler_set_kdf,
+		"Alias for scheduler_set_kdf", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+
+	add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf,
+		"Get the scheduler's current gKernelKDistFactor",
+		"Gets the scheduler's current gKernelKDistFactor.", 0);
+	add_debugger_command_etc("get_kdf", &cmd_scheduler_get_kdf,
+		"Alias for scheduler_get_kdf", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+}
+
+
 void
 scheduler_init()
 {
@@ -733,13 +779,51 @@ scheduler_init()
 		add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	}
 	init_debug_commands();
-#if SCHEDULER_TRACING
-	add_debugger_command_etc("scheduler", &cmd_scheduler,
-		"Analyze scheduler tracing information",
-		"<thread>\n"
-		"Analyzes scheduler tracing information for a given thread.\n"
-		"  <thread>  - ID of the thread.\n", 0);
-#endif
+}
+
+
+// #pragma mark - Debugger Commands
+
+static int
+cmd_scheduler_set_kdf(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_kdf <factor (float)>\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	char* endPtr;
+	double newFactor = strtod(argv[1], &endPtr);
+
+	if (argv[1] == endPtr || *endPtr != '\0') {
+		kprintf("Error: Invalid float value for factor: %s\n", argv[1]);
+		kprintf("Usage: scheduler_set_kdf <factor (float)>\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	// Validate the factor (e.g., within a reasonable range)
+	if (newFactor < 0.0 || newFactor > 2.0) { // Designed range [0.0 - 2.0]
+		kprintf("Error: factor %f is out of reasonable range [0.0 - 2.0]. Value not changed.\n", newFactor);
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	Scheduler::gKernelKDistFactor = (float)newFactor;
+	kprintf("Scheduler gKernelKDistFactor set to: %f\n", Scheduler::gKernelKDistFactor);
+
+	return DEBUG_COMMAND_SUCCESS;
+}
+
+
+static int
+cmd_scheduler_get_kdf(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_kdf\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	kprintf("Current scheduler gKernelKDistFactor: %f\n", Scheduler::gKernelKDistFactor);
+	return DEBUG_COMMAND_SUCCESS;
 }
 
 
@@ -1239,5 +1323,3 @@ _user_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
-
-[end of src/system/kernel/scheduler/scheduler.cpp]

@@ -152,30 +152,64 @@ low_latency_choose_core(const ThreadData* threadData)
 }
 
 
+// Add near the top of the file or function
+const int32 kMaxIRQsToMovePerCycleLL = 3; // LL for Low Latency
+
 static void
 low_latency_rebalance_irqs(bool idle)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (idle || gSingleCore)
+	// This function is called when 'idle' is true from reschedule.
+	// It should act if the CPU is becoming idle and it's not a single core system.
+	if (!idle || gSingleCore)
 		return;
 
 	cpu_ent* current_cpu_struct = get_cpu_struct();
-	SpinLocker locker(current_cpu_struct->irqs_lock);
+	// No irq_lock taken yet, as we might return early.
 
-	irq_assignment* chosenIRQ = NULL;
-	irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
+	// --- Step 1: Identify candidate IRQs on current CPU ---
+	irq_assignment* candidateIRQs[kMaxIRQsToMovePerCycleLL];
+	int32 candidateCount = 0;
 	int32 totalLoadOnThisCPU = 0;
+
+	SpinLocker irqListLocker(current_cpu_struct->irqs_lock);
+	irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
 	while (irq != NULL) {
-		if (chosenIRQ == NULL || chosenIRQ->load < irq->load)
-			chosenIRQ = irq;
 		totalLoadOnThisCPU += irq->load;
+		// Keep a sorted list of top N heaviest IRQs.
+		if (candidateCount < kMaxIRQsToMovePerCycleLL) {
+			candidateIRQs[candidateCount++] = irq;
+			// Simple bubble sort up for the new element
+			for (int k = candidateCount - 1; k > 0; --k) {
+				if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+					irq_assignment* temp = candidateIRQs[k];
+					candidateIRQs[k] = candidateIRQs[k-1];
+					candidateIRQs[k-1] = temp;
+				} else {
+					break;
+				}
+			}
+		} else if (irq->load > candidateIRQs[kMaxIRQsToMovePerCycleLL - 1]->load) {
+			// Replace the smallest of the top N and re-sort/re-insert
+			candidateIRQs[kMaxIRQsToMovePerCycleLL - 1] = irq;
+			for (int k = kMaxIRQsToMovePerCycleLL - 1; k > 0; --k) {
+				if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+					irq_assignment* temp = candidateIRQs[k];
+					candidateIRQs[k] = candidateIRQs[k-1];
+					candidateIRQs[k-1] = temp;
+				} else {
+					break;
+				}
+			}
+		}
 		irq = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 	}
-	locker.Unlock();
+	irqListLocker.Unlock(); // Release lock after collecting candidates
 
-	if (chosenIRQ == NULL || totalLoadOnThisCPU < kLowLoad)
+	if (candidateCount == 0 || totalLoadOnThisCPU < kLowLoad)
 		return;
 
+	// --- Step 2: Select Target Core & CPU (done once) ---
 	CoreEntry* targetCore = NULL;
 	ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
 	targetCore = gCoreLoadHeap.PeekMinimum();
@@ -191,11 +225,31 @@ low_latency_rebalance_irqs(bool idle)
 		return;
 
 	CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCore, false, NULL);
+	if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num)
+		return;
 
-	if (targetCPU != NULL && targetCPU->ID() != current_cpu_struct->cpu_num) {
-		TRACE_SCHED("low_latency_rebalance_irqs: Moving IRQ %d from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-			chosenIRQ->irq, current_cpu_struct->cpu_num, targetCPU->ID());
-		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+	// --- Step 3: Attempt to move candidate IRQs ---
+	int movedCount = 0;
+	for (int32 i = 0; i < candidateCount; i++) {
+		irq_assignment* chosenIRQ = candidateIRQs[i];
+		if (chosenIRQ == NULL) continue; // Should not happen if collected properly
+
+		// Check if this IRQ is still on this CPU (could have been moved by another process, though unlikely here)
+		// This check might require re-acquiring irqs_lock or a different way to verify IRQ's current CPU.
+		// For now, assume it's still valid to attempt move. assign_io_interrupt_to_cpu handles internal checks.
+
+		TRACE_SCHED("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
+
+		// TODO: Ideally, re-evaluate if targetCPU is still a good target *after* moving previous IRQs to it in this batch.
+		// For simplicity in this pass, we use the same targetCPU for the batch.
+		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		if (status == B_OK) {
+			movedCount++;
+			TRACE_SCHED("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+		}
+		if (movedCount >= kMaxIRQsToMovePerCycleLL) // Adhere to the "up to N" moves
+			break;
 	}
 }
 

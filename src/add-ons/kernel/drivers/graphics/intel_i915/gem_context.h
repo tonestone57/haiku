@@ -8,33 +8,32 @@
 #ifndef INTEL_I915_GEM_CONTEXT_H
 #define INTEL_I915_GEM_CONTEXT_H
 
-#include "intel_i915_priv.h"
-#include <kernel/util/ DoublyLinkedList.h>
+#include "intel_i915_priv.h" // For intel_i915_device_info
 #include <kernel/locks/mutex.h>
+#include <sys/param.h> // For PAGE_SIZE, though B_PAGE_SIZE is preferred in Haiku kernel
 
-struct intel_i915_gem_object; // Forward declaration
+// Forward declaration
+struct intel_i915_gem_object;
 
-// Size of the Gen7 Logical Ring Context image for RCS (Render Command Streamer)
-// This size varies by generation and engine. For Gen7 RCS, it's around 18-20 DWORDS for essential state,
-// but can be larger if more state (e.g., pipeline state pointers) is included.
-// A common size used in Linux for the "RING_CONTEXT_SIZE" (which includes more than just LRCA) is ~20KB.
-// For a minimal LRCA, it's much smaller. Let's use a page for simplicity for the backing store.
-#define GEN7_RCS_CONTEXT_IMAGE_SIZE B_PAGE_SIZE // Placeholder, actual HW image is smaller
-
+// Size of the hardware context image for Gen7 Render Command Streamer (RCS0)
+// Typically 1 page (4KB) is allocated for the LRCA.
+#define GEN7_RCS_CONTEXT_IMAGE_SIZE B_PAGE_SIZE
 
 typedef struct intel_i915_gem_context {
 	intel_i915_device_info* dev_priv;
-	uint32_t                id;
-	int32_t                 refcount;
+	uint32_t id; // Unique context ID
+	int32_t refcount;
+	mutex lock;
 
-	struct intel_i915_gem_object* hw_image_obj; // GEM object for HW context state image
+	// Hardware context image
+	struct intel_i915_gem_object* hw_image_obj; // GEM object backing the context image
 
-	// TODO: Add fields for:
-	// - Associated PPGTT
-	// - List of GEM objects bound (for residency)
-	// - Engine-specific state
+	// TODO: Add fields for PPGTT (Per-Process GTT) if implemented
+	// struct i915_hw_ppgtt* ppgtt;
 
-	mutex                   lock;
+	// TODO: Add other software state associated with a context
+	// (e.g., engine state, scheduling priority, etc.)
+
 } intel_i915_gem_context;
 
 
@@ -44,7 +43,6 @@ extern "C" {
 
 status_t intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	struct intel_i915_gem_context** ctx_out);
-
 void intel_i915_gem_context_get(struct intel_i915_gem_context* ctx);
 void intel_i915_gem_context_put(struct intel_i915_gem_context* ctx);
 

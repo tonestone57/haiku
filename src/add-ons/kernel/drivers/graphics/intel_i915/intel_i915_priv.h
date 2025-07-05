@@ -221,6 +221,8 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	uint8_t  panel_bits_per_color; // From LFP data or general panel type
 	bool     panel_is_dual_channel; // For LVDS
 	uint8_t  backlight_control_source; // 0=CPU PWM, 1=PCH PWM, 2=eDP AUX (conceptual values)
+	bool     backlight_pwm_active_low; // True if PWM signal is active low for brightness
+	uint16_t backlight_pwm_freq_hz;    // PWM frequency from VBT
 	// DPCD-derived properties (for DP/eDP ports)
 	uint8_t  dpcd_revision;
 	uint8_t  dp_max_link_rate; // Value from DPCD_MAX_LINK_RATE (e.g., 0x06, 0x0A, 0x14)
@@ -245,8 +247,8 @@ typedef struct intel_clock_params_t {
 	// CDCLK
 	uint32_t cdclk_freq_khz;
 	// For HSW LCPLL that sources CDCLK
-	uint32_t lcpll_freq_khz;        // Target LCPLL output frequency
-	uint32_t lcpll_cdclk_div_sel;   // Value for CDCLK_CTL_HSW to divide LCPLL
+	uint32_t hsw_cdclk_source_lcpll_freq_khz; // The LCPLL frequency CDCLK will divide from
+	uint32_t hsw_cdclk_ctl_field_val;         // Combined field value for CDCLK_CTL_HSW
 
 	// DPLL (WRPLL or SPLL)
 	int      selected_dpll_id; // Which hardware DPLL to use (e.g., 0 for DPLL_A/WRPLL1)
@@ -286,6 +288,7 @@ typedef struct intel_clock_params_t {
 		uint16_t link_n;        // FDI Link N value (PCH)
 		uint8_t  fdi_lanes;     // Number of FDI lanes (1, 2, or 4 for IVB)
 		                         // Related to FDI_DP_PORT_WIDTH in FDI_TX_CTL[22:19]
+		uint8_t  pipe_bpc_total;// Total bits per pixel for the pipe (e.g., 18, 24, 30, 36)
 	} fdi_params;
 } intel_clock_params_t;
 

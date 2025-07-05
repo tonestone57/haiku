@@ -409,7 +409,13 @@ intel_lvds_set_backlight(intel_i915_device_info* devInfo, intel_output_port_stat
 				intel_i915_write32(devInfo, blc_pwm_ctl1_reg, (cycle_len << 16) | duty_len);
 				uint32_t ctl2_val = intel_i915_read32(devInfo, blc_pwm_ctl2_reg);
 				ctl2_val |= pwm_enable_bit;
-				// TODO: Add polarity bit if needed: ctl2_val |= BLM_POLARITY_PNV (active high)
+				if (port->backlight_pwm_active_low) {
+					ctl2_val |= (bl_source == VBT_BACKLIGHT_CPU_PWM) ? BLM_POLARITY_CPU_IVB : BLM_POLARITY_PCH_HSW;
+					TRACE("LVDS/eDP: Setting PWM polarity to active low.\n");
+				} else {
+					ctl2_val &= ~((bl_source == VBT_BACKLIGHT_CPU_PWM) ? BLM_POLARITY_CPU_IVB : BLM_POLARITY_PCH_HSW);
+					TRACE("LVDS/eDP: Setting PWM polarity to active high.\n");
+				}
 				intel_i915_write32(devInfo, blc_pwm_ctl2_reg, ctl2_val);
 				TRACE("LVDS/eDP: Backlight ON via PWM. CTL1=0x%x (val 0x%x), CTL2=0x%x (val 0x%x).\n",
 					blc_pwm_ctl1_reg, intel_i915_read32(devInfo, blc_pwm_ctl1_reg),

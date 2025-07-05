@@ -351,8 +351,8 @@ status_t
 intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_gem_context* new_ctx)
 {
 	uint32_t offset_in_dwords;
-	// For Gen7 LRCA: MI_FLUSH_DW (1 dword) + MI_SET_CONTEXT (2 dwords) + MI_NOOP (1 dword) = 4 dwords
-	const uint32_t cmd_len_dwords_ctx_switch = 4;
+	// For Gen7 LRCA: MI_FLUSH_DW (1) + MI_SET_CONTEXT (3) + MI_NOOP (1) = 5 dwords
+	const uint32_t cmd_len_dwords_ctx_switch = 5;
 	const uint32_t cmd_len_dwords_flush_only = 2; // MI_FLUSH_DW + MI_NOOP
 	status_t status;
 
@@ -386,19 +386,19 @@ intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_ge
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE | MI_FLUSH_DEPTH_CACHE | MI_FLUSH_VF_CACHE);
 
 	// 2. MI_SET_CONTEXT for Gen7 Logical Ring Context Architecture (LRCA)
-	// DW0: Opcode (0x1E << 23) | Logical Context Restore (Bit 0 = 1) | Length (0 for 2DW command)
-	// DW1: Logical Ring Context Address (GTT address of the context image)
-	uint32_t mi_set_context_dw0 = (0x1E << 23) | (1 << 0) | 0; // Opcode, Logical Restore, Length=0
+	// DW0: Opcode (0x1E << 23) | Logical Context Restore (Bit 0 = 1) | Length (1 for 3DW command)
+	// DW1: Logical Context ID (0 for LRCA with implicit ID via GTT address)
+	// DW2: Logical Ring Context Address (GTT address of the context image)
+	uint32_t mi_cmd_header = (MI_COMMAND_OPCODE(0x1E) | MI_COMMAND_TYPE_MI |
+	                          MI_SET_CONTEXT_LOGICAL_RESTORE | (3 - 2)); // Length = 1 for 3 DWORDS
+	uint32_t logical_context_id = 0; // For LRCA, context ID is often implicit or 0.
 	uint32_t context_gtt_address = new_ctx->hw_image_obj->gtt_offset_pages * B_PAGE_SIZE;
 
-	// TODO: Context Save: If engine->current_context is valid and we need to save its state,
-	// the MI_SET_CONTEXT command would need the "Save Current Context" bit (Bit 1 on some gens,
-	// but Gen7 LRCA might handle save implicitly if the old context image was correctly set up
-	// or if specific save commands are issued prior). For now, assume simple restore without explicit save command.
-	// If save is needed, the hardware must know the GTT address of the *old* context's image.
-	// This is usually implicitly managed by the hardware after a context is loaded.
+	// Note: Implicit context save is relied upon for LRCA. If explicit save were needed,
+	// it would involve different MI_SET_CONTEXT bits or preceding save commands.
 
-	intel_engine_write_dword(engine, offset_in_dwords++, mi_set_context_dw0);
+	intel_engine_write_dword(engine, offset_in_dwords++, mi_cmd_header);
+	intel_engine_write_dword(engine, offset_in_dwords++, logical_context_id);
 	intel_engine_write_dword(engine, offset_in_dwords++, context_gtt_address);
 
 	// Add a MI_NOOP for padding or as a general good practice after control commands.

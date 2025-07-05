@@ -23,30 +23,17 @@
 		#define TRANSCONF_PIPE_SEL_C_IVB		(2U << 24)
 	// Bits Per Color (BPC) for Pipe - Gen7 (IVB/HSW) TRANS_CONF[7:5]
 	#define TRANSCONF_PIPE_BPC_MASK			(7U << 5)
-		#define TRANSCONF_PIPE_BPC_6		(0U << 5)
-		#define TRANSCONF_PIPE_BPC_8		(1U << 5)
-		#define TRANSCONF_PIPE_BPC_10		(2U << 5)
-		#define TRANSCONF_PIPE_BPC_12		(3U << 5)
+	#define TRANSCONF_PIPE_BPC_SHIFT		5
+		#define TRANSCONF_PIPE_BPC_6_FIELD	0 // 6 bpc
+		#define TRANSCONF_PIPE_BPC_8_FIELD	1 // 8 bpc
+		#define TRANSCONF_PIPE_BPC_10_FIELD	2 // 10 bpc
+		#define TRANSCONF_PIPE_BPC_12_FIELD	3 // 12 bpc
+		// Values 4-7 are reserved or for YCbCr
 
-
-#define PIPECONF(pipe)			(_PIPE(pipe) + 0x0008) // This was wrong, PIPECONF is e.g. 0x70008 for pipe A
-                                                       // Corrected: TRANSCONF is 0x7x008, PIPECONF is 0x7x000
-                                                       // No, PIPECONF is correct. TRANS_DDI_FUNC_CTL uses pipe for transcoder.
-                                                       // Let's keep PIPECONF as is, and TRANSCONF for 0x7x008.
-                                                       // It seems PIPECONF was being used for TRANS_CONF previously.
-                                                       // The register at offset 0x0008 from pipe base is TRANS_CONF.
-                                                       // Let's rename PIPECONF(pipe) to TRANSCONF(pipe) for clarity for 0x7x008
-                                                       // And define actual PIPECONF registers if different.
-                                                       // For IVB/HSW:
-                                                       // Pipe A Conf: 0x70008 (TRANSACONF)
-                                                       // Pipe B Conf: 0x71008 (TRANSBCONF)
-                                                       // Pipe C Conf: 0x72008 (TRANSCCONF)
-                                                       // These are indeed the TRANS_CONF registers.
-                                                       // The actual PIPECONF registers (PIPEA_CONF, etc.) are different, e.g. 0x70000 for PIPEA_CTL
-                                                       // Let's define PIPECONF separately.
-#define PIPEA_CONF 0x70000 // Example, check actual register name and offset
-// This needs careful review. The existing code uses PIPECONF(pipe) + 0x0008 for TRANS_CONF.
-// Let's assume TRANSCONF(pipe) is the correct macro for 0x7x008.
+// Note: The TRANSCONF(pipe) macro correctly refers to the transcoder configuration
+// registers (e.g., TRANSACONF at 0x70008, TRANSBCONF at 0x71008).
+// A general PIPECONF register (like PIPEA_CTL at 0x70000) would be different.
+// Removing the old confusing PIPECONF macro that pointed to the same address as TRANSCONF.
 
 #define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
 #define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE : \
@@ -86,16 +73,27 @@
 		#define LCPLL_LINK_RATE_1620	2 // 1620 MHz
 		#define LCPLL_LINK_RATE_2700	3 // 2700 MHz
 	#define LCPLL_REF_FREQ_HSW_KHZ  27000000 // 27MHz crystal for LCPLL itself typically
-	#define LCPLL_CD_SOURCE_FCLK_HSW (1U << 27)
+	#define LCPLL_CD_SOURCE_FCLK_HSW (1U << 27) // HSW: Select FCLK (Fixed 400/200) as LCPLL source for CDCLK logic
+	#define LCPLL_CD_SOURCE_LCPLL_HSW (0U << 27) // HSW: Select LCPLL output as LCPLL source for CDCLK logic
+
 
 #define CDCLK_CTL_IVB			0x4C000
-	#define CDCLK_FREQ_SEL_IVB_MASK		(7U << 26) /* For Mobile IVB */
-		#define CDCLK_FREQ_337_5_MHZ_IVB_M	(0U << 26)
-		#define CDCLK_FREQ_450_MHZ_IVB_M	(1U << 26)
-		#define CDCLK_FREQ_540_MHZ_IVB_M	(2U << 26)
-		#define CDCLK_FREQ_675_MHZ_IVB_M	(4U << 26)
-	// IVB Desktop: CDCLK_CTL bits 10:8 for freq (e.g. 000 = 320MHz from 96MHz ref)
-	// This needs more detail if supporting IVB desktop CDCLK.
+	// Mobile IVB CDCLK Frequency Select (Bits 28:26 of CDCLK_CTL)
+	#define CDCLK_FREQ_SEL_IVB_MASK_MOBILE	(7U << 26)
+		#define CDCLK_FREQ_337_5_MHZ_IVB_M	(0U << 26) // 337.5 MHz
+		#define CDCLK_FREQ_450_MHZ_IVB_M	(1U << 26) // 450 MHz
+		#define CDCLK_FREQ_540_MHZ_IVB_M	(2U << 26) // 540 MHz
+		#define CDCLK_FREQ_675_MHZ_IVB_M	(4U << 26) // 675 MHz
+	// Desktop IVB CDCLK Frequency Select (Bits 10:8 of CDCLK_CTL)
+	#define CDCLK_FREQ_SEL_IVB_MASK_DESKTOP	(7U << 8)
+		#define CDCLK_FREQ_320_IVB_D		(0U << 8)  // 320 MHz (from 96MHz ref, div by 3, x10 mult) - Example
+		#define CDCLK_FREQ_400_IVB_D		(1U << 8)  // 400 MHz (from 100MHz ref, div by 2.5, x10 mult) - Example
+		#define CDCLK_FREQ_480_IVB_D		(2U << 8)  // 480 MHz
+		#define CDCLK_FREQ_560_IVB_D		(3U << 8)  // 560 MHz (Unlikely for CDCLK, more for LCPLL)
+		#define CDCLK_FREQ_640_IVB_D		(4U << 8)  // 640 MHz
+	// Bit 0 of CDCLK_CTL_IVB: LCPLL_CD_SOURCE_FCLK_IVB
+	// If set, CDCLK logic uses FCLK (e.g. 400MHz / 200MHz). If clear, uses LCPLL output.
+	#define LCPLL_CD_SOURCE_FCLK_IVB        (1U << 0)
 
 #define CDCLK_CTL_HSW           0x46000
     #define HSW_CDCLK_FREQ_SEL_MASK (3U << 0)
@@ -109,6 +107,12 @@
         #define HSW_CDCLK_SELECT_1350   (0U << 26)
         #define HSW_CDCLK_SELECT_2700   (1U << 26)
         #define HSW_CDCLK_SELECT_810    (2U << 26) // Seems less common for CDCLK source
+    #define HSW_CDCLK_FREQ_DECIMAL_ENABLE (1U << 25) // CDCLK Frequency Decimal Enable
+    // HSW_CDCLK_FREQ_SEL_MASK (bits 1:0) values:
+    #define HSW_CDCLK_DIVISOR_3_FIELD_VAL   0x0 // Divisor /3
+    #define HSW_CDCLK_DIVISOR_2_5_FIELD_VAL 0x1 // Divisor /2.5
+    #define HSW_CDCLK_DIVISOR_4_FIELD_VAL   0x2 // Divisor /4
+    #define HSW_CDCLK_DIVISOR_2_FIELD_VAL   0x3 // Divisor /2
 
 
 // DPLL (Display PLLs)
@@ -182,8 +186,9 @@
 #define SPLL_CTL_HSW			0x46020
 	#define SPLL_PLL_ENABLE_HSW     (1U << 31)
 	#define SPLL_PLL_LOCK_HSW       (1U << 30)
-	#define SPLL_REF_LCPLL_HSW      (0U << 26)
-	#define SPLL_REF_SSC_HSW        (1U << 26)
+	#define SPLL_REF_SEL_MASK_HSW	(1U << 26) // Placeholder, check PRM for actual mask if >1 bit
+	#define SPLL_REF_LCPLL_HSW      (0U << 26) // Field value for LCPLL reference
+	#define SPLL_REF_SSC_HSW        (1U << 26) // Field value for SSC reference
 	#define SPLL_SSC_ENABLE_HSW     (1U << 24)
 	// HSW SPLL_CTL also contains M, N, P dividers directly
 	// Bits [20:13] M2_INT (8 bits)
@@ -221,6 +226,8 @@
 // --- FDI Registers (Ivy Bridge PCH Link) ---
 // FDI_TX_CTL and FDI_RX_CTL are per-pipe (A/B for IVB)
 #define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100) // PIPE_A_FDI_TX_CTL = 0x70100
+	#define FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB	16 // Bits 18:16 for actual field
+	#define FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB	14 // Bits 15:14 for actual field
 	#define FDI_TX_ENABLE					(1U << 31)
 	#define FDI_TX_CTL_TU_SIZE_MASK_IVB		(7U << 24) // Bits 26:24
 		#define FDI_TX_CTL_TU_SIZE_64_IVB	(0U << 24)
@@ -238,7 +245,18 @@
 		#define FDI_LINK_TRAIN_NONE_IVB		 (0U << 8) // Normal operation
 		#define FDI_LINK_TRAIN_PATTERN_1_IVB (1U << 8) // Training Pattern 1
 		#define FDI_LINK_TRAIN_PATTERN_2_IVB (2U << 8) // Training Pattern 2
-		// Pattern 3 might be (3U << 8)
+	// FDI Voltage Swing Control (Bits 18:16 of FDI_TX_CTL)
+	#define FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB	16
+	#define FDI_TX_CTL_VOLTAGE_SWING_LEVEL_0_IVB	(0U << FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB) // 0.4V
+	#define FDI_TX_CTL_VOLTAGE_SWING_LEVEL_1_IVB	(1U << FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB) // 0.6V
+	#define FDI_TX_CTL_VOLTAGE_SWING_LEVEL_2_IVB	(2U << FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB) // 0.8V
+	#define FDI_TX_CTL_VOLTAGE_SWING_LEVEL_3_IVB	(3U << FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB) // 1.2V (Use with caution)
+	// FDI Pre-emphasis Control (Bits 15:14 of FDI_TX_CTL)
+	#define FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB		14
+	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_0_IVB	(0U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB) // 0dB
+	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_1_IVB	(1U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB) // 3.5dB
+	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_2_IVB	(2U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB) // 6dB
+	#define FDI_TX_CTL_PRE_EMPHASIS_LEVEL_3_IVB	(3U << FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB) // 9.5dB (Use with caution)
 
 #define FDI_RX_CTL(pipe)		(_PIPE(pipe) + 0x10C) // PIPE_A_FDI_RX_CTL = 0x7010C
 	#define FDI_RX_ENABLE					(1U << 31)
@@ -285,6 +303,29 @@
 // IVB PORT_BUF_CTL (eDP) Voltage Swing / Pre-emphasis (Bits 3:0)
 // Also needs PRM lookup for actual values.
 	#define PORT_BUF_CTL_IVB_EDP_VS_PE_MASK       (0xFU)  // Bits 3:0
+	#define PORT_BUF_CTL_IVB_EDP_VS_PE_SHIFT      0       // Shift for the 4-bit field
+	// Individual level defines for IVB eDP if known, e.g.:
+	// #define PORT_BUF_CTL_IVB_EDP_VS0_PE0_FIELD    0x0
+	// #define PORT_BUF_CTL_IVB_EDP_VS0_PE1_FIELD    0x1
+	#define PORT_BUF_CTL_IVB_EDP_VS_SHIFT         0 // Example: VS in bits 1:0
+	#define PORT_BUF_CTL_IVB_EDP_PE_SHIFT         2 // Example: PE in bits 3:2
+
+// HSW DDI_BUF_CTL[4:1] DP Voltage Swing / Pre-emphasis Select Field Values
+// These are the direct 4-bit values for the field.
+#define HSW_DP_VS_PE_FIELD_VS0_PE0    (0x0 << 1) // Voltage Swing Level 0, Pre-emphasis Level 0
+#define HSW_DP_VS_PE_FIELD_VS0_PE1    (0x1 << 1) // Voltage Swing Level 0, Pre-emphasis Level 1
+#define HSW_DP_VS_PE_FIELD_VS0_PE2    (0x2 << 1) // Voltage Swing Level 0, Pre-emphasis Level 2
+#define HSW_DP_VS_PE_FIELD_VS0_PE3    (0x3 << 1) // Voltage Swing Level 0, Pre-emphasis Level 3
+#define HSW_DP_VS_PE_FIELD_VS1_PE0    (0x4 << 1) // Voltage Swing Level 1, Pre-emphasis Level 0
+#define HSW_DP_VS_PE_FIELD_VS1_PE1    (0x5 << 1) // Voltage Swing Level 1, Pre-emphasis Level 1
+#define HSW_DP_VS_PE_FIELD_VS1_PE2    (0x6 << 1) // Voltage Swing Level 1, Pre-emphasis Level 2
+// Note: HSW DDI_BUF_CTL [4:1] is DP Vswing / Pre-emphasis select.
+// The actual values for level 3 pre-emphasis or level 3 voltage swing might be different or combined.
+// The defines above are based on a common interpretation.
+// Level 3 VS (1200mV) typically only with PE Level 0.
+#define HSW_DP_VS_PE_FIELD_VS2_PE0    (0x8 << 1) // Voltage Swing Level 2, Pre-emphasis Level 0
+#define HSW_DP_VS_PE_FIELD_VS2_PE1    (0x9 << 1) // Voltage Swing Level 2, Pre-emphasis Level 1
+#define HSW_DP_VS_PE_FIELD_VS3_PE0    (0xC << 1) // Voltage Swing Level 3, Pre-emphasis Level 0
 
 
 // --- DisplayPort DPCD Defines (standard addresses) ---
@@ -369,6 +410,52 @@
 // --- Palette / CLUT Registers ---
 // Gen4+ through Haswell. Pipe C only on HSW+.
 #define LGC_PALETTE_A           0x4A000 // Pipe A Palette
+
+// --- Gen7 (IVB/HSW) Logical Ring Context Area (LRCA) DWord Offsets ---
+// These are offsets from the start of the 4KB context image page.
+// Based on common Linux i915 driver layouts for RCS0.
+#define GEN7_LRCA_CTX_CONTROL              0x01 // DW1: Context Control (Inhibit Restore, etc.)
+#define GEN7_LRCA_RING_HEAD                0x02 // DW2: Ring Buffer Head Pointer (offset within ring)
+#define GEN7_LRCA_RING_TAIL                0x03 // DW3: Ring Buffer Tail Pointer (offset within ring)
+#define GEN7_LRCA_RING_BUFFER_START        0x04 // DW4: Ring Buffer Start GTT Address (page aligned)
+#define GEN7_LRCA_RING_BUFFER_CONTROL      0x05 // DW5: Ring Buffer Control (Length, etc.)
+#define GEN7_LRCA_BB_HEAD_UDW              0x06 // DW6: Batch Buffer Current Head Pointer (Upper DW)
+#define GEN7_LRCA_BB_HEAD_LDW              0x07 // DW7: Batch Buffer Current Head Pointer (Lower DW)
+#define GEN7_LRCA_BB_STATE                 0x08 // DW8: Batch Buffer State (Valid, Second Level)
+#define GEN7_LRCA_SECOND_BB_HEAD_UDW       0x09 // DW9: Second Level Batch Buffer Head UDW
+#define GEN7_LRCA_SECOND_BB_HEAD_LDW       0x0A // DW10: Second Level Batch Buffer Head LDW
+#define GEN7_LRCA_SECOND_BB_STATE          0x0B // DW11: Second Level Batch Buffer State
+// DW 0x0C is often Indirect Context Pointer Offset or Reserved
+#define GEN7_LRCA_INSTRUCTION_STATE_POINTER 0x0D // DW13: Instruction State Pointer (ISP) / Indirect Context
+// DW 0x0E is often State Base Address Pointer
+// DW 0x0F is Reserved
+// DW 0x10 - 0x1F are often GPRs or reserved
+// PDPs for PPGTT (these are common but exact layout can vary slightly by specific Gen7 sub-version or config)
+// Assuming 3-level page tables for default context (PDP2, PDP1, PDP0 valid)
+// Or 4-level (PDP3, PDP2, PDP1, PDP0). For default context, these are usually 0 if not using PPGTT.
+#define GEN7_LRCA_PDP3_UDW                 0x20 // Page Directory Pointer 3 Upper DWord
+#define GEN7_LRCA_PDP3_LDW                 0x21 // Page Directory Pointer 3 Lower DWord
+#define GEN7_LRCA_PDP2_UDW                 0x22 // Page Directory Pointer 2 Upper DWord
+#define GEN7_LRCA_PDP2_LDW                 0x23 // Page Directory Pointer 2 Lower DWord
+#define GEN7_LRCA_PDP1_UDW                 0x24 // Page Directory Pointer 1 Upper DWord
+#define GEN7_LRCA_PDP1_LDW                 0x25 // Page Directory Pointer 1 Lower DWord
+#define GEN7_LRCA_PDP0_UDW                 0x26 // Page Directory Pointer 0 Upper DWord
+#define GEN7_LRCA_PDP0_LDW                 0x27 // Page Directory Pointer 0 Lower DWord
+// The size of the context image that HW saves/restores can be up to 20 DWords (80 bytes) for minimal state,
+// or larger if more state (like GPRs, more PDPs) is included.
+// The GEN7_RCS_CONTEXT_IMAGE_SIZE of 4KB (1024 DWords) is ample.
+
+// --- Backlight Control Registers ---
+// CPU Backlight PWM Control (Example for IVB+, older gens might differ)
+#define BLC_PWM_CPU_CTL2        0x48250 // IvyBridge+ CPU Backlight Control Register 2
+	#define BLM_PWM_ENABLE_CPU_IVB  (1U << 31) // PWM Enable
+	#define BLM_POLARITY_CPU_IVB    (1U << 29) // Polarity (0=active high, 1=active low)
+#define BLC_PWM_CPU_CTL         0x48254 // IvyBridge+ CPU Backlight Frequency/Duty Cycle
+// PCH Backlight PWM Control (Example for CPT/LPT+)
+#define PCH_BLC_PWM_CTL2        0xC8250 // PCH Backlight Control Register 2
+	#define BLM_PWM_ENABLE_PCH_HSW  (1U << 31) // PWM Enable
+	#define BLM_POLARITY_PCH_HSW    (1U << 29) // Polarity
+#define PCH_BLC_PWM_CTL1        0xC8254 // PCH Backlight Frequency/Duty Cycle
 #define LGC_PALETTE_B           0x4A800 // Pipe B Palette
 #define LGC_PALETTE_C           0x4B000 // Pipe C Palette (HSW+)
 // Each palette has 256 entries of 32-bit (00:RR:GG:BB) values. Offset = index * 4.

@@ -55,19 +55,41 @@ intel_ddi_set_source_tx_equalization(intel_i915_device_info* devInfo,
 		port->hw_port_index, vs_level, pe_level, ddi_buf_ctl_val);
 
 	if (IS_HASWELL(devInfo->device_id) || INTEL_GRAPHICS_GEN(devInfo->device_id) >= 8) {
-		ddi_buf_ctl_val &= ~DDI_BUF_CTL_HSW_DP_VS_PE_MASK;
-		if (vs_level == 0 && pe_level == 0) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS0_PE0;
-		else if (vs_level == 1 && pe_level == 0) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS1_PE0;
-		else if (vs_level == 2 && pe_level == 0) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS2_PE0;
-		else if (vs_level == 3 && pe_level == 0) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS3_PE0;
-		else if (vs_level == 0 && pe_level == 1) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS0_PE1;
-		else if (vs_level == 1 && pe_level == 1) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS1_PE1;
-		else if (vs_level == 2 && pe_level == 1) ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS2_PE1;
-		// TODO: Add defines and cases for PE levels 2 and 3 for HSW if they map to distinct DDI_BUF_CTL bits.
-		else {
-			TRACE("DDI TX EQ: HSW VS/PE combo (%u/%u) not fully mapped, using VS0/PE0.\n", vs_level, pe_level);
-			ddi_buf_ctl_val |= DDI_BUF_CTL_HSW_DP_VS0_PE0;
+		ddi_buf_ctl_val &= ~DDI_BUF_CTL_HSW_DP_VS_PE_MASK; // Clear bits [4:1]
+		uint32_t field_val = HSW_DP_VS_PE_FIELD_VS0_PE0; // Default to VS0/PE0
+
+		// Map vs_level (0-3) and pe_level (0-3) to the HSW_DP_VS_PE_FIELD_* defines
+		// These defines are already shifted correctly (e.g., (value << 1))
+		if (vs_level == 0) {
+			if (pe_level == 0) field_val = HSW_DP_VS_PE_FIELD_VS0_PE0;
+			else if (pe_level == 1) field_val = HSW_DP_VS_PE_FIELD_VS0_PE1;
+			else if (pe_level == 2) field_val = HSW_DP_VS_PE_FIELD_VS0_PE2;
+			else if (pe_level == 3) field_val = HSW_DP_VS_PE_FIELD_VS0_PE3; // Max PE for VS0
+			else TRACE("DDI TX EQ: HSW VS0 with invalid PE%u\n", pe_level);
+		} else if (vs_level == 1) {
+			if (pe_level == 0) field_val = HSW_DP_VS_PE_FIELD_VS1_PE0;
+			else if (pe_level == 1) field_val = HSW_DP_VS_PE_FIELD_VS1_PE1;
+			else if (pe_level == 2) field_val = HSW_DP_VS_PE_FIELD_VS1_PE2; // Max PE for VS1
+			else TRACE("DDI TX EQ: HSW VS1 with invalid PE%u\n", pe_level);
+		} else if (vs_level == 2) {
+			if (pe_level == 0) field_val = HSW_DP_VS_PE_FIELD_VS2_PE0;
+			else if (pe_level == 1) field_val = HSW_DP_VS_PE_FIELD_VS2_PE1; // Max PE for VS2
+			else TRACE("DDI TX EQ: HSW VS2 with invalid PE%u\n", pe_level);
+		} else if (vs_level == 3) {
+			if (pe_level == 0) field_val = HSW_DP_VS_PE_FIELD_VS3_PE0; // Max VS, only PE0 typical
+			else TRACE("DDI TX EQ: HSW VS3 with invalid PE%u (only PE0 typical)\n", pe_level);
+		} else {
+			TRACE("DDI TX EQ: HSW invalid VS%u\n", vs_level);
 		}
+
+		// Check if the selected field_val is still the default HSW_DP_VS_PE_FIELD_VS0_PE0
+		// AND the requested vs_level or pe_level was non-zero. This indicates an unmapped combo.
+		if (field_val == HSW_DP_VS_PE_FIELD_VS0_PE0 && (vs_level != 0 || pe_level != 0)) {
+			TRACE("DDI TX EQ: HSW VS/PE combo (VS%u/PE%u) not explicitly mapped, using default VS0/PE0 field value.\n", vs_level, pe_level);
+			// field_val is already HSW_DP_VS_PE_FIELD_VS0_PE0, so this is just for logging.
+		}
+		ddi_buf_ctl_val |= field_val;
+
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
 		if (port->type == PRIV_OUTPUT_EDP) {
 			ddi_buf_ctl_val &= ~PORT_BUF_CTL_IVB_EDP_VS_PE_MASK;

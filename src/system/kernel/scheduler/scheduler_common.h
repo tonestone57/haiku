@@ -39,6 +39,10 @@ class ThreadData; // Forward declaration
 #define NUM_MLFQ_LEVELS 16
 #define DEFAULT_K_DIST_FACTOR 0.25f // Start with a conservative value
 
+// SMT Conflict Factor Defaults
+#define DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY 0.60f
+#define DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING 0.40f
+
 // Base time quanta for each MLFQ level (in microseconds)
 // Level 0 (highest priority) to NUM_MLFQ_LEVELS - 1 (lowest priority)
 static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {

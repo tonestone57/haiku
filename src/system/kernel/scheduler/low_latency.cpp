@@ -29,9 +29,10 @@ low_latency_switch_to_mode()
 	gSchedulerBaseQuantumMultiplier = 1.0f;
 	gSchedulerAgingThresholdMultiplier = 1.0f;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
-	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier);
+	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD, SMT Factor: %.2f\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor);
 }
 
 

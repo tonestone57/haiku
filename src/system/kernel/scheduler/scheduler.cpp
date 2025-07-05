@@ -62,7 +62,7 @@ float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
 float gSchedulerBaseQuantumMultiplier = 1.0f;
 float gSchedulerAgingThresholdMultiplier = 1.0f;
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = 0.5f; // Default to current behavior
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY; // New default
 
 
 }	// namespace Scheduler

@@ -93,14 +93,12 @@ static const bigtime_t kLoadBalanceCheckInterval = 100000;
 static const bigtime_t kMinTimeBetweenMigrations = 20000;
 
 
-// Helper to get mode-adjusted base quantum, moved from earlier conceptual placement
 static inline bigtime_t
 get_mode_adjusted_base_quantum(int mlfqLevel) {
 	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
 	return (bigtime_t)(kBaseQuanta[mlfqLevel] * gSchedulerBaseQuantumMultiplier);
 }
 
-// Helper to get mode-adjusted aging threshold
 static inline bigtime_t
 get_mode_adjusted_aging_threshold(int mlfqLevel) {
 	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
@@ -142,7 +140,7 @@ enqueue_thread_on_cpu(Thread* thread, CPUEntry* cpu, CoreEntry* core, bool newTh
 		thread->id, mlfqLevel, sortPriority, cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->AddThread(threadData, mlfqLevel, false); // AddThread now calls MarkEnqueued
+	cpu->AddThread(threadData, mlfqLevel, false);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -218,30 +216,24 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		return oldBasePriority;
 	}
 
-	ASSERT(threadData->Core() != NULL || thread->previous_cpu != NULL); // Must have some CPU context if ready
+	ASSERT(threadData->Core() != NULL || thread->previous_cpu != NULL);
 	CPUEntry* cpu = NULL;
 	if (thread->previous_cpu != NULL) cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	else if (thread->cpu != NULL) cpu = CPUEntry::GetCPU(thread->cpu->cpu_num); // Should not happen for B_THREAD_READY
+	else if (thread->cpu != NULL) cpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
 	else panic("scheduler_set_thread_priority: Ready thread %" B_PRId32 " has no cpu context", thread->id);
 
-	// If threadData->Core() is NULL, it means the thread was unassigned.
-	// Its previous_cpu field should guide it to a CPU whose core it can be assigned to.
-	// For simplicity, assume if Core is NULL, previous_cpu's core is the target.
-	// This might need refinement if a thread becomes ready without previous_cpu set (e.g. new thread not yet enqueued).
-	// However, scheduler_enqueue_in_run_queue handles initial placement and core assignment.
-	// This path is for an already-existing, ready thread.
 	ASSERT(cpu != NULL);
-	if (threadData->Core() == NULL) threadData->MarkEnqueued(cpu->Core()); // Re-associate if it was unassigned
+	if (threadData->Core() == NULL) threadData->MarkEnqueued(cpu->Core());
 	ASSERT(cpu->Core() == threadData->Core());
 
 	T(RemoveThread(thread));
 
 	cpu->LockRunQueue();
-	if (threadData->IsEnqueued()) { // Should always be true if B_THREAD_READY
+	if (threadData->IsEnqueued()) {
 		cpu->RemoveFromQueue(threadData, oldMlfqLevel);
 		threadData->MarkDequeued();
 	}
-	cpu->AddThread(threadData, newMlfqLevel, false); // AddThread calls MarkEnqueued
+	cpu->AddThread(threadData, newMlfqLevel, false);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadRemovedFromRunQueue, thread);
@@ -368,13 +360,13 @@ reschedule(int32 nextState)
 				}
 			} else if (!oldThreadData->IsIdle()) {
 				shouldReEnqueueOldThread = false;
-				if (oldThreadData->Core() == core) { // Only unassign if it was on this core
+				if (oldThreadData->Core() == core) {
 					oldThreadData->UnassignCore(false);
 				}
 				TRACE("reschedule: thread %" B_PRId32 " affinity/pinning prevents re-enqueue on CPU %" B_PRId32 "\n", oldThread->id, thisCPUId);
-			} else if (oldThreadData->IsIdle()) { // Idle thread handling
-				putOldThreadAtBack = false; // Idle thread doesn't "yield" or "end quantum" in the same way
-				demoteOldThread = false; // Idle thread doesn't demote
+			} else if (oldThreadData->IsIdle()) {
+				putOldThreadAtBack = false;
+				demoteOldThread = false;
 			}
 			break;
 		}
@@ -393,7 +385,6 @@ reschedule(int32 nextState)
 
 	if (demoteOldThread) {
 		int newLevel = oldThreadData->CurrentMLFQLevel() + 1;
-		// SetMLFQLevel handles clamping and resetting TimeEnteredCurrentLevel
 		oldThreadData->SetMLFQLevel(newLevel);
 		TRACE("reschedule: demoting thread %" B_PRId32 " to level %d on CPU %" B_PRId32 "\n",
 			oldThread->id, newLevel, thisCPUId);
@@ -404,7 +395,7 @@ reschedule(int32 nextState)
 
 	if (gCPU[thisCPUId].disabled) {
 		if (oldThread->cpu == &gCPU[thisCPUId] && oldThreadData->IsEnqueued()) {
-			cpu->RemoveFromQueue(oldThreadData, oldThreadData->CurrentMLFQLevel()); // Use its current (possibly demoted) level
+			cpu->RemoveFromQueue(oldThreadData, oldThreadData->CurrentMLFQLevel());
 			oldThreadData->MarkDequeued();
 			TRACE("reschedule: oldThread %" B_PRId32 " was still enqueued on disabling CPU %" B_PRId32 ". Removed.\n", oldThread->id, thisCPUId);
 		}
@@ -416,23 +407,18 @@ reschedule(int32 nextState)
 		int oldThreadLevelForChooser = -1;
 		if (shouldReEnqueueOldThread) {
 			oldThreadToPassToChooser = oldThreadData;
-			// Pass the level it should be enqueued AT (already updated if demoted)
 			oldThreadLevelForChooser = oldThreadData->CurrentMLFQLevel();
 		}
 
-		// ChooseNextThread re-enqueues oldThreadToPassToChooser if not NULL,
-		// then peeks the best next candidate. It does NOT remove the peeked candidate.
 		nextThreadData = cpu->ChooseNextThread(oldThreadToPassToChooser, putOldThreadAtBack, oldThreadLevelForChooser);
 
 		if (nextThreadData != NULL && !nextThreadData->IsIdle()) {
-			// If a non-idle thread was chosen, remove it from its queue now.
 			cpu->RemoveFromQueue(nextThreadData, nextThreadData->CurrentMLFQLevel());
 			nextThreadData->MarkDequeued();
-		} else { // No suitable thread found in MLFQs or ChooseNextThread returned idle.
+		} else {
 			nextThreadData = cpu->PeekIdleThread();
 			if (nextThreadData == NULL)
 				panic("reschedule: No idle thread available on CPU %" B_PRId32 " after ChooseNextThread!", thisCPUId);
-			// Idle thread is not "dequeued" in the standard sense.
 		}
 	}
 	cpu->UnlockRunQueue();
@@ -468,8 +454,8 @@ reschedule(int32 nextState)
 		TRACE("reschedule: thread %" B_PRId32 " (level %d) starting DTQ quantum %" B_PRId64 " on CPU %" B_PRId32 "\n",
 			nextThread->id, nextThreadData->CurrentMLFQLevel(), dynamicQuantum, thisCPUId);
 	} else {
-		dynamicQuantum = kLoadMeasureInterval * 2; // For idle thread's _UpdateLoadEvent timer
-		nextThreadData->StartQuantum(MAX_BIGTIME); // Idle effectively has "infinite" Q_eff
+		dynamicQuantum = kLoadMeasureInterval * 2;
+		nextThreadData->StartQuantum(MAX_BIGTIME);
 	}
 
 	cpu->StartQuantumTimer(nextThreadData, gCPU[thisCPUId].preempted, dynamicQuantum);
@@ -845,9 +831,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 		for (int i = 0; i < candidateCount; i++) {
 			ThreadData* threadData = candidates[i].thread_data;
 			int oldLevel = candidates[i].old_level;
-			int newLevel = oldLevel - 1; // Promote one level up
-
-			// Sanity check: thread should still be in the queue at the expected old level
+			int newLevel = oldLevel - 1;
 			if (!threadData->IsEnqueued() || threadData->CurrentMLFQLevel() != oldLevel) {
 				TRACE_SCHED("scheduler_perform_aging: Candidate thread %" B_PRId32 " state changed (now level %d, enqueued %d), skipping promotion from %d.\n",
 					threadData->GetThread()->id, threadData->CurrentMLFQLevel(), threadData->IsEnqueued(), oldLevel);
@@ -855,9 +839,9 @@ scheduler_perform_aging(CPUEntry* cpu)
 			}
 
 			cpu->RemoveFromQueue(threadData, oldLevel);
-			threadData->MarkDequeued(); // Important: mark dequeued from old position
+			threadData->MarkDequeued();
 
-			threadData->SetMLFQLevel(newLevel); // This resets TimeEnteredCurrentLevel
+			threadData->SetMLFQLevel(newLevel);
 
 			cpu->AddThread(threadData, newLevel, false /*add to back*/);
 			// AddThread calls MarkEnqueued.
@@ -870,7 +854,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 				if (thread_is_idle_thread(currentRunningOnCPU) || newLevel < currentRunningData->CurrentMLFQLevel()) {
 					needsRescheduleICI = true;
 				}
-			} else if (currentRunningData == NULL) { // Should be idle thread
+			} else if (currentRunningData == NULL) {
 				needsRescheduleICI = true;
 			}
 		}
@@ -886,7 +870,6 @@ scheduler_perform_aging(CPUEntry* cpu)
 static int32
 _get_cpu_high_priority_task_count_locked(CPUEntry* cpu)
 {
-	// Note: Caller MUST hold cpu->fQueueLock
 	ASSERT(cpu->fQueueLock.IsOwned());
 	int32 count = 0;
 	for (int i = 0; i < NUM_MLFQ_LEVELS / 2; i++) {
@@ -928,49 +911,47 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		float currentInstantLoad = currentCPU->GetInstantaneousLoad();
 		float smtPenalty = 0.0f;
 
-		if (!preferBusiest && core->CPUCount() > 1) { // Apply SMT penalty when finding target CPU
+		if (!preferBusiest && core->CPUCount() > 1) {
 			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
-			siblings.ClearBit(currentCPU->ID()); // Don't check self
+			siblings.ClearBit(currentCPU->ID());
 			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * 0.5f; // Example weight
-					// Assuming one relevant sibling for simplicity, could average if multiple
+					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * 0.5f;
 				}
 			}
 		}
 		float effectiveLoad = currentInstantLoad + smtPenalty;
 
-
 		bool isBetter = false;
-		if (preferBusiest) {
-			if (effectiveLoad > bestLoadScore) { // Higher effective load is "busier"
-				isBetter = true;
-			} else if (effectiveLoad == bestLoadScore) {
-				currentCPU->LockRunQueue();
-				int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
-				currentCPU->UnlockRunQueue();
-				if (currentHighPrioTasks > bestTaskCountScore) isBetter = true;
-			}
-		} else { // Prefer least busy
-			if (effectiveLoad < bestLoadScore) {
-				isBetter = true;
-			} else if (effectiveLoad == bestLoadScore) {
-				currentCPU->LockRunQueue();
-				int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
-				currentCPU->UnlockRunQueue();
-				if (currentHighPrioTasks < bestTaskCountScore) isBetter = true;
+		if (bestCPU == NULL) { // First suitable candidate
+			isBetter = true;
+		} else {
+			if (preferBusiest) {
+				if (effectiveLoad > bestLoadScore) {
+					isBetter = true;
+				} else if (effectiveLoad == bestLoadScore) {
+					currentCPU->LockRunQueue();
+					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
+					currentCPU->UnlockRunQueue();
+					if (currentHighPrioTasks > bestTaskCountScore) isBetter = true;
+				}
+			} else { // Prefer least busy
+				if (effectiveLoad < bestLoadScore) {
+					isBetter = true;
+				} else if (effectiveLoad == bestLoadScore) {
+					currentCPU->LockRunQueue();
+					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
+					currentCPU->UnlockRunQueue();
+					if (currentHighPrioTasks < bestTaskCountScore) isBetter = true;
+				}
 			}
 		}
 
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
-			// bestTaskCountScore would be updated here if it was the deciding factor
-			// For now, ensure it's set if isBetter is true due to primary or secondary.
-			if (isBetter) { // Re-check to set secondary metric if it was the decider
-				currentCPU->LockRunQueue();
-				bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
-				currentCPU->UnlockRunQueue();
-			}
+			currentCPU->LockRunQueue(); // Lock to get consistent task count with load score
+			bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
+			currentCPU->UnlockRunQueue();
 			bestCPU = currentCPU;
 		}
 	}
@@ -1014,23 +995,41 @@ scheduler_perform_load_balance()
 
 		if (consolidationCore != NULL) {
 			if (sourceCoreCandidate != consolidationCore &&
-				(consolidationCore->GetLoad() < kHighLoad || consolidationCore->GetInstantaneousLoad() < 0.8f)) { // Has capacity
+				(consolidationCore->GetLoad() < kHighLoad || consolidationCore->GetInstantaneousLoad() < 0.8f)) {
 				finalTargetCore = consolidationCore;
 			} else if (sourceCoreCandidate == consolidationCore && sourceCoreCandidate->GetLoad() > kVeryHighLoad) {
-				finalTargetCore = targetCoreCandidate;
-				if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
-				if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0 && gCurrentMode->should_wake_core_for_load != NULL) {
-					// Estimating a generic thread load for should_wake_core_for_load
-					if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 10)) {
-						finalTargetCore = NULL; // Mode policy says don't wake this idle core
+				// Spill-over logic refined
+				CoreEntry* spillTarget = NULL;
+				// Prefer least loaded *active* core first
+				for (int32 i = 0; i < gCoreCount; ++i) {
+					CoreEntry* core = &gCoreEntries[i];
+					if (core == consolidationCore || core->GetLoad() == 0) continue; // Skip self and idle
+					if (core->GetLoad() < kHighLoad) { // Has capacity
+						if (spillTarget == NULL || core->GetLoad() < spillTarget->GetLoad()) {
+							spillTarget = core;
+						}
+					}
+				}
+				if (spillTarget != NULL) {
+					finalTargetCore = spillTarget;
+				} else { // No suitable active core, consider waking an idle one
+					finalTargetCore = targetCoreCandidate; // Overall least loaded (might be idle)
+					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
+					if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0
+						&& gCurrentMode->should_wake_core_for_load != NULL) {
+						// Estimate load of a typical thread for the check
+						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5)) {
+							finalTargetCore = NULL;
+						}
 					}
 				}
 			} else {
-				TRACE_SCHED("LoadBalance: CONSOLIDATE - No clear action or target for core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
+				TRACE_SCHED("LoadBalance: CONSOLIDATE - No clear action for source %" B_PRId32 " / consolidation %" B_PRId32 ".\n",
+					sourceCoreCandidate->ID(), consolidationCore->ID());
 				return;
 			}
 		} else {
-			TRACE_SCHED("LoadBalance: CONSOLIDATE - No consolidation core designated or identified.\n");
+			TRACE_SCHED("LoadBalance: CONSOLIDATE - No consolidation core designated.\n");
 			return;
 		}
 		if (finalTargetCore == NULL) {
@@ -1162,7 +1161,7 @@ _user_estimate_max_scheduling_latency(thread_id id)
 	}
 	cpu->UnlockRunQueue();
 
-	bigtime_t estimatedLatency = get_mode_adjusted_base_quantum(currentLevel) // Use mode-adjusted
+	bigtime_t estimatedLatency = get_mode_adjusted_base_quantum(currentLevel)
 		* higherOrEqualPriorityThreads;
 	for (int i = 0; i < currentLevel; i++) {
 		estimatedLatency += get_mode_adjusted_base_quantum(i);
@@ -1171,7 +1170,7 @@ _user_estimate_max_scheduling_latency(thread_id id)
 	if (gCurrentMode != NULL)
 		return std::min(estimatedLatency, gCurrentMode->maximum_latency);
 
-	return std::min(estimatedLatency, kMaxEffectiveQuantum * (NUM_MLFQ_LEVELS / 2)); // Generic fallback
+	return std::min(estimatedLatency, kMaxEffectiveQuantum * (NUM_MLFQ_LEVELS / 2));
 }
 
 

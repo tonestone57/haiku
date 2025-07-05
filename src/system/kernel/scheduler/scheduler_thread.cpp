@@ -246,6 +246,7 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle() || IsRealTime()) {
+		// Real-time and Idle threads get their mode-adjusted base quantum directly.
 		return GetBaseQuantumForLevel(fCurrentMlfqLevel);
 	}
 
@@ -255,6 +256,22 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 
 	float cpuLoad = cpu->GetInstantaneousLoad();
 	float multiplier = 1.0f + (gKernelKDistFactor * (1.0f - cpuLoad));
+
+	// Additional refinement for Power Saving mode
+	if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING) {
+		// If this CPU is part of the designated consolidation core (sSmallTaskCore)
+		// and that core is very lightly loaded, give a further small boost to encourage
+		// task completion on this core.
+		// This requires access to sSmallTaskCore, which is in power_saving.cpp.
+		// For now, let's assume a simplified check: if the CPU load is extremely low
+		// in power saving mode, give an extra nudge.
+		// A more direct check of sSmallTaskCore would require passing it or making it more globally accessible.
+		// Let's use a proxy: very low CPU load on *this* CPU in power saving mode.
+		if (cpuLoad < 0.05f) { // CPU is almost completely idle
+			multiplier *= 1.2f; // Additional 20% boost to quantum
+		}
+	}
+
 	if (multiplier < 0.1f) multiplier = 0.1f;
 
 	bigtime_t dynamicQuantum = (bigtime_t)(baseQuantum * multiplier);
@@ -358,7 +375,9 @@ ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	return kBaseQuanta[mlfqLevel];
+	// Apply the global scheduler base quantum multiplier
+	bigtime_t adjustedQuantum = (bigtime_t)(kBaseQuanta[mlfqLevel] * gSchedulerBaseQuantumMultiplier);
+	return adjustedQuantum;
 }
 
 

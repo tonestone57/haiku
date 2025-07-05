@@ -848,8 +848,9 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 	// Caller (intel_i915_display_set_mode_internal) is expected to hold forcewake.
 
 	// TODO: Implement actual FDI M/N calculation based on:
-	// clocks->adjusted_pixel_clock_khz
-	// pipe's BPC (e.g., from PIPECONF register or a cached value)
+	// - devInfo->pch_type (e.g., CPT vs LPT PCHs have different reference clocks or details for FDI)
+	// - clocks->adjusted_pixel_clock_khz
+	// - pipe's BPC (e.g., from TRANSCONF register or a cached value)
 	// clocks->fdi_params.fdi_lanes
 	// FDI link frequency (typically 2.7 GHz for IVB/SNB, symbol rate)
 

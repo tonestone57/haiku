@@ -49,9 +49,120 @@
 // Let's assume TRANSCONF(pipe) is the correct macro for 0x7x008.
 
 #define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
-#define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE : \
-                           ((trans) == 1 ? _PIPE_B_BASE : \
-                           ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
+
+// Transcoder base addresses (Gen4+ through Haswell at least)
+#define _TRANSCODER_A_BASE		0x60000
+#define _TRANSCODER_B_BASE		0x61000
+#define _TRANSCODER_C_BASE		0x62000 // HSW+
+#define _TRANSCODER_EDP_BASE	0x6F000 // For eDP transcoder if separate from A/B/C
+
+#define _TRANSCODER_REG_BASE(trans) \
+	((trans) == PRIV_TRANSCODER_A ? _TRANSCODER_A_BASE : \
+	 ((trans) == PRIV_TRANSCODER_B ? _TRANSCODER_B_BASE : \
+	  ((trans) == PRIV_TRANSCODER_C ? _TRANSCODER_C_BASE : \
+	   ((trans) == PRIV_TRANSCODER_EDP ? _TRANSCODER_EDP_BASE : 0))))
+
+// Transcoder Timing Registers
+#define HTOTAL_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x0000) // e.g., HTOTAL_A
+#define HBLANK_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x0004) // e.g., HBLANK_A
+#define HSYNC_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x0008) // e.g., HSYNC_A
+#define VTOTAL_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x000C) // e.g., VTOTAL_A
+#define VBLANK_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x0010) // e.g., VBLANK_A
+#define VSYNC_TRANS(trans)		(_TRANSCODER_REG_BASE(trans) + 0x0014) // e.g., VSYNC_A
+#define VSYNCSHIFT_TRANS(trans)	(_TRANSCODER_REG_BASE(trans) + 0x0028) // e.g., VSYNCSHIFT_A (not all gens)
+
+// Pipe Source Size
+#define PIPESRC(pipe)			(_PIPE(pipe) + 0x000C) // e.g., PIPEASRC (Image size W-1, H-1)
+
+// Pipe Configuration (actual pipe enable, different from TRANSCONF)
+// Note: PIPECONF(pipe) was previously misdefined as TRANSCONF.
+// Actual PIPECONF registers:
+#define PIPECONF_REG(pipe)      (_PIPE(pipe) + 0x0000) // e.g. PIPEA_CONF (0x70000 for Pipe A)
+	#define PIPECONF_ENABLE         (1U << 31)
+	#define PIPECONF_STATE_ENABLE   (1U << 30) // Read-only status for HSW+, R/W for IVB
+	#define PIPECONF_FORCE_BORDER   (1U << 25)
+	#define PIPECONF_GAMMA_MODE_MASK_IVB (3U << 24) // IVB specific
+		#define PIPECONF_GAMMA_MODE_8BIT_IVB  (0U << 24)
+		#define PIPECONF_GAMMA_MODE_10BIT_IVB (1U << 24)
+		#define PIPECONF_GAMMA_MODE_12BIT_IVB (2U << 24) // Check if this is right for 12bit LUT
+	#define PIPECONF_INTERLACED_ILK   (1U << 23) // Older gens, IVB/HSW use TRANSCONF
+	#define PIPECONF_PIPE_BPC_MASK_IVB (7U << 5) // IVB Pipe BPC (different from TRANSCONF BPC)
+		#define PIPECONF_PIPE_BPC_6_IVB   (0U << 5)
+		#define PIPECONF_PIPE_BPC_8_IVB   (1U << 5)
+		#define PIPECONF_PIPE_BPC_10_IVB  (2U << 5)
+		#define PIPECONF_PIPE_BPC_12_IVB  (3U << 5)
+	// HSW PIPECONF has different BPC bits (2:0)
+	#define PIPECONF_PIPE_BPC_MASK_HSW (7U << 0)
+		#define PIPECONF_PIPE_BPC_6_HSW   (0U << 0) // Example, verify actual values
+		#define PIPECONF_PIPE_BPC_8_HSW   (1U << 0)
+		#define PIPECONF_PIPE_BPC_10_HSW  (2U << 0)
+		#define PIPECONF_PIPE_BPC_12_HSW  (3U << 0)
+
+
+// Primary Plane Control (Display Plane)
+#define DSPCNTR(pipe)			(_PIPE(pipe) + 0x2000) // e.g. DSPACNTR for Pipe A (0x72000)
+	#define DISPPLANE_ENABLE		(1U << 31)
+	#define DISPPLANE_GAMMA_ENABLE	(1U << 30)
+	#define DISPPLANE_FORMAT_MASK	(0x1FU << 24) // Bits 28:24 for Gen7+
+		#define DISPPLANE_BGRA8888		(0x06 << 24) // Example for BGRA_8888
+		#define DISPPLANE_BGRX8888		(0x02 << 24) // Example for BGRX_8888
+		#define DISPPLANE_RGB565		(0x0A << 24) // Example for RGB_565
+	#define DISPPLANE_STEREO_ENABLE (1U << 20) // For stereo modes
+	#define DISPPLANE_TILED			(1U << 10) // If surface is tiled
+
+#define DSPSURF(pipe)			(_PIPE(pipe) + 0x200C) // e.g. DSPASURF (Surface Base Address)
+#define DSPOFFSET(pipe)			(_PIPE(pipe) + 0x2010) // e.g. DSPALINOFF (Linear Offset within surface) - for older gens
+#define DSPSTRIDE(pipe)			(_PIPE(pipe) + 0x2018) // e.g. DSPASIZE (Stride) - for older gens
+
+// Gen7+ (IVB, HSW) use DSPLINOFF and DSPTILEOFF for linear/tile offset, and DSPSTRIDE is just stride.
+// DSPSURF is still the base.
+// For IVB/HSW Primary Plane:
+#define DSPLINOFF_IVB(pipe)		(_PIPE(pipe) + 0x2084) // Linear offset from surface base
+#define DSPSTRIDE_IVB(pipe)		(_PIPE(pipe) + 0x2088) // Surface Stride
+#define DSPTILEOFF_IVB(pipe)	(_PIPE(pipe) + 0x20A4) // Tile offset X/Y
+
+// Cursor Registers (Gen7+) - Pipe A example
+#define CURACNTR				0x70080 // Cursor A Control
+#define CURAPOS					0x70084 // Cursor A Position
+#define CURABASE				0x70088 // Cursor A Base Address
+	#define CURSOR_MODE_MASK		(7U << 24) // Bits 26:24
+		#define CURSOR_MODE_DISABLE		0
+		#define CURSOR_MODE_64_ARGB_AX	(0x02 << 24) // 64x64 ARGB (Intel specific value)
+		#define CURSOR_MODE_128_ARGB_AX (0x04 << 24) // 128x128 ARGB
+		#define CURSOR_MODE_256_ARGB_AX (0x05 << 24) // 256x256 ARGB
+	#define CURSOR_ENABLE			(1U << 0)  // This bit is in older gens, Gen7+ uses CURSOR_MODE_DISABLE
+	                                           // For Gen7+, setting CURSOR_MODE to non-DISABLE enables it.
+	                                           // The old CURSOR_ENABLE bit (often bit 0 or 31) might be repurposed or reserved.
+	                                           // Let's assume for Gen7+, mode field handles enable.
+	#define CURSOR_FORMAT_SHIFT     24 // For the mode bits
+	#define CURSOR_FORMAT_MASK      (0x7 << CURSOR_FORMAT_SHIFT)
+		#define CURSOR_FORMAT_DISABLED  (0x0 << CURSOR_FORMAT_SHIFT)
+		#define CURSOR_FORMAT_ARGB_64   (0x2 << CURSOR_FORMAT_SHIFT) // Typical 64x64 ARGB
+		#define CURSOR_FORMAT_ARGB_128  (0x4 << CURSOR_FORMAT_SHIFT)
+		#define CURSOR_FORMAT_ARGB_256  (0x5 << CURSOR_FORMAT_SHIFT)
+	// Position bits
+	#define CURSOR_POS_X_SIGN		(1U << 31)
+	#define CURSOR_POS_X_MASK		(0x1FFFU) // 13 bits for X coord
+	#define CURSOR_POS_Y_SIGN		(1U << 15)
+	#define CURSOR_POS_Y_MASK		(0x1FFFU) // 13 bits for Y coord (shifted to low part of word)
+
+
+// Pipe B Cursor Registers (add 0x1000 to Pipe A cursor regs)
+#define CURBCNTR				(CURACNTR + 0x1000)
+#define CURBPOS					(CURAPOS  + 0x1000)
+#define CURBBASE				(CURABASE + 0x1000)
+
+// Pipe C Cursor Registers (HSW+) (add 0x2000 to Pipe A cursor regs)
+#define CURCCNTR				(CURACNTR + 0x2000)
+#define CURCPOS					(CURAPOS  + 0x2000)
+#define CURCBASE				(CURABASE + 0x2000)
+
+// Helper macro for cursor registers per pipe
+#define CURSOR_CONTROL(pipe)	(_PIPE(pipe) + 0x0080) // CURACNTR, CURBCNTR, etc.
+#define CURSOR_POSITION(pipe)	(_PIPE(pipe) + 0x0084) // CURAPOS, CURBPOS, etc.
+#define CURSOR_BASE(pipe)		(_PIPE(pipe) + 0x0088) // CURABASE, CURBBASE, etc.
+
+
 // ... other display registers ...
 
 // --- Interrupt Registers ---

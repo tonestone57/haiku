@@ -38,7 +38,7 @@ static status_t intel_i915_close(void* cookie);
 static status_t intel_i915_free(void* cookie);
 // ... (other static declarations)
 static status_t intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length);
-static enum pch_info_priv intel_i915_detect_pch(intel_i915_device_info* devInfo);
+static enum pch_info_priv intel_i915_detect_pch(void);
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -343,8 +343,11 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 
 	if (atomic_add(&devInfo->open_count, 1) == 0) {
 		// Detect PCH type first as it might influence subsequent initializations
+		// Pass devInfo to detect_pch if it needs any device-specific info for PCH detection,
+		// though typically PCH is system-wide and gPCI is sufficient.
+		// The current intel_i915_detect_pch(void) does not take devInfo.
 		devInfo->pch_type = intel_i915_detect_pch();
-		TRACE("intel_i915_open: Detected PCH type: %d\n", devInfo->pch_type);
+		TRACE("intel_i915_open: Detected PCH type: %d for device 0x%04x\n", devInfo->pch_type, devInfo->device_id);
 
 		// ... (MMIO, GTTMMADR, Shared Info mapping) ...
 		snprintf(areaName, sizeof(areaName), "i915_0x%04x_gmb", devInfo->device_id);

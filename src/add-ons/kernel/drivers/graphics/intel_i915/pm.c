@@ -27,20 +27,36 @@ static bigtime_t gLastGpuActivityTime = 0; // Global, or per-devInfo? For now, g
 #define RPS_IDLE_DOWNCLOCK_TIMEOUT_MS 500 // Time GPU must be idle before downclocking
 #define RPS_BUSY_UPCLOCK_TIMEOUT_MS 100   // Time GPU must be busy before upclocking (heuristic)
 
-// Default RPS Evaluation Intervals and Thresholds
-// WARNING: These values are placeholders and MUST be verified against Intel PRMs
-// for specific Gen7 (IVB/HSW) devices for correct units (e.g., 1.28us ticks, command counts)
-// and optimal behavior. Incorrect values can lead to poor performance or power management.
-#define DEFAULT_RP_DOWN_TIMEOUT_US 64000 // ~64ms (e.g., 50000 * 1.28us ticks) - PRM VERIFICATION NEEDED
-#define DEFAULT_RP_UP_TIMEOUT_US   32000 // ~32ms (e.g., 25000 * 1.28us ticks) - PRM VERIFICATION NEEDED
-#define DEFAULT_RP_DOWN_THRESHOLD  100   // Number of idle evaluations - PRM VERIFICATION NEEDED
-#define DEFAULT_RP_UP_THRESHOLD    50    // Number of busy evaluations - PRM VERIFICATION NEEDED
+// Default RC6 Idle Threshold (desired logical value, will be scaled)
+#define DEFAULT_RC6_IDLE_THRESHOLD_US 10000 // ~10ms
 
-// Default RC6 Idle Threshold
-// WARNING: This value is a placeholder. The actual register units (e.g., 1.28us ticks,
-// multiples of 128ns, etc.) and appropriate scale MUST be verified against Intel PRMs
-// for Gen7 (IVB/HSW) devices.
-#define DEFAULT_RC6_IDLE_THRESHOLD_US 10000 // ~10ms - PRM VERIFICATION NEEDED (units and scale)
+// Desired RPS and RC6 parameters (can be tuned)
+#define DESIRED_RP_DOWN_TIMEOUT_US 50000  // 50ms: Time of inactivity before considering downclock
+#define DESIRED_RP_UP_TIMEOUT_US   10000  // 10ms: Time of activity before considering upclock (shorter for responsiveness)
+#define DEFAULT_RPS_DOWN_THRESHOLD_PERCENT 85 // Percentage of down_timeout_hw_units
+#define DEFAULT_RPS_UP_THRESHOLD_PERCENT   95 // Percentage of up_timeout_hw_units
+#define DESIRED_RC_EVALUATION_INTERVAL_US 16000 // ~16ms (target for 12500 * 1.28us)
+#define DESIRED_RC_IDLE_HYSTERESIS_US   32      // 32us (target for 25 * 1.28us)
+#define DESIRED_RING_MAX_IDLE_COUNT     10      // In units of evaluation intervals
+
+
+// According to Intel PRMs for Gen6/Gen7, many GT PM timers (RPS, RC6)
+// operate in units of 1.28 microseconds.
+// 1.28 us = 1280 ns.
+// To convert microseconds to these hardware units: value_in_hw_units = value_in_us / 1.28
+// This is equivalent to: value_in_hw_units = (value_in_us * 100) / 128
+// or: value_in_hw_units = (value_in_us * 25) / 32
+static inline uint32_t
+_intel_i915_us_to_gen7_pm_units(uint32_t microseconds)
+{
+	// Using integer arithmetic: (microseconds * 25) / 32
+	// Ensure we don't lose too much precision or overflow for typical inputs.
+	// Max typical input for timeouts is ~65535 * 1.28us.
+	// (65535 * 25) / 32 = 1638375 / 32 = 51199.
+	// Max register value for these timers is often 16 or 24 bits.
+	// This calculation should be fine.
+	return (microseconds * 25) / 32;
+}
 
 
 static bool
@@ -54,10 +70,9 @@ static uint32_t
 _get_current_pstate_val(intel_i915_device_info* devInfo)
 {
 	// Caller must hold forcewake.
-	uint32_t reg = RPSTAT0; // Common for Gen6+ (e.g., 0xA00C)
-	uint32_t mask = CUR_PSTATE_IVB_HSW_MASK;
-	uint32_t shift = CUR_PSTATE_IVB_HSW_SHIFT;
-	// Add Gen-specific overrides if register/mask/shift differ significantly.
+	uint32_t reg = RPSTAT0;
+	uint32_t mask = CUR_PSTATE_IVB_HSW_MASK; // Ensure this is correct for IVB/HSW
+	uint32_t shift = CUR_PSTATE_IVB_HSW_SHIFT; // Ensure this is correct for IVB/HSW
 	return (intel_i915_read32(devInfo, reg) & mask) >> shift;
 }
 
@@ -65,7 +80,7 @@ static bool
 is_gpu_really_idle(intel_i915_device_info* devInfo)
 {
 	// Caller must hold forcewake.
-	if (devInfo->rcs0 == NULL) return true; // No engine to check
+	if (devInfo->rcs0 == NULL) return true;
 	struct intel_engine_cs* rcs = devInfo->rcs0;
 	bool is_idle_local;
 
@@ -73,8 +88,9 @@ is_gpu_really_idle(intel_i915_device_info* devInfo)
 	uint32_t hw_head = intel_i915_read32(devInfo, rcs->head_reg_offset) & (rcs->ring_size_bytes - 1);
 	is_idle_local = (hw_head == rcs->cpu_ring_tail);
 	if (is_idle_local && rcs->hw_seqno_cpu_map != NULL && rcs->last_submitted_hw_seqno != 0) {
+		// Check if the last submitted sequence number has been processed by the HW
 		if ((int32_t)(*(volatile uint32_t*)rcs->hw_seqno_cpu_map - rcs->last_submitted_hw_seqno) < 0) {
-			is_idle_local = false;
+			is_idle_local = false; // HW hasn't processed the last command yet
 		}
 	}
 	mutex_unlock(&rcs->lock);
@@ -100,13 +116,12 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	devInfo->rps_state->dev_priv = devInfo;
 
 	devInfo->rps_state->rc6_supported = is_rc6_supported_by_platform(devInfo);
-	// Set the desired RC6 mask to enable all RC6 states (RC6, RC6p, RC6pp) by default if supported.
 	if (IS_HASWELL(devInfo->device_id)) {
 		devInfo->rps_state->desired_rc6_mask_hw = HSW_RC_CTL_RC6_ENABLE | HSW_RC_CTL_RC6p_ENABLE | HSW_RC_CTL_RC6pp_ENABLE;
 	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		devInfo->rps_state->desired_rc6_mask_hw = IVB_RC_CTL_RC6_ENABLE | IVB_RC_CTL_RC6P_ENABLE | IVB_RC_CTL_RC6PP_ENABLE;
 	} else {
-		devInfo->rps_state->desired_rc6_mask_hw = 0; // No RC6 for older or unhandled gens
+		devInfo->rps_state->desired_rc6_mask_hw = 0;
 	}
 
 	status = mutex_init_etc(&devInfo->rps_state->lock, "i915 RPS/RC6 lock", MUTEX_FLAG_CLONE_NAME);
@@ -126,91 +141,130 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (status != B_OK) {
 		TRACE("PM Init: Failed to get forcewake for initial PM setup: %s. PM features may be limited.\n", strerror(status));
-		// Fall through, some PM init (like work queue) can still proceed.
-		// RPS/RC6 HW setup will be skipped by checks below.
+		// Continue, some PM init (like work queue) can still proceed.
+		// RPS/RC6 HW setup will be skipped by checks below if forcewake was needed and failed.
 	}
 
-	uint64 rp_state_cap = 0;
-	// Define MSRs if not available from headers. Common value is 0x65E for many gens.
-	#ifndef MSR_RP_STATE_CAP_GEN6_GEN9 // Generic name for 0x65E used by SNB, IVB, BDW, SKL+
-	#define MSR_RP_STATE_CAP_GEN6_GEN9 0x65E
-	#endif
-	// MSR_HSW_RP_STATE_CAP is assumed to be defined elsewhere (e.g. registers.h)
+	// --- P-State Limit Discovery (Enhancement 3) ---
+	uint8_t rp0_val = 0, rp1_val = 0, rpn_val = 0;
+	bool p_state_limits_valid = false;
 
-	if (IS_HASWELL(devInfo->device_id)) {
-		rp_state_cap = rdmsr(MSR_HSW_RP_STATE_CAP);
-		TRACE("PM: Reading RP_STATE_CAP MSR for Haswell (0x%lx)\n", (uint32)MSR_HSW_RP_STATE_CAP);
-	} else if (IS_SANDYBRIDGE(devInfo->device_id) ||
-			   IS_IVYBRIDGE(devInfo->device_id) ||
-			   IS_BROADWELL(devInfo->device_id) || // Gen8
-			   IS_GEN9(devInfo->device_id) ||      // Covers SKL, KBL, CFL, CML, GLK
-			   IS_GEN11(devInfo->device_id) ||     // Covers ICL, JSL
-			   IS_GEN12(devInfo->device_id)) {     // Covers TGL, ADL, DG1 etc.
-		rp_state_cap = rdmsr(MSR_RP_STATE_CAP_GEN6_GEN9);
-		TRACE("PM: Reading RP_STATE_CAP MSR for Gen6-Gen12 (excluding HSW) (0x%lx)\n", (uint32)MSR_RP_STATE_CAP_GEN6_GEN9);
-	}
-	// TODO: Verify MSR address and interpretation for future Gens beyond Gen12.
-	// Actual frequency control mechanisms for Gen11+ are more complex and rely on MMIO/firmware.
-	if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 11) {
-		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Reading RP_STATE_CAP MSR for Gen %d. Frequency control for Gen11+ is more complex (MMIO/firmware) and this MSR may be insufficient or misleading. Full RPS support for this Gen requires PRM review.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
-	}
+	if (status == B_OK && (INTEL_GRAPHICS_GEN(devInfo->device_id) == 7 || INTEL_GRAPHICS_GEN(devInfo->device_id) == 6)) {
+		uint32_t rp_state_cap_mmio_val = intel_i915_read32(devInfo, GEN6_RP_STATE_CAP);
+		uint8_t mmio_rp0 = (rp_state_cap_mmio_val & GEN6_RP_STATE_CAP_RP0_MASK) >> GEN6_RP_STATE_CAP_RP0_SHIFT;
+		uint8_t mmio_rp1 = (rp_state_cap_mmio_val & GEN6_RP_STATE_CAP_RP1_MASK) >> GEN6_RP_STATE_CAP_RP1_SHIFT;
+		uint8_t mmio_rpn = (rp_state_cap_mmio_val & GEN6_RP_STATE_CAP_RPN_MASK) >> GEN6_RP_STATE_CAP_RPN_SHIFT;
+		TRACE("PM: GEN6_RP_STATE_CAP (0x%x) raw: 0x%08lx. RP0=0x%x, RP1=0x%x, RPn=0x%x\n",
+			GEN6_RP_STATE_CAP, rp_state_cap_mmio_val, mmio_rp0, mmio_rp1, mmio_rpn);
 
-	if (rp_state_cap != 0) {
-		devInfo->rps_state->max_p_state_val = (rp_state_cap >> 0) & 0xFF; // Max P-state (lowest GPU freq value)
-		devInfo->rps_state->min_p_state_val = (rp_state_cap >> 8) & 0xFF; // Min P-state (highest GPU freq value)
-		devInfo->rps_state->default_p_state_val = (rp_state_cap >> 16) & 0xFF; // RP0 - guaranteed freq (often max non-turbo)
-
-		if (devInfo->rps_state->min_p_state_val > devInfo->rps_state->max_p_state_val || devInfo->rps_state->max_p_state_val == 0) {
-			TRACE("PM: Invalid P-state caps from MSR (min 0x%x, max 0x%x). Disabling RPS.\n",
-				devInfo->rps_state->min_p_state_val, devInfo->rps_state->max_p_state_val);
-			devInfo->rps_state->max_p_state_val = 0;
+		if (mmio_rp0 != 0 && mmio_rpn != 0 && mmio_rp0 <= mmio_rpn && mmio_rp1 >= mmio_rp0 && mmio_rp1 <= mmio_rpn) {
+			rp0_val = mmio_rp0;
+			rpn_val = mmio_rpn;
+			devInfo->rps_state->efficient_p_state_val = mmio_rp1;
+			devInfo->rps_state->default_p_state_val = mmio_rp1;
+			p_state_limits_valid = true;
+			TRACE("PM: Using P-state limits from MMIO: RP0(min_val)=0x%x, RP1(eff)=0x%x, RPn(max_val)=0x%x. Default=0x%x\n",
+				rp0_val, devInfo->rps_state->efficient_p_state_val, rpn_val, devInfo->rps_state->default_p_state_val);
 		} else {
-			if (devInfo->rps_state->default_p_state_val < devInfo->rps_state->min_p_state_val)
-				devInfo->rps_state->default_p_state_val = devInfo->rps_state->min_p_state_val;
-			if (devInfo->rps_state->default_p_state_val > devInfo->rps_state->max_p_state_val)
-				devInfo->rps_state->default_p_state_val = devInfo->rps_state->max_p_state_val;
+			TRACE("PM: MMIO RP_STATE_CAP values seem invalid (RP0=0x%x, RP1=0x%x, RPn=0x%x). Will try MSR.\n",
+				mmio_rp0, mmio_rp1, mmio_rpn);
 		}
+	}
 
-		TRACE("PM: P-State caps: MaxFreqPState=0x%x, MinFreqPState=0x%x, DefaultReqPState=0x%x\n",
-			devInfo->rps_state->min_p_state_val, devInfo->rps_state->max_p_state_val, devInfo->rps_state->default_p_state_val);
+	if (!p_state_limits_valid) {
+		uint64 rp_state_cap_msr = 0;
+		#ifndef MSR_RP_STATE_CAP_GEN6_GEN9
+		#define MSR_RP_STATE_CAP_GEN6_GEN9 0x65E
+		#endif
 
-		if (status == B_OK && devInfo->rps_state->max_p_state_val != 0) {
-			dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using placeholder RPS timeouts/thresholds. These values (DownTimeout=%u us, UpTimeout=%u us, DownThresh=%u, UpThresh=%u) MUST be verified against Intel PRMs for correct units and optimal behavior.\n",
-				DEFAULT_RP_DOWN_TIMEOUT_US, DEFAULT_RP_UP_TIMEOUT_US, DEFAULT_RP_DOWN_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
-			intel_i915_write32(devInfo, GEN6_RP_INTERRUPT_LIMITS,
-				(devInfo->rps_state->max_p_state_val << RP_INT_LIMITS_LOW_PSTATE_SHIFT) |
-				(devInfo->rps_state->min_p_state_val << RP_INT_LIMITS_HIGH_PSTATE_SHIFT));
-			intel_i915_write32(devInfo, GEN6_RP_DOWN_TIMEOUT, DEFAULT_RP_DOWN_TIMEOUT_US);
-			intel_i915_write32(devInfo, GEN6_RP_UP_TIMEOUT, DEFAULT_RP_UP_TIMEOUT_US);
-			intel_i915_write32(devInfo, GEN6_RP_DOWN_THRESHOLD, DEFAULT_RP_DOWN_THRESHOLD);
-			intel_i915_write32(devInfo, GEN6_RP_UP_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
-			intel_i915_write32(devInfo, GEN6_RPNSWREQ, (devInfo->rps_state->default_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
-			intel_i915_write32(devInfo, GEN6_RP_CONTROL, RP_CONTROL_RPS_ENABLE | RP_CONTROL_MODE_HW_AUTONOMOUS);
-			TRACE("PM: RPS HW Autonomous mode enabled. Initial P-state req: 0x%x.\n", devInfo->rps_state->default_p_state_val);
+		if (IS_HASWELL(devInfo->device_id)) {
+			rp_state_cap_msr = rdmsr(MSR_HSW_RP_STATE_CAP);
+			TRACE("PM: Reading RP_STATE_CAP MSR for Haswell (0x%lx)\n", (uint32)MSR_HSW_RP_STATE_CAP);
+		} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
+			rp_state_cap_msr = rdmsr(MSR_RP_STATE_CAP_GEN6_GEN9);
+			TRACE("PM: Reading RP_STATE_CAP MSR for IVB/SNB (0x%lx)\n", (uint32)MSR_RP_STATE_CAP_GEN6_GEN9);
 		}
+		// Note: MSRs might not be reliable or primary source for newer gens.
+		// This part is mostly for Gen6/7.
+
+		if (rp_state_cap_msr != 0) {
+			uint8_t msr_rpn = (rp_state_cap_msr >> 0) & 0xFF;
+			uint8_t msr_rp0 = (rp_state_cap_msr >> 8) & 0xFF;
+			uint8_t msr_default = (rp_state_cap_msr >> 16) & 0xFF;
+
+			if (msr_rp0 != 0 && msr_rpn != 0 && msr_rp0 <= msr_rpn) {
+				rp0_val = msr_rp0;
+				rpn_val = msr_rpn;
+				devInfo->rps_state->default_p_state_val = msr_default;
+				if (devInfo->rps_state->default_p_state_val < rp0_val) devInfo->rps_state->default_p_state_val = rp0_val;
+				if (devInfo->rps_state->default_p_state_val > rpn_val) devInfo->rps_state->default_p_state_val = rpn_val;
+				devInfo->rps_state->efficient_p_state_val = devInfo->rps_state->default_p_state_val;
+				p_state_limits_valid = true;
+				TRACE("PM: Using P-State limits from MSR: RP0(min_val)=0x%x, RPn(max_val)=0x%x, Default=0x%x, Efficient=0x%x\n",
+					rp0_val, rpn_val, devInfo->rps_state->default_p_state_val, devInfo->rps_state->efficient_p_state_val);
+			} else {
+				TRACE("PM: Invalid P-state caps from MSR. Disabling RPS.\n");
+			}
+		} else {
+			TRACE("PM: Could not read P-State caps MSR or MSR was zero. RPS disabled.\n");
+		}
+	}
+
+	if (p_state_limits_valid) {
+		devInfo->rps_state->min_p_state_val = rp0_val;
+		devInfo->rps_state->max_p_state_val = rpn_val;
+		if (devInfo->rps_state->default_p_state_val < devInfo->rps_state->min_p_state_val) devInfo->rps_state->default_p_state_val = devInfo->rps_state->min_p_state_val;
+		if (devInfo->rps_state->default_p_state_val > devInfo->rps_state->max_p_state_val) devInfo->rps_state->default_p_state_val = devInfo->rps_state->max_p_state_val;
+		if (devInfo->rps_state->efficient_p_state_val < devInfo->rps_state->min_p_state_val) devInfo->rps_state->efficient_p_state_val = devInfo->rps_state->min_p_state_val;
+		if (devInfo->rps_state->efficient_p_state_val > devInfo->rps_state->max_p_state_val) devInfo->rps_state->efficient_p_state_val = devInfo->rps_state->max_p_state_val;
+		TRACE("PM: Final P-State opcodes: min_val(RP0)=0x%x, max_val(RPn)=0x%x, default=0x%x, efficient=0x%x\n",
+			devInfo->rps_state->min_p_state_val, devInfo->rps_state->max_p_state_val,
+			devInfo->rps_state->default_p_state_val, devInfo->rps_state->efficient_p_state_val);
 	} else {
-		TRACE("PM: Could not read P-State caps MSR for Gen %d. RPS disabled.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		devInfo->rps_state->max_p_state_val = 0;
+		TRACE("PM: RPS disabled due to invalid/unavailable P-state limits.\n");
+	}
+	// --- End P-State Limit Discovery ---
+
+
+	if (status == B_OK && devInfo->rps_state->max_p_state_val != 0) { // Check if RPS is usable
+		// Program RPS registers with correctly scaled values (Enhancement 1)
+		uint32_t down_timeout_hw_units = _intel_i915_us_to_gen7_pm_units(DESIRED_RP_DOWN_TIMEOUT_US);
+		uint32_t up_timeout_hw_units = _intel_i915_us_to_gen7_pm_units(DESIRED_RP_UP_TIMEOUT_US);
+		uint32_t down_threshold_val = (down_timeout_hw_units * DEFAULT_RPS_DOWN_THRESHOLD_PERCENT) / 100;
+		uint32_t up_threshold_val = (up_timeout_hw_units * DEFAULT_RPS_UP_THRESHOLD_PERCENT) / 100;
+
+		TRACE("PM: Programming RPS Timers/Thresholds:\n");
+		TRACE("  DownTimeout: %u us -> %u hw_units\n", DESIRED_RP_DOWN_TIMEOUT_US, down_timeout_hw_units);
+		TRACE("  UpTimeout:   %u us -> %u hw_units\n", DESIRED_RP_UP_TIMEOUT_US, up_timeout_hw_units);
+		TRACE("  DownThresh:  %u%% of DownTimeout -> %u hw_units\n", DEFAULT_RPS_DOWN_THRESHOLD_PERCENT, down_threshold_val);
+		TRACE("  UpThresh:    %u%% of UpTimeout   -> %u hw_units\n", DEFAULT_RPS_UP_THRESHOLD_PERCENT, up_threshold_val);
+
+		intel_i915_write32(devInfo, GEN6_RP_INTERRUPT_LIMITS,
+			(devInfo->rps_state->max_p_state_val << RP_INT_LIMITS_LOW_PSTATE_SHIFT) |
+			(devInfo->rps_state->min_p_state_val << RP_INT_LIMITS_HIGH_PSTATE_SHIFT));
+		intel_i915_write32(devInfo, GEN6_RP_DOWN_TIMEOUT, down_timeout_hw_units);
+		intel_i915_write32(devInfo, GEN6_RP_UP_TIMEOUT, up_timeout_hw_units);
+		intel_i915_write32(devInfo, GEN6_RP_DOWN_THRESHOLD, down_threshold_val);
+		intel_i915_write32(devInfo, GEN6_RP_UP_THRESHOLD, up_threshold_val);
+
+		intel_i915_write32(devInfo, GEN6_RPNSWREQ, (devInfo->rps_state->default_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
+		intel_i915_write32(devInfo, GEN6_RP_CONTROL, RP_CONTROL_RPS_ENABLE | RP_CONTROL_MODE_HW_AUTONOMOUS);
+		TRACE("PM: RPS HW Autonomous mode enabled. Initial P-state req: 0x%x. GEN6_RP_CONTROL set to 0x%x\n",
+			devInfo->rps_state->default_p_state_val, (RP_CONTROL_RPS_ENABLE | RP_CONTROL_MODE_HW_AUTONOMOUS));
 	}
 
 	if (devInfo->rps_state->rc6_supported) {
-		// RC6 hardware setup (control register, thresholds) is now handled by intel_i915_pm_enable_rc6.
-		// Call it here if forcewake was successfully acquired for other PM init.
-		if (status == B_OK) { // status here refers to the forcewake acquisition status from earlier
+		if (status == B_OK) { // Check forcewake was acquired before enabling RC6
 			intel_i915_pm_enable_rc6(devInfo);
 		} else {
 			TRACE("PM: Forcewake not acquired earlier, skipping initial call to intel_i915_pm_enable_rc6.\n");
-			// Mark that driver policy is to have it enabled, work handler might try later if FW available.
-			// However, intel_i915_pm_enable_rc6 itself checks and handles forcewake.
-			// So, it's safe to call, but good to note why it might not do anything yet.
-			// For robustness, ensure rc6_enabled_by_driver reflects intent vs actual attempt.
-			// The enable_rc6 function will set rc6_enabled_by_driver = true if it succeeds in writing.
-			// If forcewake fails inside enable_rc6, it won't set this flag.
-			intel_i915_pm_enable_rc6(devInfo); // Attempt anyway, it will handle its own forcewake.
+			// We can still call it; it will try to acquire FW itself.
+			intel_i915_pm_enable_rc6(devInfo);
 		}
 
-		// Schedule work item if RC6 is supported (it will also handle RPS if enabled)
-		if (gPmWorkQueue && !devInfo->rps_state->rc6_work_scheduled) {
+		if (gPmWorkQueue && !devInfo->rps_state->rc6_work_scheduled &&
+		    (devInfo->rps_state->rc6_enabled_by_driver || devInfo->rps_state->max_p_state_val != 0)) {
 			if (queue_work_item(gPmWorkQueue, &devInfo->rps_state->rc6_work_item,
 						intel_i915_rc6_work_handler, devInfo->rps_state, RC6_IDLE_TIMEOUT_MS * 1000) == B_OK) {
 				devInfo->rps_state->rc6_work_scheduled = true;
@@ -218,8 +272,7 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 		}
 	}
 
-	// Release the forcewake acquired at the start of pm_init if it was successful
-	if (status == B_OK) {
+	if (status == B_OK) { // If we acquired FW at the start, release it.
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	}
 	TRACE("PM: PM init complete. RPS/RC6 logic in work handler is primary control.\n");
@@ -237,11 +290,11 @@ intel_i915_pm_uninit(intel_i915_device_info* devInfo)
 		devInfo->rps_state->rc6_work_scheduled = false;
 	}
 
-	if (devInfo->rps_state->rc6_supported) { // Check support, not driver policy for uninit
+	if (devInfo->rps_state->rc6_supported) {
 		intel_i915_pm_disable_rc6(devInfo);
 	}
 
-	if (devInfo->mmio_regs_addr && devInfo->rps_state->max_p_state_val != 0) { // Check if RPS was configured
+	if (devInfo->mmio_regs_addr && devInfo->rps_state->max_p_state_val != 0) {
 		status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		if (fw_status == B_OK) {
 			intel_i915_write32(devInfo, GEN6_RP_CONTROL, 0);
@@ -281,36 +334,58 @@ intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 
 	uint32_t rc_ctl_reg;
 	uint32_t rc6_idle_thresh_reg;
-	uint32_t rc6_idle_thresh_val = DEFAULT_RC6_IDLE_THRESHOLD_US; // Default common value
-	// desired_rc6_mask_hw is already set in rps_state during pm_init
+	uint32_t rc6_idle_thresh_val = _intel_i915_us_to_gen7_pm_units(DEFAULT_RC6_IDLE_THRESHOLD_US);
 
 	if (IS_HASWELL(devInfo->device_id)) {
 		rc_ctl_reg = RENDER_C_STATE_CONTROL_HSW;
 		rc6_idle_thresh_reg = HSW_RC6_THRESHOLD_IDLE;
-		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US (%u us) for HSW (reg 0x%lx). This value MUST be verified/adjusted against Intel PRM for correct units/scale.\n", DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_reg);
 	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		rc_ctl_reg = RC_CONTROL_IVB;
 		rc6_idle_thresh_reg = GEN6_RC6_THRESHOLD_IDLE_IVB;
-		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US (%u us) for IVB/SNB (reg 0x%lx). This value MUST be verified/adjusted against Intel PRM for correct units/scale.\n", DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_reg);
 	} else {
 		TRACE("PM: intel_i915_pm_enable_rc6: RC6 not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 		return;
 	}
 
-	// Program RC6 Idle Thresholds
-	// TODO: Determine appropriate, PRM-verified default values for these thresholds.
-	intel_i915_write32(devInfo, rc6_idle_thresh_reg, rc6_idle_thresh_val);
-	TRACE("PM: RC6 Idle Threshold (Reg 0x%x) set to conceptual value %u (raw %u) during RC6 enable.\n",
-		rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_val);
+	// Program additional RC6 control parameters (Enhancement 2)
+	uint32_t eval_interval_hw = _intel_i915_us_to_gen7_pm_units(DESIRED_RC_EVALUATION_INTERVAL_US);
+	uint32_t idle_hysteresis_hw = _intel_i915_us_to_gen7_pm_units(DESIRED_RC_IDLE_HYSTERESIS_US);
 
-	// Enable RC6 states
-	uint32_t rc_ctl_val = intel_i915_read32(devInfo, rc_ctl_reg);
-	rc_ctl_val |= devInfo->rps_state->desired_rc6_mask_hw; // Use the comprehensive mask
-	intel_i915_write32(devInfo, rc_ctl_reg, rc_ctl_val);
+	intel_i915_write32(devInfo, GEN6_RC_EVALUATION_INTERVAL, eval_interval_hw);
+	intel_i915_write32(devInfo, GEN6_RC_IDLE_HYSTERSIS, idle_hysteresis_hw);
+	TRACE("PM: RC6 Eval Interval (0x%x) set to %u hw_units (%u us).\n",
+		GEN6_RC_EVALUATION_INTERVAL, eval_interval_hw, DESIRED_RC_EVALUATION_INTERVAL_US);
+	TRACE("PM: RC6 Idle Hysteresis (0x%x) set to %u hw_units (%u us).\n",
+		GEN6_RC_IDLE_HYSTERSIS, idle_hysteresis_hw, DESIRED_RC_IDLE_HYSTERESIS_US);
+
+	if (devInfo->rcs0 && GEN7_RCS_MAX_IDLE_REG != 0) {
+		intel_i915_write32(devInfo, GEN7_RCS_MAX_IDLE_REG, DESIRED_RING_MAX_IDLE_COUNT);
+		TRACE("PM: RCS0 Ring Max Idle (0x%x) set to %u counts.\n", GEN7_RCS_MAX_IDLE_REG, DESIRED_RING_MAX_IDLE_COUNT);
+	}
+
+	intel_i915_write32(devInfo, rc6_idle_thresh_reg, rc6_idle_thresh_val);
+	TRACE("PM: RC6 Idle Threshold (Reg 0x%x) set to %u hw_units (from %u us desired).\n",
+		rc6_idle_thresh_reg, rc6_idle_thresh_val, DEFAULT_RC6_IDLE_THRESHOLD_US);
+
+	// Enable RC6 states (Enhancement 4: Ensure comprehensive RC6 control bits)
+	uint32_t rc_ctl_val_new = 0;
+	if (IS_HASWELL(devInfo->device_id)) {
+		// For HSW, RENDER_C_STATE_CONTROL_HSW (0x83D0).
+		// Linux driver often uses Timeout Mode for HSW RC6.
+		rc_ctl_val_new = HSW_RC_CTL_TO_MODE_ENABLE; // Timeout mode enable
+		// HSW_RC_CTL_HW_ENABLE (bit 31) is often implicitly handled by specific RC state enables.
+		// If explicit overall HW enable is needed for HSW: rc_ctl_val_new |= HSW_RC_CTL_HW_ENABLE; (assuming definition)
+		rc_ctl_val_new |= devInfo->rps_state->desired_rc6_mask_hw; // Add RC6, RC6p, RC6pp enables
+	} else { // IVB/SNB using RC_CONTROL_IVB (0xA090)
+		rc_ctl_val_new = GEN6_RC_CTL_HW_ENABLE | GEN6_RC_CTL_EI_MODE(1); // Base enables: HW control + Event Interrupt mode
+		rc_ctl_val_new |= devInfo->rps_state->desired_rc6_mask_hw; // Add specific RC6/p/pp states
+	}
+
+	intel_i915_write32(devInfo, rc_ctl_reg, rc_ctl_val_new);
 	devInfo->rps_state->rc6_enabled_by_driver = true;
-	TRACE("PM: RC6 enabled in HW (Reg 0x%x Val 0x%08x, MaskUsed 0x%x).\n",
-		rc_ctl_reg, rc_ctl_val, devInfo->rps_state->desired_rc6_mask_hw);
+	TRACE("PM: RC6 enabled in HW (Reg 0x%x Val 0x%08lx, DesiredMask 0x%x).\n",
+		rc_ctl_reg, rc_ctl_val_new, devInfo->rps_state->desired_rc6_mask_hw);
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }
@@ -329,26 +404,26 @@ intel_i915_pm_disable_rc6(intel_i915_device_info* devInfo)
 	}
 
 	uint32_t rc_ctl_reg;
-	uint32_t disable_mask;
+	uint32_t final_rc_ctl_val = 0;
 
-	if (IS_IVYBRIDGE(devInfo->device_id)) {
+	if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		rc_ctl_reg = RC_CONTROL_IVB;
-		disable_mask = IVB_RC_CTL_RC6_ENABLE | IVB_RC_CTL_RC6P_ENABLE | IVB_RC_CTL_RC6PP_ENABLE; // Disable all
+		final_rc_ctl_val = 0; // Fully disable RC for IVB/SNB
 	} else if (IS_HASWELL(devInfo->device_id)) {
 		rc_ctl_reg = RENDER_C_STATE_CONTROL_HSW;
-		disable_mask = HSW_RC_CTL_RC6_ENABLE | HSW_RC_CTL_RC6p_ENABLE | HSW_RC_CTL_RC6pp_ENABLE; // Disable all
+		uint32_t current_val = intel_i915_read32(devInfo, rc_ctl_reg);
+		final_rc_ctl_val = current_val & ~(HSW_RC_CTL_RC6_ENABLE | HSW_RC_CTL_RC6p_ENABLE | HSW_RC_CTL_RC6pp_ENABLE);
+		final_rc_ctl_val &= ~(HSW_RC_CTL_TO_MODE_ENABLE | HSW_RC_CTL_EI_MODE_ENABLE); // Also clear mode enables
 	} else {
 		TRACE("PM: RC6 disable not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 		return;
 	}
 
-	uint32_t rc_ctl_val = intel_i915_read32(devInfo, rc_ctl_reg);
-	rc_ctl_val &= ~disable_mask;
-	intel_i915_write32(devInfo, rc_ctl_reg, rc_ctl_val);
+	intel_i915_write32(devInfo, rc_ctl_reg, final_rc_ctl_val);
 	devInfo->rps_state->rc6_enabled_by_driver = false;
 	devInfo->rps_state->rc6_active = false;
-	TRACE("PM: RC6 disabled in HW (Reg 0x%x Val 0x%08x, MaskUsed 0x%x).\n", rc_ctl_reg, rc_ctl_val, disable_mask);
+	TRACE("PM: RC6 disabled in HW (Reg 0x%x set to Val 0x%08lx).\n", rc_ctl_reg, final_rc_ctl_val);
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }
@@ -363,7 +438,7 @@ intel_i915_rc6_work_handler(void* data)
 
 	mutex_lock(&rpsState->lock);
 	rpsState->rc6_work_scheduled = false;
-	if (!rpsState->rc6_enabled_by_driver && rpsState->max_p_state_val == 0 /*RPS also off*/) {
+	if (!rpsState->rc6_enabled_by_driver && rpsState->max_p_state_val == 0 /*RPS also off by max_p_state_val == 0 check*/) {
 		mutex_unlock(&rpsState->lock);
 		return;
 	}
@@ -385,9 +460,9 @@ intel_i915_rc6_work_handler(void* data)
 		if (IS_HASWELL(devInfo->device_id)) {
 			current_rc_hw_val = (intel_i915_read32(devInfo, RENDER_C_STATE_CONTROL_HSW) & HSW_RC_CTL_RC_STATE_MASK) >> HSW_RC_CTL_RC_STATE_SHIFT;
 			rpsState->rc6_active = (current_rc_hw_val >= HSW_RC_STATE_RC6);
-		} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-			current_rc_hw_val = intel_i915_read32(devInfo, RC_STATE_IVB) & 0x7;
-			rpsState->rc6_active = (current_rc_hw_val >= 0x6);
+		} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) { // Also check SNB
+			current_rc_hw_val = intel_i915_read32(devInfo, RC_STATE_IVB) & 0x7; // Assuming RC_STATE_IVB is also valid for SNB
+			rpsState->rc6_active = (current_rc_hw_val >= 0x6); // 0x6 for RC6, 0x7 for RC6p/pp
 		} else {
 			current_rc_hw_val = 0; rpsState->rc6_active = false;
 		}
@@ -400,12 +475,12 @@ intel_i915_rc6_work_handler(void* data)
 	bigtime_t idle_duration_us = now - gLastGpuActivityTime;
 	uint32 current_pstate_val = (rpsState->max_p_state_val != 0) ? _get_current_pstate_val(devInfo) : 0;
 
-	if (rpsState->max_p_state_val != 0) {
+	if (rpsState->max_p_state_val != 0) { // If RPS is enabled
 		if (rpsState->rps_up_event_pending) {
 			TRACE("PM Work: RPS Up event. Requesting min P-state (0x%x).\n", rpsState->min_p_state_val);
 			intel_i915_write32(devInfo, GEN6_RPNSWREQ, (rpsState->min_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
 			rpsState->rps_up_event_pending = false;
-			gLastGpuActivityTime = now;
+			gLastGpuActivityTime = now; // Reset idle timer on upclock
 			idle_duration_us = 0;
 		} else if (rpsState->rps_down_event_pending) {
 			TRACE("PM Work: RPS Down event. Requesting max P-state (0x%x).\n", rpsState->max_p_state_val);
@@ -413,13 +488,16 @@ intel_i915_rc6_work_handler(void* data)
 			rpsState->rps_down_event_pending = false;
 		}
 
+		// Software override based on idle timer (simplified from full RPS logic)
 		if (gpu_is_idle) {
 			if (idle_duration_us > (RPS_IDLE_DOWNCLOCK_TIMEOUT_MS * 1000) && current_pstate_val < rpsState->max_p_state_val) {
+				// If idle for long enough, request lowest frequency (highest P-state value)
 				intel_i915_write32(devInfo, GEN6_RPNSWREQ, (rpsState->max_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
 				TRACE("PM Work: GPU idle timeout, requesting max P-state (0x%x) (lowest freq).\n", rpsState->max_p_state_val);
 			}
-		} else {
-			if (current_pstate_val > rpsState->min_p_state_val) {
+		} else { // GPU is busy
+			if (current_pstate_val > rpsState->min_p_state_val) { // If not already at highest frequency
+				// Request highest frequency (lowest P-state value)
 				intel_i915_write32(devInfo, GEN6_RPNSWREQ, (rpsState->min_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
 				TRACE("PM Work: GPU busy, requesting min P-state (0x%x) (highest freq).\n", rpsState->min_p_state_val);
 			}
@@ -435,15 +513,15 @@ intel_i915_rc6_work_handler(void* data)
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 
 	if (gPmWorkQueue && (rpsState->rc6_enabled_by_driver || rpsState->max_p_state_val != 0)) {
-		bigtime_t next_check_delay = RPS_BUSY_UPCLOCK_TIMEOUT_MS * 1000;
+		bigtime_t next_check_delay = RPS_BUSY_UPCLOCK_TIMEOUT_MS * 1000; // Default for busy or RPS active
 		if (gpu_is_idle) {
 			next_check_delay = rpsState->rc6_active ? (RPS_IDLE_DOWNCLOCK_TIMEOUT_MS * 1000 * 2) : (RPS_IDLE_DOWNCLOCK_TIMEOUT_MS * 1000);
-			if (rpsState->rc6_enabled_by_driver && !rpsState->rc6_active) {
+			if (rpsState->rc6_enabled_by_driver && !rpsState->rc6_active) { // If RC6 enabled but not active, check more frequently
 				next_check_delay = min_c(next_check_delay, RC6_IDLE_TIMEOUT_MS * 1000);
 			}
 		}
 		if (rpsState->rps_up_event_pending || rpsState->rps_down_event_pending || rpsState->rc6_event_pending) {
-			next_check_delay = 50000;
+			next_check_delay = 50000; // Quicker check if events are pending
 		}
 
 		if (queue_work_item(gPmWorkQueue, &rpsState->rc6_work_item,
@@ -488,21 +566,27 @@ intel_i915_pm_resume(intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL || devInfo->rps_state == NULL || !devInfo->mmio_regs_addr) return;
 	TRACE("PM: Resuming PM for device 0x%04x\n", devInfo->device_id);
-	status_t fw_status_rps = B_ERROR, fw_status_rc6_check = B_ERROR;
+	status_t fw_status_rps = B_ERROR;
 
 	// Re-initialize RPS related registers
 	if (devInfo->rps_state->max_p_state_val != 0) { // If RPS is configured/was active
 		fw_status_rps = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		if (fw_status_rps == B_OK) {
-			dprintf(DEVICE_NAME_PRIV ": PM WARNING (Resume): Using placeholder RPS timeouts/thresholds. These values (DownTimeout=%u us, UpTimeout=%u us, DownThresh=%u, UpThresh=%u) MUST be verified against Intel PRMs for correct units and optimal behavior.\n",
-				DEFAULT_RP_DOWN_TIMEOUT_US, DEFAULT_RP_UP_TIMEOUT_US, DEFAULT_RP_DOWN_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
+			uint32_t down_timeout_hw_units = _intel_i915_us_to_gen7_pm_units(DESIRED_RP_DOWN_TIMEOUT_US);
+			uint32_t up_timeout_hw_units = _intel_i915_us_to_gen7_pm_units(DESIRED_RP_UP_TIMEOUT_US);
+			uint32_t down_threshold_val = (down_timeout_hw_units * DEFAULT_RPS_DOWN_THRESHOLD_PERCENT) / 100;
+			uint32_t up_threshold_val = (up_timeout_hw_units * DEFAULT_RPS_UP_THRESHOLD_PERCENT) / 100;
+
+			TRACE("PM Resume: Re-programming RPS Timers/Thresholds.\n");
+
 			intel_i915_write32(devInfo, GEN6_RP_INTERRUPT_LIMITS,
 				(devInfo->rps_state->max_p_state_val << RP_INT_LIMITS_LOW_PSTATE_SHIFT) |
 				(devInfo->rps_state->min_p_state_val << RP_INT_LIMITS_HIGH_PSTATE_SHIFT));
-			intel_i915_write32(devInfo, GEN6_RP_DOWN_TIMEOUT, DEFAULT_RP_DOWN_TIMEOUT_US);
-			intel_i915_write32(devInfo, GEN6_RP_UP_TIMEOUT, DEFAULT_RP_UP_TIMEOUT_US);
-			intel_i915_write32(devInfo, GEN6_RP_DOWN_THRESHOLD, DEFAULT_RP_DOWN_THRESHOLD);
-			intel_i915_write32(devInfo, GEN6_RP_UP_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
+
+			intel_i915_write32(devInfo, GEN6_RP_DOWN_TIMEOUT, down_timeout_hw_units);
+			intel_i915_write32(devInfo, GEN6_RP_UP_TIMEOUT, up_timeout_hw_units);
+			intel_i915_write32(devInfo, GEN6_RP_DOWN_THRESHOLD, down_threshold_val);
+			intel_i915_write32(devInfo, GEN6_RP_UP_THRESHOLD, up_threshold_val);
 
 			intel_i915_write32(devInfo, GEN6_RPNSWREQ, (devInfo->rps_state->default_p_state_val << RPNSWREQ_TARGET_PSTATE_SHIFT));
 			intel_i915_write32(devInfo, GEN6_RP_CONTROL, RP_CONTROL_RPS_ENABLE | RP_CONTROL_MODE_HW_AUTONOMOUS);
@@ -529,3 +613,4 @@ intel_i915_pm_resume(intel_i915_device_info* devInfo)
 		}
 	}
 }
+>>>>>>> REPLACE

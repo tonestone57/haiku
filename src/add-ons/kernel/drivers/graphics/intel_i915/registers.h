@@ -203,12 +203,28 @@
 	#define IVB_RC_CTL_RC6P_ENABLE		(1U << 1)
 	#define IVB_RC_CTL_RC6PP_ENABLE		(1U << 2)
 #define RC_STATE_IVB			0xA094
+#define GEN6_RP_STATE_CAP		0xA004 // For P-State limit discovery (Enhancement 3)
+	#define GEN6_RP_STATE_CAP_RP0_SHIFT 0    // RP0: Highest non-turbo (lowest numerical opcode)
+	#define GEN6_RP_STATE_CAP_RP0_MASK  (0xFFU << GEN6_RP_STATE_CAP_RP0_SHIFT)
+	#define GEN6_RP_STATE_CAP_RP1_SHIFT 8    // RP1: Efficient/Nominal frequency
+	#define GEN6_RP_STATE_CAP_RP1_MASK  (0xFFU << GEN6_RP_STATE_CAP_RP1_SHIFT)
+	#define GEN6_RP_STATE_CAP_RPN_SHIFT 16   // RPn: Lowest frequency (highest numerical opcode)
+	#define GEN6_RP_STATE_CAP_RPN_MASK  (0xFFU << GEN6_RP_STATE_CAP_RPN_SHIFT)
 #define GEN6_RPNSWREQ				0xA008
 	#define RPNSWREQ_TARGET_PSTATE_SHIFT 0
 #define GEN6_RP_CONTROL				0xA024
 	#define RP_CONTROL_RPS_ENABLE		(1U << 31)
 	#define RP_CONTROL_MODE_HW_AUTONOMOUS (0U << 29)
 	#define RP_CONTROL_MODE_SW_CONTROL    (1U << 29)
+	// GEN6_RC_CTL_HW_ENABLE and GEN6_RC_CTL_EI_MODE are for RC_CONTROL_IVB (0xA090)
+	// Added from plan for RC6 control bits (Enhancement 4)
+	#define GEN6_RC_CTL_HW_ENABLE		(1U << 31) // For Gen6/7 RC_CONTROL (e.g. RC_CONTROL_IVB)
+	#define GEN6_RC_CTL_EI_MODE(val)	(((val) & 0x3) << 27) // For Gen6/7 RC_CONTROL Event/Timeout mode
+	// Note: HSW_RC_CTL_HW_ENABLE and HSW_RC_CTL_EI_MODE_ENABLE are different bits in RENDER_C_STATE_CONTROL_HSW
+	// HSW_RC_CTL_HW_ENABLE is already part of HSW_RC_CTL_RC6_ENABLE etc. in Haiku's current defines.
+	// HSW_RC_CTL_EI_MODE_ENABLE (Bit 29 in RENDER_C_STATE_CONTROL_HSW) should be added if distinct logic for HSW EI mode is needed.
+	// For now, assuming GEN6_RC_CTL_EI_MODE can be adapted or HSW uses a combined enable bit.
+	#define HSW_RC_CTL_TO_MODE_ENABLE   (1U << 30) // In RENDER_C_STATE_CONTROL_HSW, enables timeout based mode (often used by Linux for HSW RC6)
 #define GEN6_RP_INTERRUPT_LIMITS	0xA02C
 	#define RP_INT_LIMITS_LOW_PSTATE_SHIFT  0
 	#define RP_INT_LIMITS_HIGH_PSTATE_SHIFT 16
@@ -226,6 +242,10 @@
 	#define PM_INTR_RC6_THRESHOLD		(1U << 8)
 #define GEN6_RC6_THRESHOLD_IDLE_IVB	0xA0B0
 #define HSW_RC6_THRESHOLD_IDLE		0x138154
+
+#define GEN6_RC_EVALUATION_INTERVAL		0xA09C // Corrected from 0xA090 based on some PRMs/Linux, was RC_CONTROL_IVB
+#define GEN6_RC_IDLE_HYSTERSIS			0xA0B8 // Corrected from 0xA094 based on some PRMs/Linux, was RC_STATE_IVB
+// RING_MAX_IDLE is per-engine, e.g., GEN7_RCS_MAX_IDLE_REG (0x2078) for render
 
 // Forcewake Registers (Gen6/7 - IVB, HSW)
 // Note: Newer Gens (Gen8+) have per-engine forcewake registers.

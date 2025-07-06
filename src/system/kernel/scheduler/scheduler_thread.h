@@ -114,7 +114,14 @@ private:
 			bigtime_t	fQuantumStartWallTime;
 			bigtime_t	fLastInterruptTime;
 
+			// Timestamp (system_time()) when the thread last transitioned to a
+			// waiting/sleeping state. Used in cache affinity heuristics
+			// (especially PS mode).
 			bigtime_t	fWentSleep;
+			// Cumulative active time of the core (`fCore->GetActiveTime()`) when
+			// the thread last transitioned to a waiting/sleeping state on that
+			// core. Used in cache affinity heuristics (especially LL mode) to
+			// estimate how much other work the core has done since.
 			bigtime_t	fWentSleepActive;
 
 			bool		fEnqueued;

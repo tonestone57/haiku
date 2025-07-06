@@ -51,26 +51,41 @@ static bool
 low_latency_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
+	// Determines if a thread's cache affinity for its previous core has likely expired.
+	// In Low Latency mode, we are quicker to consider cache cold to promote spreading
+	// to potentially less loaded cores.
+
 	if (threadData == NULL) // Basic sanity check
 		return true;
 
 	CoreEntry* core = threadData->Core(); // This is the thread's *previous* core
 	if (core == NULL) {
 		// Thread is not currently associated with a specific previous core,
-		// or it's the first time it's being scheduled. Cache affinity is irrelevant.
+		// or it's the first time it's being scheduled. Cache is definitely cold for this core.
 		return true;
 	}
 
-	// If WentSleepActive is 0, it means the thread either is new to this core
-	// or the core was idle when the thread last ran on it.
-	// In this case, the cache is only considered potentially warm if the core
-	// has remained mostly idle (i.e., its total active time is still very low).
+	// kLowLatencyCacheExpire (e.g., 30ms): A short duration. If the core has been
+	// active with other work for longer than this since the thread last ran,
+	// its L1/L2 cache contents are likely evicted.
+
 	if (threadData->WentSleepActive() == 0) {
+		// This case implies the thread is effectively "new" to this core for the
+		// current scheduling consideration, or the core had zero *cumulative*
+		// active time when the thread last ran and then slept (very rare for a
+		// core that has been up).
+		// The logic `core->GetActiveTime() > kLowLatencyCacheExpire` means:
+		// if this core has *ever* accumulated more than kLowLatencyCacheExpire
+		// (e.g. 30ms) of activity, assume its cache is cold for a thread that
+		// doesn't have a specific prior active session record (`fWentSleepActive`).
+		// This is a conservative "cold" assumption, aligning with LL mode's
+		// preference to spread tasks if there's any doubt about cache warmth.
 		return core->GetActiveTime() > kLowLatencyCacheExpire;
 	}
 
-	// Standard case: core was active when thread slept on it.
-	// Check how much more active the core has been since.
+	// Standard case: The thread ran on this core, and the core was active.
+	// We measure how much *additional* active time the core has accumulated
+	// due to *other* threads since this specific thread last ran on it.
 	bigtime_t coreActiveTimeSinceThreadSlept = core->GetActiveTime() - threadData->WentSleepActive();
 	return coreActiveTimeSinceThreadSlept > kLowLatencyCacheExpire;
 }

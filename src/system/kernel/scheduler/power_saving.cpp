@@ -355,8 +355,32 @@ static bool
 power_saving_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (threadData == NULL || threadData->WentSleep() == 0)
+	// Determines if a thread's cache affinity for its previous core has likely expired.
+	// In Power Saving mode, we are more lenient about cache expiry to promote
+	// thread "stickiness" to a core, aiding work consolidation.
+
+	if (threadData == NULL || threadData->WentSleep() == 0) {
+		// Thread is new or never ran/slept, so no existing cache affinity.
 		return true;
+	}
+
+	// kPowerSavingCacheExpire (e.g., 250ms): A relatively long duration.
+	// This heuristic uses simple wall-clock time since the thread last went to sleep.
+	// Rationale:
+	// - Simplicity: Avoids more complex tracking of core activity for this decision.
+	// - Stickiness: A longer expiry time makes it more likely the scheduler will
+	//   consider the cache "warm," preferring to place the thread on its previous
+	//   core. This helps consolidate work on fewer cores.
+	// - Overriding Logic: Even if this heuristic deems cache "warm" for a non-STC core,
+	//   the `power_saving_choose_core` logic will still strongly prefer the
+	//   Small Task Core (STC) if it has capacity. This `has_cache_expired` check
+	//   mainly influences decisions when the STC is not an option or when comparing
+	//   multiple non-STC cores.
+	// - Trade-off: May sometimes incorrectly assume cache is warm if the previous
+	//   core was very busy during the thread's sleep. However, the 250ms is chosen
+	//   as a balance point. L3 cache might retain some useful data over this period.
+	//   Future tuning could evaluate a shorter duration or incorporating some activity metric
+	//   if power/performance analysis indicates a need.
 	return system_time() - threadData->WentSleep() > kPowerSavingCacheExpire;
 }
 

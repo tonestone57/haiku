@@ -353,10 +353,14 @@ ThreadData::_ComputeEffectivePriority() const
 		fEffectivePriority = GetBasePriority();
 	else {
 		fEffectivePriority = GetBasePriority();
+		// Cap effective priority for non-RT threads below RT range.
 		if (fEffectivePriority >= B_FIRST_REAL_TIME_PRIORITY)
 			fEffectivePriority = B_URGENT_DISPLAY_PRIORITY - 1;
-		if (fEffectivePriority < _GetMinimalPriority())
-			fEffectivePriority = _GetMinimalPriority();
+		// Ensure effective priority for any active non-RT thread is at least B_LOWEST_ACTIVE_PRIORITY.
+		// GetBasePriority() for non-idle, non-RT threads should already be >= B_LOWEST_ACTIVE_PRIORITY.
+		// This floor mainly catches hypothetical cases or ensures a baseline.
+		if (fEffectivePriority < B_LOWEST_ACTIVE_PRIORITY)
+			fEffectivePriority = B_LOWEST_ACTIVE_PRIORITY;
 	}
 }
 

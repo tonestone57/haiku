@@ -612,43 +612,37 @@ power_saving_rebalance_irqs(bool idle)
 	CoreEntry* consolidationCore = power_saving_get_consolidation_target_core(NULL);
 
 	if (idle && consolidationCore != NULL && currentCore != consolidationCore) {
-		// This is the "packing" case - move ALL IRQs.
+		// This is the "packing" case - move ALL IRQs from the current idling core
+		// to the designated consolidationCore, if suitable CPUs are found there.
 		SpinLocker irqLocker(current_cpu_struct->irqs_lock);
 		irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
+		irq_assignment* nextIRQ = irq;
 
-		// Select target CPU on the consolidation core using the unified function.
-		// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
-		// and gSchedulerSMTConflictFactor (already mode-specific for PS).
-		CPUEntry* targetCPUonConsolidationCore = SelectTargetCPUForIRQ(consolidationCore,
-			0, /* Pass 0 for irqLoadToMove when selecting best CPU on core generally */
-			gModeIrqTargetFactor,
-			gSchedulerSMTConflictFactor,
-			gModeMaxTargetCpuIrqLoad);
+		while (nextIRQ != NULL) {
+			irq = nextIRQ;
+			nextIRQ = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 
-		if (targetCPUonConsolidationCore != NULL) {
-			irq_assignment* nextIRQ = irq;
-			while (nextIRQ != NULL) {
-				irq = nextIRQ;
-				nextIRQ = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
+			// Select target CPU on the consolidation core for this specific IRQ.
+			// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
+			// and gSchedulerSMTConflictFactor.
+			CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
+				irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor,
+				gModeMaxTargetCpuIrqLoad);
 
-				// Re-evaluate target CPU for this specific IRQ to ensure capacity.
-				CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
-					irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
-
-				if (specificTargetCPU != NULL) {
-					TRACE("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-						irq->irq, irq->load, current_cpu_struct->cpu_num, specificTargetCPU->ID());
+			if (specificTargetCPU != NULL) {
+				TRACE("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+					irq->irq, irq->load, current_cpu_struct->cpu_num, specificTargetCPU->ID());
 				status_t status = assign_io_interrupt_to_cpu(irq->irq, specificTargetCPU->ID());
 				if (status != B_OK) {
 					TRACE("power_saving_rebalance_irqs (pack): Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
 						irq->irq, specificTargetCPU->ID(), strerror(status));
 				}
-				} else {
-					TRACE("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains.\n",
-						consolidationCore->ID(), irq->irq);
-				}
+			} else {
+				TRACE("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains on CPU %" B_PRId32 ".\n",
+					consolidationCore->ID(), irq->irq, current_cpu_struct->cpu_num);
 			}
 		}
+		// irqLocker automatically releases here
 		return;
 	}
 

@@ -735,9 +735,31 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	SpinLocker lock(fCPULock); // Protects core-local CPU structures.
 
 	ASSERT(fCPUCount > 0);
-	// Corrected check for cpu being in its heap:
-	if (cpu->GetHeapLink()->fIndex != -1) // Check if it's still in the heap.
-		fCPUHeap.RemoveRoot(); // Assuming cpu is made root before this call
+
+	// The CPUEntry 'cpu' being removed has had its priority set to B_IDLE_PRIORITY (0)
+	// by scheduler_set_cpu_enabled(), making it the root of the min-heap fCPUHeap,
+	// if the heap is not empty and it was correctly modified.
+	if (cpu->GetHeapLink()->fIndex != -1) {
+		// If fIndex is not -1, it must be in the heap.
+		// Assert that it's the root as expected.
+#if KDEBUG
+		if (fCPUHeap.Count() == 0) {
+			panic("CoreEntry::RemoveCPU: CPU %" B_PRId32 " on core %" B_PRId32
+				" has heap link index %d but fCPUHeap is empty.",
+				cpu->ID(), this->ID(), cpu->GetHeapLink()->fIndex);
+		}
+		if (fCPUHeap.PeekRoot() != cpu) {
+			panic("CoreEntry::RemoveCPU: CPU %" B_PRId32 " (key %" B_PRId32 ", index %d) on core %" B_PRId32
+				" was expected to be root of fCPUHeap (count %" B_PRId32 ") but is not. Root is CPU %" B_PRId32 " (key %" B_PRId32 ").",
+				cpu->ID(), CPUPriorityHeap::GetKey(cpu), cpu->GetHeapLink()->fIndex, this->ID(),
+				fCPUHeap.Count(),
+				fCPUHeap.PeekRoot() ? fCPUHeap.PeekRoot()->ID() : -1,
+				fCPUHeap.PeekRoot() ? CPUPriorityHeap::GetKey(fCPUHeap.PeekRoot()) : -1);
+		}
+#endif
+		fCPUHeap.RemoveRoot();
+	}
+	// Note: After RemoveRoot(), Heap.h's KDEBUG block sets the removed element's fIndex to -1.
 
 	fCPUSet.ClearBit(cpu->ID());
 	fCPUCount--;
@@ -858,39 +880,31 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	SCHEDULER_ENTER_FUNCTION();
 
 	if (this->fDefunct) {
-		// If the core is defunct, ensure its load is 0 and it's correctly
-		// (not) in heaps.
+		// If the core is defunct, ensure its load metrics are zeroed.
 		WriteSpinLocker loadLocker(fLoadLock);
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
-		// If it's in a heap, its key should reflect 0.
-		// And it should not be in gCoreHighLoadHeap.
-		bool wasInHighLoad = fHighLoad;
-		fHighLoad = false;
+		bool wasInHighLoadHeap = fHighLoad; // Capture state before changing fHighLoad
+		fHighLoad = false; // A defunct core is not considered high-load
 		loadLocker.Unlock();
 
 		WriteSpinLocker heapsLock(gCoreHeapsLock);
+		// If the core is currently linked into a heap, update its key to 0.
+		// It will remain in whichever heap it was in, but with key 0.
+		// The load balancer must explicitly check core->fDefunct and skip it.
 		if (this->GetMinMaxHeapLink()->fIndex != -1) {
-			if (wasInHighLoad) {
-				// This is where a proper Remove(this, gCoreHighLoadHeap) would be.
-				// Then Insert(this, 0, gCoreLoadHeap).
-				// With ModifyKey, we just ensure its key is 0.
-				// If it was in gCoreHighLoadHeap, it needs to move.
-				// The current MinMaxHeap might not support moving directly.
-				// Simplest for now: if it was high load, it's now 0 load.
-				// The existing _UpdateLoad logic below would try to move it.
-				// To prevent re-insertion if defunct:
-				// TODO: This still needs a robust way to remove it from *any* heap.
-				// For now, we'll rely on load balancing skipping defunct cores.
-				// The core might remain in a heap with key 0.
-				gCoreHighLoadHeap.ModifyKey(this, 0); // Try to update key if it was there
-				gCoreLoadHeap.ModifyKey(this, 0);   // Try to update key if it was there
+			if (wasInHighLoadHeap) {
+				// It was in gCoreHighLoadHeap. Update its key there to 0.
+				// It remains in gCoreHighLoadHeap but won't be picked due to fDefunct.
+				gCoreHighLoadHeap.ModifyKey(this, 0);
 			} else {
+				// It was (or should be) in gCoreLoadHeap. Update its key there to 0.
 				gCoreLoadHeap.ModifyKey(this, 0);
 			}
 		}
-		// A defunct core should not be re-added to any heap by subsequent logic.
+		// No attempt to move between heaps or re-insert if defunct.
+		// It will be ignored by virtue of its fDefunct flag in load balancing.
 		return;
 	}
 

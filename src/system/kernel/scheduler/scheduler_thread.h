@@ -28,7 +28,7 @@ private:
 	// This ensures that even with penalties (historically) or other adjustments,
 	// the effective priority doesn't drop below a system-defined active threshold.
 	// Called by _ComputeEffectivePriority().
-	inline	int32		_GetMinimalPriority() const;
+	// inline	int32		_GetMinimalPriority() const; // Removed
 
 	inline	CoreEntry*	_ChooseCore() const;
 	inline	CPUEntry*	_ChooseCPU(CoreEntry* core,
@@ -167,21 +167,8 @@ public:
 
 // --- Inlined Method Implementations ---
 
-inline int32
-ThreadData::_GetMinimalPriority() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	// This logic is from the old penalty system.
-	// It might still be referenced by _ComputeEffectivePriority if that function
-	// tries to ensure priority doesn't drop below a certain Haiku-specific floor.
-	// If _ComputeEffectivePriority becomes simpler, this might also be dead code.
-	// For now, assume it's still used by _ComputeEffectivePriority's capping logic.
-	const int32 kDivisor = 5;
-	const int32 kMaximalPriority = 25;
-	const int32 kMinimalPriority = B_LOWEST_ACTIVE_PRIORITY;
-	int32 priority = GetBasePriority() / kDivisor;
-	return std::max(std::min(priority, kMaximalPriority), kMinimalPriority);
-}
+// Removed _GetMinimalPriority() function as its logic is being simplified
+// and integrated or made redundant within _ComputeEffectivePriority().
 
 inline bool
 ThreadData::IsRealTime() const

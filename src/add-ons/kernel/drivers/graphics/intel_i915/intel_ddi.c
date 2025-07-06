@@ -597,8 +597,177 @@ intel_dp_stop_link_train(intel_i915_device_info* devInfo, intel_output_port_stat
 	// No status is returned by intel_dp_set_link_train_pattern,
 	// errors/stub status are logged within that function and its AUX call.
 }
-status_t intel_ddi_port_enable(intel_i915_device_info*d,intel_output_port_state*p,enum pipe_id_priv pi,const display_mode*am,const intel_clock_params_t*c){return B_OK;}
-void intel_ddi_port_disable(intel_i915_device_info*d,intel_output_port_state*p){}
+status_t
+intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	enum pipe_id_priv pipe, const display_mode* adjusted_mode, const intel_clock_params_t* clocks)
+{
+	// NOTE: This function implements the DDI port enable sequence.
+	// Its full functionality is currently limited due to:
+	// 1. DisplayPort Path: Dependent on intel_dp_start_link_train, which is
+	//    stubbed because the underlying AUX channel communication is not yet
+	//    functional (missing dedicated AUX hardware register definitions).
+	// 2. HDMI/DVI/DP Mode Selection: Specific bits in DDI_BUF_CTL for selecting
+	//    the port mode (HDMI, DP, etc.) are not fully defined for all DDI ports
+	//    and GPU generations in registers.h.
+	// 3. HDMI Electrical Parameters: DDI_BUF_TRANS registers for HDMI-specific
+	//    voltage swing/pre-emphasis are not defined in registers.h, so their
+	//    programming is currently stubbed.
+	// As a result, this function provides the structural outline but may return
+	// B_UNSUPPORTED or not fully enable the port as intended until these
+	// dependencies are resolved.
+
+	if (!devInfo || !port || !clocks || !adjusted_mode)
+		return B_BAD_VALUE;
+	if (port->hw_port_index < 0) {
+		TRACE("DDI: Port Enable: Invalid hw_port_index %d for port %d\n",
+			port->hw_port_index, port->logical_port_id);
+		return B_BAD_INDEX;
+	}
+
+	TRACE("DDI: Port Enable: Port %d (type %d, hw_idx %d), Pipe %d\n",
+		port->logical_port_id, port->type, port->hw_port_index, pipe);
+
+	status_t status = B_OK;
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) {
+		TRACE("DDI: Port Enable: Failed to get forcewake: %s\n", strerror(fw_status));
+		return fw_status;
+	}
+
+	uint32_t ddi_buf_ctl_val = 0;
+	// Use the DDI_BUF_CTL macro with the VBT-derived hardware port index.
+	// This assumes DDI_A is index 0, DDI_B is 1, etc.
+	// For HSW, DDI E is index 4. For SKL, DDI F might be 5.
+	// The VBT parser in vbt.c sets port->hw_port_index based on this.
+	uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+
+	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+		TRACE("DDI: Port Enable: DP/eDP path for port %d\n", port->logical_port_id);
+		status = intel_dp_start_link_train(devInfo, port, clocks);
+		if (status != B_OK) {
+			TRACE("DDI: Port Enable: DP Link Training failed for port %d: %s\n",
+				port->logical_port_id, strerror(status));
+			goto ddi_enable_done;
+		}
+
+		ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		ddi_buf_ctl_val &= ~(DDI_PORT_WIDTH_MASK | DDI_BUF_CTL_MODE_SELECT_MASK); // Conceptual mode mask
+
+		uint8_t trained_lane_count = port->dpcd_data.max_lane_count & DPCD_MAX_LANE_COUNT_MASK;
+		// TODO: Link training should update a 'current_lane_count' in port state.
+		if (trained_lane_count == 1) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X1;
+		else if (trained_lane_count == 2) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X2;
+		else if (trained_lane_count == 4) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4;
+		else {
+			TRACE("DDI: Port Enable: Invalid trained lane count %u for DP, defaulting to x1\n", trained_lane_count);
+			ddi_buf_ctl_val |= DDI_PORT_WIDTH_X1;
+		}
+
+		// TODO: Use actual DDI_BUF_CTL_MODE_DP_SST define once available in registers.h
+		// This requires GEN-specific bits. Example for HSW DDI A:
+		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) { // DDI_A_MODE_SELECT (bit 7) = 0 for DP
+			ddi_buf_ctl_val &= ~(1U << 7);
+		} else {
+			TRACE("DDI: Port Enable: DP Mode Select for DDI_BUF_CTL port %d (Gen %d) NOT YET DEFINED.\n",
+				port->hw_port_index, INTEL_GRAPHICS_GEN(devInfo->device_id));
+			// Cannot enable if mode cannot be set.
+			status = B_UNSUPPORTED; goto ddi_enable_done;
+		}
+		// TODO: Configure DDI_BUF_TRANS for DP if needed.
+
+		ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
+		intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		TRACE("DDI: Port Enable: DP DDI_BUF_CTL(0x%x) = 0x%08lx\n", ddi_buf_ctl_reg, ddi_buf_ctl_val);
+
+	} else if (port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
+		TRACE("DDI: Port Enable: HDMI/DVI path for port %d\n", port->logical_port_id);
+		ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		ddi_buf_ctl_val &= ~(DDI_PORT_WIDTH_MASK | DDI_BUF_CTL_MODE_SELECT_MASK); // Conceptual mode mask
+		ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4; // HDMI/DVI use 4 lanes for TMDS
+
+		// TODO: Use actual DDI_BUF_CTL_MODE_HDMI define once available in registers.h
+		// Example for HSW DDI A:
+		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) { // DDI_A_MODE_SELECT (bit 7) = 1 for HDMI
+			ddi_buf_ctl_val |= (1U << 7);
+		} else {
+			TRACE("DDI: Port Enable: HDMI/DVI Mode Select for DDI_BUF_CTL port %d (Gen %d) NOT YET DEFINED.\n",
+				port->hw_port_index, INTEL_GRAPHICS_GEN(devInfo->device_id));
+			status = B_UNSUPPORTED; goto ddi_enable_done;
+		}
+
+		// TODO: Program DDI_BUF_TRANS_LO/HI for HDMI specifics. Registers not defined yet.
+		TRACE("DDI: Port Enable: HDMI DDI_BUF_TRANS programming STUBBED for port %d.\n", port->hw_port_index);
+
+		ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
+		intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		TRACE("DDI: Port Enable: HDMI/DVI DDI_BUF_CTL(0x%x) = 0x%08lx\n", ddi_buf_ctl_reg, ddi_buf_ctl_val);
+
+		if (port->type == PRIV_OUTPUT_HDMI) {
+			intel_ddi_send_avi_infoframe(devInfo, port, pipe, adjusted_mode);
+			intel_ddi_setup_audio(devInfo, port, pipe, adjusted_mode);
+		}
+	} else {
+		TRACE("DDI: Port Enable: Unsupported port type %d for port %d\n", port->type, port->logical_port_id);
+		status = B_BAD_TYPE;
+	}
+
+ddi_enable_done:
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	return status;
+}
+
+void
+intel_ddi_port_disable(intel_i915_device_info* devInfo, intel_output_port_state* port)
+{
+	if (!devInfo || !port)
+		return;
+	if (port->hw_port_index < 0) {
+		TRACE("DDI: Port Disable: Invalid hw_port_index %d for port %d\n",
+			port->hw_port_index, port->logical_port_id);
+		return;
+	}
+
+	TRACE("DDI: Port Disable: Port %d (type %d, hw_idx %d)\n",
+		port->logical_port_id, port->type, port->hw_port_index);
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status != B_OK) {
+		TRACE("DDI: Port Disable: Failed to get forcewake: %s. Proceeding cautiously.\n", strerror(fw_status));
+		// Continue if forcewake fails, as this is a disable path.
+	}
+
+	// For DisplayPort, ensure link training is stopped first.
+	if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) {
+		intel_dp_stop_link_train(devInfo, port);
+	}
+
+	// Disable DDI Buffer
+	uint32_t ddi_buf_ctl_reg = DDI_BUF_CTL(port->hw_port_index);
+	uint32_t ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+
+	if (ddi_buf_ctl_val & DDI_BUF_CTL_ENABLE) {
+		ddi_buf_ctl_val &= ~DDI_BUF_CTL_ENABLE;
+		// It might also be necessary to clear the port width or mode bits,
+		// or set to a default "off" state if one exists beyond just !ENABLE.
+		// For now, just clearing ENABLE.
+		intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		// Perform a read to ensure the write is posted, especially before releasing forcewake.
+		(void)intel_i915_read32(devInfo, ddi_buf_ctl_reg);
+		TRACE("DDI: Port Disable: DDI_BUF_CTL(0x%x) disabled. Value now 0x%08lx\n",
+			ddi_buf_ctl_reg, ddi_buf_ctl_val);
+	} else {
+		TRACE("DDI: Port Disable: DDI_BUF_CTL(0x%x) was already disabled. Value 0x%08lx\n",
+			ddi_buf_ctl_reg, ddi_buf_ctl_val);
+	}
+
+	// For HDMI, InfoFrames are typically managed by the Transcoder DIP settings,
+	// which should be disabled when the transcoder/pipe is disabled.
+	// No specific DDI-level InfoFrame disable seems necessary here beyond disabling the DDI buffer.
+
+	if (fw_status == B_OK) {
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	}
+}
 
 void
 intel_ddi_setup_audio(intel_i915_device_info* devInfo, intel_output_port_state* port,

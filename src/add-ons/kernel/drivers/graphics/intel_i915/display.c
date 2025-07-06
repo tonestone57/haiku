@@ -290,11 +290,21 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 		status = intel_i915_enable_fdi(devInfo, targetPipe, true);
 		if (status != B_OK) goto modeset_fail_pipe_enabled;
 	}
-	status = intel_i915_port_enable(devInfo, targetPortId, targetPipe, mode); // Dispatches, internal functions handle FW
-	if (status != B_OK) goto modeset_fail_fdi_enabled;
+
+	// Enable the specific port type (LVDS or DDI)
+	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+		status = intel_lvds_port_enable(devInfo, port_state, targetPipe, mode);
+	} else if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
+		status = intel_ddi_port_enable(devInfo, port_state, targetPipe, mode, &clock_params);
+	} else {
+		// Analog VGA or other non-digital, may not need specific port enable beyond what pipe/transcoder does.
+		// Or might have its own function. For now, assume B_OK for these.
+		TRACE("Modeset: Port type %d does not require specific DDI/LVDS port enable.\n", port_state->type);
+	}
+	if (status != B_OK) goto modeset_fail_fdi_enabled; // Use fdi_enabled as a common point before this
 
 	status = intel_i915_plane_enable(devInfo, targetPipe, true);
-	if (status != B_OK) goto modeset_fail_port_enabled;
+	if (status != B_OK) goto modeset_fail_port_enabled; // 'port_enabled' here means DDI/LVDS port
 
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
 		uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
@@ -335,16 +345,23 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 
 	return B_OK;
 
-modeset_fail_port_enabled:
-	intel_i915_port_disable(devInfo, targetPortId);
+modeset_fail_port_enabled: // This label means DDI/LVDS port enable failed or plane enable failed
+	// If intel_i915_port_enable (which now calls ddi/lvds specific) succeeded but plane_enable failed,
+	// we need to disable the DDI/LVDS port that was just enabled.
+	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+		intel_lvds_port_disable(devInfo, port_state);
+	} else if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
+		intel_ddi_port_disable(devInfo, port_state);
+	}
+	// Fall through
 modeset_fail_fdi_enabled:
 	if (clock_params.needs_fdi) intel_i915_enable_fdi(devInfo, targetPipe, false);
 modeset_fail_pipe_enabled:
 	intel_i915_pipe_disable(devInfo, targetPipe);
-modeset_fail_dpll_enabled_fdi_prog: // Label to cover failures after DPLLs are on but before port/plane fully
+modeset_fail_dpll_enabled_fdi_prog:
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
-		intel_lvds_panel_power_off(devInfo, port_state); // Manages its own FW
-modeset_fail_dpll_program_only: // If panel power on failed, but dpll was programmed
+		intel_lvds_panel_power_off(devInfo, port_state);
+modeset_fail_dpll_program_only:
 modeset_fail_dpll:
 	intel_i915_enable_dpll_for_pipe(devInfo, targetPipe, false, &clock_params);
 modeset_fail_fw:
@@ -410,7 +427,13 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 				if (clocks_for_on->needs_fdi) {
 					intel_i915_enable_fdi(devInfo, pipe, true);
 				}
-				intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode); // Manages own FW if needed
+				// intel_i915_port_enable(devInfo, port_id, pipe, &current_pipe_mode); // Old generic call
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_port_enable(devInfo, port, pipe, &current_pipe_mode);
+				} else if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
+					intel_ddi_port_enable(devInfo, port, pipe, &current_pipe_mode, clocks_for_on);
+				}
+
 				intel_i915_plane_enable(devInfo, pipe, true);
 				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
 					uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
@@ -451,13 +474,19 @@ intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 					snooze(t3_delay_ms * 1000);
 				}
 				intel_i915_plane_enable(devInfo, pipe, false);
-				intel_i915_port_disable(devInfo, port_id); // Manages own FW if needed
+				// intel_i915_port_disable(devInfo, port_id); // Old generic call
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_port_disable(devInfo, port);
+				} else if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
+					intel_ddi_port_disable(devInfo, port);
+				}
+
 				if (cached_clocks->needs_fdi) {
 					intel_i915_enable_fdi(devInfo, pipe, false);
 				}
 				intel_i915_pipe_disable(devInfo, pipe);
 				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
-					intel_lvds_panel_power_off(devInfo, port); // Manages own FW
+					intel_lvds_panel_power_off(devInfo, port); // Manages its own FW
 				}
 				intel_i915_enable_dpll_for_pipe(devInfo, pipe, false, cached_clocks);
 			} else if (devInfo->pipes[pipe].enabled) { /* ... (pipe on, no port) ... */ }

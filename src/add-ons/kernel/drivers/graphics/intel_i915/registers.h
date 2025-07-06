@@ -285,7 +285,50 @@
 	#define FDI_MVAL_TU_SIZE(tu)		(((tu) - 1) << 16)
 
 // --- DDI Buffer Control (DDI_BUF_CTL) for HSW/IVB ---
-	#define DDI_BUF_CTL_HSW_DP_VS_PE_MASK         (0x1EU)
+// DDI_BUF_CTL_BASE (e.g. DDI_A_BUF_CTL) = 0x64E00 for DDI A, then +0x100 for B, etc. (complex mapping)
+// The DDI_BUF_CTL(ddi_port_idx) macro should map an abstract port index (0=A, 1=B, etc.)
+// to the correct MMIO offset. VBT hw_port_index should be used.
+// Example for DDI A (HW Port Index 0 typically for DDI A/eDP on CPU):
+// #define DDI_A_BUF_CTL                       0x64E00 (This base is usually for Port A/eDP on CPU)
+// #define DDI_B_BUF_CTL                       0x64F00 (Example for Port B)
+// #define DDI_C_BUF_CTL                       0x64D00 (Example for Port C - check PRM for actuals)
+// #define DDI_D_BUF_CTL                       0x64C00 (Example for Port D)
+// #define DDI_E_BUF_CTL                       0x64B00 (Example for Port E - SKL+)
+// The intel_i915_priv.h uses a DDI_BUF_CTL(port_idx) macro, assuming port_idx maps correctly.
+
+	#define DDI_BUF_CTL_ENABLE              (1U << 31)
+	#define DDI_BUF_CTL_IDLE_ON             (1U << 0) // Buffer Idle State
+
+	// DDI_BUF_CTL Port Width (Common for DP/HDMI)
+	#define DDI_PORT_WIDTH_SHIFT            1
+	#define DDI_PORT_WIDTH_MASK             (7U << DDI_PORT_WIDTH_SHIFT)
+		#define DDI_PORT_WIDTH_X1           (0U << DDI_PORT_WIDTH_SHIFT) // For DP, actual is (val+1) lanes
+		#define DDI_PORT_WIDTH_X2           (1U << DDI_PORT_WIDTH_SHIFT) // For DP
+		#define DDI_PORT_WIDTH_X4           (3U << DDI_PORT_WIDTH_SHIFT) // For DP / HDMI
+
+	// DDI_BUF_CTL Mode Select (Gen7.5 HSW/BDW, Gen8 BDW, Gen9 SKL+)
+	// Bits [6:4] for DDI A,B,E. Bits [3:1] for DDI C,D on HSW. Varies by GEN!
+	// This needs GEN specific handling. Conceptual defines:
+	#define DDI_BUF_CTL_MODE_SELECT_SHIFT   4 // Example shift for some ports/gens
+	#define DDI_BUF_CTL_MODE_SELECT_MASK    (7U << DDI_BUF_CTL_MODE_SELECT_SHIFT)
+		#define DDI_BUF_CTL_MODE_HDMI       (0x0 << DDI_BUF_CTL_MODE_SELECT_SHIFT) // Value for HDMI
+		#define DDI_BUF_CTL_MODE_DVI        (0x1 << DDI_BUF_CTL_MODE_SELECT_SHIFT) // Value for DVI (often same as HDMI)
+		#define DDI_BUF_CTL_MODE_DP_SST     (0x2 << DDI_BUF_CTL_MODE_SELECT_SHIFT) // Value for DP SST
+		#define DDI_BUF_CTL_MODE_DP_MST     (0x3 << DDI_BUF_CTL_MODE_SELECT_SHIFT) // Value for DP MST (if supported)
+	// For IVB, mode is implicit or tied to DPLL mode. For HSW, DDI_A_MODE_SELECT (bit 7) is 0=DP, 1=HDMI/DVI.
+
+	// DDI_BUF_CTL for DP Voltage Swing / Pre-emphasis (HSW specific bits shown)
+	#define DDI_BUF_CTL_HSW_DP_VS_PE_MASK   (0x1EU) // Bits 4:1 for HSW DP VS/PE (already defined)
+
+// DDI Buffer Transition Registers (primarily for HDMI electricals on HSW+)
+// These are per-DDI port. Example for DDI A. Offsets are relative to DDI_BUF_CTL.
+// #define DDI_BUF_TRANS_LO(port_idx)      (DDI_BUF_CTL(port_idx) + 0x8) // Conceptual Offset
+// #define DDI_BUF_TRANS_HI(port_idx)      (DDI_BUF_CTL(port_idx) + 0xC) // Conceptual Offset
+	// TODO: Define specific bitfields for DDI_BUF_TRANS_LO/HI for HDMI:
+	// e.g., HSW_DDI_BUF_TRANS_HDMI_DEEMPHASIS_SHIFT, _MASK
+	//      HSW_DDI_BUF_TRANS_HDMI_VSWING_SHIFT, _MASK
+	// These are highly generation and port specific.
+
 
 // TODO: Define dedicated DisplayPort AUX Channel Registers here.
 // These are essential for DisplayPort communication (DPCD access, link training).

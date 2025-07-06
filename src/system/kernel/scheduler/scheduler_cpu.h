@@ -470,16 +470,23 @@ CoreEntry::ChangeLoad(int32 delta)
 inline void
 PackageEntry::CoreGoesIdle(CoreEntry* core)
 {
+	// Called when a core within this package becomes fully idle (all its
+	// logical CPUs are idle).
+	// Updates the package's count of idle cores and adds the core to its
+	// fIdleCores list. If this results in all cores in the package being idle,
+	// the package itself is added to the global gIdlePackageList.
 	SCHEDULER_ENTER_FUNCTION();
-	WriteSpinLocker _(fCoreLock);
+	WriteSpinLocker _(fCoreLock); // Protects fIdleCoreCount and fIdleCores list.
 	ASSERT(fIdleCoreCount >= 0);
+	// A core should not be marked idle if it would make idle count > total cores.
 	ASSERT(fIdleCoreCount < fCoreCount);
 	fIdleCoreCount++;
-	fIdleCores.Add(core);
-	if (fIdleCoreCount == fCoreCount) { // Package becomes fully idle
-		WriteSpinLocker _(gIdlePackageLock);
+	fIdleCores.Add(core); // Add to this package's list of idle cores.
+	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
+		// All cores in this package are now idle.
+		WriteSpinLocker _(gIdlePackageLock); // Lock for global idle package list.
 		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
-			gIdlePackageList.Add(this);
+			gIdlePackageList.Add(this); // Add this package to global idle list.
 	}
 }
 
@@ -487,17 +494,23 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 inline void
 PackageEntry::CoreWakesUp(CoreEntry* core)
 {
+	// Called when a previously idle core within this package becomes active
+	// (at least one of its logical CPUs is no longer idle).
+	// Updates the package's count of idle cores and removes the core from its
+	// fIdleCores list. If the package was previously fully idle, it's removed
+	// from the global gIdlePackageList.
 	SCHEDULER_ENTER_FUNCTION();
-	bool packageWasFullyIdle = (fIdleCoreCount == fCoreCount);
-	WriteSpinLocker _(fCoreLock);
-	ASSERT(fIdleCoreCount > 0);
+	bool packageWasFullyIdle = (fIdleCoreCount == fCoreCount && fCoreCount > 0);
+	WriteSpinLocker _(fCoreLock); // Protects fIdleCoreCount and fIdleCores list.
+	ASSERT(fIdleCoreCount > 0); // Should have at least one idle core to wake up from.
 	ASSERT(fIdleCoreCount <= fCoreCount);
-	fIdleCores.Remove(core);
+	fIdleCores.Remove(core); // Remove from this package's list of idle cores.
 	fIdleCoreCount--;
-	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) { // Package was fully idle and now is not
-		WriteSpinLocker _(gIdlePackageLock);
+	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
+		// Package was fully idle and now has at least one active core.
+		WriteSpinLocker _(gIdlePackageLock); // Lock for global idle package list.
 		if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
-			gIdlePackageList.Remove(this);
+			gIdlePackageList.Remove(this); // Remove from global idle list.
 	}
 }
 
@@ -508,6 +521,9 @@ CoreEntry::CPUGoesIdle(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount < fCPUCount);
+	// When a CPU on this core becomes idle, increment core's idle CPU count.
+	// If this makes all CPUs on this core idle (fIdleCPUCount + 1 == fCPUCount),
+	// then this core is now considered idle, so notify its parent package.
 	if (atomic_add(&fIdleCPUCount, 1) + 1 == fCPUCount)
 		fPackage->CoreGoesIdle(this);
 }
@@ -519,11 +535,13 @@ CoreEntry::CPUWakesUp(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount > 0);
-	// Check if this was the *last* idle CPU on this core making the core active
+	// When a CPU on this core becomes active (was idle).
+	// If this core was previously fully idle (all its CPUs were idle),
+	// then this CPU waking up makes the core active. Notify its parent package.
 	if (fIdleCPUCount == fCPUCount) { // This implies it was fully idle
 		fPackage->CoreWakesUp(this);
 	}
-	atomic_add(&fIdleCPUCount, -1); // Decrement after check
+	atomic_add(&fIdleCPUCount, -1); // Decrement core's idle CPU count.
 }
 
 

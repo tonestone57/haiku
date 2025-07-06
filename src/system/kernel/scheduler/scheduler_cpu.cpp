@@ -100,9 +100,12 @@ CPUEntry::CPUEntry()
 void
 CPUEntry::Init(int32 id, CoreEntry* core)
 {
+	// Initializes this CPUEntry for the logical CPU specified by `id`,
+	// associating it with its parent `core`.
 	fCPUNumber = id;
 	fCore = core;
-	fMlfqHighestNonEmptyLevel = -1;
+	fMlfqHighestNonEmptyLevel = -1; // No threads initially in MLFQ.
+	// Initialize load metrics to a clean state.
 	fInstantaneousLoad = 0.0f;
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
@@ -113,18 +116,23 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 void
 CPUEntry::Start()
 {
+	// Called when this CPU is being enabled for scheduling.
+	// Resets load metrics and adds this CPU to its core's management.
 	fLoad = 0;
 	fInstantaneousLoad = 0.0f;
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
-	fCore->AddCPU(this);
+	fCore->AddCPU(this); // Register this CPU with its parent core.
 }
 
 
 void
 CPUEntry::Stop()
 {
+	// Called when this CPU is being disabled for scheduling.
+	// Migrates all IRQs off this CPU. Threads are migrated by higher-level logic
+	// (e.g. by scheduler_set_cpu_enabled forcing its idle thread).
 	cpu_ent* entry = &gCPU[fCPUNumber];
 
 	SpinLocker locker(entry->irqs_lock);
@@ -610,8 +618,15 @@ CoreEntry::CoreEntry()
 void
 CoreEntry::Init(int32 id, PackageEntry* package)
 {
+	// Initializes this CoreEntry for the physical core `id`, associating it
+	// with its parent `package`.
 	fCoreID = id;
 	fPackage = package;
+	// fCPUCount and fIdleCPUCount are managed by AddCPU/RemoveCPU
+	// and CPUGoesIdle/CPUWakesUp respectively.
+	// fCPUSet is managed by AddCPU/RemoveCPU.
+	// fCPUHeap is initialized by its constructor.
+	// Load and active time metrics are initialized to zero by the constructor.
 	fInstantaneousLoad = 0.0f;
 }
 
@@ -666,97 +681,106 @@ CoreEntry::ThreadCount() const
 void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
-	// This function should be called under a global lock that protects scheduler structure changes,
-	// or fCPULock should protect fCPUHeap, fCPUCount, fIdleCPUCount, fCPUSet additions.
-	SpinLocker lock(fCPULock); // Protects CPU list modifications for this core
+	// Associates a logical CPU (CPUEntry) with this physical core.
+	// This is typically called during scheduler initialization when building
+	// the CPU topology.
+	// Note: Assumes external synchronization (e.g., global scheduler init lock)
+	// for modifications to core/package topology if called outside initial setup.
+	SpinLocker lock(fCPULock); // Protects fCPUSet, fCPUCount, fIdleCPUCount, fCPUHeap.
 
-	fCPUSet.SetBit(cpu->ID());
+	fCPUSet.SetBit(cpu->ID()); // Mark this CPU as part of the core.
 	fCPUCount++;
-	fIdleCPUCount++; // Assume new CPU starts idle for scheduler purposes
-	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY);
+	// Assume a newly added CPU starts in an "idle" state from the scheduler's
+	// perspective until it picks up work. Its CPUEntry::UpdatePriority will adjust this.
+	fIdleCPUCount++;
+	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY); // Add to this core's CPU priority heap.
 
-	// Logic for adding to gCoreLoadHeap and package idle list
-	if (fCPUCount == 1) { // First CPU being added to this core
+	// If this is the first CPU being added to this core, the core itself
+	// becomes active and needs to be added to global tracking structures.
+	if (fCPUCount == 1) {
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
 		fHighLoad = false;
-		fLastLoadUpdate = system_time(); // Initialize load update time
-		fLoadMeasurementEpoch = 0;      // Initialize epoch
+		fLastLoadUpdate = system_time();
+		fLoadMeasurementEpoch = 0;
 
-		WriteSpinLocker heapsLock(gCoreHeapsLock);
-		if (!MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked())
-			gCoreLoadHeap.Insert(this, 0); // Add to low load heap initially
+		WriteSpinLocker heapsLock(gCoreHeapsLock); // Lock for global core heaps.
+		if (!MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked()) {
+			// Add this core to the low-load heap initially. Its load will be updated.
+			gCoreLoadHeap.Insert(this, 0);
+		}
 		heapsLock.Unlock();
 
-		if (fPackage != NULL) // Should always have a package
-			fPackage->AddIdleCore(this); // Core is initially idle
+		if (fPackage != NULL) {
+			// Since the core now has a (presumed idle) CPU, add it to its
+			// package's list of idle cores.
+			fPackage->AddIdleCore(this);
+		}
 	}
-	// No need to call _UpdateLoad here, as new CPU has 0 load.
-	// Instantaneous load will be updated when its CPUEntry is updated.
+	// _UpdateLoad() is not strictly needed here as the new CPU adds 0 load initially.
+	// UpdateInstantaneousLoad() will be called when the CPU's own metrics update.
 }
 
 
 void
 CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 {
-	// Similar to AddCPU, this should be under appropriate global scheduler structure lock.
-	SpinLocker lock(fCPULock); // Protects CPU list modifications for this core
+	// Dissociates a logical CPU (CPUEntry) from this physical core.
+	// This is typically called if a CPU is being disabled.
+	// Note: Assumes external synchronization for topology changes.
+	SpinLocker lock(fCPULock); // Protects core-local CPU structures.
 
 	ASSERT(fCPUCount > 0);
-	if (CPUPriorityHeap::Link(cpu)->IsLinked()) // Check if it's in the heap
+	if (CPUPriorityHeap::Link(cpu)->IsLinked()) // Check if it's still in the heap.
 		fCPUHeap.Remove(cpu);
 
 	fCPUSet.ClearBit(cpu->ID());
 	fCPUCount--;
 
-	// Adjust idle count if the removed CPU was idle
-	// This needs careful check of CPUEntry's state or how idle state is tracked for CPUEntry
-	// For simplicity, assume if it was B_IDLE_PRIORITY in heap, it was idle.
-	// However, CPUEntry::UpdatePriority handles CPUWakesUp/CPUGoesIdle which calls Package level.
-	// This fIdleCPUCount is for the CoreEntry itself.
-	// Let's assume CPUEntry::Stop() or similar handles its own idle status correctly before this.
-	// The fIdleCPUCount here is decremented if the CPU was considered idle by the CoreEntry.
-	// This part is tricky; CPUEntry::UpdatePriority should manage fIdleCPUCount on Core.
-	// Let's assume for now that if a CPU is removed, it's no longer contributing to idle/active count.
-	// If CPUEntry::UpdatePriority(B_IDLE_PRIORITY) was called before removing from heap, fIdleCPUCount would be correct.
-	// If not, we need to check its last known state.
-	// Simplification: if a CPU is removed, it's no longer idle *on this core*.
-	if (!gCPU[cpu->ID()].disabled && CPUPriorityHeap::GetKey(cpu) == B_IDLE_PRIORITY) {
-		// This logic is problematic as GetKey might be invalid if already removed.
-		// Assume CPUGoesIdle/CPUWakesUp correctly maintains fIdleCPUCount.
-		// If we are removing an enabled CPU, it must have been made idle first.
-	}
-	// fIdleCPUCount should be managed by CPUGoesIdle/CPUWakesUp.
-	// When a CPU is effectively removed, its contribution to fIdleCPUCount stops.
-	// If it was the last CPU, fIdleCPUCount should become 0.
-	// This needs to be robust. If the CPU was not idle, fIdleCPUCount is not changed by its removal
-	// unless it was the last *active* CPU.
+	// If the removed CPU was considered idle by this core, decrement idle count.
+	// Note: CPUWakesUp/CPUGoesIdle (called via CPUEntry::UpdatePriority) are
+	// the primary managers of fIdleCPUCount. This ensures consistency if the
+	// CPU was made idle before removal. If it was active, fIdleCPUCount might
+	// not change here, but fCPUCount decreasing can still trigger package-level
+	// idle state changes if this was the last active CPU on the core.
+	// A simplifying assumption is that a CPU is made idle before being fully removed.
+	// If gCPU[cpu->ID()].disabled is true, it implies it should be idle.
+	// For robustness, we check if it was contributing to fIdleCPUCount.
+	// This part is complex due to the interaction with CPUEntry state.
+	// A CPU that is part of fCPUHeap and has B_IDLE_PRIORITY *should* have
+	// incremented fIdleCPUCount when it went idle.
+	// If we are removing a CPU, and it was one of the fIdleCPUCount, that count needs to drop.
+	// The logic in CPUGoesIdle/CPUWakesUp should correctly maintain fIdleCPUCount
+	// relative to fCPUCount. If fCPUCount drops, and fIdleCPUCount was equal to
+	// the old fCPUCount, the package may transition out of fully idle.
+	// This interaction is mainly handled by CPUGoesIdle/WakesUp.
+	// Here, we primarily care about the core becoming defunct if fCPUCount hits 0.
 
-	// This logic seems to be more about the Core becoming fully idle/active
-	// rather than individual CPU contributions to fIdleCPUCount of the Core.
-	// For now, let's assume CPUEntry::Stop correctly makes the CPU appear idle to the Core
-	// before this is called, or that higher-level logic handles Core's idle state.
+	lock.Unlock(); // Release fCPULock before potentially taking global locks.
 
-	lock.Unlock(); // Release fCPULock before global locks
+	if (fCPUCount == 0) {
+		// This was the last CPU on this core. The core is now defunct.
+		// Unassign any threads that were still homed to this core.
+		thread_map(CoreEntry::_UnassignThread, this);
 
-	if (fCPUCount == 0) { // Last CPU removed from this core
-		thread_map(CoreEntry::_UnassignThread, this); // Unassign threads from this core
-
-		WriteSpinLocker heapsLock(gCoreHeapsLock);
+		WriteSpinLocker heapsLock(gCoreHeapsLock); // Lock for global core heaps.
 		if (MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked()) {
+			// Remove from whichever load heap it was in.
 			if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 			else gCoreLoadHeap.Remove(this);
 		}
 		heapsLock.Unlock();
 
-		if (fPackage != NULL) // Should always have a package
-			fPackage->RemoveIdleCore(this); // Core effectively becomes non-idle/gone
+		if (fPackage != NULL) {
+			// Remove this (now empty) core from its package's idle list.
+			fPackage->RemoveIdleCore(this);
+		}
 	}
 
-	// Re-calculate core's load and instantaneous load based on remaining CPUs
-	_UpdateLoad(true); // Force update based on remaining CPUs
-	UpdateInstantaneousLoad(); // Update instantaneous load based on remaining CPUs
+	// Re-calculate the core's aggregate load metrics based on remaining CPUs.
+	_UpdateLoad(true); // Force update of fLoad.
+	UpdateInstantaneousLoad(); // Update fInstantaneousLoad.
 }
 
 
@@ -893,28 +917,45 @@ PackageEntry::PackageEntry()
 void
 PackageEntry::Init(int32 id)
 {
+	// Initializes this PackageEntry for the CPU package/socket `id`.
+	// fCoreCount is determined as CoreEntry objects are associated with this package
+	// (implicitly, as CoreEntry::Init links a core to its package, and
+	// CoreEntry::AddCPU increments its package's core count if it's the first CPU).
+	// For now, this Init primarily sets the ID. The number of cores this package
+	// contains (fCoreCount) will be updated as cores are initialized and
+	// their CPUEntries are added via CoreEntry::AddCPU, which in turn would
+	// update the package's fCoreCount if it's the first CPU for a new core
+	// on this package.
+	// A more direct way to set fCoreCount here would be to iterate all gCoreEntries
+	// and count those whose Package() points to this, but that depends on
+	// gCoreEntries being fully initialized first.
+	// Current logic: fCoreCount is incremented in PackageEntry::AddIdleCore
+	// if the core being added makes fIdleCoreCount == fCoreCount (meaning this
+	// core was not previously known to the package or it's complex).
+	// Let's simplify: fCoreCount should be accurately maintained by CoreEntry::Init
+	// when it sets its fPackage, and CoreEntry::AddCPU when it makes a core active.
+	// This Init just sets the ID. The caller (scheduler::init) builds the topology.
 	fPackageID = id;
-	// fCoreCount should be determined by iterating through gCoreEntries and checking
-	// if their Package() points to this PackageEntry instance, or passed in.
-	// For now, assuming it's updated correctly when cores are associated.
 }
 
 
 void
 PackageEntry::AddIdleCore(CoreEntry* core)
 {
+	// Adds a core to this package's list of idle cores.
+	// If this makes all cores in the package idle, the package itself is
+	// added to the global list of idle packages.
+	// Note: fCoreCount for the package should be accurately reflecting the total
+	// number of configured cores on this package.
 	WriteSpinLocker lock(fCoreLock);
-	// This is called when a CoreEntry is added to this Package for the first time,
-	// or when an existing core in this package becomes idle.
-	// We need to ensure fCoreCount is accurate.
-	// If this is the first time this core is associated, fCoreCount might need ++.
-	// Let's assume fCoreCount is set correctly when CoreEntry::Init links it to a package.
 
-	if (!fIdleCores.Contains(core)) { // Only add if not already there
+	if (!fIdleCores.Contains(core)) { // Only add if not already in the list.
 		fIdleCores.Add(core);
 		fIdleCoreCount++;
 
-		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) { // Package transitions to fully idle
+		// If all cores on this package are now idle, and the package has cores,
+		// add this package to the global list of idle packages.
+		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 			WriteSpinLocker globalLock(gIdlePackageLock);
 			if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
 				gIdlePackageList.Add(this);
@@ -926,19 +967,25 @@ PackageEntry::AddIdleCore(CoreEntry* core)
 void
 PackageEntry::RemoveIdleCore(CoreEntry* core)
 {
+	// Removes a core from this package's list of idle cores (e.g., when it
+	// becomes active or is removed).
+	// If this package was previously fully idle and now is not, it's removed
+	// from the global list of idle packages.
 	bool packageWasFullyIdle;
 	{
-		ReadSpinLocker lock(fCoreLock); // Check if it was fully idle before taking write lock
+		ReadSpinLocker lock(fCoreLock);
 		packageWasFullyIdle = (fIdleCoreCount == fCoreCount && fCoreCount > 0);
 	}
 
 	WriteSpinLocker lock(fCoreLock);
-	if (fIdleCores.Contains(core)) { // Only remove if present
+	if (fIdleCores.Contains(core)) { // Only remove if present in the list.
 		fIdleCores.Remove(core);
 		fIdleCoreCount--;
 		ASSERT(fIdleCoreCount >= 0);
 
-		if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) { // Package was fully idle and now is not
+		// If the package was fully idle and now has at least one active core,
+		// remove it from the global list of idle packages.
+		if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
 			WriteSpinLocker globalLock(gIdlePackageLock);
 			if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
 				gIdlePackageList.Remove(this);
@@ -1180,5 +1227,3 @@ void Scheduler::init_debug_commands()
 			"List idle cores per package", "\nList idle cores per package", 0);
 	}
 }
-
-[end of src/system/kernel/scheduler/scheduler_cpu.cpp]

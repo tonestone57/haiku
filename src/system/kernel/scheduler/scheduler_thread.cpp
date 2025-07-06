@@ -15,6 +15,11 @@ using namespace Scheduler;
 // ThreadData::_ScaleQuantum() have been removed as they are dead code
 // with the new DTQ+MLFQ-RR scheduler design.
 
+// Constants for DTQ calculation in power saving mode
+static const float POWER_SAVING_DTQ_IDLE_CPU_THRESHOLD = 0.05f;
+static const float POWER_SAVING_DTQ_STC_BOOST_FACTOR = 1.1f;
+static const float POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR = 1.2f;
+
 void
 ThreadData::_InitBase()
 {
@@ -270,12 +275,12 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		// task completion on this core.
 		if (cpu->Core() == sSmallTaskCore && sSmallTaskCore != NULL
 			&& sSmallTaskCore->GetLoad() < kLowLoad) {
-			multiplier *= 1.1f; // Modest 10% boost if on a lightly loaded STC
-		} else if (cpuLoad < 0.05f) {
+			multiplier *= POWER_SAVING_DTQ_STC_BOOST_FACTOR;
+		} else if (cpuLoad < POWER_SAVING_DTQ_IDLE_CPU_THRESHOLD) {
 			// Fallback: If not on STC or STC is more loaded,
 			// still give a boost if *this specific CPU* is almost idle.
 			// This helps very short tasks complete quickly if they land on an idle SMT thread.
-			multiplier *= 1.2f;
+			multiplier *= POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR;
 		}
 	}
 

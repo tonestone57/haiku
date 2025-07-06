@@ -961,6 +961,12 @@ scheduler_init()
 
 // #pragma mark - Debugger Commands
 
+// Constants for debugger command validation
+static const double KDF_DEBUG_MIN_FACTOR = 0.0;
+static const double KDF_DEBUG_MAX_FACTOR = 2.0;
+static const double SMT_DEBUG_MIN_FACTOR = 0.0;
+static const double SMT_DEBUG_MAX_FACTOR = 1.0;
+
 static int
 cmd_scheduler_set_kdf(int argc, char** argv)
 {
@@ -979,8 +985,8 @@ cmd_scheduler_set_kdf(int argc, char** argv)
 	}
 
 	// Validate the factor (e.g., within a reasonable range)
-	if (newFactor < 0.0 || newFactor > 2.0) { // Designed range [0.0 - 2.0]
-		kprintf("Error: factor %f is out of reasonable range [0.0 - 2.0]. Value not changed.\n", newFactor);
+	if (newFactor < KDF_DEBUG_MIN_FACTOR || newFactor > KDF_DEBUG_MAX_FACTOR) {
+		kprintf("Error: factor %f is out of reasonable range [%.1f - %.1f]. Value not changed.\n", newFactor, KDF_DEBUG_MIN_FACTOR, KDF_DEBUG_MAX_FACTOR);
 		return B_KDEBUG_ERROR;
 	}
 
@@ -1021,8 +1027,8 @@ cmd_scheduler_set_smt_factor(int argc, char** argv)
 		return B_KDEBUG_ERROR;
 	}
 
-	if (newFactor < 0.0 || newFactor > 1.0) { // SMT factor typically 0.0 to 1.0
-		kprintf("Error: SMT factor %f is out of reasonable range [0.0 - 1.0]. Value not changed.\n", newFactor);
+	if (newFactor < SMT_DEBUG_MIN_FACTOR || newFactor > SMT_DEBUG_MAX_FACTOR) {
+		kprintf("Error: SMT factor %f is out of reasonable range [%.1f - %.1f]. Value not changed.\n", newFactor, SMT_DEBUG_MIN_FACTOR, SMT_DEBUG_MAX_FACTOR);
 		return B_KDEBUG_ERROR;
 	}
 

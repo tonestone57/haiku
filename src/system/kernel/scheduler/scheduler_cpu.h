@@ -91,6 +91,9 @@ public:
 
 	static inline		CPUEntry*		GetCPU(int32 cpu);
 
+						// New method for IRQ load
+						int32			CalculateTotalIrqLoad() const;
+
 private:
 						void			_UpdateHighestMLFQLevel();
 						void			_RequestPerformanceLevel(
@@ -371,9 +374,16 @@ CoreEntry::GetLoad() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	// Return 0 if fCPUCount is 0 to avoid division by zero
-	if (fCPUCount == 0)
+	// Also ensure active CPUs are considered for load calculation.
+	int32 activeCPUsOnCore = 0;
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (fCPUSet.GetBit(i) && gCPUEnabled.GetBit(i)) {
+			activeCPUsOnCore++;
+		}
+	}
+	if (activeCPUsOnCore == 0)
 		return 0;
-	return std::min(fLoad / fCPUCount, kMaxLoad);
+	return std::min(fLoad / activeCPUsOnCore, kMaxLoad);
 }
 
 
@@ -385,11 +395,13 @@ CoreEntry::AddLoad(int32 load, uint32 epoch, bool updateLoad)
 	ASSERT(gTrackCoreLoad);
 	ASSERT(load >= 0 && load <= kMaxLoad);
 
-	ReadSpinLocker locker(fLoadLock); // Should be WriteSpinLocker if fLoad is modified directly
+	// This function's locking and update logic for fLoad vs fCurrentLoad
+	// might need review for full consistency, but keeping as is for now.
+	WriteSpinLocker locker(fLoadLock);
 	atomic_add(&fCurrentLoad, load);
-	if (fLoadMeasurementEpoch != epoch) // This logic seems related to average load, not just current
-		atomic_add(&fLoad, load);     // This direct modification of fLoad needs fLoadLock as Write
-	locker.Unlock(); // Should have been WriteSpinLocker if fLoad was modified
+	if (fLoadMeasurementEpoch != epoch)
+		atomic_add(&fLoad, load);
+	// Unlock happens on locker destruction
 
 	if (updateLoad)
 		_UpdateLoad(true);
@@ -404,19 +416,17 @@ CoreEntry::RemoveLoad(int32 load, bool force)
 	ASSERT(gTrackCoreLoad);
 	ASSERT(load >= 0 && load <= kMaxLoad);
 
-	ReadSpinLocker locker(fLoadLock); // Should be WriteSpinLocker if fLoad is modified
-	atomic_add(&fCurrentLoad, -load);
-	if (force) {
-		atomic_add(&fLoad, -load); // This direct modification of fLoad needs fLoadLock as Write
-		// locker.Unlock(); // Unlock should be after all modifications if it was a WriteSpinLocker
+	uint32 epochToReturn;
+	{
+		WriteSpinLocker locker(fLoadLock);
+		atomic_add(&fCurrentLoad, -load);
+		if (force) {
+			atomic_add(&fLoad, -load);
+		}
+		epochToReturn = fLoadMeasurementEpoch;
+	} // Locker destroyed, lock released
 
-		// _UpdateLoad(true); // This should be called after releasing fLoadLock if taken as Write
-	}
-	// Return fLoadMeasurementEpoch outside of lock if it was read inside
-	uint32 epochToReturn = fLoadMeasurementEpoch;
-	locker.Unlock(); // Release read lock
-
-	if (force) // Call _UpdateLoad after releasing the read lock
+	if (force)
 		_UpdateLoad(true);
 
 	return epochToReturn;
@@ -429,17 +439,14 @@ CoreEntry::ChangeLoad(int32 delta)
 	SCHEDULER_ENTER_FUNCTION();
 
 	ASSERT(gTrackCoreLoad);
-	// ASSERT(delta >= -kMaxLoad && delta <= kMaxLoad); // Delta can be larger if many threads change state
 
 	if (delta != 0) {
-		// This needs to be WriteSpinLocker to protect fLoad and fCurrentLoad consistently
 		WriteSpinLocker locker(fLoadLock);
 		atomic_add(&fCurrentLoad, delta);
 		atomic_add(&fLoad, delta);
-		// No Unlock here, WriteSpinLocker unlocks on destruction
 	}
 
-	_UpdateLoad(); // This takes gCoreHeapsLock and fLoadLock, ensure no deadlocks
+	_UpdateLoad();
 }
 
 
@@ -452,9 +459,9 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 	ASSERT(fIdleCoreCount < fCoreCount);
 	fIdleCoreCount++;
 	fIdleCores.Add(core);
-	if (fIdleCoreCount == fCoreCount) {
+	if (fIdleCoreCount == fCoreCount) { // Package becomes fully idle
 		WriteSpinLocker _(gIdlePackageLock);
-		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked()) // Ensure not already added
+		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
 			gIdlePackageList.Add(this);
 	}
 }
@@ -464,16 +471,16 @@ inline void
 PackageEntry::CoreWakesUp(CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
+	bool packageWasFullyIdle = (fIdleCoreCount == fCoreCount);
 	WriteSpinLocker _(fCoreLock);
 	ASSERT(fIdleCoreCount > 0);
 	ASSERT(fIdleCoreCount <= fCoreCount);
-	fIdleCoreCount--;
 	fIdleCores.Remove(core);
-	if (fIdleCoreCount == 0 && DoublyLinkedListLinkImpl<PackageEntry>::IsLinked()) {
-		// Package was idle (all cores idle), now one core woke up.
-		// Or, if fIdleCoreCount + 1 == fCoreCount (as in original, meaning it *was* the last idle core)
+	fIdleCoreCount--;
+	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) { // Package was fully idle and now is not
 		WriteSpinLocker _(gIdlePackageLock);
-		gIdlePackageList.Remove(this);
+		if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
+			gIdlePackageList.Remove(this);
 	}
 }
 
@@ -484,7 +491,7 @@ CoreEntry::CPUGoesIdle(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount < fCPUCount);
-	if (atomic_add(&fIdleCPUCount, 1) + 1 == fCPUCount) // Check after increment
+	if (atomic_add(&fIdleCPUCount, 1) + 1 == fCPUCount)
 		fPackage->CoreGoesIdle(this);
 }
 
@@ -495,8 +502,11 @@ CoreEntry::CPUWakesUp(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount > 0);
-	if (atomic_add(&fIdleCPUCount, -1) == fCPUCount) // Check before decrement for this condition
+	// Check if this was the *last* idle CPU on this core making the core active
+	if (fIdleCPUCount == fCPUCount) { // This implies it was fully idle
 		fPackage->CoreWakesUp(this);
+	}
+	atomic_add(&fIdleCPUCount, -1); // Decrement after check
 }
 
 
@@ -513,7 +523,6 @@ inline CoreEntry*
 PackageEntry::GetIdleCore(int32 index) const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// This needs fCoreLock for reading fIdleCores if it can be modified concurrently
 	ReadSpinLocker lock(fCoreLock);
 	CoreEntry* element = fIdleCores.Last();
 	for (int32 i = 0; element != NULL && i < index; i++)
@@ -526,20 +535,26 @@ PackageEntry::GetIdleCore(int32 index) const
 PackageEntry::GetMostIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// This needs gIdlePackageLock if reading gPackageEntries and their counts concurrently
-	ReadSpinLocker lock(gIdlePackageLock); // Or a more appropriate global lock
+	ReadSpinLocker lock(gIdlePackageLock);
 	PackageEntry* mostIdle = NULL;
-	int32 maxIdleCores = -1;
+	int32 maxIdleCores = -1; // Start with -1 to ensure any package with >=0 idle cores is picked
 	for (int32 i = 0; i < gPackageCount; i++) {
-		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock); // Lock individual package's core list
+		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);
+		// Only consider packages that have *some* idle cores, unless all are fully busy
 		if (gPackageEntries[i].fIdleCoreCount > maxIdleCores) {
 			maxIdleCores = gPackageEntries[i].fIdleCoreCount;
 			mostIdle = &gPackageEntries[i];
 		}
 	}
-	// Ensure we return NULL if no package has any idle cores.
-	if (maxIdleCores == 0) return NULL;
-	return mostIdle;
+	// If maxIdleCores is still 0 or -1, it means no package has truly idle cores,
+	// or all are equally non-idle. This function might need to return NULL
+	// or pick one based on another metric if strictly "idle" cores are sought.
+	// The original logic would pick one even if fIdleCoreCount is 0 for all.
+	// Let's stick to returning a package if one was found, even if its idle_core_count is 0,
+	// if all others are also 0. The > comparison handles this.
+	// If maxIdleCores remains -1 (no packages?), return NULL.
+	if (maxIdleCores < 0) return NULL;
+	return mostIdle; // This can be NULL if gPackageCount is 0 or no suitable package found.
 }
 
 
@@ -547,9 +562,9 @@ PackageEntry::GetMostIdlePackage()
 PackageEntry::GetLeastIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(gIdlePackageLock); // Or a more appropriate global lock
+	ReadSpinLocker lock(gIdlePackageLock);
 	PackageEntry* leastIdleWithIdleCores = NULL;
-	int32 minIdleCores = 0x7fffffff;
+	int32 minIdleCores = 0x7fffffff; // Ensure any valid count is smaller
 
 	for (int32 i = 0; i < gPackageCount; i++) {
 		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);
@@ -558,7 +573,7 @@ PackageEntry::GetLeastIdlePackage()
 			leastIdleWithIdleCores = &gPackageEntries[i];
 		}
 	}
-	return leastIdleWithIdleCores; // Can be NULL if all packages have 0 idle cores or all are fully idle
+	return leastIdleWithIdleCores;
 }
 
 

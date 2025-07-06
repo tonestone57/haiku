@@ -19,7 +19,7 @@
 #include <AutoDeleter.h>
 #include <cpu.h>
 #include <debug.h>
-#include <interrupts.h>
+#include <interrupts.h> // For assign_io_interrupt_to_cpu
 #include <kernel.h>
 #include <kscheduler.h>
 #include <listeners.h>
@@ -28,6 +28,7 @@
 #include <timer.h>
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
+#include <util/Algorithm.h> // For std::swap
 
 // For strtod in debugger command
 #include <stdlib.h>
@@ -62,7 +63,15 @@ float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
 float gSchedulerBaseQuantumMultiplier = 1.0f;
 float gSchedulerAgingThresholdMultiplier = 1.0f;
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY; // New default
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+
+// IRQ balancing parameters
+bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
+int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
+int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
+float gIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
+int32 gMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
 
 
 }	// namespace Scheduler
@@ -88,6 +97,12 @@ static void scheduler_perform_aging(CPUEntry* cpu);
 static int32 scheduler_aging_event(timer* unused);
 static void scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
+
+// Proactive IRQ balancing
+static timer sIRQBalanceTimer;
+static int32 scheduler_irq_balance_event(timer* unused);
+static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad);
+
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
 
 // Debugger command forward declarations
@@ -95,7 +110,7 @@ static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusie
 static int cmd_scheduler(int argc, char** argv);
 #endif
 static int cmd_scheduler_set_kdf(int argc, char** argv);
-static int cmd_scheduler_get_kdf(int argc, char** argv); // Forward declaration for get_kdf
+static int cmd_scheduler_get_kdf(int argc, char** argv);
 
 static timer sAgingTimer;
 static const bigtime_t kAgingCheckInterval = 500000;
@@ -572,16 +587,21 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	gSchedulerBaseQuantumMultiplier = 1.0f;
 	gSchedulerAgingThresholdMultiplier = 1.0f;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD; // Default to spread
+	// SMT Factor will be set by the mode's switch_to_mode function.
 
 	if (gCurrentMode->switch_to_mode != NULL) {
 		gCurrentMode->switch_to_mode();
 	} else {
 		// Fallback basic settings if switch_to_mode is NULL (shouldn't happen for defined modes)
+		// Ensure SMT factor is also set here if this path is ever taken for a new mode.
 		if (mode == SCHEDULER_MODE_POWER_SAVING) {
 			gKernelKDistFactor = 0.6f;
 			gSchedulerBaseQuantumMultiplier = 1.5f;
 			gSchedulerAgingThresholdMultiplier = 1.5f;
 			gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
+			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
+		} else { // Implicitly Low Latency or a new mode defaulting to LL settings
+			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 		}
 	}
 
@@ -719,7 +739,7 @@ static int32 scheduler_aging_event(timer* /*unused*/)
 static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore)
-	scheduler_perform_load_balance();
+		scheduler_perform_load_balance();
     add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
     return B_HANDLED_INTERRUPT;
 }
@@ -773,10 +793,11 @@ scheduler_init()
 	status_t result = init();
 	if (result != B_OK)
 		panic("scheduler_init: failed to initialize scheduler\n");
-	scheduler_set_operation_mode(SCHEDULER_MODE_LOW_LATENCY);
+	scheduler_set_operation_mode(SCHEDULER_MODE_LOW_LATENCY); // This will set initial KDF and SMT factor via mode switch
 	add_timer(&sAgingTimer, &scheduler_aging_event, kAgingCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	if (!gSingleCore) {
 		add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
+		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	}
 	init_debug_commands();
 }
@@ -824,6 +845,209 @@ cmd_scheduler_get_kdf(int argc, char** argv)
 
 	kprintf("Current scheduler gKernelKDistFactor: %f\n", Scheduler::gKernelKDistFactor);
 	return DEBUG_COMMAND_SUCCESS;
+}
+
+
+// #pragma mark - Proactive IRQ Balancing
+
+static CPUEntry*
+_scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
+{
+    SCHEDULER_ENTER_FUNCTION();
+    ASSERT(core != NULL);
+
+    CPUEntry* bestCPU = NULL;
+    float bestScore = 1e9; // Initialize with a large value, lower score is better
+
+    CPUSet coreCPUs = core->CPUMask();
+    for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+        if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
+            continue;
+
+        CPUEntry* currentCPU = CPUEntry::GetCPU(i);
+        ASSERT(currentCPU->Core() == core);
+
+        int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
+        if (currentCpuExistingIrqLoad + irqToMoveLoad >= gMaxTargetCpuIrqLoad) {
+            TRACE_SCHED("IRQ Target Sel: CPU %" B_PRId32 " fails IRQ capacity (curr:%" B_PRId32 ", add:%" B_PRId32 ", max:%" B_PRId32 ")\n",
+                currentCPU->ID(), currentCpuExistingIrqLoad, irqToMoveLoad, gMaxTargetCpuIrqLoad);
+            continue; // Skip this CPU, too much IRQ load already or would exceed
+        }
+
+        float threadInstantLoad = currentCPU->GetInstantaneousLoad();
+        float smtPenalty = 0.0f;
+        if (core->CPUCount() > 1) { // Apply SMT penalty if choosing among SMT siblings
+            CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
+            siblings.ClearBit(currentCPU->ID());
+            for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+                if (siblings.GetBit(k) && !gCPU[k].disabled) {
+                    smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+                }
+            }
+        }
+        float threadEffectiveLoad = threadInstantLoad + smtPenalty;
+
+        // Combine scores: lower is better.
+        // Weighted sum: (1-gIrqTargetFactor) for thread load, gIrqTargetFactor for IRQ load.
+        float normalizedExistingIrqLoad = (gMaxTargetCpuIrqLoad > 0 && gMaxTargetCpuIrqLoad > currentCpuExistingIrqLoad)
+            ? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1)) // Avoid div by zero, +1 for safety
+            : ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f); // Max out if capacity is 0 and has load
+
+        float score = (1.0f - gIrqTargetFactor) * threadEffectiveLoad
+                           + gIrqTargetFactor * normalizedExistingIrqLoad;
+
+        if (bestCPU == NULL || score < bestScore) {
+            bestScore = score;
+            bestCPU = currentCPU;
+        }
+    }
+
+    if (bestCPU != NULL) {
+         TRACE_SCHED("IRQ Target Sel: Selected CPU %" B_PRId32 " on core %" B_PRId32 " with combined score %f (effThreadLoad %f, normIrqLoad %f)\n",
+            bestCPU->ID(), core->ID(), bestScore, (bestCPU->GetInstantaneousLoad() /* crude re-calc for trace */),
+			(gMaxTargetCpuIrqLoad > 0) ? (float)bestCPU->CalculateTotalIrqLoad() / gMaxTargetCpuIrqLoad : 0.0f);
+    } else {
+         TRACE_SCHED("IRQ Target Sel: No suitable CPU found on core %" B_PRId32 " for IRQ (load %" B_PRId32 ")\n",
+            core->ID(), irqToMoveLoad);
+    }
+    return bestCPU;
+}
+
+
+static int32
+scheduler_irq_balance_event(timer* /* unused */)
+{
+	if (gSingleCore || !sSchedulerEnabled) {
+		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
+		return B_HANDLED_INTERRUPT;
+	}
+
+	SCHEDULER_ENTER_FUNCTION();
+	TRACE_SCHED("Proactive IRQ Balance Check running\n");
+
+	CPUEntry* sourceCpuMaxIrq = NULL;
+	CPUEntry* targetCandidateCpuMinIrq = NULL;
+	int32 maxIrqLoad = -1;
+	int32 minIrqLoad = 0x7fffffff; // Initialize with a large value
+
+	// Find CPUs with max and min IRQ loads among enabled CPUs
+	int32 enabledCpuCount = 0;
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (!gCPUEnabled.GetBit(i))
+			continue;
+		enabledCpuCount++;
+
+		CPUEntry* currentCpu = CPUEntry::GetCPU(i);
+		int32 currentTotalIrqLoad = currentCpu->CalculateTotalIrqLoad();
+
+		if (sourceCpuMaxIrq == NULL || currentTotalIrqLoad > maxIrqLoad) {
+			maxIrqLoad = currentTotalIrqLoad;
+			sourceCpuMaxIrq = currentCpu;
+		}
+		// For min, ensure it's not the same as the current max candidate initially,
+		// unless it's the only CPU considered so far.
+		if (targetCandidateCpuMinIrq == NULL || currentTotalIrqLoad < minIrqLoad) {
+			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) { // Allow if only one CPU or different
+				minIrqLoad = currentTotalIrqLoad;
+				targetCandidateCpuMinIrq = currentCpu;
+			}
+		}
+	}
+
+	// If after the loop, min is still the same as max (e.g. only one enabled CPU, or all have same load)
+	// or min wasn't found because all CPUs but one had higher load than the first one picked as max.
+	if (targetCandidateCpuMinIrq == NULL || targetCandidateCpuMinIrq == sourceCpuMaxIrq) {
+		if (enabledCpuCount > 1 && sourceCpuMaxIrq != NULL) { // Need at least two CPUs to balance
+			// Find any other CPU to be the target candidate
+			targetCandidateCpuMinIrq = NULL; // Reset
+			minIrqLoad = 0x7fffffff;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (!gCPUEnabled.GetBit(i) || CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
+					continue;
+				CPUEntry* potentialTarget = CPUEntry::GetCPU(i);
+				int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
+				if (targetCandidateCpuMinIrq == NULL || potentialTargetLoad < minIrqLoad) {
+					targetCandidateCpuMinIrq = potentialTarget;
+					minIrqLoad = potentialTargetLoad;
+				}
+			}
+		} else { // Only one CPU enabled, or sourceCpuMaxIrq is NULL
+			targetCandidateCpuMinIrq = NULL; // Ensure no balancing if only one CPU
+		}
+	}
+
+
+	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
+		TRACE_SCHED("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
+		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
+		return B_HANDLED_INTERRUPT;
+	}
+
+	if (maxIrqLoad > gHighAbsoluteIrqThreshold && maxIrqLoad > minIrqLoad + gSignificantIrqLoadDifference) {
+		TRACE_SCHED("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (IRQ load %" B_PRId32 ")\n",
+			sourceCpuMaxIrq->ID(), maxIrqLoad, targetCandidateCpuMinIrq->ID(), minIrqLoad);
+
+		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
+		int32 candidateCount = 0;
+		{
+			cpu_ent* cpuSt = &gCPU[sourceCpuMaxIrq->ID()];
+			SpinLocker locker(cpuSt->irqs_lock);
+			irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
+			while (irq != NULL) {
+				if (candidateCount < gMaxIRQsToMoveProactively) {
+					candidateIRQs[candidateCount++] = irq;
+					for (int k = candidateCount - 1; k > 0; --k) {
+						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
+						} else break;
+					}
+				} else if (gMaxIRQsToMoveProactively > 0 && irq->load > candidateIRQs[gMaxIRQsToMoveProactively - 1]->load) {
+					candidateIRQs[gMaxIRQsToMoveProactively - 1] = irq;
+					for (int k = gMaxIRQsToMoveProactively - 1; k > 0; --k) {
+						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
+						} else break;
+					}
+				}
+				irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
+			}
+		} // irqs_lock released
+
+		CoreEntry* targetCore = targetCandidateCpuMinIrq->Core();
+		for (int32 i = 0; i < candidateCount; i++) {
+			irq_assignment* irqToMove = candidateIRQs[i];
+			if (irqToMove == NULL) continue;
+
+			CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCore, irqToMove->load);
+
+			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
+				// Ensure IRQ is still on sourceCpuMaxIrq before moving
+				// This check is implicitly handled by assign_io_interrupt_to_cpu if it verifies source.
+				// If not, a check here would be good:
+				// cpu_ent* srcCpuSt = &gCPU[sourceCpuMaxIrq->ID()];
+				// SpinLocker srcLocker(srcCpuSt->irqs_lock);
+				// bool stillOnSource = false; ... iterate srcCpuSt->irqs ...
+				// srcLocker.Unlock();
+				// if (stillOnSource) { ... }
+
+				TRACE_SCHED("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
+				if (assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID()) == B_OK) {
+					TRACE_SCHED("Proactive IRQ: Move successful for IRQ %d.\n", irqToMove->irq);
+				} else {
+					TRACE_SCHED("Proactive IRQ: Move FAILED for IRQ %d.\n", irqToMove->irq);
+				}
+			} else {
+				TRACE_SCHED("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
+					irqToMove->irq, targetCore->ID());
+			}
+		}
+	} else {
+		TRACE_SCHED("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoad, minIrqLoad);
+	}
+
+	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
+	return B_HANDLED_INTERRUPT;
 }
 
 
@@ -978,7 +1202,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 	ASSERT(core != NULL);
 
 	CPUEntry* bestCPU = NULL;
-	float bestLoadScore = preferBusiest ? -1.0f : 2.0f;
+	float bestLoadScore = preferBusiest ? -1.0f : 2.0f; // Lower is better if !preferBusiest
 	int32 bestTaskCountScore = preferBusiest ? -1 : 0x7fffffff;
 
 	CPUSet coreCPUs = core->CPUMask();
@@ -998,12 +1222,13 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		float currentInstantLoad = currentCPU->GetInstantaneousLoad();
 		float smtPenalty = 0.0f;
 
+		// SMT penalty is only applied when we prefer the *least* busy CPU,
+		// as it makes busy SMT siblings less attractive.
 		if (!preferBusiest && core->CPUCount() > 1) {
 			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
 			siblings.ClearBit(currentCPU->ID());
 			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					// Use the global tunable factor instead of hardcoded 0.5f
 					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
 				}
 			}
@@ -1011,19 +1236,23 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		float effectiveLoad = currentInstantLoad + smtPenalty;
 
 		bool isBetter = false;
-		if (bestCPU == NULL) { // First suitable candidate
+		if (bestCPU == NULL) {
 			isBetter = true;
 		} else {
 			if (preferBusiest) {
 				if (effectiveLoad > bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
+					// Tie-break by preferring CPU with more high-priority tasks if preferring busiest
+					// This part of tie-breaking might need review for preferBusiest context.
+					// Usually, preferBusiest might mean "highest load", then perhaps "most tasks".
+					// For now, using existing high-prio task count.
 					currentCPU->LockRunQueue();
 					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
 					currentCPU->UnlockRunQueue();
 					if (currentHighPrioTasks > bestTaskCountScore) isBetter = true;
 				}
-			} else { // Prefer least busy
+			} else { // Prefer least busy (lower effectiveLoad is better)
 				if (effectiveLoad < bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
@@ -1037,7 +1266,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
-			currentCPU->LockRunQueue(); // Lock to get consistent task count with load score
+			currentCPU->LockRunQueue();
 			bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
 			currentCPU->UnlockRunQueue();
 			bestCPU = currentCPU;
@@ -1149,6 +1378,9 @@ scheduler_perform_load_balance()
 			if (candidate->GetThread()->pinned_to_cpu != 0)
 				continue;
 
+			// Use refined target selection for threads too, for consistency, or keep _scheduler_select_cpu_on_core?
+			// For now, keep original for thread load balancing target CPU on core.
+			// The new _scheduler_select_cpu_for_irq is specific.
 			targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
 			if (targetCPU == NULL || targetCPU == sourceCPU) {
 				targetCPU = NULL;

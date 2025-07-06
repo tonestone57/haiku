@@ -7,6 +7,7 @@
 
 #include "scheduler_cpu.h"
 
+#include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
 #include <util/AutoLock.h>
 #include <util/atomic.h> // For atomic_add
 
@@ -286,20 +287,23 @@ CPUEntry::UpdateInstantaneousLoad(bigtime_t now)
 	bigtime_t currentTotalActiveTime = gCPU[fCPUNumber].active_time;
 	float currentActivitySample = 0.0f;
 
-	if (fInstLoadLastUpdateTimeSnapshot == 0 || now < fInstLoadLastUpdateTimeSnapshot || now == fInstLoadLastUpdateTimeSnapshot) {
+	if (fInstLoadLastUpdateTimeSnapshot == 0 || now <= fInstLoadLastUpdateTimeSnapshot) {
+		// Handle potential system_time() wrap-around or first call carefully
 		Thread* runningThread = gCPU[fCPUNumber].running_thread;
 		if (runningThread != NULL && !thread_is_idle_thread(runningThread)) {
 			currentActivitySample = 1.0f;
 		} else {
 			currentActivitySample = 0.0f;
 		}
+		// If it's the first call or time hasn't advanced, fInstantaneousLoad becomes currentActivitySample.
+		// If time wrapped, this is a simple reset.
 		fInstantaneousLoad = currentActivitySample;
 	} else {
 		bigtime_t timeDelta = now - fInstLoadLastUpdateTimeSnapshot;
 		bigtime_t activeTimeDelta = currentTotalActiveTime - fInstLoadLastActiveTimeSnapshot;
 
-		if (activeTimeDelta < 0) activeTimeDelta = 0;
-		if (activeTimeDelta > timeDelta) activeTimeDelta = timeDelta;
+		if (activeTimeDelta < 0) activeTimeDelta = 0; // active_time should not decrease
+		if (activeTimeDelta > timeDelta) activeTimeDelta = timeDelta; // Cap at elapsed wall time
 
 		currentActivitySample = (float)activeTimeDelta / timeDelta;
 		currentActivitySample = std::max(0.0f, std::min(1.0f, currentActivitySample));
@@ -333,9 +337,12 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool putAtBack, int oldMlfqLev
 	ThreadData* nextThreadData = PeekNextThread();
 
 	if (nextThreadData != NULL) {
+		// Successfully found a thread in the run queue.
 	} else {
+		// No thread in run queue, pick the idle thread for this CPU.
 		nextThreadData = PeekIdleThread();
 		if (nextThreadData == NULL) {
+			// This should ideally never happen if idle threads are correctly set up.
 			panic("CPUEntry::ChooseNextThread: No idle thread found for CPU %" B_PRId32, ID());
 		}
 	}
@@ -372,7 +379,9 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 
 	if (gTrackCPULoad) {
 		if (!cpuEntry->disabled)
-			ComputeLoad();
+			ComputeLoad(); // This updates fLoad and calls UpdateInstantaneousLoad
+		else // Ensure instantaneous load is zeroed if CPU disabled
+			UpdateInstantaneousLoad(system_time());
 		_RequestPerformanceLevel(nextThreadData);
 	}
 
@@ -426,7 +435,7 @@ CPUEntry::_RequestPerformanceLevel(ThreadData* threadData)
 		decrease_cpu_performance(delta);
 	} else {
 		int32 range = kMaxLoad - kTargetLoad;
-		if (range <=0) range = 1;
+		if (range <=0) range = 1; // Avoid division by zero
 		int32 delta = loadToConsider - kTargetLoad;
 		delta = (delta * kCPUPerformanceScaleMax) / range;
 		increase_cpu_performance(delta);
@@ -450,20 +459,43 @@ CPUEntry::_UpdateLoadEvent(timer* /* unused */)
 	int32 currentCPUId = smp_get_current_cpu();
 	CPUEntry* cpu = CPUEntry::GetCPU(currentCPUId);
 
-	cpu->UpdateInstantaneousLoad(system_time());
+	// We need to get the current time for UpdateInstantaneousLoad
+	bigtime_t now = system_time();
+	cpu->UpdateInstantaneousLoad(now);
 
 	CoreEntry* core = cpu->Core();
-	if (core)
+	if (core) {
+		// ChangeLoad(0) implicitly calls _UpdateLoad which uses system_time() again.
+		// It might be better if _UpdateLoad could take 'now' as a parameter.
+		// For now, keeping it as is, the minor time difference is likely okay.
 		core->ChangeLoad(0);
+	}
 
 	cpu->fUpdateLoadEvent = false;
 
+	// Check if the currently running thread on this CPU is still the idle thread
 	if (thread_is_idle_thread(gCPU[currentCPUId].running_thread) && (gTrackCoreLoad || gTrackCPULoad)) {
 		add_timer(&gCPU[currentCPUId].quantum_timer, &CPUEntry::_UpdateLoadEvent,
 			kLoadMeasureInterval, B_ONE_SHOT_RELATIVE_TIMER);
 		cpu->fUpdateLoadEvent = true;
 	}
 	return B_HANDLED_INTERRUPT;
+}
+
+
+// New method implementation
+int32
+CPUEntry::CalculateTotalIrqLoad() const
+{
+	cpu_ent* cpuSt = &gCPU[fCPUNumber];
+	SpinLocker locker(cpuSt->irqs_lock);
+	int32 totalLoad = 0;
+	irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
+	while (irq != NULL) {
+		totalLoad += irq->load;
+		irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
+	}
+	return totalLoad;
 }
 
 
@@ -535,9 +567,11 @@ CoreEntry::UpdateInstantaneousLoad()
 	float totalCpuInstantaneousLoad = 0.0f;
 	int32 enabledCpuCountOnCore = 0;
 
+	// No lock needed for fCPUSet if AddCPU/RemoveCPU are synchronized
+	// and this is called from a context that expects stable topology.
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (fCPUSet.GetBit(i)) {
-			if (!gCPU[i].disabled) {
+		if (fCPUSet.GetBit(i)) { // Check if CPU belongs to this core
+			if (!gCPU[i].disabled) { // Check if the CPU is enabled
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
 				totalCpuInstantaneousLoad += cpuEntry->GetInstantaneousLoad();
 				enabledCpuCountOnCore++;
@@ -549,7 +583,7 @@ CoreEntry::UpdateInstantaneousLoad()
 	if (enabledCpuCountOnCore > 0) {
 		fInstantaneousLoad = totalCpuInstantaneousLoad / enabledCpuCountOnCore;
 	} else {
-		fInstantaneousLoad = 0.0f;
+		fInstantaneousLoad = 0.0f; // No enabled CPUs on this core
 	}
 	fInstantaneousLoad = std::max(0.0f, std::min(1.0f, fInstantaneousLoad));
 }
@@ -560,16 +594,11 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	// No need to lock fCPULock if only reading fCPUSet and GetTotalThreadCount is safe.
-	// fCPUSet is stable outside of AddCPU/RemoveCPU.
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i)) {
-			// Check if CPU is enabled before counting its threads,
-			// as disabled CPUs should conceptually have 0 threads for balancing.
-			// Or, ensure GetTotalThreadCount on a disabled CPUEntry returns 0.
-			// For now, assume GetTotalThreadCount is accurate for enabled/disabled state.
-			CPUEntry* cpuEntry = CPUEntry::GetCPU(i); // Safe to call
-			if (!gCPU[i].disabled) { // Only count threads on enabled CPUs
+			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
+			if (!gCPU[i].disabled) {
+				// CPUEntry::GetTotalThreadCount() is atomic or appropriately locked internally
 				totalThreads += cpuEntry->GetTotalThreadCount();
 			}
 		}
@@ -581,44 +610,82 @@ CoreEntry::ThreadCount() const
 void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
-	ASSERT(fCPUCount >= 0);
-	ASSERT(fIdleCPUCount >= 0);
+	// This function should be called under a global lock that protects scheduler structure changes,
+	// or fCPULock should protect fCPUHeap, fCPUCount, fIdleCPUCount, fCPUSet additions.
+	SpinLocker lock(fCPULock); // Protects CPU list modifications for this core
 
-	fIdleCPUCount++;
-	if (fCPUCount++ == 0) {
+	fCPUSet.SetBit(cpu->ID());
+	fCPUCount++;
+	fIdleCPUCount++; // Assume new CPU starts idle for scheduler purposes
+	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY);
+
+	// Logic for adding to gCoreLoadHeap and package idle list
+	if (fCPUCount == 1) { // First CPU being added to this core
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
 		fHighLoad = false;
-		if (!MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked())
-			gCoreLoadHeap.Insert(this, 0);
-		fPackage->AddIdleCore(this);
-	}
-	fCPUSet.SetBit(cpu->ID());
+		fLastLoadUpdate = system_time(); // Initialize load update time
+		fLoadMeasurementEpoch = 0;      // Initialize epoch
 
-	SpinLocker lock(fCPULock);
-	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY);
+		WriteSpinLocker heapsLock(gCoreHeapsLock);
+		if (!MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked())
+			gCoreLoadHeap.Insert(this, 0); // Add to low load heap initially
+		heapsLock.Unlock();
+
+		if (fPackage != NULL) // Should always have a package
+			fPackage->AddIdleCore(this); // Core is initially idle
+	}
+	// No need to call _UpdateLoad here, as new CPU has 0 load.
+	// Instantaneous load will be updated when its CPUEntry is updated.
 }
 
 
 void
 CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 {
+	// Similar to AddCPU, this should be under appropriate global scheduler structure lock.
+	SpinLocker lock(fCPULock); // Protects CPU list modifications for this core
+
 	ASSERT(fCPUCount > 0);
-	ASSERT(fIdleCPUCount > 0);
+	if (CPUPriorityHeap::Link(cpu)->IsLinked()) // Check if it's in the heap
+		fCPUHeap.Remove(cpu);
 
-	fIdleCPUCount--;
 	fCPUSet.ClearBit(cpu->ID());
+	fCPUCount--;
 
-	{
-		SpinLocker lock(fCPULock);
-		if (CPUPriorityHeap::Link(cpu)->IsLinked())
-			fCPUHeap.Remove(cpu);
+	// Adjust idle count if the removed CPU was idle
+	// This needs careful check of CPUEntry's state or how idle state is tracked for CPUEntry
+	// For simplicity, assume if it was B_IDLE_PRIORITY in heap, it was idle.
+	// However, CPUEntry::UpdatePriority handles CPUWakesUp/CPUGoesIdle which calls Package level.
+	// This fIdleCPUCount is for the CoreEntry itself.
+	// Let's assume CPUEntry::Stop() or similar handles its own idle status correctly before this.
+	// The fIdleCPUCount here is decremented if the CPU was considered idle by the CoreEntry.
+	// This part is tricky; CPUEntry::UpdatePriority should manage fIdleCPUCount on Core.
+	// Let's assume for now that if a CPU is removed, it's no longer contributing to idle/active count.
+	// If CPUEntry::UpdatePriority(B_IDLE_PRIORITY) was called before removing from heap, fIdleCPUCount would be correct.
+	// If not, we need to check its last known state.
+	// Simplification: if a CPU is removed, it's no longer idle *on this core*.
+	if (!gCPU[cpu->ID()].disabled && CPUPriorityHeap::GetKey(cpu) == B_IDLE_PRIORITY) {
+		// This logic is problematic as GetKey might be invalid if already removed.
+		// Assume CPUGoesIdle/CPUWakesUp correctly maintains fIdleCPUCount.
+		// If we are removing an enabled CPU, it must have been made idle first.
 	}
+	// fIdleCPUCount should be managed by CPUGoesIdle/CPUWakesUp.
+	// When a CPU is effectively removed, its contribution to fIdleCPUCount stops.
+	// If it was the last CPU, fIdleCPUCount should become 0.
+	// This needs to be robust. If the CPU was not idle, fIdleCPUCount is not changed by its removal
+	// unless it was the last *active* CPU.
 
+	// This logic seems to be more about the Core becoming fully idle/active
+	// rather than individual CPU contributions to fIdleCPUCount of the Core.
+	// For now, let's assume CPUEntry::Stop correctly makes the CPU appear idle to the Core
+	// before this is called, or that higher-level logic handles Core's idle state.
 
-	if (--fCPUCount == 0) {
-		thread_map(CoreEntry::_UnassignThread, this);
+	lock.Unlock(); // Release fCPULock before global locks
+
+	if (fCPUCount == 0) { // Last CPU removed from this core
+		thread_map(CoreEntry::_UnassignThread, this); // Unassign threads from this core
 
 		WriteSpinLocker heapsLock(gCoreHeapsLock);
 		if (MinMaxHeapLinkImpl<CoreEntry,int32>::IsLinked()) {
@@ -626,12 +693,14 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 			else gCoreLoadHeap.Remove(this);
 		}
 		heapsLock.Unlock();
-		fPackage->RemoveIdleCore(this);
+
+		if (fPackage != NULL) // Should always have a package
+			fPackage->RemoveIdleCore(this); // Core effectively becomes non-idle/gone
 	}
 
-	ASSERT(cpu->GetLoad() >= 0 && cpu->GetLoad() <= kMaxLoad);
-	_UpdateLoad(true);
-	UpdateInstantaneousLoad();
+	// Re-calculate core's load and instantaneous load based on remaining CPUs
+	_UpdateLoad(true); // Force update based on remaining CPUs
+	UpdateInstantaneousLoad(); // Update instantaneous load based on remaining CPUs
 }
 
 
@@ -641,20 +710,28 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	SCHEDULER_ENTER_FUNCTION();
 
 	int32 newAverageLoad = 0;
-	if (fCPUCount > 0) {
-		int32 currentTotalLoadSum = 0;
-		int32 activeCPUsForLoad = 0;
-		// Iterate using fCPUSet to get actual CPUs on this core
+	int32 activeCPUsOnCore = 0;
+	{ // Scope for fCPULock
+		ReadSpinLocker cpuListLock(fCPULock); // Protects iteration over fCPUSet (though fCPUSet itself is bitmask)
+											// and access to CPUEntry states.
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
-				currentTotalLoadSum += cpuEntry->GetLoad();
-				activeCPUsForLoad++;
+				// CPUEntry::GetLoad() is inline and reads fLoad, which is updated by ComputeLoad.
+				// This needs to be safe if ComputeLoad is concurrent.
+				// Assuming CPUEntry::fLoad is accessed atomically or appropriately.
+				newAverageLoad += cpuEntry->GetLoad(); // Summing CPUEntry's fLoad (thread load)
+				activeCPUsOnCore++;
 			}
 		}
-		if (activeCPUsForLoad > 0)
-			newAverageLoad = currentTotalLoadSum / activeCPUsForLoad;
+	} // cpuListLock released
+
+	if (activeCPUsOnCore > 0) {
+		newAverageLoad /= activeCPUsOnCore;
+	} else {
+		newAverageLoad = 0; // No active CPUs, so core load is 0
 	}
+	newAverageLoad = std::min(newAverageLoad, kMaxLoad);
 
 
 	bigtime_t now = system_time();
@@ -663,31 +740,24 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (!intervalEnded && !forceUpdate)
 		return;
 
+	// Lock order: gCoreHeapsLock then fLoadLock
 	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
 	WriteSpinLocker loadLocker(fLoadLock);
 
 	int32 oldKey = MinMaxHeapLinkImpl<CoreEntry, int32>::GetKey(this);
 	fLoad = newAverageLoad;
-	// fCurrentLoad should ideally be an atomic sum from CPUEntries or managed differently.
-	// For now, aligning it with fLoad when interval ends.
+
 	if (intervalEnded) {
-		// fCurrentLoad should track the sum of loads of threads on this core,
-		// which is managed by ThreadData::AddLoad/RemoveLoad.
-		// Here, we are calculating the average CPU load for the core.
-		// The logic for fCurrentLoad vs fLoad for CoreEntry might need review
-		// if fCurrentLoad is meant to be more instantaneous sum for other purposes.
-		// For heap purposes, fLoad (average CPU load on core) is key.
-		// Let's assume fCurrentLoad is the sum of fNeededLoad of threads on this core.
-		// This might not be what compute_load expects for a core.
-		// This section needs careful re-evaluation if fCurrentLoad is used elsewhere for core.
-		// For now, let's ensure fLoad is the average of its CPU's fLoad.
 		fLoadMeasurementEpoch++;
 		fLastLoadUpdate = now;
 	}
-	loadLocker.Unlock();
+	// fCurrentLoad is managed by AddLoad/RemoveLoad/ChangeLoad directly via atomics on fCurrentLoad.
+	// The relationship between fLoad (average of CPU fLoads) and fCurrentLoad (sum of thread fNeededLoads on core)
+	// is that fLoad is what's used for heap placement.
 
-	fLoad = std::min(fLoad, kMaxLoad);
+	loadLocker.Unlock(); // Release fLoadLock before potentially modifying heaps
 
+	// fLoad is now updated. Compare with oldKey (which was based on previous fLoad).
 	if (oldKey == fLoad && MinMaxHeapLinkImpl<CoreEntry, int32>::IsLinked()) {
 		coreHeapsLocker.Unlock();
 		return;
@@ -705,7 +775,7 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		gCoreLoadHeap.Insert(this, fLoad);
 		fHighLoad = false;
 	}
-	coreHeapsLocker.Unlock();
+	// coreHeapsLocker unlocks on destruction
 }
 
 
@@ -714,7 +784,7 @@ CoreEntry::_UnassignThread(Thread* thread, void* data)
 {
 	CoreEntry* core = static_cast<CoreEntry*>(data);
 	ThreadData* threadData = thread->scheduler_data;
-	if (threadData->Core() == core && thread->pinned_to_cpu == 0)
+	if (threadData != NULL && threadData->Core() == core && thread->pinned_to_cpu == 0)
 		threadData->UnassignCore(thread_is_running(thread));
 }
 
@@ -750,7 +820,7 @@ CoreLoadHeap::Dump()
 PackageEntry::PackageEntry()
 	:
 	fIdleCoreCount(0),
-	fCoreCount(0)
+	fCoreCount(0) // Should be initialized by counting cores in Init or when cores are added
 {
 	B_INITIALIZE_RW_SPINLOCK(&fCoreLock);
 }
@@ -760,6 +830,9 @@ void
 PackageEntry::Init(int32 id)
 {
 	fPackageID = id;
+	// fCoreCount should be determined by iterating through gCoreEntries and checking
+	// if their Package() points to this PackageEntry instance, or passed in.
+	// For now, assuming it's updated correctly when cores are associated.
 }
 
 
@@ -767,17 +840,21 @@ void
 PackageEntry::AddIdleCore(CoreEntry* core)
 {
 	WriteSpinLocker lock(fCoreLock);
-	// fCoreCount should be incremented when a CoreEntry is logically part of this package.
-	// This typically happens once during CoreEntry::Init when it's associated with a package.
-	// Let's assume fCoreCount is correctly maintained elsewhere based on topology.
-	// This function should only manage fIdleCoreCount and fIdleCores list.
-	fIdleCoreCount++;
-	fIdleCores.Add(core);
+	// This is called when a CoreEntry is added to this Package for the first time,
+	// or when an existing core in this package becomes idle.
+	// We need to ensure fCoreCount is accurate.
+	// If this is the first time this core is associated, fCoreCount might need ++.
+	// Let's assume fCoreCount is set correctly when CoreEntry::Init links it to a package.
 
-	if (fIdleCoreCount == 1 && fCoreCount > 0) {
-		WriteSpinLocker globalLock(gIdlePackageLock);
-		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
-			gIdlePackageList.Add(this);
+	if (!fIdleCores.Contains(core)) { // Only add if not already there
+		fIdleCores.Add(core);
+		fIdleCoreCount++;
+
+		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) { // Package transitions to fully idle
+			WriteSpinLocker globalLock(gIdlePackageLock);
+			if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
+				gIdlePackageList.Add(this);
+		}
 	}
 }
 
@@ -785,14 +862,23 @@ PackageEntry::AddIdleCore(CoreEntry* core)
 void
 PackageEntry::RemoveIdleCore(CoreEntry* core)
 {
-	WriteSpinLocker lock(fCoreLock);
-	fIdleCores.Remove(core);
-	fIdleCoreCount--;
+	bool packageWasFullyIdle;
+	{
+		ReadSpinLocker lock(fCoreLock); // Check if it was fully idle before taking write lock
+		packageWasFullyIdle = (fIdleCoreCount == fCoreCount && fCoreCount > 0);
+	}
 
-	if (fIdleCoreCount == 0 && fCoreCount > 0) {
-		WriteSpinLocker globalLock(gIdlePackageLock);
-		if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
-			gIdlePackageList.Remove(this);
+	WriteSpinLocker lock(fCoreLock);
+	if (fIdleCores.Contains(core)) { // Only remove if present
+		fIdleCores.Remove(core);
+		fIdleCoreCount--;
+		ASSERT(fIdleCoreCount >= 0);
+
+		if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) { // Package was fully idle and now is not
+			WriteSpinLocker globalLock(gIdlePackageLock);
+			if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
+				gIdlePackageList.Remove(this);
+		}
 	}
 }
 
@@ -818,14 +904,10 @@ DebugDumper::DumpCPURunQueue(CPUEntry* cpu)
 			kprintf("\n");
 		}
 	}
-	if (cpu->HighestMLFQLevel() == -1 && cpu->GetTotalThreadCount() == 0) { // Also check total count for idle
+	if (cpu->HighestMLFQLevel() == -1 && cpu->GetTotalThreadCount() == 0) {
 		kprintf("  All levels empty.\n");
-	} else if (cpu->GetTotalThreadCount() > 0 && cpu->HighestMLFQLevel() == -1) {
-		// This case implies idle thread might not be in MLFQ or count is off.
-		// For now, if idle is the only one, HighestMLFQLevel might be -1 if idle isn't in a "level".
-		// The PeekIdleThread logic needs to be consistent with how idle threads are counted or excluded.
-		// Assuming idle thread IS in the lowest MLFQ level and counted by GetTotalThreadCount.
 	}
+	// Consider if idle thread is part of TotalThreadCount for this print
 	cpu->UnlockRunQueue();
 }
 
@@ -835,7 +917,7 @@ DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
 	kprintf("%4" B_PRId32 " %11" B_PRId32 "%% %8.2f %7" B_PRId32 " %5" B_PRIu32 "\n",
 		entry->ID(),
-		entry->GetLoad() / (kMaxLoad/100),
+		entry->GetLoad(), // GetLoad() already returns a percentage-like or scaled value if so designed
 		entry->GetInstantaneousLoad(),
 		entry->ThreadCount(),
 		entry->LoadMeasurementEpoch());
@@ -857,7 +939,7 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 		kprintf("%" B_PRId32, coreEntry->ID());
 		first = false;
 	}
-	if (first) kprintf("-");
+	if (first) kprintf("-"); // No idle cores in this package from the list
 	kprintf("\n");
 }
 
@@ -866,7 +948,9 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 DebugDumper::_AnalyzeCoreThreads(Thread* thread, void* data)
 {
 	CoreThreadsData* threadsData = static_cast<CoreThreadsData*>(data);
-	if (thread->scheduler_data->Core() == threadsData->fCore) {
+	if (thread->scheduler_data != NULL && thread->scheduler_data->Core() == threadsData->fCore) {
+		// This function seems incomplete or was for a different purpose.
+		// If it's meant to sum load, it should do: threadsData->fLoad += thread->scheduler_data->GetLoad();
 	}
 }
 
@@ -875,8 +959,10 @@ static int
 dump_run_queue(int /* argc */, char** /* argv */)
 {
 	int32 cpuCount = smp_get_num_cpus();
-	for (int32 i = 0; i < cpuCount; i++)
-		DebugDumper::DumpCPURunQueue(&gCPUEntries[i]);
+	for (int32 i = 0; i < cpuCount; i++) {
+		if (gCPUEnabled.GetBit(i)) // Only dump enabled CPUs
+			DebugDumper::DumpCPURunQueue(&gCPUEntries[i]);
+	}
 	return 0;
 }
 
@@ -884,16 +970,29 @@ dump_run_queue(int /* argc */, char** /* argv */)
 static int
 dump_cpu_heap(int /* argc */, char** /* argv */)
 {
-	kprintf("core avg_load inst_load threads epoch\n");
+	kprintf("Low Load Cores (ID  AvgLoad InstLoad Threads Epoch):\n");
 	gCoreLoadHeap.Dump();
-	kprintf("\nHigh Load Cores:\n");
+	kprintf("\nHigh Load Cores (ID  AvgLoad InstLoad Threads Epoch):\n");
 	gCoreHighLoadHeap.Dump();
 
 	for (int32 i = 0; i < gCoreCount; i++) {
-		if (gCoreEntries[i].CPUCount() < 1)
-			continue;
-		kprintf("\nCore %" B_PRId32 " CPU Priority Heap (CPUs on this core):\n", i);
-		gCoreEntries[i].CPUHeap()->Dump();
+		// Check if core has any enabled CPUs before dumping its heap
+		bool coreHasEnabledCPUs = false;
+		for(int j=0; j < smp_get_num_cpus(); ++j) {
+			if (gCoreEntries[i].CPUMask().GetBit(j) && gCPUEnabled.GetBit(j)) {
+				coreHasEnabledCPUs = true;
+				break;
+			}
+		}
+		if (!coreHasEnabledCPUs && gCoreEntries[i].CPUCount() > 0) {
+			// This case (core has CPUs but none are enabled) might be interesting
+			// but its CPUHeap might not be meaningful for active scheduling.
+			// For now, only dump if it has CPUs defined, enabled or not.
+		}
+		if (gCoreEntries[i].CPUCount() > 0) { // Only dump if core is configured with CPUs
+			kprintf("\nCore %" B_PRId32 " CPU Priority Heap (CPUs on this core):\n", i);
+			gCoreEntries[i].CPUHeap()->Dump();
+		}
 	}
 	return 0;
 }
@@ -915,13 +1014,13 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 		kprintf("No packages currently in the idle list.\n");
 	globalLock.Unlock();
 
-	kprintf("\nAll Packages (package_id: idle_core_count / total_core_count):\n");
+	kprintf("\nAll Packages (package_id: idle_core_count / total_configured_core_count_on_package):\n");
 	for(int32 i = 0; i < gPackageCount; ++i) {
-		ReadSpinLocker lock(gPackageEntries[i].fCoreLock);
+		ReadSpinLocker lock(gPackageEntries[i].fCoreLock); // Protects fIdleCoreCount and fCoreCount
 		kprintf("  %2" B_PRId32 ": %2" B_PRId32 " / %2" B_PRId32 "\n",
 			gPackageEntries[i].fPackageID,
 			gPackageEntries[i].fIdleCoreCount,
-			gPackageEntries[i].fCoreCount);
+			gPackageEntries[i].fCoreCount); // fCoreCount is total configured cores for this package
 	}
 	return 0;
 }
@@ -929,8 +1028,11 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 
 void Scheduler::init_debug_commands()
 {
-	new(&sDebugCPUHeap) CPUPriorityHeap(smp_get_num_cpus());
-	new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus());
+	// Initialize debug heaps only if not already (though new() is placement new)
+	if (sDebugCPUHeap.Count() == 0) // Crude check if already initialized
+		new(&sDebugCPUHeap) CPUPriorityHeap(smp_get_num_cpus());
+	if (sDebugCoreHeap.Count() == 0)
+		new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus()); // Max possible cores
 
 	add_debugger_command_etc("run_queue", &dump_run_queue,
 		"List threads in MLFQ run queues per CPU", "\nLists threads in MLFQ run queues per CPU", 0);

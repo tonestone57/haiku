@@ -258,7 +258,7 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 static void
 power_saving_switch_to_mode()
 {
-	gKernelKDistFactor = 0.6f;
+	gKernelKDistFactor = 0.5f; // Changed from 0.6f
 	gSchedulerBaseQuantumMultiplier = 1.5f;
 	gSchedulerAgingThresholdMultiplier = 2.0f;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;

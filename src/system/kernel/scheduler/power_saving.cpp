@@ -64,73 +64,119 @@ const int32 kMaxIRQsToMovePerCyclePS = 2; // PS for Power Saving
 static CoreEntry*
 power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 {
-	// This function selects and potentially updates the global `sSmallTaskCore`.
-	// Goal: Choose a single core to consolidate work onto, to save power.
+	// This function selects and potentially updates the global `sSmallTaskCore` (STC).
+	// Its primary goal is to choose a single core for consolidating work to save power.
 	//
-	// Method:
-	// 1. Respects optional `affinityMaskPtr` for thread-specific calls.
-	// 2. Validates current global `sSmallTaskCore` against affinity and CPU status.
-	// 3. Scores all valid cores based on:
-	//    - Strongest preference: Truly idle cores.
-	//    - Next preference: Very lightly loaded cores.
-	//    - Next: Active but not heavily loaded cores.
-	//    - Base: Other cores (load-based).
-	// 4. Applies a hysteresis bonus (`kConsolidationScoreHysteresisMargin`) to the
-	//    current `sSmallTaskCore` (if valid for context) to make it "sticky" and
-	//    prevent rapid switching if another core is only marginally "better".
-	// 5. Decision to update global `sSmallTaskCore`:
-	//    - If current global is best for context, stick with it.
-	//    - If another core is significantly better (score exceeds current's score
-	//      plus hysteresis), attempt to update global `sSmallTaskCore` using
-	//      `atomic_pointer_test_and_set` to handle concurrency.
-	//    - If no current global or it's unsuitable for context, best candidate
-	//      for context attempts to become the new global `sSmallTaskCore`.
-	// 6. Race handling: If `atomic_pointer_test_and_set` indicates another thread
-	//    changed `sSmallTaskCore` during this function's execution, the logic
-	//    re-evaluates using the new global value against the current context's needs.
+	// The selection process involves:
+	// 1. Initialization:
+	//    - Respects an optional `affinityMaskPtr` for thread-specific placement constraints.
+	//    - Captures the current global `sSmallTaskCore` value.
+	//
+	// 2. Validation of Current Global STC:
+	//    - Checks if `currentGlobalSTC` is non-NULL.
+	//    - If `affinityMaskPtr` is provided, ensures `currentGlobalSTC`'s CPUs match the mask.
+	//    - Verifies that `currentGlobalSTC` still has at least one enabled CPU.
+	//    - If invalid (e.g., no enabled CPUs), `currentGlobalSTC` is nulled locally,
+	//      and an attempt is made to atomically nullify the global `sSmallTaskCore`
+	//      if this instance was the one to detect invalidity.
+	//
+	// 3. Scoring Potential Cores:
+	//    - Iterates through all available `gCoreEntries`.
+	//    - Skips cores that don't match `affinityMaskPtr` (if provided).
+	//    - Skips cores with no enabled CPUs.
+	//    - Calculates a 'score' for each valid core:
+	//        - Highest score: Truly idle cores (zero active time, zero load).
+	//        - High score: Very lightly loaded cores (load < kLowLoad), score decreases with load.
+	//        - Medium score: Active but not heavily loaded cores (load < kHighLoad), score decreases with load.
+	//        - Low score: Other cores (e.g., busy, or idle with some residual reported load), score decreases with load.
+	//    - Hysteresis Boost: If a core being scored is the `currentGlobalSTC` (and is valid
+	//      for the current context/affinity), its score is boosted by
+	//      `kConsolidationScoreHysteresisMargin`. This makes the current STC "sticky"
+	//      and prevents rapid switching if another core is only marginally better.
+	//    - The core with the highest score (`bestAffinityCandidate`) is tracked.
+	//
+	// 4. Decision Logic for Returning/Updating STC:
+	//    - If no suitable `bestAffinityCandidate` is found (e.g., due to affinity constraints
+	//      or no enabled cores), returns NULL.
+	//    - Case A: `currentGlobalSTC` is valid for the context and is also the `bestAffinityCandidate`.
+	//      -> Returns `currentGlobalSTC` (no change needed).
+	//    - Case B: `currentGlobalSTC` is valid for the context, but `bestAffinityCandidate` has a higher score.
+	//      -> Compare `bestAffinityCandidateScore` with `currentGlobalSTCScore` (recalculated *without* its
+	//         own hysteresis boost for a fair comparison).
+	//      -> If `bestAffinityCandidateScore` is significantly greater (i.e., > `currentGlobalSTCScore` + `kConsolidationScoreHysteresisMargin`),
+	//         an attempt is made to atomically update the global `sSmallTaskCore` to `bestAffinityCandidate`
+	//         using `atomic_pointer_test_and_set`.
+	//         - If atomic update succeeds: `bestAffinityCandidate` becomes the new STC and is returned.
+	//         - If atomic update fails (race condition, another CPU changed `sSmallTaskCore`):
+	//           The newly set global STC is re-read. If it matches the current affinity requirements,
+	//           it's returned. Otherwise, `bestAffinityCandidate` (best for *this* call's affinity) is returned.
+	//      -> If `bestAffinityCandidate` is not significantly better, `currentGlobalSTC` is returned (stickiness wins).
+	//    - Case C: No `currentGlobalSTC` was valid for the context at the start (or it was NULL).
+	//      -> `bestAffinityCandidate` (if found) attempts to become the new global `sSmallTaskCore` via
+	//         `atomic_pointer_test_and_set`.
+	//         - If atomic update succeeds: `bestAffinityCandidate` is returned.
+	//         - If atomic update fails: Similar to Case B, check if the new global STC (set by another CPU)
+	//           is suitable for current affinity; otherwise, return `bestAffinityCandidate`.
+	//
+	// This multi-stage process aims to find the best core for consolidation while respecting
+	// affinity, ensuring core viability, preventing rapid STC changes (hysteresis), and
+	// handling concurrent updates to the global `sSmallTaskCore` variable.
 
 	SCHEDULER_ENTER_FUNCTION();
+
+	// --- Step 1: Initialization and Parameter Handling ---
 	CPUSet affinityMask;
 	if (affinityMaskPtr != NULL)
 		affinityMask = *affinityMaskPtr;
 	const bool useAffinityMask = !affinityMask.IsEmpty();
 
-	CoreEntry* currentGlobalSTC = sSmallTaskCore; // Capture current global value
+	CoreEntry* currentGlobalSTC = sSmallTaskCore; // Capture current global sSmallTaskCore
 
-	// Check if current sSmallTaskCore is still valid and suitable
-	if (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
+	// --- Step 2: Validation of Current Global STC ---
+	// Check if currentGlobalSTC is valid and suitable for the given affinity (if any).
+	if (currentGlobalSTC != NULL) {
+		bool isValidForAffinity = !useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask);
 		bool hasEnabledCPU = false;
-		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (currentGlobalSTC->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
-				hasEnabledCPU = true;
-				break;
+		if (isValidForAffinity) { // Only check CPUs if affinity matches or no affinity specified
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (currentGlobalSTC->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
+					hasEnabledCPU = true;
+					break;
+				}
 			}
 		}
-		if (!hasEnabledCPU) {
-			// Current STC is no longer valid (CPUs disabled)
-			if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentGlobalSTC) == currentGlobalSTC) {
-				// Successfully nulled it if it was indeed currentGlobalSTC
-				dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated (no enabled CPUs).\n", currentGlobalSTC->ID());
+
+		if (!isValidForAffinity || !hasEnabledCPU) {
+			// Current global STC is unsuitable for this specific call due to affinity mismatch,
+			// or it has no enabled CPUs (globally unsuitable).
+			if (!hasEnabledCPU && isValidForAffinity) {
+				// If it was globally unsuitable (no enabled CPUs), attempt to clear the global pointer.
+				// This TAS ensures we only nullify it if it hasn't been changed by another CPU already.
+				if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentGlobalSTC) == currentGlobalSTC) {
+					dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated (no enabled CPUs).\n", currentGlobalSTC->ID());
+				}
 			}
-			currentGlobalSTC = NULL; // Proceed to find a new one
+			// Regardless of global update, for this call, currentGlobalSTC is considered NULL.
+			currentGlobalSTC = NULL;
 		}
-		// If currentGlobalSTC is still valid here, it's a candidate to stick with.
-	} else if (currentGlobalSTC != NULL && useAffinityMask && !currentGlobalSTC->CPUMask().Matches(affinityMask)) {
-		// Current global STC exists but doesn't match affinity for *this call*.
-		// We will still find the best candidate for *this affinity*, but we won't try to overwrite the global STC
-		// unless our candidate is significantly better *and* the global STC is NULL or also being replaced.
-		// For now, this path means currentGlobalSTC is not *our* preferred sticky candidate for this call.
 	}
 
-
+	// --- Step 3: Scoring Potential Cores ---
 	CoreEntry* bestAffinityCandidate = NULL;
-	int32 bestAffinityCandidateScore = -1;
+	int32 bestAffinityCandidateScore = -1; // Lower scores are less preferable.
 
 	for (int32 i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[i];
+
+		// Skip defunct cores
+		if (core->fDefunct)
+			continue;
+
+		// Skip if core doesn't match affinity mask
 		if (useAffinityMask && !core->CPUMask().Matches(affinityMask))
 			continue;
 
+		// Skip if core has no enabled CPUs
 		bool hasEnabledCPUOnThisCore = false;
 		for (int32 j = 0; j < smp_get_num_cpus(); j++) {
 			if (core->CPUMask().GetBit(j) && gCPUEnabled.GetBit(j)) {
@@ -141,91 +187,91 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 		if (!hasEnabledCPUOnThisCore)
 			continue;
 
+		// Calculate score for the current core
 		int32 currentCoreLoad = core->GetLoad();
 		int32 score = 0;
-
-		// Refined Scoring (Proposal 2)
-		if (core->GetActiveTime() == 0 && currentCoreLoad == 0) { // Truly idle
-			score = kMaxLoad * 2; // Strongest preference
-		} else if (currentCoreLoad < kLowLoad) { // Very lightly loaded (active or not)
-			score = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - currentCoreLoad); // Higher than just active, rewards lower load
-		} else if (core->GetActiveTime() > 0 && currentCoreLoad < kHighLoad) { // Active and not heavily loaded
-			score = kMaxLoad + (kHighLoad - currentCoreLoad); // Base bonus for being active and light
-		} else { // Busy, or idle but with some residual load reported (less ideal)
-			score = kMaxLoad - currentCoreLoad; // Original base score
+		if (core->GetActiveTime() == 0 && currentCoreLoad == 0) {
+			score = kMaxLoad * 2; // Strongest preference: truly idle
+		} else if (currentCoreLoad < kLowLoad) {
+			score = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - currentCoreLoad); // Next: very lightly loaded
+		} else if (core->GetActiveTime() > 0 && currentCoreLoad < kHighLoad) {
+			score = kMaxLoad + (kHighLoad - currentCoreLoad); // Next: active and not heavily loaded
+		} else {
+			score = kMaxLoad - currentCoreLoad; // Base: other (higher load is lower score)
 		}
 
-		// Hysteresis/Stickiness Boost (Proposal 1 part A)
-		// If this core is the current global STC (and matches affinity for this call), give it a boost.
-		if (core == currentGlobalSTC && (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask)))) {
+		// Apply hysteresis boost if this core is the current (and still valid) global STC
+		if (core == currentGlobalSTC && currentGlobalSTC != NULL) {
 			score += kConsolidationScoreHysteresisMargin;
 		}
 
-		if (score > bestAffinityCandidateScore) {
+		// Update best candidate if current core is better
+		if (bestAffinityCandidate == NULL || score > bestAffinityCandidateScore) {
 			bestAffinityCandidateScore = score;
 			bestAffinityCandidate = core;
 		}
 	}
 
-	// Decision logic (Proposal 1 part B & Proposal 3 simplification)
+	// --- Step 4: Decision Logic ---
 	if (bestAffinityCandidate == NULL) {
-		// No core matches affinity or no cores enabled.
-		return NULL;
+		TRACE("PS designate_consolidation_core: No suitable candidate found (affinity/enabled check failed for all).\n");
+		return NULL; // No core matches affinity or no cores enabled.
 	}
 
-	// If currentGlobalSTC is still valid for this affinity and is our bestAffinityCandidate, just return it.
-	if (currentGlobalSTC == bestAffinityCandidate && currentGlobalSTC != NULL
-		&& (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
+	// Case A: Current global STC is valid for this context and is also the best candidate found.
+	if (currentGlobalSTC == bestAffinityCandidate && currentGlobalSTC != NULL) {
+		TRACE("PS designate_consolidation_core: Sticking with current sSmallTaskCore %" B_PRId32 " (score %" B_PRId32 ").\n", currentGlobalSTC->ID(), bestAffinityCandidateScore);
 		return currentGlobalSTC;
 	}
 
-	// If currentGlobalSTC exists, is valid for this affinity, but is NOT our bestAffinityCandidate:
-	// Only switch if bestAffinityCandidate is significantly better.
-	if (currentGlobalSTC != NULL && (!useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask))) {
-		int32 currentGlobalSTCScore = 0; // Recalculate its score without the self-boost for fair comparison
+	// Case B: Current global STC was valid, but a different candidate is better.
+	// Only switch if the new candidate is *significantly* better.
+	if (currentGlobalSTC != NULL) {
+		// Recalculate currentGlobalSTC's score *without* the hysteresis boost for fair comparison.
+		int32 currentGlobalSTCBaseScore = 0;
 		int32 load = currentGlobalSTC->GetLoad();
-		if (currentGlobalSTC->GetActiveTime() == 0 && load == 0) { currentGlobalSTCScore = kMaxLoad * 2; }
-		else if (load < kLowLoad) { currentGlobalSTCScore = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - load); }
-		else if (currentGlobalSTC->GetActiveTime() > 0 && load < kHighLoad) { currentGlobalSTCScore = kMaxLoad + (kHighLoad - load); }
-		else { currentGlobalSTCScore = kMaxLoad - load; }
+		if (currentGlobalSTC->GetActiveTime() == 0 && load == 0) { currentGlobalSTCBaseScore = kMaxLoad * 2; }
+		else if (load < kLowLoad) { currentGlobalSTCBaseScore = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - load); }
+		else if (currentGlobalSTC->GetActiveTime() > 0 && load < kHighLoad) { currentGlobalSTCBaseScore = kMaxLoad + (kHighLoad - load); }
+		else { currentGlobalSTCBaseScore = kMaxLoad - load; }
 
-		if (bestAffinityCandidateScore > currentGlobalSTCScore + kConsolidationScoreHysteresisMargin) {
-			// Significantly better, attempt to set globally
+		if (bestAffinityCandidateScore > currentGlobalSTCBaseScore + kConsolidationScoreHysteresisMargin) {
+			// bestAffinityCandidate is significantly better. Attempt to set it as the new global STC.
 			if (atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC) == currentGlobalSTC) {
-				dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 " (was %" B_PRId32 ")\n", bestAffinityCandidate->ID(), currentGlobalSTC->ID());
+				dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 " (was %" B_PRId32 ", score %" B_PRId32 " vs %" B_PRId32 ").\n",
+					bestAffinityCandidate->ID(), currentGlobalSTC->ID(), bestAffinityCandidateScore, currentGlobalSTCBaseScore);
 				return bestAffinityCandidate;
 			} else {
-				// Race: someone else changed sSmallTaskCore. Return the new global if it matches affinity.
-				CoreEntry* newGlobalSTC = sSmallTaskCore; // Re-read after failed atomic_tas
-				if (newGlobalSTC != NULL && (!useAffinityMask || newGlobalSTC->CPUMask().Matches(affinityMask)))
-					return newGlobalSTC;
-				return bestAffinityCandidate; // Fallback to our best affinity candidate if new global doesn't match
+				// Race condition: sSmallTaskCore was changed by another CPU.
+				// Use the new global STC if it fits affinity, otherwise use our best candidate for this call.
+				CoreEntry* newGlobalSTCFromRace = sSmallTaskCore; // Re-read the new global value
+				TRACE("PS designate_consolidation_core: Race detected trying to set STC. New global is %" B_PRId32 ".\n", newGlobalSTCFromRace ? newGlobalSTCFromRace->ID() : -1);
+				if (newGlobalSTCFromRace != NULL && (!useAffinityMask || newGlobalSTCFromRace->CPUMask().Matches(affinityMask)) && !newGlobalSTCFromRace->fDefunct)
+					return newGlobalSTCFromRace;
+				return bestAffinityCandidate; // Fallback to our affinity-best if new global STC doesn't fit
 			}
 		} else {
-			// Not significantly better, stick with currentGlobalSTC for this call
+			// Not significantly better, stick with currentGlobalSTC for this call.
+			TRACE("PS designate_consolidation_core: bestAffinityCandidate %" B_PRId32 " (score %" B_PRId32 ") not significantly better than current STC %" B_PRId32 " (base score %" B_PRId32 "). Sticking.\n",
+				bestAffinityCandidate->ID(), bestAffinityCandidateScore, currentGlobalSTC->ID(), currentGlobalSTCBaseScore);
 			return currentGlobalSTC;
 		}
 	} else {
-		// No current valid global STC (either NULL or didn't match affinity for this call), or we are setting it for the first time.
-		// Attempt to set our bestAffinityCandidate as the global one.
-		CoreEntry* previousGlobalValue = atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC);
-			// `currentGlobalSTC` here is what `sSmallTaskCore` was at the start of the function,
-			// or NULL if it was invalidated. This TAS tries to replace that old value.
-
-		if (previousGlobalValue == currentGlobalSTC) { // Successfully set it (or it was already bestAffinityCandidate)
-			if (currentGlobalSTC != bestAffinityCandidate) // Only print if it actually changed or was newly set
-				dprintf("scheduler: Power Saving - sSmallTaskCore designated to core %" B_PRId32 " (previous was %s%" B_PRId32 ")\n",
-					bestAffinityCandidate->ID(), currentGlobalSTC ? "" : "NULL or affinity mismatch, now ", currentGlobalSTC ? currentGlobalSTC->ID() : -1);
+		// Case C: No currentGlobalSTC was valid for this context (it was NULL or failed validation).
+		// Attempt to set our bestAffinityCandidate as the new global STC.
+		// `currentGlobalSTC` here is the value sSmallTaskCore had at the start (possibly NULL or invalidated one).
+		CoreEntry* previousGlobalValueBeforeTAS = sSmallTaskCore; // Read just before TAS for accurate comparison in dprintf
+		if (atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, previousGlobalValueBeforeTAS) == previousGlobalValueBeforeTAS) {
+			dprintf("scheduler: Power Saving - sSmallTaskCore newly designated to core %" B_PRId32 " (score %" B_PRId32 "). Previous was %s.\n",
+				bestAffinityCandidate->ID(), bestAffinityCandidateScore, previousGlobalValueBeforeTAS ? "valid" : "NULL/invalid");
 			return bestAffinityCandidate;
 		} else {
-			// Race: someone else changed sSmallTaskCore between our initial read and the TAS.
-			// Return the new global value if it matches our affinity needs.
-			CoreEntry* newGlobalSTC = sSmallTaskCore; // Re-read after failed atomic_tas
-			if (newGlobalSTC != NULL && (!useAffinityMask || newGlobalSTC->CPUMask().Matches(affinityMask)))
-				return newGlobalSTC;
-			// If the new global STC doesn't match our affinity, we return our best candidate for this call,
-			// but the global STC remains what the other thread set it to.
-			return bestAffinityCandidate;
+			// Race condition: sSmallTaskCore was changed by another CPU.
+			CoreEntry* newGlobalSTCFromRace = sSmallTaskCore; // Re-read the new global value
+			TRACE("PS designate_consolidation_core: Race detected trying to set new STC. New global is %" B_PRId32 ".\n", newGlobalSTCFromRace ? newGlobalSTCFromRace->ID() : -1);
+			if (newGlobalSTCFromRace != NULL && (!useAffinityMask || newGlobalSTCFromRace->CPUMask().Matches(affinityMask)) && !newGlobalSTCFromRace->fDefunct)
+				return newGlobalSTCFromRace;
+			return bestAffinityCandidate; // Fallback to our affinity-best
 		}
 	}
 }

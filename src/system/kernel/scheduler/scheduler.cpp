@@ -951,8 +951,7 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf,
 		"Get the scheduler's current gKernelKDistFactor",
 		"Gets the scheduler's current gKernelKDistFactor.", 0);
-	add_debugger_command_etc("get_kdf", &cmd_scheduler_get_kdf,
-		"Alias for scheduler_get_kdf", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+	add_debugger_command_alias("get_kdf", "scheduler_get_kdf", "Alias for scheduler_get_kdf");
 
 	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor,
 		"Set the scheduler's SMT conflict factor.",
@@ -963,14 +962,12 @@ _scheduler_init_kdf_debug_commands()
 		"              0.5 = SMT sibling load contributes 50% to penalty.\n"
 		"              1.0 = SMT sibling load fully contributes to penalty.\n"
 		"Note: This value is overridden by scheduler mode switches to the mode's default.", 0);
-	add_debugger_command_etc("set_smt_factor", &cmd_scheduler_set_smt_factor,
-		"Alias for scheduler_set_smt_factor", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor,
 		"Get the scheduler's current SMT conflict factor.",
 		"Gets the current value of Scheduler::gSchedulerSMTConflictFactor.", 0);
-	add_debugger_command_etc("get_smt_factor", &cmd_scheduler_get_smt_factor,
-		"Alias for scheduler_get_smt_factor", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+	add_debugger_command_alias("get_smt_factor", "scheduler_get_smt_factor", "Alias for scheduler_get_smt_factor");
 }
 
 

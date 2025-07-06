@@ -3,6 +3,9 @@
 #include "snmalloc_kernel_api.h"
 #include "pal_haiku_kernel.h" // For snmalloc::PALHaikuKernel for init
 
+// Define the PAL type *before* including core snmalloc headers that might use it.
+#define SNMALLOC_PAL_TYPE PALHaikuKernel
+
 // snmalloc core includes
 #include <snmalloc/snmalloc_core.h>
 #include <snmalloc/adapters/ThreadAlloc.h> // For snmalloc::ThreadAlloc

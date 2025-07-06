@@ -9,13 +9,18 @@
 #include <pthread.h> // For pthread_once
 #include <kits/support/TLS.h>    // For Haiku's TLS (tls_set, tls_get)
 
+// Define the PAL type *before* including core snmalloc headers that might use it.
+// This PALHaikuUser should be defined in "snmalloc/pal_haiku_user.h"
+#include "snmalloc/pal_haiku_user.h" // Haiku-specific userland PAL from within /src
+#define SNMALLOC_PAL_TYPE PALHaikuUser
+
 // Main snmalloc include - this should bring in necessary core types and APIs.
-// The exact path might need adjustment based on final include structure in Haiku's build.
+// It will use SNMALLOC_PAL_TYPE.
 #include <snmalloc/snmalloc_core.h>
 // PAL Data Structures, which often contain fork handling logic.
 #include <snmalloc/pal/pal_ds.h>
-// PAL for Haiku (userland) to ensure its definitions are available if needed by PALDS.
-#include <snmalloc/pal/pal_haiku.h>
+// Note: <snmalloc/pal/pal_haiku.h> from the reference tree is no longer directly included here.
+// Our local pal_haiku_user.h provides the PALHaikuUser class.
 
 
 // Global flag to track if snmalloc's core/global components are initialized.

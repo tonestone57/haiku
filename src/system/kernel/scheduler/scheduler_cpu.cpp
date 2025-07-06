@@ -315,7 +315,9 @@ CPUEntry::UpdateInstantaneousLoad(bigtime_t now)
 		if (activeTimeDelta > timeDelta) activeTimeDelta = timeDelta; // Cap at elapsed wall time
 
 		currentActivitySample = (float)activeTimeDelta / timeDelta;
-		currentActivitySample = std::max(0.0f, std::min(1.0f, currentActivitySample));
+		// Clamping currentActivitySample to [0.0, 1.0] is redundant here,
+		// as activeTimeDelta is already capped to be within [0, timeDelta]
+		// and timeDelta is positive in this branch.
 
 		fInstantaneousLoad = (kInstantLoadEWMAAlpha * currentActivitySample)
 			+ ((1.0f - kInstantLoadEWMAAlpha) * fInstantaneousLoad);

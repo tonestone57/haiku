@@ -322,10 +322,8 @@ ThreadData::_ComputeNeededLoad()
 	if (period <= 0)
 		return;
 
-	int32 currentLoadPercentage = 0;
-	if (period > 0) {
-		currentLoadPercentage = (int32)((fMeasureAvailableActiveTime * kMaxLoad) / period);
-	}
+	// period is guaranteed > 0 here due to the check above.
+	int32 currentLoadPercentage = (int32)((fMeasureAvailableActiveTime * kMaxLoad) / period);
 	currentLoadPercentage = std::max(0, std::min(kMaxLoad, currentLoadPercentage));
 
 	const float alpha = 0.5f;

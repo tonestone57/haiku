@@ -1,5 +1,68 @@
 SubDir HAIKU_TOP src system libroot posix malloc ;
 
+# This will build posix_malloc_debug.o for the debug version of libroot.
 HaikuSubInclude debug ;
-#HaikuSubInclude hoard2 ;
-HaikuSubInclude openbsd ;
+
+# Determine the malloc implementation to use for libroot.
+# Default to 'openbsd', can be overridden by a build profile setting this variable.
+# For testing, you can uncomment and set this locally:
+# HAIKU_LIBROOT_ALLOCATOR ?= snmalloc ;
+HAIKU_LIBROOT_ALLOCATOR ?= openbsd ;
+
+local architectureObject ;
+for architectureObject in [ MultiArchSubDirSetup ] {
+	on $(architectureObject) {
+		local architecture = $(TARGET_PACKAGING_ARCH) ;
+		UsePrivateSystemHeaders ;
+
+		if $(HAIKU_LIBROOT_ALLOCATOR) = snmalloc {
+			Echo libroot malloc: snmalloc ;
+
+			# Set up include paths for snmalloc library headers and the Haiku userland PAL
+			# The snmalloc core headers are in BSD/snmalloc-main/src/
+			# The Haiku userland PAL (pal_haiku.h) is in BSD/snmalloc-main/src/snmalloc/pal/
+			SubDirC++Flags
+				-I$(HAIKU_TOP)/BSD/snmalloc-main/src
+			;
+			# Add a specific define to tell snmalloc_hooks.cpp or snmalloc core
+			# if it's being built for userland with this specific PAL.
+			# This might also inform which snmalloc configuration to use.
+			SubDirC++Flags -DLIBC_MALLOC_SNMALLOC_Hooks ;
+
+
+			# snmalloc is largely header-only for its core logic.
+			# snmalloc_hooks.cpp includes the necessary snmalloc headers.
+			# The Haiku PAL (pal_haiku.h) is also included from snmalloc_hooks.cpp
+			# via <snmalloc/pal/pal_haiku.h>.
+			# No other .cpp files from snmalloc are compiled directly here for libroot;
+			# they are pulled in via headers by snmalloc_hooks.cpp.
+			# If snmalloc had specific .cc files for PAL or overrides that were *not*
+			# header-only and needed for userland, they would be listed here.
+			# For example, if snmalloc had a pal_haiku.cpp:
+			#	$(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/pal/pal_haiku.cpp
+
+			MergeObject <$(architecture)>posix_malloc.o :
+				snmalloc_hooks.cpp
+				# Add other necessary snmalloc .cpp files here if any
+				# For example, if snmalloc's standard overrides are in .cc files:
+				# $(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/override/malloc.cc
+				# $(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/override/new.cc
+				# $(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/override/malloc-extensions.cc
+				# However, snmalloc_hooks.cpp already provides stubs for mspace,
+				# and snmalloc itself typically overrides malloc/free/new/delete symbols
+				# when its headers are included and linked.
+				# The primary linkage point is snmalloc_hooks.cpp which calls snmalloc's API.
+			;
+
+		} else if $(HAIKU_LIBROOT_ALLOCATOR) = hoard2 {
+			Echo libroot malloc: hoard2 ;
+			# hoard2 has its own Jamfile in its subdirectory
+			HaikuSubInclude hoard2 ;
+		} else {
+			# Default to openbsd
+			Echo libroot malloc: openbsd ;
+			# openbsd has its own Jamfile in its subdirectory
+			HaikuSubInclude openbsd ;
+		}
+	}
+}

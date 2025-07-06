@@ -28,6 +28,8 @@
 #include <slab/Slab.h> // For object_cache_alloc (used by old PAL version, now only for HaikuKernelSubMapping if not using internal pool)
 #include <kernel/thread.h> // For spinlock, disable_interrupts, etc.
 
+extern int64 gMappedPagesCount; // For tracking mapped pages globally in kernel
+
 
 // Forward declaration
 struct PageRunInfo; // If used by HaikuKernelSubMapping or other PAL structs
@@ -254,26 +256,10 @@ namespace snmalloc
             restore_interrupts(inner_pool_lock_state);
         }
 
-        if (Pprev_next_ptr != &g_snmalloc_va_free_list_head) {
-            VAExtent* prev_block_iter = g_snmalloc_va_free_list_head;
-            VAExtent* block_before_new_free = nullptr;
-            while(prev_block_iter != nullptr && prev_block_iter->next_free != new_free_extent) {
-                prev_block_iter = prev_block_iter->next_free;
-            }
-            block_before_new_free = prev_block_iter;
-
-            if (block_before_new_free != nullptr &&
-                (block_before_new_free->base + block_before_new_free->size == new_free_extent->base)) {
-                block_before_new_free->size += new_free_extent->size;
-                block_before_new_free->next_free = new_free_extent->next_free;
-
-                cpu_status inner_pool_lock_state = disable_interrupts();
-                acquire_spinlock(&g_pal_va_extent_pool_lock);
-                _free_va_extent_struct_locked(new_free_extent);
-                release_spinlock(&g_pal_va_extent_pool_lock);
-                restore_interrupts(inner_pool_lock_state);
-            }
-        }
+        // Simplified: Removed complex backward merge.
+        // Forward merge (with the next block) is handled above.
+        // A more sophisticated VA manager might be needed if fragmentation within
+        // the arena becomes a problem, but this is a robust starting point.
         release_spinlock(&g_snmalloc_va_list_lock);
         restore_interrupts(lock_state);
     }
@@ -368,7 +354,20 @@ namespace snmalloc
         acquire_spinlock(&g_snmalloc_pal_lock);
 
         if (g_snmalloc_kernel_area_id >= B_OK) {
-            // ... (leak check for s_kernel_mapping_list) ...
+            if (s_kernel_mapping_list != nullptr) {
+                // This indicates snmalloc did not free all memory it mapped via the PAL.
+                // Forcing cleanup here can hide bugs in snmalloc's usage or its own teardown.
+                // Better to log/panic if this state is reached unexpectedly.
+                dprintf("PALHaikuKernel: StaticTeardown: s_kernel_mapping_list is not empty! Potential leak by snmalloc.\n");
+                HaikuKernelSubMapping* leaked_mapping = s_kernel_mapping_list;
+                while (leaked_mapping != nullptr) {
+                    dprintf("PALHaikuKernel: Leaked mapping: VA %p, Size %zu\n",
+                        leaked_mapping->virtual_address, leaked_mapping->size_in_bytes);
+                    leaked_mapping = leaked_mapping->next;
+                }
+                // Depending on policy, could panic here.
+                // panic("PALHaikuKernel: StaticTeardown detected leaked mappings.");
+            }
             delete_area(g_snmalloc_kernel_area_id);
             g_snmalloc_kernel_area_id = -1;
             g_snmalloc_kernel_vm_area = nullptr;

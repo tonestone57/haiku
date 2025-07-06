@@ -61,6 +61,11 @@
 #include <vm/vm.h>
 #include <boot/kernel_args.h>
 
+// Include for specific allocator API if chosen
+#if defined(KERNEL_ALLOCATOR_SNMALLOC)
+#include <kernel/alloc/snmalloc/snmalloc_kernel_api.h>
+#endif
+
 #include "vm/VMAnonymousCache.h"
 
 
@@ -196,6 +201,19 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
 		// now we can create and use semaphores
 		TRACE("init VM semaphores\n");
 		vm_init_post_sem(&sKernelArgs);
+
+#if defined(KERNEL_ALLOCATOR_SNMALLOC)
+		TRACE("init snmalloc kernel allocator\n");
+		if (kmalloc_init() != B_OK) {
+			panic("Kernel allocator (snmalloc) initialization failed!");
+		}
+#else
+		// TODO: If there's a heap_init() for the slab allocator, ensure it's called here
+		// or that its initialization path is still valid.
+		// For now, assuming slab is initialized via its static objects or other means
+		// if KERNEL_ALLOCATOR_SNMALLOC is not defined.
+#endif
+
 		TRACE("init generic syscall\n");
 		generic_syscall_init();
 		smp_init_post_generic_syscalls();

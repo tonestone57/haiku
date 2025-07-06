@@ -1,0 +1,68 @@
+# Jamfile for src/system/kernel/alloc
+
+SubDir HAIKU_TOP src system kernel alloc ;
+
+UsePrivateHeaders kernel ; # For kernel-specific headers if PAL needs more
+
+# Default to slab, but allow override (e.g., from a build profile)
+# For testing, you can uncomment and set this locally:
+# HAIKU_KERNEL_ALLOCATOR ?= snmalloc ;
+HAIKU_KERNEL_ALLOCATOR ?= slab ;
+
+local allocatorObjects ;
+local allocatorDefines ;
+
+if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
+    # Use snmalloc
+    Echo Kernel allocator: snmalloc ;
+
+    # Ensure include paths for snmalloc core headers and the kernel PAL
+    # The snmalloc core headers are in BSD/snmalloc-main/src/
+    # The PAL specific to kernel is in the 'snmalloc' subdirectory here.
+    SubDirC++Flags
+        -I$(HAIKU_TOP)/BSD/snmalloc-main/src
+        -I$(SUBDIR)/snmalloc # For pal_haiku_kernel.h
+    ;
+
+    KernelMergeObject snmalloc_kernel_api.o :
+        snmalloc/snmalloc_kernel_api.cpp
+    ;
+    allocatorObjects = snmalloc_kernel_api.o ;
+
+    # Pass a define to kernel build to indicate snmalloc is used,
+    # if any C++ code elsewhere in the kernel needs to know.
+    allocatorDefines = -DKERNEL_ALLOCATOR_SNMALLOC ;
+    SubDirC++Flags $(SubDirC++Flags) $(allocatorDefines) ;
+
+} else {
+    # Default to slab allocator (or any other chosen default)
+    Echo Kernel allocator: slab ;
+    # The slab allocator is currently built via src/system/kernel/slab/Jamfile
+    # and its objects are directly included in src/system/kernel/Jamfile.
+    # This Jamfile (alloc/Jamfile) will produce an empty kernel_allocator.o
+    # in this case, or we can make src/system/kernel/Jamfile conditional
+    # on kernel_slab.o vs kernel_allocator.o from here.
+
+    # For now, this Jamfile won't produce conflicting symbols if slab is default.
+    # If this Jamfile *must* provide the 'kernel_allocator.o' target,
+    # we'd do something like this:
+    # KernelMergeObject slab_dummy.o : empty.cpp ; # Assuming an empty.cpp
+    # allocatorObjects = slab_dummy.o ;
+    # However, it's cleaner to adjust src/system/kernel/Jamfile to pick one.
+}
+
+# This object will be conditionally included in the main kernel link
+# based on the allocator choice.
+# If allocatorObjects is empty (e.g. slab is handled by its own Jamfile),
+# then this target might not be strictly necessary, or kernel/Jamfile
+# needs to be aware.
+if $(allocatorObjects) {
+    KernelMergeObject kernel_allocator.o :
+        $(allocatorObjects)
+    ;
+    # If defines were set:
+    # SubDirCcFlags $(allocatorDefines) ;
+    # SubDirC++Flags $(allocatorDefines) ;
+}
+
+[end of src/system/kernel/alloc/Jamfile]

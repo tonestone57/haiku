@@ -103,7 +103,8 @@ KernelLd kernel_$(TARGET_ARCH) :
 	kernel_fs.o
 	kernel_messaging.o
 	kernel_posix.o
-	kernel_slab.o
+	# kernel_slab.o will be replaced by KERNEL_ALLOCATOR_OBJECT
+	$(KERNEL_ALLOCATOR_OBJECT)
 	kernel_util.o
 	kernel_vm.o
 
@@ -144,7 +145,8 @@ if $(HAIKU_ARCH) in x86_64 arm {
 		kernel_fs.o
 		kernel_messaging.o
 		kernel_posix.o
-		kernel_slab.o
+		# kernel_slab.o will be replaced by KERNEL_ALLOCATOR_OBJECT
+		$(KERNEL_ALLOCATOR_OBJECT)
 		kernel_util.o
 		kernel_vm.o
 
@@ -201,4 +203,18 @@ SubInclude HAIKU_TOP src system kernel vm ;
 
 if $(TARGET_KERNEL_PLATFORM) {
 	SubInclude HAIKU_TOP src system kernel platform $(TARGET_KERNEL_PLATFORM) ;
+}
+
+SubInclude HAIKU_TOP src system kernel alloc ;
+
+# Determine the kernel allocator object to use
+# HAIKU_KERNEL_ALLOCATOR is expected to be set by alloc/Jamfile (defaults to slab)
+# or by a build profile.
+local KERNEL_ALLOCATOR_OBJECT ;
+if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
+	KERNEL_ALLOCATOR_OBJECT = kernel_allocator.o ;
+		# This is built by alloc/Jamfile and contains snmalloc
+} else {
+	KERNEL_ALLOCATOR_OBJECT = kernel_slab.o ;
+		# This is built by slab/Jamfile
 }

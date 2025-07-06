@@ -102,6 +102,10 @@ private:
 	typedef Heap<PriorityEntry, unsigned int, HeapGreaterCompare<unsigned int> >
 		PriorityHeap;
 
+			// A key value that is guaranteed to be "worse" (larger for this min-heap of priorities)
+			// than any valid priority, used to effectively remove an entry from heap consideration.
+			static const unsigned int kInvalidOrLastPriorityKey = MaxPriority + 1;
+
 			// status_t	fInitStatus; // Removed as it was always B_OK
 
 			PriorityEntry	fPriorityEntries[MaxPriority + 1];
@@ -347,8 +351,21 @@ RUN_QUEUE_CLASS_NAME::Remove(Element* element)
 		|| (fHeads[priority] != NULL && fTails[priority] != NULL));
 
 	if (fHeads[priority] == NULL) {
-		fPriorityHeap.ModifyKey(&fPriorityEntries[priority], MaxPriority + 1);
-		ASSERT(fPriorityHeap.PeekRoot() == &fPriorityEntries[priority]);
+		// This priority level is now empty. To remove its corresponding PriorityEntry
+		// from the fPriorityHeap (which tracks non-empty priority levels):
+		// 1. Modify its key in the heap to an invalid/last value. Since fPriorityHeap
+		//    uses HeapGreaterCompare, this effectively makes it the "largest" (worst)
+		//    key if it wasn't already.
+		// 2. Assert that it's now the root (or would be if it was the only one,
+		//    or became the one with the "largest" key). This assertion might be too strong
+		//    if other keys could also be kInvalidOrLastPriorityKey, but for typical
+		//    heap usage this is expected after making it the worst.
+		// 3. Remove the root. If it was the only element, or the one we just modified
+		//    was indeed the one with the highest key value, this removes it.
+		// This pattern is used when a direct Remove(specific_entry) isn't available/used.
+		fPriorityHeap.ModifyKey(&fPriorityEntries[priority], kInvalidOrLastPriorityKey);
+		ASSERT(fPriorityHeap.PeekRoot() == &fPriorityEntries[priority] || fPriorityHeap.Count() == 0
+			|| PriorityHeap::GetKey(fPriorityHeap.PeekRoot()) == kInvalidOrLastPriorityKey);
 		fPriorityHeap.RemoveRoot();
 	}
 

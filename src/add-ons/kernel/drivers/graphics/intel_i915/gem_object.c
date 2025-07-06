@@ -170,23 +170,39 @@ i915_gem_object_lru_uninit(struct intel_i915_device_info* devInfo)
 	mutex_lock(&devInfo->lru_lock);
 	struct intel_i915_gem_object* obj;
 	struct intel_i915_gem_object* temp_obj;
-	int cleared_count = 0;
+	int cleanup_count = 0;
 
 	list_for_every_entry_safe(&devInfo->active_lru_list, obj, temp_obj, struct intel_i915_gem_object, lru_link) {
-		// This object should ideally have been unmapped and removed from LRU
-		// when its refcount dropped to zero or it was explicitly evicted.
-		// If it's still here, it's a potential leak or inconsistent state.
-		// For cleanup, remove it. The object itself will be freed if its refcount drops.
-		TRACE("GEM LRU: Uninit: Removing object %p (area %" B_PRId32 ") still on LRU list.\n",
+		TRACE("GEM LRU: Uninit: Object %p (area %" B_PRId32 ") found on LRU list. Attempting cleanup.\n",
 			obj, obj->backing_store_area);
+
+		// Remove from LRU list first.
 		list_remove_item(&devInfo->active_lru_list, obj);
-		// Note: This doesn't 'put' the object, just removes from this list.
-		// If this is the last ref to the list management, the object's own refcount
-		// should handle its destruction.
-		cleared_count++;
+
+		// If it was GTT mapped, unmap it. This will also free its GTT space from the bitmap.
+		// intel_i915_gem_object_unmap_gtt also removes from LRU, but it's safe to call remove again.
+		if (obj->gtt_mapped) {
+			TRACE("GEM LRU: Uninit: Object %p was GTT mapped, calling unmap_gtt.\n", obj);
+			intel_i915_gem_object_unmap_gtt(obj); // This also sets current_state to SYSTEM
+		} else {
+			// If not GTT mapped but still on active_lru_list, that's an inconsistent state.
+			// Ensure its state is SYSTEM.
+			obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM;
+		}
+
+		// Decrement refcount. If this is the last reference, it will be freed.
+		// This is important as the LRU list itself might have held a conceptual reference,
+		// or the object might have been leaked if its normal usage path didn't 'put' it enough times.
+		intel_i915_gem_object_put(obj);
+		cleanup_count++;
 	}
-	if (cleared_count > 0) {
-		TRACE("GEM LRU: Uninit: Cleared %d objects from active_lru_list during uninit.\n", cleared_count);
+
+	if (cleanup_count > 0) {
+		TRACE("GEM LRU: Uninit: Processed and put %d objects from active_lru_list during uninit.\n", cleanup_count);
+	}
+	// Ensure the list is truly empty after the loop.
+	if (!list_is_empty(&devInfo->active_lru_list)) {
+		TRACE("GEM LRU: Uninit: WARNING - active_lru_list is NOT empty after cleanup loop!\n");
 	}
 	mutex_unlock(&devInfo->lru_lock);
 

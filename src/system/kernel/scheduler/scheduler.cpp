@@ -874,17 +874,66 @@ init()
 	gPackageEntries = new(std::nothrow) PackageEntry[packageCount];
 	if (gPackageEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<PackageEntry> packageEntriesDeleter(gPackageEntries);
-	new(&gCoreLoadHeap) CoreLoadHeap(coreCount);
-	new(&gCoreHighLoadHeap) CoreLoadHeap(coreCount);
+	new(&gCoreLoadHeap) CoreLoadHeap(actualCoreCount);
+	new(&gCoreHighLoadHeap) CoreLoadHeap(actualCoreCount);
 	new(&gIdlePackageList) IdlePackageList;
-	for (int32 i = 0; i < cpuCount; i++) {
-		CoreEntry* currentCore = &gCoreEntries[sCPUToCore[i]];
-		PackageEntry* currentPackage = &gPackageEntries[sCPUToPackage[i]];
-		currentPackage->Init(sCPUToPackage[i]);
-		currentCore->Init(sCPUToCore[i], currentPackage);
-		gCPUEntries[i].Init(i, currentCore);
-		currentCore->AddCPU(&gCPUEntries[i]);
+
+	// Initialize Package IDs first
+	for (int32 i = 0; i < actualPackageCount; ++i) {
+		gPackageEntries[i].Init(i);
 	}
+
+	// Temporary tracking to ensure each core increments its package's core count only once.
+	bool* coreHasRegisteredWithPackage = new(std::nothrow) bool[actualCoreCount];
+	if (coreHasRegisteredWithPackage == NULL) {
+		// Deleters will clean up gCPUEntries, gCoreEntries, gPackageEntries
+		return B_NO_MEMORY;
+	}
+	ArrayDeleter<bool> coreRegisteredDeleter(coreHasRegisteredWithPackage);
+	for (int32 i = 0; i < actualCoreCount; ++i)
+		coreHasRegisteredWithPackage[i] = false;
+
+	// Initialize CoreEntry objects, link them to packages,
+	// and have them register with their package to count cores.
+	for (int32 i = 0; i < cpuCount; ++i) { // Iterate over logical CPUs
+		int32 coreIdx = sCPUToCore[i];
+		int32 packageIdx = sCPUToPackage[i];
+
+		ASSERT(coreIdx >= 0 && coreIdx < actualCoreCount);
+		ASSERT(packageIdx >= 0 && packageIdx < actualPackageCount);
+
+		CoreEntry* currentCore = &gCoreEntries[coreIdx];
+		PackageEntry* currentPackage = &gPackageEntries[packageIdx];
+
+		// CoreEntry::Init sets its fPackage field.
+		// Call Init only once per core. Assuming core IDs are dense from topology processing.
+		// A simple check could be if currentCore->Package() is NULL or ID is -1.
+		// For robustness, let's assume Init can be called multiple times but sets ID once.
+		// The crucial part is that currentCore->Package() is valid before _AddConfiguredCore.
+		if (currentCore->ID() == -1) { // Assuming ID is -1 if not yet initialized
+			currentCore->Init(coreIdx, currentPackage); // Initializes ID and sets fPackage
+		}
+
+
+		// If this unique core (coreIdx) hasn't registered with its package yet, do so.
+		if (!coreHasRegisteredWithPackage[coreIdx]) {
+			// Ensure currentPackage is valid (it should be if packageIdx is valid)
+			ASSERT(currentPackage != NULL);
+			currentPackage->_AddConfiguredCore();
+			coreHasRegisteredWithPackage[coreIdx] = true;
+		}
+	}
+	coreRegisteredDeleter.Detach(); // Detach now that the loop is successful
+
+	// Initialize CPUEntry objects and add them to their CoreEntry
+	for (int32 i = 0; i < cpuCount; i++) {
+		int32 coreIdx = sCPUToCore[i];
+		CoreEntry* currentCore = &gCoreEntries[coreIdx];
+		// PackageEntry and CoreEntry are now initialized, and PackageEntry::fCoreCount is set.
+		gCPUEntries[i].Init(i, currentCore);
+		currentCore->AddCPU(&gCPUEntries[i]); // This might call PackageEntry::AddIdleCore
+	}
+
 	packageEntriesDeleter.Detach();
 	coreEntriesDeleter.Detach();
 	cpuEntriesDeleter.Detach();

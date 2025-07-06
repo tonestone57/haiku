@@ -255,6 +255,7 @@ public:
 											PackageEntry();
 
 						void				Init(int32 id);
+						void				_AddConfiguredCore(); // New method for init
 
 	inline				void				CoreGoesIdle(CoreEntry* core);
 	inline				void				CoreWakesUp(CoreEntry* core);
@@ -511,17 +512,34 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 	// fIdleCores list. If this results in all cores in the package being idle,
 	// the package itself is added to the global gIdlePackageList.
 	SCHEDULER_ENTER_FUNCTION();
-	WriteSpinLocker _(fCoreLock); // Protects fIdleCoreCount and fIdleCores list.
-	ASSERT(fIdleCoreCount >= 0);
-	// A core should not be marked idle if it would make idle count > total cores.
+	WriteSpinLocker lock(fCoreLock);
+	ASSERT(fIdleCoreCount >= 0 && fIdleCoreCount <= fCoreCount);
+
+	// If the core is already in the idle list, this call might be redundant.
+	// Do not increment fIdleCoreCount or re-add to list.
+	if (fIdleCores.Contains(core)) {
+		// Ensure package's global idle status is correct if it should be globally idle.
+		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
+			WriteSpinLocker listLock(gIdlePackageLock);
+			if (!gIdlePackageList.Contains(this))
+				gIdlePackageList.Add(this);
+		}
+		return;
+	}
+
+	// The core is not on the list, so we are about to add it and increment count.
+	// The assertion fIdleCoreCount < fCoreCount must hold true here.
+	// If it fails, it means fIdleCoreCount reached fCoreCount without this 'core'
+	// being on the list, which points to fIdleCoreCount being over-incremented elsewhere
+	// or fCoreCount being too low.
 	ASSERT(fIdleCoreCount < fCoreCount);
-	fIdleCoreCount++;
+
 	fIdleCores.Add(core); // Add to this package's list of idle cores.
+	fIdleCoreCount++;
+
 	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 		// All cores in this package are now idle.
 		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
-		// gIdlePackageList.Contains() is O(N_idle_packages). This is acceptable
-		// as N_idle_packages is expected to be very small.
 		if (!gIdlePackageList.Contains(this)) // Check if THIS package instance is already linked
 			gIdlePackageList.Add(this); // Add this package to global idle list.
 	}

@@ -1124,6 +1124,15 @@ PackageEntry::Init(int32 id)
 // Definition moved to scheduler_cpu.h as it's an inline function.
 
 void
+PackageEntry::_AddConfiguredCore()
+{
+	// This method is intended to be called during initial scheduler setup
+	// for each unique core that belongs to this package.
+	// Using atomic_add for robustness, though init is typically single-threaded.
+	atomic_add(&fCoreCount, 1);
+}
+
+void
 PackageEntry::AddIdleCore(CoreEntry* core)
 {
 	// Adds a core to this package's list of idle cores.

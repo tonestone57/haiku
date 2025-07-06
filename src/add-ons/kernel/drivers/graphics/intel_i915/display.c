@@ -183,23 +183,38 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	} else { /* ... (set shared_info current_mode to 0) ... */ }
 	/* ... (populate shared_info preferred_mode_suggestion, primary_edid, min/max_pixel_clock - no MMIO) ... */
 
-	// TODO: Explicitly disable hardware cursors on all pipes here to ensure a clean state.
-	// This requires CURxCNTR register definitions and a loop through pipes.
-	// Example for one pipe (conceptual):
-	// status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
-	// if (fw_status == B_OK) {
-	//   for (int pipe = 0; pipe < PRIV_MAX_PIPES; ++pipe) {
-	//     uint32_t cur_cntr_reg = CURSOR_CONTROL_REGISTER_FOR_PIPE(pipe); // Needs actual macro
-	//     if (cur_cntr_reg != 0) { // If register is known for this pipe
-	//       uint32_t cur_val = intel_i915_read32(devInfo, cur_cntr_reg);
-	//       cur_val &= ~CURSOR_ENABLE_BIT; // Needs actual CURSOR_ENABLE_BIT
-	//       cur_val |= CURSOR_MODE_OFF_BITS; // Needs actual CURSOR_MODE_OFF_BITS
-	//       intel_i915_write32(devInfo, cur_cntr_reg, cur_val);
-	//     }
-	//   }
-	//   intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	// }
-	TRACE("display_init: TODO - Explicitly disable hardware cursors for all pipes.\n");
+	// Explicitly disable hardware cursors on all pipes to ensure a clean state.
+	// This logic is currently a placeholder as actual register definitions are missing.
+	TRACE("display_init: Attempting to disable hardware cursors for all pipes (currently conceptual).\n");
+#if 0 // TODO: Enable this block once CURSOR_CONTROL_REG and related bits are defined in registers.h
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status == B_OK) {
+		for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; ++pipe_idx) {
+			// Conceptual register access - replace with actual macros from registers.h
+			// uint32_t cursor_ctrl_reg = CURSOR_CONTROL_REG((enum pipe_id_priv)pipe_idx);
+			// uint32_t val = intel_i915_read32(devInfo, cursor_ctrl_reg);
+			// val &= ~CURSOR_ENABLE_BIT_CONCEPTUAL;
+			// val = (val & ~CURSOR_MODE_MASK_CONCEPTUAL) | CURSOR_MODE_OFF_BITS_CONCEPTUAL;
+			// intel_i915_write32(devInfo, cursor_ctrl_reg, val);
+			// TRACE("display_init: Disabled cursor for pipe %d (conceptual write to 0x%x with value 0x%x)\n",
+			//    pipe_idx, cursor_ctrl_reg, val);
+
+			// For now, just ensure software state is off, which is done by memset in init_driver
+			devInfo->cursor_visible[pipe_idx] = false;
+			devInfo->cursor_format[pipe_idx] = 0; // Conceptual "off" format
+		}
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	} else {
+		TRACE("display_init: Failed to get forcewake for disabling cursors: %s\n", strerror(fw_status));
+	}
+#else
+	TRACE("display_init: Hardware cursor disable logic is placeholder due to missing register definitions.\n");
+	// Ensure software state reflects cursors are off (already done by memset in init_driver, but for clarity):
+	for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; ++pipe_idx) {
+		devInfo->cursor_visible[pipe_idx] = false;
+		devInfo->cursor_format[pipe_idx] = 0; // Represents an "off" or undefined state
+	}
+#endif
 
 	return B_OK;
 }

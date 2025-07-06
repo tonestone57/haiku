@@ -182,6 +182,25 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 			preferred_port_for_initial_modeset->logical_port_id);
 	} else { /* ... (set shared_info current_mode to 0) ... */ }
 	/* ... (populate shared_info preferred_mode_suggestion, primary_edid, min/max_pixel_clock - no MMIO) ... */
+
+	// TODO: Explicitly disable hardware cursors on all pipes here to ensure a clean state.
+	// This requires CURxCNTR register definitions and a loop through pipes.
+	// Example for one pipe (conceptual):
+	// status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	// if (fw_status == B_OK) {
+	//   for (int pipe = 0; pipe < PRIV_MAX_PIPES; ++pipe) {
+	//     uint32_t cur_cntr_reg = CURSOR_CONTROL_REGISTER_FOR_PIPE(pipe); // Needs actual macro
+	//     if (cur_cntr_reg != 0) { // If register is known for this pipe
+	//       uint32_t cur_val = intel_i915_read32(devInfo, cur_cntr_reg);
+	//       cur_val &= ~CURSOR_ENABLE_BIT; // Needs actual CURSOR_ENABLE_BIT
+	//       cur_val |= CURSOR_MODE_OFF_BITS; // Needs actual CURSOR_MODE_OFF_BITS
+	//       intel_i915_write32(devInfo, cur_cntr_reg, cur_val);
+	//     }
+	//   }
+	//   intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	// }
+	TRACE("display_init: TODO - Explicitly disable hardware cursors for all pipes.\n");
+
 	return B_OK;
 }
 

@@ -561,6 +561,60 @@
 // --- Gen7 (IVB/HSW) Logical Ring Context Area (LRCA) DWord Offsets ---
 #define GEN7_LRCA_CTX_CONTROL              0x01
 #define GEN7_LRCA_RING_HEAD                0x02
+
+// --- Cursor Registers ---
+// TODO: These are conceptual offsets and bit definitions.
+// Actual register addresses and bitfields MUST be verified from Intel PRMs
+// for each supported GPU generation (e.g., Gen7-Gen9).
+
+// Per-pipe cursor registers (example for Pipe A, offsets from _PIPE_A_BASE usually 0x80, 0x84, 0x88)
+// CURxCNTR: Cursor Control Register
+// #define CURACNTR                (_PIPE_A_BASE + 0x0080) // Example for Pipe A
+// #define CURBCNTR                (_PIPE_B_BASE + 0x0080) // Example for Pipe B
+// #define CURCCNTR                (_PIPE_C_BASE + 0x0080) // Example for Pipe C (if exists)
+	// Bits for CURxCNTR (Conceptual - actual bits vary significantly by GEN)
+	// #define CURSOR_MODE_SHIFT           28 // Or other shifts
+	// #define CURSOR_MODE_MASK            (7U << CURSOR_MODE_SHIFT)
+		// #define CURSOR_MODE_OFF         (0U << CURSOR_MODE_SHIFT)
+		// #define CURSOR_MODE_64_ARGB_AX  (2U << CURSOR_MODE_SHIFT) // Often 64x64 ARGB
+		// #define CURSOR_MODE_128_ARGB_AX (3U << CURSOR_MODE_SHIFT) // (Gen specific)
+		// #define CURSOR_MODE_256_ARGB_AX (4U << CURSOR_MODE_SHIFT) // (Gen specific)
+		// #define CURSOR_MODE_64_MONO     (5U << CURSOR_MODE_SHIFT) // Legacy monochrome
+	// #define CURSOR_ENABLE               (1U << 0) // Or (1U << 31) on some gens
+	// #define CURSOR_GAMMA_ENABLE         (1U << 26) // Or other bit
+	// #define CURSOR_FORMAT_SHIFT         5          // Example for format within a mode
+	// #define CURSOR_FORMAT_ARGB          (1U << CURSOR_FORMAT_SHIFT) // Example
+	// #define CURSOR_STRIDE_SHIFT         10         // Example if stride is part of control
+
+// CURxBASE: Cursor Base Address Register (GTT offset of cursor image)
+// #define CURABASE                (_PIPE_A_BASE + 0x0084)
+// #define CURBBASE                (_PIPE_B_BASE + 0x0084)
+// #define CURCBASE                (_PIPE_C_BASE + 0x0084)
+	// Base address is typically page-aligned GTT offset.
+
+// CURxPOS: Cursor Position Register
+// #define CURAPOS                 (_PIPE_A_BASE + 0x0088)
+// #define CURBPOS                 (_PIPE_B_BASE + 0x0088)
+// #define CURCPOS                 (_PIPE_C_BASE + 0x0088)
+	// Bits for CURxPOS (Conceptual)
+	// #define CURSOR_POS_X_SIGN           (1U << 31)
+	// #define CURSOR_POS_X_MASK           0x7FFF0000 // Bits 30:16 for X value
+	// #define CURSOR_POS_X_SHIFT          16
+	// #define CURSOR_POS_Y_SIGN           (1U << 15)
+	// #define CURSOR_POS_Y_MASK           0x00007FFF // Bits 14:0 for Y value
+	// #define CURSOR_POS_Y_SHIFT          0
+
+// CURxSIZE: Cursor Size Register (Some newer gens like SKL+ for universal planes)
+// For older CURSOR_MODE based sizes, this might not exist or is different.
+// #define CURASIZE                (_PIPE_A_BASE + 0x00A0) // Example
+
+// Palette registers for cursor if using palettized formats (less common for ARGB)
+// #define CURAPAL0                (_PIPE_A_BASE + 0x0090)
+// #define CURAPAL1                (_PIPE_A_BASE + 0x0094)
+// #define CURAPAL2                (_PIPE_A_BASE + 0x0098)
+// #define CURAPAL3                (_PIPE_A_BASE + 0x009C)
+
+#define GEN7_LRCA_RING_HEAD                0x02
 #define GEN7_LRCA_RING_TAIL                0x03
 #define GEN7_LRCA_RING_BUFFER_START        0x04
 #define GEN7_LRCA_RING_BUFFER_CONTROL      0x05

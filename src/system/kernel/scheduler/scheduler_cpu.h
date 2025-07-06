@@ -613,7 +613,7 @@ CoreEntry::GetCore(int32 cpu)
 PackageEntry::GetMostIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(gIdlePackageLock);
+	// ReadSpinLocker lock(gIdlePackageLock); // Removed: Unnecessary and causes deadlock risk
 	PackageEntry* mostIdle = NULL;
 	int32 maxIdleCores = -1; // Start with -1 to ensure any package with >=0 idle cores is picked
 	for (int32 i = 0; i < gPackageCount; i++) {

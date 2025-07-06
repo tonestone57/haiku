@@ -286,6 +286,58 @@
 
 // --- DDI Buffer Control (DDI_BUF_CTL) for HSW/IVB ---
 	#define DDI_BUF_CTL_HSW_DP_VS_PE_MASK         (0x1EU)
+
+// TODO: Define dedicated DisplayPort AUX Channel Registers here.
+// These are essential for DisplayPort communication (DPCD access, link training).
+// They are typically per-port (e.g., PCH_DPA_AUX_CH_CTL, PCH_DPA_AUX_CH_DATA1-5, etc.,
+// or CPU integrated equivalents like DDI_AUX_CH_CTL(PORT_A) on newer gens).
+// The exact register addresses and bit definitions need to be sourced from
+// Intel Programmer's Reference Manuals (PRMs) or Linux/FreeBSD i915 driver source
+// for the targeted GPU generations (e.g., SandyBridge through Kaby Lake/Coffee Lake).
+//
+// Example structure (conceptual, actual names/offsets vary by GEN):
+// #define DPA_AUX_CH_CTL          0x64010 // Example Address for Port A
+// #define DPA_AUX_CH_DATA1        0x64014 // Data Register 1
+// #define DPA_AUX_CH_DATA2        0x64018 // Data Register 2
+// #define DPA_AUX_CH_DATA3        0x6401C // Data Register 3
+// #define DPA_AUX_CH_DATA4        0x64020 // Data Register 4
+// #define DPA_AUX_CH_DATA5        0x64024 // Data Register 5 (not all gens use 5)
+//
+// // Bits for AUX_CH_CTL (conceptual examples):
+// #define AUX_CH_CTL_SEND_BUSY            (1U << 31) // Initiate transaction
+// #define AUX_CH_CTL_DONE                 (1U << 30) // Transaction complete
+// #define AUX_CH_CTL_INTERRUPT_ON_DONE    (1U << 29) // Enable interrupt on done
+// #define AUX_CH_CTL_TIMEOUT_ERROR        (1U << 28) // Timeout error status
+// #define AUX_CH_CTL_RECEIVE_ERROR        (1U << 27) // Receive error status (bad stop, etc.)
+// #define AUX_CH_CTL_MESSAGE_SIZE_MASK    (0x1FU << 20) // Number of bytes to transfer (0-15 for 1-16 bytes)
+// #define AUX_CH_CTL_MESSAGE_SIZE_SHIFT   20
+// #define AUX_CH_CTL_TIMEOUT_VALUE_MASK   (3U << 16)  // Timeout duration
+// #define AUX_CH_CTL_TIMEOUT_400US        (0U << 16)
+// #define AUX_CH_CTL_TIMEOUT_600US        (1U << 16)
+// #define AUX_CH_CTL_TIMEOUT_800US        (2U << 16)
+// #define AUX_CH_CTL_TIMEOUT_1600US       (3U << 16) // Or similar values
+// #define AUX_CH_CTL_PRECHARGE_2US_MASK   (0xFU << 12) // Precharge length
+// #define AUX_CH_CTL_BIT_CLOCK_2US_MASK   (0xFFU << 4) // Bit clock divisor
+// #define AUX_CH_CTL_SYNC_PULSE_SKL_MASK  (0xFU << 0)  // SYNC Pulse count (SKL+)
+//
+// // Bits for AUX_CH_DATA (command in first DWORD - conceptual):
+// // DW0 (AUX_CH_DATA1 typically holds this)
+// #define AUX_CH_CMD_SHIFT                28
+// #define AUX_CH_CMD_I2C_WRITE            (0x0 << AUX_CH_CMD_SHIFT)
+// #define AUX_CH_CMD_I2C_READ             (0x1 << AUX_CH_CMD_SHIFT)
+// #define AUX_CH_CMD_I2C_STATUS           (0x2 << AUX_CH_CMD_SHIFT) // I2C Status/Address only
+// #define AUX_CH_CMD_I2C_MOT              (0x4 << AUX_CH_CMD_SHIFT) // I2C Middle Of Transaction
+// #define AUX_CH_CMD_NATIVE_WRITE         (0x8 << AUX_CH_CMD_SHIFT)
+// #define AUX_CH_CMD_NATIVE_READ          (0x9 << AUX_CH_CMD_SHIFT)
+// #define AUX_CH_CMD_DPCD_ADDR_MASK       0xFFFFF // 20-bit DPCD Address
+//
+// // Reply status (often read from AUX_CH_CTL or a status field in DATA regs)
+// #define AUX_REPLY_ACK                   0x00
+// #define AUX_REPLY_NACK                  0x01
+// #define AUX_REPLY_DEFER                 0x02
+// #define AUX_REPLY_I2C_NACK              0x04 // Different from AUX layer NACK
+// #define AUX_REPLY_I2C_DEFER             0x08 // Different from AUX layer DEFER
+
 #define HSW_DP_VS_PE_FIELD_VS0_PE0    (0x0 << 1)
 #define HSW_DP_VS_PE_FIELD_VS0_PE1    (0x1 << 1)
 #define HSW_DP_VS_PE_FIELD_VS0_PE2    (0x2 << 1)

@@ -137,9 +137,9 @@ intel_lvds_panel_power_on(intel_i915_device_info* devInfo, intel_output_port_sta
 		uint8_t dpcd_val = DPCD_POWER_D0;
 		status_t aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_SET_POWER, &dpcd_val, 1);
 		if (aux_status != B_OK) {
-			TRACE("LVDS/eDP: Failed to set eDP DPCD power D0: %s\n", strerror(aux_status));
-			// This might be critical, consider returning error.
-			// For now, continue, link training might still work or recover.
+			TRACE("LVDS/eDP: Failed to set eDP DPCD power D0: %s. Aborting panel power on.\n", strerror(aux_status));
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return aux_status; // Return the error from AUX communication
 		}
 		// VBT eDP T3 (AUX_ON to PANEL_ON/signals active) delay is conceptually part of T1 here,
 		// or happens during link training initiated by DDI port enable.

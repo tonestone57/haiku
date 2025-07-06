@@ -130,9 +130,55 @@ static void intel_ddi_send_avi_infoframe(intel_i915_device_info* devInfo, intel_
 }
 
 status_t intel_ddi_init_port(intel_i915_device_info*d, intel_output_port_state*p){return B_OK;}
-static status_t _intel_dp_aux_ch_xfer(intel_i915_device_info*d,intel_output_port_state*p,bool w,uint32_t a,uint8_t*b,uint8_t l){return B_OK;}
-status_t intel_dp_aux_read_dpcd(intel_i915_device_info*d,intel_output_port_state*p,uint16_t off,uint8_t*bf,uint8_t ln){return _intel_dp_aux_ch_xfer(d,p,false,off,bf,ln);}
-status_t intel_dp_aux_write_dpcd(intel_i915_device_info*d,intel_output_port_state*p,uint16_t off,uint8_t*bf,uint8_t ln){return _intel_dp_aux_ch_xfer(d,p,true,off,bf,ln);}
+
+static status_t
+_intel_dp_aux_ch_xfer(intel_i915_device_info* devInfo, intel_output_port_state* port,
+	bool is_write, uint32_t dpcd_addr, uint8_t* buffer, uint8_t length, uint8_t* aux_reply_type_out)
+{
+	// This function is currently a STUB and will NOT perform correct DisplayPort AUX CH transactions.
+	// It requires definitions for dedicated AUX channel hardware registers (e.g., DPA_AUX_CH_CTL,
+	// DPA_AUX_CH_DATA1-5 for each port) which are missing from the current registers.h.
+	//
+	// The VBT parser maps DP AUX DDC pins to GMBUS pins (e.g., port->dp_aux_ch might hold
+	// a GMBUS_PIN_DPA_AUX value). Attempting to use GMBus for true DP AUX CH communication
+	// on Gen7-Gen9 Intel GPUs is likely incorrect as these generations have dedicated AUX hardware.
+	//
+	// Once dedicated AUX register definitions are available:
+	// 1. This function should select the correct per-port AUX registers based on 'port->dp_aux_ch'
+	//    or 'port->hw_port_index'.
+	// 2. It needs to construct an AUX command in the control register (DPCD address, request type, length).
+	// 3. Write data to data registers if 'is_write' is true.
+	// 4. Initiate the transaction and poll for completion (DONE bit) or errors (TIMEOUT, RCV_ERROR).
+	// 5. Handle AUX replies (ACK, NACK, DEFER with retries).
+	// 6. Retrieve data from data registers if 'is_read' and ACK.
+	// 7. Manage forcewake for AUX register access.
+
+	TRACE("DDI: _intel_dp_aux_ch_xfer: STUB! op: %s, addr: 0x%05lx, len: %u, port_aux_pin_val: 0x%x\n",
+		is_write ? "WRITE" : "READ", dpcd_addr, length, port ? port->dp_aux_ch : 0xFF);
+
+	if (aux_reply_type_out != NULL) {
+		// Simulate a NACK or DEFER to indicate failure to communicate,
+		// as we can't actually perform the transaction.
+		// Using a value that's not a plain ACK.
+		// Linux uses 0 for AUX_ACK, 1 for AUX_NACK, 2 for AUX_DEFER.
+		// Let's use a high bit to indicate "driver internal error / not supported".
+		*aux_reply_type_out = 0x80; // Custom: "Not Implemented / Error"
+	}
+
+	// Returning B_UNSUPPORTED as the operation cannot be genuinely performed.
+	return B_UNSUPPORTED;
+}
+
+status_t intel_dp_aux_read_dpcd(intel_i915_device_info*d,intel_output_port_state*p,uint16_t off,uint8_t*bf,uint8_t ln){
+	uint8_t reply_type;
+	return _intel_dp_aux_ch_xfer(d, p, false, off, bf, ln, &reply_type);
+}
+
+status_t intel_dp_aux_write_dpcd(intel_i915_device_info*d,intel_output_port_state*p,uint16_t off,uint8_t*bf,uint8_t ln){
+	uint8_t reply_type;
+	return _intel_dp_aux_ch_xfer(d, p, true, off, bf, ln, &reply_type);
+}
+
 status_t intel_dp_start_link_train(intel_i915_device_info*d,intel_output_port_state*p,const intel_clock_params_t*c){return B_OK;}
 void intel_dp_stop_link_train(intel_i915_device_info*d,intel_output_port_state*p){}
 status_t intel_ddi_port_enable(intel_i915_device_info*d,intel_output_port_state*p,enum pipe_id_priv pi,const display_mode*am,const intel_clock_params_t*c){return B_OK;}

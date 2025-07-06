@@ -54,6 +54,13 @@
 #define XY_SRC_COPY_BLT_CMD_OPCODE	(0x53 << 22)
 #define XY_SRC_COPY_BLT_LENGTH		(6 - 2) // 6 DWs total, length field is (DWs - 2)
 
+// TODO: Tiling bits for blitter commands (e.g., XY_COLOR_BLT_CMD Bit 11 for Dest Tiling,
+// XY_SRC_COPY_BLT_CMD Bit 11 for Dest Tiling & Bit 15 for Src Tiling on Gen7)
+// are currently hardcoded within the command construction logic in each 2D function.
+// This needs to be verified and generalized if 2D acceleration is to be correctly
+// supported on GPU generations other than Gen7, as these bit positions or meanings
+// might change. This would involve consulting PRMs for each supported generation
+// and potentially adding generation checks or more abstract tiling flag definitions.
 
 static uint32
 get_blit_colordepth_flags(uint16 bits_per_pixel, color_space format)
@@ -167,11 +174,11 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
 		return;
 
-	size_t max_spans_per_batch = 64;
-	size_t num_batches = (count + max_spans_per_batch - 1) / max_spans_per_batch;
+	const size_t max_ops_per_batch = 160; // Increased batch size
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
-		size_t current_batch_count = min_c(count - (batch * max_spans_per_batch), max_spans_per_batch);
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
 		size_t cmd_dwords_per_span = 5; // XY_COLOR_BLT uses 5 DWORDS
 		size_t pipe_control_dwords = 4;
 		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_span) + pipe_control_dwords + 1; // +1 for MI_BATCH_BUFFER_END
@@ -277,41 +284,50 @@ static void
 intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color,
 	blit_params *list, uint32 count)
 {
-	TRACE("intel_i915_screen_to_screen_transparent_blit: Stub, %lu operations, color 0x%08lx. HW Accel TODO.\n", count, transparent_color);
-	// TODO: Implement hardware accelerated transparent blit using color keying.
-	// This will require:
-	// 1. Identifying the correct color keying registers for the blitter.
-	//    (e.g. COLOR_CHROMA_KEY_LOW, _HIGH, _MASK and enable bit in BLT_CMD or a control register)
-	// 2. Setting these registers with transparent_color and a suitable mask.
-	// 3. Enabling color keying in the blit command (if a flag exists for XY_SRC_COPY_BLT_CMD)
-	//    or ensuring the blitter is in a state where it respects the color key registers.
-	// 4. Executing XY_SRC_COPY_BLT_CMD with an appropriate ROP (likely SRCCOPY).
-	//    The command setup would be similar to intel_i915_screen_to_screen_blit.
-	// 5. Restoring any modified blitter state (e.g., disable chroma keying).
-	// If direct blitter support isn't feasible or straightforward with XY_SRC_COPY_BLT_CMD,
-	// this might require using display planes/sprites with their own keying capabilities,
-	// or a different blit command if one exists for this purpose.
+	// Hardware acceleration for transparent blit (color keying) is not currently
+	// implemented for the XY_SRC_COPY_BLT command path used.
+	// This is due to the lack of readily available register/command flag definitions
+	// for this feature within the Haiku i915 driver's headers or easily discoverable
+	// hardware capabilities without direct PRM access or more extensive reverse engineering.
+	//
+	// Potential hardware implementation would involve:
+	// 1. Defining and setting color key registers (e.g., BLT_CHROMA_KEY_LOW, _HIGH, _MASK).
+	// 2. Enabling a color keying mode in the XY_SRC_COPY_BLT command itself, if such a
+	//    flag exists and is compatible with the RCS0 engine path.
+	// 3. Ensuring the ROP and other parameters are compatible with color keying.
+	//
+	// For now, this function falls back to a standard (non-transparent) screen-to-screen blit.
+	// If true transparency is required, it would be handled by software in the app_server.
+	TRACE("intel_i915_screen_to_screen_transparent_blit: %lu operations, color 0x%08lx. HW Accel for transparency not implemented, falling back to normal blit.\n", count, transparent_color);
+	intel_i915_screen_to_screen_blit(et, list, count);
 }
 
 static void
 intel_i915_screen_to_screen_scaled_blit(engine_token* et, scaled_blit_params *list, uint32 count)
 {
-	TRACE("intel_i915_screen_to_screen_scaled_blit: Stub, %lu operations. HW Accel TODO.\n", count);
-	// TODO: Implement hardware accelerated scaled blit.
-	// This will require:
-	// 1. Researching Intel PRMs for a dedicated "stretch blit" command
-	//    (e.g., XY_SRC_COPY_STRETCH_BLT or similar, or a different BLT command type like FULL_BLT_CMD
-	//     if it has scaling capabilities) that can be issued to RCS0/BCS.
-	//    - If found, implement by constructing and submitting this command via GEM.
-	//      It will involve setting source/destination coordinates and source/destination sizes.
-	// 2. If no direct stretch blit command:
-	//    a. Investigate using display plane/sprite scalers (e.g., PS_CTRL, PF_CTL from i915_reg.h).
-	//       This is complex for general blits (may need an intermediate offscreen surface,
-	//       programming plane coordinates, sizes, and scaling ratios, then potentially a copy-back).
-	//    b. Consider using the 3D rendering pipeline (textured quad with sampler filtering).
-	//       This is powerful but significantly more complex than current 2D ops (requires managing
-	//       3D state, shaders, render targets, etc.).
-	// For now, this function is a stub and such operations would fall back to software.
+	// Hardware acceleration for scaled blits (stretch blits) is not currently
+	// implemented for the XY_SRC_COPY_BLT command path or other simple blitter
+	// commands known to be available on the RCS0 engine.
+	//
+	// Implementing this would require:
+	// 1. Identifying a specific hardware command for scaled/stretched blits
+	//    (e.g., a hypothetical XY_SRC_COPY_STRETCH_BLT or similar) that is
+	//    accessible via the currently used command submission path (RCS0).
+	//    Such commands are not immediately apparent from existing local headers.
+	// 2. Alternatively, exploring other hardware units:
+	//    a. Display Plane Scalers: These are part of the display controller and
+	//       are typically used for scaling the output to a monitor, not for
+	//       general purpose blit-to-memory operations. Using them for general
+	//       scaled blits would be complex and inefficient.
+	//    b. 3D Rendering Pipeline: Could perform high-quality filtered scaling
+	//       by drawing a textured quad. However, this involves a much more
+	//       complex setup (shaders, render targets, 3D state) and is outside
+	//       the scope of the current 2D blitter acceleration model.
+	//
+	// Due to these complexities and the lack of an obvious simple blitter command
+	// for scaling, this function remains a stub. Scaled blit operations will
+	// be handled by software fallback in the app_server.
+	TRACE("intel_i915_screen_to_screen_scaled_blit: Stub, %lu operations. HW Accel for scaling not implemented.\n", count);
 }
 
 
@@ -325,14 +341,14 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
 		return;
 
-	// Estimate command buffer size: Each rect needs XY_COLOR_BLT (4 DWORDS) + MI_BATCH_BUFFER_END (1 DWORD)
-	// Max commands for a reasonable buffer size. If count is huge, batching is needed.
-	size_t max_rects_per_batch = 64;
-	size_t num_batches = (count + max_rects_per_batch - 1) / max_rects_per_batch;
+	const size_t max_ops_per_batch = 160; // Use defined batch size
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
-		size_t current_batch_count = min_c(count - (batch * max_rects_per_batch), max_rects_per_batch);
-		size_t cmd_dwords = current_batch_count * 4 + 1; // 4 per BLT, 1 for BB_END
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
+		size_t cmd_dwords_per_rect = 5; // XY_COLOR_BLT is 5 DWORDs
+		size_t pipe_control_dwords = 4; // For emit_pipe_control_render_stall
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1; // +1 for MI_BATCH_BUFFER_END
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
 		uint32 cmd_handle;
@@ -348,7 +364,7 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 
 		uint32 current_dword = 0;
 		for (size_t i = 0; i < current_batch_count; i++) {
-			fill_rect_params *rect = &list[batch * max_rects_per_batch + i];
+			fill_rect_params *rect = &list[batch * max_ops_per_batch + i];
 			if (rect->right < rect->left || rect->bottom < rect->top) continue;
 
 			// XY_COLOR_BLT command (Gen7 example)
@@ -380,11 +396,20 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 			// DW4: Color (BGRA for Gen7 often)
 			cmd_buffer_cpu[current_dword++] = color;
 		}
-		cmd_buffer_cpu[current_dword++] = 0x0A000000; // MI_BATCH_BUFFER_END
+
+		if (current_dword == 0) { // All rects in batch were invalid
+			destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+			continue;
+		}
+
+		uint32* current_ptr = cmd_buffer_cpu + current_dword;
+		current_ptr = emit_pipe_control_render_stall(current_ptr);
+		current_ptr[0] = MI_BATCH_BUFFER_END;
+		current_dword = (current_ptr - cmd_buffer_cpu) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args;
 		exec_args.cmd_buffer_handle = cmd_handle;
-		exec_args.cmd_buffer_length = current_dword * sizeof(uint32);
+		exec_args.cmd_buffer_length = current_dword * sizeof(uint32); // Use updated current_dword
 		exec_args.engine_id = RCS0; // Use Render Command Streamer
 		exec_args.flags = 0;
 
@@ -405,18 +430,19 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 		return;
 
 	// Similar to fill_rectangle, using XY_COLOR_BLT with DSTINVERT ROP
-	size_t max_rects_per_batch = 64; // Same batching as fill_rectangle
-	size_t num_batches = (count + max_rects_per_batch - 1) / max_rects_per_batch;
+	const size_t max_ops_per_batch = 160; // Use defined batch size
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
-		size_t current_batch_count = min_c(count - (batch * max_rects_per_batch), max_rects_per_batch);
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
 		// XY_COLOR_BLT is 5 DWORDS if color is included, but for DSTINVERT, color is ignored.
 		// The command length field is for DWORDS *after* DW0. So for 4 total DW (DW0-DW3), length is 2.
 		// If we write 5 DWs (DW0-DW4) as in fill_rectangle, length is 3.
 		// For DSTINVERT, we can use the 4-DW version (length 2) if color is truly ignored,
 		// or send 5 DWs with a dummy color. Let's use 5 DWs for consistency with fill_rectangle structure.
 		size_t cmd_dwords_per_rect = 5;
-		size_t cmd_dwords = current_batch_count * cmd_dwords_per_rect + 1; // +1 for MI_BATCH_BUFFER_END
+		size_t pipe_control_dwords = 4; // For emit_pipe_control_render_stall
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1; // +1 for MI_BATCH_BUFFER_END
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
 		uint32 cmd_handle;
@@ -463,11 +489,20 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 			// DW4: Color (Ignored for DSTINVERT, but command expects it if length is 3)
 			cmd_buffer_cpu[current_dword++] = 0x00000000; // Dummy color
 		}
-		cmd_buffer_cpu[current_dword++] = 0x0A000000; // MI_BATCH_BUFFER_END
+
+		if (current_dword == 0) { // All rects in batch were invalid
+			destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+			continue;
+		}
+
+		uint32* current_ptr = cmd_buffer_cpu + current_dword;
+		current_ptr = emit_pipe_control_render_stall(current_ptr);
+		current_ptr[0] = MI_BATCH_BUFFER_END;
+		current_dword = (current_ptr - cmd_buffer_cpu) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args;
 		exec_args.cmd_buffer_handle = cmd_handle;
-		exec_args.cmd_buffer_length = current_dword * sizeof(uint32);
+		exec_args.cmd_buffer_length = current_dword * sizeof(uint32); // Use updated current_dword
 		exec_args.engine_id = RCS0;
 		exec_args.flags = 0;
 		exec_args.relocation_count = 0; // No relocations for this simple blit
@@ -490,13 +525,15 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
 		return;
 
-	size_t max_blits_per_batch = 64;
-	size_t num_batches = (count + max_blits_per_batch - 1) / max_blits_per_batch;
+	const size_t max_ops_per_batch = 160; // Use defined batch size
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
-		size_t current_batch_count = min_c(count - (batch * max_blits_per_batch), max_blits_per_batch);
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
 		// XY_SRC_COPY_BLT is 6 DWORDS
-		size_t cmd_dwords = current_batch_count * 6 + 1; // 6 per BLT, 1 for BB_END
+		size_t cmd_dwords_per_blit = 6;
+		size_t pipe_control_dwords = 4; // For emit_pipe_control_render_stall
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit) + pipe_control_dwords + 1; // +1 for MI_BATCH_BUFFER_END
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
 		uint32 cmd_handle;
@@ -511,7 +548,7 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 
 		uint32 current_dword = 0;
 		for (size_t i = 0; i < current_batch_count; i++) {
-			blit_params *blit = &list[batch * max_blits_per_batch + i];
+			blit_params *blit = &list[batch * max_ops_per_batch + i];
 
 			// XY_SRC_COPY_BLT command (Gen7 example)
 			// DW0: Command (Opcode 0x53, Length 0x4 (6 DWs total), ColorDepth, ROP)
@@ -553,11 +590,20 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 			// DW5: Source X1, Y1
 			cmd_buffer_cpu[current_dword++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
 		}
-		cmd_buffer_cpu[current_dword++] = 0x0A000000; // MI_BATCH_BUFFER_END
+
+		if (current_dword == 0) { // All blits in batch were invalid (e.g. zero width/height, though not checked here)
+			destroy_cmd_buffer(cmd_handle, cmd_area_clone_id, cmd_buffer_cpu);
+			continue;
+		}
+
+		uint32* current_ptr = cmd_buffer_cpu + current_dword;
+		current_ptr = emit_pipe_control_render_stall(current_ptr);
+		current_ptr[0] = MI_BATCH_BUFFER_END;
+		current_dword = (current_ptr - cmd_buffer_cpu) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args;
 		exec_args.cmd_buffer_handle = cmd_handle;
-		exec_args.cmd_buffer_length = current_dword * sizeof(uint32);
+		exec_args.cmd_buffer_length = current_dword * sizeof(uint32); // Use updated current_dword
 		exec_args.engine_id = RCS0;
 		exec_args.flags = 0;
 

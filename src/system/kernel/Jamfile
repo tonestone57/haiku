@@ -211,10 +211,14 @@ SubInclude HAIKU_TOP src system kernel alloc ;
 # HAIKU_KERNEL_ALLOCATOR is expected to be set by alloc/Jamfile (defaults to slab)
 # or by a build profile.
 local KERNEL_ALLOCATOR_OBJECT ;
+local KERNEL_GLOBAL_CXX_DEFINES = $(SubDirC++Flags) ; # Get current global C++ flags
+
 if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
 	KERNEL_ALLOCATOR_OBJECT = kernel_allocator.o ;
 		# This is built by alloc/Jamfile and contains snmalloc
+	KERNEL_GLOBAL_CXX_DEFINES += -DKERNEL_ALLOCATOR_SNMALLOC ;
 } else {
 	KERNEL_ALLOCATOR_OBJECT = kernel_slab.o ;
 		# This is built by slab/Jamfile
 }
+SubDirC++Flags $(KERNEL_GLOBAL_CXX_DEFINES) ; # Apply updated global C++ flags

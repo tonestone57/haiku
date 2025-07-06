@@ -24,17 +24,30 @@ if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
         -I$(SUBDIR)/snmalloc # For pal_haiku_kernel.h
     ;
 
+    local snmallocTargetFlags = ;
+    # Add snmalloc hardening flags
+    snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT=1 -DSNMALLOC_PAGEID=1 -DSNMALLOC_CHECK_LOADS=1 ;
+    # Optional: Enable verbose tracing within snmalloc
+    # snmallocTargetFlags += -DSNMALLOC_TRACING=1 ;
+    # Optional: Enable statistics gathering within snmalloc
+    # snmallocTargetFlags += -DSNMALLOC_STATS=1 ;
+    # Optional: Enable specific advanced security mitigations (can be combined with +)
+    # See snmalloc/CMakeLists.txt for full list. Examples:
+    # snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="metadata_protection" ;
+    # snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="freelist_forward_edge" ;
+    # snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="random_pagemap" ;
+    # Note: Some mitigations like 'pal_enforce_access' require specific PAL support.
+
     KernelMergeObject snmalloc_kernel_api.o :
         snmalloc/snmalloc_kernel_api.cpp
+        : # Target specific flags
+        $(snmallocTargetFlags)
     ;
     allocatorObjects = snmalloc_kernel_api.o ;
 
-    # Pass a define to kernel build to indicate snmalloc is used,
-    # if any C++ code elsewhere in the kernel needs to know.
-    allocatorDefines = -DKERNEL_ALLOCATOR_SNMALLOC ;
-    # Add snmalloc hardening flags
-    allocatorDefines += -DSNMALLOC_CHECK_CLIENT=1 -DSNMALLOC_PAGEID=1 ;
-    SubDirC++Flags $(SubDirC++Flags) $(allocatorDefines) ;
+    # The -DKERNEL_ALLOCATOR_SNMALLOC define is now handled by the parent src/system/kernel/Jamfile
+    # to ensure it's globally visible for kernel compilations when snmalloc is active.
+    # This Jamfile only needs to worry about flags specific to snmalloc_kernel_api.o compilation.
 
 } else {
     # Default to slab allocator (or any other chosen default)

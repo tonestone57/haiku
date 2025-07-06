@@ -894,11 +894,33 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		return;
 	}
 
-	// This function updates the core's average load (`fLoad`) based on the
-	// current loads of its constituent, enabled CPUs. This `fLoad` is used
-	// for placing the core in the global load balancing heaps.
-	// It also manages the `fLoadMeasurementEpoch` for coordinating with
-	// `CoreEntry::AddLoad/RemoveLoad`.
+	// This function updates the core's average historical execution load (`fLoad`)
+	// based on the current historical loads (`CPUEntry::fLoad`) of its
+	// constituent, enabled CPUs. The core's `fLoad` is then used as the key for
+	// placing/updating this `CoreEntry` in the global load balancing heaps
+	// (`gCoreLoadHeap`, `gCoreHighLoadHeap`).
+	//
+	// It also manages `fLoadMeasurementEpoch`. This epoch is used by
+	// `CoreEntry::AddLoad()` and `CoreEntry::RemoveLoad()` to determine if a
+	// thread's `fNeededLoad` (demand-based load) should directly influence
+	// `CoreEntry::fLoad` (execution-based load) when a thread is homed to or
+	// removed from a core. If the thread's load epoch (captured when its
+	// `fNeededLoad` was last significantly updated) differs from the core's
+	// current epoch, it implies a potentially stale `CoreEntry::fLoad` with
+	// respect to this thread's demand, so `fLoad` is adjusted directly.
+	// Otherwise, only `fCurrentLoad` (sum of demands) is adjusted, and `fLoad`
+	// is expected to catch up via this `_UpdateLoad` function reflecting actual
+	// CPU execution. The epoch is advanced here if `kLoadMeasureInterval` has passed.
+	//
+	// `forceUpdate` allows bypassing the `kLoadMeasureInterval` check, typically
+	// used when a core's CPU membership changes or a thread is forcefully
+	// unassigned, requiring an immediate re-evaluation of the core's load.
+	//
+	// Locking:
+	// - Acquires `gCoreHeapsLock` (write) before modifying heaps.
+	// - Acquires `fLoadLock` (write) for updating `fLoad`, `fLoadMeasurementEpoch`,
+	//   `fLastLoadUpdate`, and `fHighLoad`.
+	// - Acquires `fCPULock` (read/spin) when iterating its CPUs to sum their loads.
 
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;

@@ -410,16 +410,55 @@ switch_thread(Thread* fromThread, Thread* toThread)
 static void
 reschedule(int32 nextState)
 {
-	// This is the core rescheduling function. It's called when the current
-	// thread's quantum might have expired, or it's changing state (e.g., to sleep).
+	// This is the core rescheduling function for the current CPU.
+	// It is called when:
+	//   - The current thread's quantum expires.
+	//   - The current thread yields (thread_yield()).
+	//   - The current thread changes state (e.g., goes to sleep on a semaphore,
+	//     is suspended, or exits).
+	//   - An explicit reschedule is requested (e.g., after a higher-priority
+	//     thread becomes ready on this CPU).
+	//
+	// The caller MUST hold the current thread's scheduler_lock and have
+	// interrupts disabled.
+	//
 	// Major phases:
-	// 1. Update state of the `oldThread` (the one currently running).
-	// 2. Determine if `oldThread` should be re-enqueued (if it's still READY),
-	//    potentially demoting it in MLFQ if its quantum ended.
-	// 3. Select the `nextThread` to run from the current CPU's run queue or its
-	//    idle thread if the queue is empty or CPU is being disabled.
-	// 4. Update accounting (CPU activity, timers) and set up the quantum for `nextThread`.
-	// 5. If `nextThread` is different from `oldThread`, perform a context switch.
+	// 1. Update State of `oldThread` (currently running thread):
+	//    - Stop its CPU time accounting for the current slice.
+	//    - Set its new state (`nextState`).
+	//    - Account for any interrupt time "stolen" during its slice.
+	//
+	// 2. Determine `oldThread`'s Re-enqueue Fate:
+	//    - If `nextState` is READY or RUNNING:
+	//        - If its quantum ended or it yielded, it's marked for re-enqueue
+	//          at the back of its MLFQ level.
+	//        - If it's non-real-time and its quantum ended, it's demoted to a
+	//          lower MLFQ level.
+	//        - If its affinity prevents running on this CPU, it's not re-enqueued here.
+	//    - If `nextState` is other than READY/RUNNING (e.g., sleeping, exiting):
+	//        - It's not re-enqueued. Its load contribution is updated accordingly.
+	//
+	// 3. Select `nextThread` to Run:
+	//    - If the current CPU is being disabled, the CPU's idle thread is chosen.
+	//    - Otherwise, `CPUEntry::ChooseNextThread()` is called. This method will:
+	//        - Re-enqueue `oldThread` (if it's still READY and suitable for this CPU,
+	//          respecting the `putAtBack` and demotion decisions).
+	//        - Select the highest-priority runnable thread from this CPU's MLFQ.
+	//        - If no runnable thread is found, select this CPU's idle thread.
+	//    - The chosen `nextThread` is removed from its run queue (if not idle).
+	//
+	// 4. Update Accounting and Prepare `nextThread`:
+	//    - The new `nextThread`'s state is set to B_THREAD_RUNNING.
+	//    - Its CPU time accounting is started for the new slice.
+	//    - CPU and Core load/activity metrics are updated.
+	//    - A dynamic quantum is calculated for `nextThread`, and its quantum timer
+	//      is started.
+	//
+	// 5. Context Switch (if necessary):
+	//    - If `nextThread` is different from `oldThread`, `switch_thread()` is called
+	//      to perform the context switch. This involves saving `oldThread`'s state
+	//      and restoring `nextThread`'s state.
+	//    - If `nextThread` is the same as `oldThread`, it simply continues execution.
 
 	ASSERT(!are_interrupts_enabled());
 	SCHEDULER_ENTER_FUNCTION();
@@ -1382,35 +1421,70 @@ static CPUEntry*
 _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 	const ThreadData* affinityCheckThread)
 {
+	// Selects the "best" CPU on a given `core` based on load and other criteria.
+	//
+	// Parameters:
+	//   - core: The physical core on which to select a CPU.
+	//   - preferBusiest: If true, selects the CPU with the highest effective load.
+	//                    If false, selects the CPU with the lowest effective load.
+	//   - affinityCheckThread: If not NULL, only CPUs matching this thread's
+	//                          affinity mask are considered.
+	//
+	// Logic:
+	// 1. Iterates through all logical CPUs belonging to the given `core`.
+	// 2. Skips disabled CPUs or CPUs not matching `affinityCheckThread`'s mask (if provided).
+	// 3. Calculates an `effectiveLoad` for each candidate CPU:
+	//    - Starts with the CPU's `fInstantaneousLoad`.
+	//    - If `preferBusiest` is false (i.e., seeking the *least* busy CPU) and the
+	//      core has SMT siblings, an SMT penalty is added. This penalty is
+	//      proportional to the load of its active SMT siblings, scaled by
+	//      `gSchedulerSMTConflictFactor`. This makes CPUs with busy SMT siblings
+	//      less attractive when trying to find an idle execution context.
+	// 4. Compares the `effectiveLoad` to find the best CPU:
+	//    - If `preferBusiest` is true, higher `effectiveLoad` is better.
+	//    - If `preferBusiest` is false, lower `effectiveLoad` is better.
+	// 5. Tie-Breaking:
+	//    - If `effectiveLoad`s are equal, a tie-breaker uses the count of
+	//      "high priority" tasks (from the upper half of MLFQ levels) in each
+	//      CPU's run queue (`_get_cpu_high_priority_task_count_locked`).
+	//        - If `preferBusiest`, prefers the CPU with more high-priority tasks.
+	//          (Comment indicates this tie-breaker might need review for this context).
+	//        - If not `preferBusiest`, prefers the CPU with fewer high-priority tasks.
+	//
+	// Returns: The selected CPUEntry, or NULL if no suitable CPU is found.
+
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
 	CPUEntry* bestCPU = NULL;
-	float bestLoadScore = preferBusiest ? -1.0f : 2.0f; // Lower is better if !preferBusiest
+	// Initialize bestLoadScore: if preferring busiest, start low; if preferring least busy, start high.
+	float bestLoadScore = preferBusiest ? -1.0f : 2.0f;
+	// Initialize bestTaskCountScore similarly for tie-breaking.
 	int32 bestTaskCountScore = preferBusiest ? -1 : 0x7fffffff;
 
 	CPUSet coreCPUs = core->CPUMask();
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
-			continue;
+			continue; // Skip CPUs not on this core or disabled.
 
 		CPUEntry* currentCPU = CPUEntry::GetCPU(i);
 		ASSERT(currentCPU->Core() == core);
 
+		// Check affinity if a specific thread is being considered
 		if (affinityCheckThread != NULL) {
 			const CPUSet& threadAffinity = affinityCheckThread->GetCPUMask();
 			if (!threadAffinity.IsEmpty() && !threadAffinity.GetBit(i))
-				continue;
+				continue; // Skip if CPU doesn't match thread's affinity.
 		}
 
 		float currentInstantLoad = currentCPU->GetInstantaneousLoad();
 		float smtPenalty = 0.0f;
 
-		// SMT penalty is only applied when we prefer the *least* busy CPU,
-		// as it makes busy SMT siblings less attractive.
+		// Apply SMT penalty only when seeking the *least* busy CPU,
+		// to make CPUs with busy SMT siblings less attractive.
 		if (!preferBusiest && core->CPUCount() > 1) {
 			CPUSet siblings = gCPU[currentCPU->ID()].arch.sibling_cpus;
-			siblings.ClearBit(currentCPU->ID());
+			siblings.ClearBit(currentCPU->ID()); // Don't penalize for self.
 			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 				if (siblings.GetBit(k) && !gCPU[k].disabled) {
 					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
@@ -1420,17 +1494,17 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		float effectiveLoad = currentInstantLoad + smtPenalty;
 
 		bool isBetter = false;
-		if (bestCPU == NULL) {
+		if (bestCPU == NULL) { // First suitable CPU found.
 			isBetter = true;
 		} else {
+			// Compare based on load and preference (busiest or least busy).
 			if (preferBusiest) {
 				if (effectiveLoad > bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// Tie-break by preferring CPU with more high-priority tasks if preferring busiest
-					// This part of tie-breaking might need review for preferBusiest context.
-					// Usually, preferBusiest might mean "highest load", then perhaps "most tasks".
-					// For now, using existing high-prio task count.
+					// Tie-break: prefer CPU with more high-priority tasks.
+					// As noted in original comment, this tie-breaker's utility for 'preferBusiest'
+					// might warrant review, but current logic is kept.
 					currentCPU->LockRunQueue();
 					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
 					currentCPU->UnlockRunQueue();
@@ -1440,6 +1514,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (effectiveLoad < bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
+					// Tie-break: prefer CPU with fewer high-priority tasks.
 					currentCPU->LockRunQueue();
 					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
 					currentCPU->UnlockRunQueue();
@@ -1450,6 +1525,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
+			// Update task count score for future tie-breaking.
 			currentCPU->LockRunQueue();
 			bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
 			currentCPU->UnlockRunQueue();
@@ -1463,13 +1539,58 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 static void
 scheduler_perform_load_balance()
 {
+	// This function is periodically called to attempt to balance thread load
+	// across different physical cores. It does not run if the system is
+	// single-core or has fewer than two cores.
+	//
+	// The general strategy is:
+	// 1. Identify Candidate Cores:
+	//    - A potential `sourceCoreCandidate` is picked from `gCoreHighLoadHeap`
+	//      (cores with higher historical load).
+	//    - A potential `targetCoreCandidate` is picked from `gCoreLoadHeap`
+	//      (cores with lower historical load).
+	//    - Defunct cores are skipped during this selection.
+	//    - If no suitable distinct source/target pair is found, or if the
+	//      load difference isn't significant (less than `kLoadDifference`),
+	//      no balancing is attempted in this pass.
+	//
+	// 2. Determine Final Target Core based on Policy:
+	//    - If `gSchedulerLoadBalancePolicy` is `SCHED_LOAD_BALANCE_CONSOLIDATE`:
+	//        - The scheduler tries to use a designated "consolidation core"
+	//          (often `sSmallTaskCore` from power-saving mode).
+	//        - If the source core is *not* the consolidation core and the
+	//          consolidation core has capacity, it becomes the `finalTargetCore`.
+	//        - If the source core *is* the consolidation core but is very loaded,
+	//          an attempt is made to find a "spill-over" core (another active
+	//          core with capacity, or if none, the overall least loaded core if
+	//          the mode permits waking it).
+	//    - If `gSchedulerLoadBalancePolicy` is `SCHED_LOAD_BALANCE_SPREAD`:
+	//        - The `targetCoreCandidate` (overall least loaded non-defunct core)
+	//          is typically chosen as the `finalTargetCore`.
+	//
+	// 3. Select Source CPU and Thread to Migrate:
+	//    - A `sourceCPU` is chosen from the `sourceCoreCandidate` (usually the
+	//      busiest CPU on that core).
+	//    - A `threadToMove` is selected from the `sourceCPU`'s run queue.
+	//      The selection iterates from higher to lower priority MLFQ levels,
+	//      skipping idle threads, the currently running thread, and pinned threads.
+	//      It also avoids migrating a thread too frequently using `kMinTimeBetweenMigrations`.
+	//
+	// 4. Select Target CPU and Perform Migration:
+	//    - A `targetCPU` is chosen on the `finalTargetCore` (usually the least
+	//      busy CPU on that core that can run the `threadToMove`, respecting affinity).
+	//    - If a suitable `threadToMove` and `targetCPU` are found:
+	//        - The `threadToMove` is removed from the `sourceCPU`'s run queue.
+	//        - Its core/CPU affinity and load associations are updated.
+	//        - It's added to the `targetCPU`'s run queue.
+	//        - If the migrated thread is now higher priority than what's running
+	//          on `targetCPU`, a reschedule is triggered on `targetCPU`.
+	//
+	// Note: This function uses historical core load (`CoreEntry::GetLoad()`) for
+	// identifying candidate cores for balancing, but instantaneous CPU load and
+	// thread priorities/affinity for selecting specific CPUs and threads.
+
 	SCHEDULER_ENTER_FUNCTION();
-	// This function attempts to balance load across cores.
-	// It identifies a source core (most loaded from gCoreHighLoadHeap) and a
-	// target core (least loaded from gCoreLoadHeap).
-	// If a significant imbalance exists, it tries to migrate a suitable thread
-	// from a CPU on the source core to a CPU on the target core.
-	// The exact behavior (spread vs. consolidate) depends on gSchedulerLoadBalancePolicy.
 
 	if (gSingleCore || gCoreCount < 2)
 		return; // No load balancing needed for single core or less than 2 cores.

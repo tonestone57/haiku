@@ -233,6 +233,8 @@ private:
 						bigtime_t		fLastLoadUpdate;
 						rw_spinlock		fLoadLock;
 
+						bool			fDefunct;	// True if core has no enabled CPUs
+
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
 

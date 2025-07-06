@@ -482,6 +482,8 @@ power_saving_choose_core(const ThreadData* threadData)
 		int32 minLoad = 0x7fffffff;
 		for (int32 i = 0; i < gCoreCount; i++) {
 			CoreEntry* core = &gCoreEntries[i];
+			if (core->fDefunct)
+				continue;
 			if ((core->GetLoad() > 0 || core->GetActiveTime() > 0) && // Check it's active
 				(!affinityMask.IsEmpty() ? core->CPUMask().Matches(affinityMask) : true)) {
 				int32 cpuCountOnCore = core->CPUCount();
@@ -524,6 +526,8 @@ power_saving_choose_core(const ThreadData* threadData)
 	if (chosenCore == NULL) {
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
+			if (core->fDefunct)
+				continue;
 			bool hasEnabledCPU = false;
 			for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
 				if (core->CPUMask().GetBit(cpu_idx) && gCPUEnabled.GetBit(cpu_idx)) {
@@ -535,7 +539,7 @@ power_saving_choose_core(const ThreadData* threadData)
 
 			if (affinityMask.IsEmpty() || core->CPUMask().Matches(affinityMask)) {
 				chosenCore = core;
-				dprintf("scheduler: power_saving_choose_core: Fallback to first available core %" B_PRId32 "\n", chosenCore->ID());
+				dprintf("scheduler: power_saving_choose_core: Fallback to first available non-defunct core %" B_PRId32 "\n", chosenCore->ID());
 				break;
 			}
 		}
@@ -628,22 +632,22 @@ power_saving_rebalance_irqs(bool idle)
 	if (candidateCount == 0 || totalLoadOnThisCPU < kLowLoad) return;
 
 	CoreEntry* targetCoreForIRQs = NULL;
-	if (consolidationCore != NULL && consolidationCore != currentCore &&
+	if (consolidationCore != NULL && !consolidationCore->fDefunct && consolidationCore != currentCore &&
 		consolidationCore->GetLoad() < currentCore->GetLoad() - kLoadDifference) {
 		targetCoreForIRQs = consolidationCore;
 	} else {
 		ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
-		targetCoreForIRQs = gCoreLoadHeap.PeekMinimum();
-		if (targetCoreForIRQs == currentCore && gCoreLoadHeap.Count() > 1) {
-			CoreEntry* temp = gCoreLoadHeap.PeekMinimum(1);
-			if (temp) targetCoreForIRQs = temp;
-		} else if (targetCoreForIRQs == currentCore) {
-            targetCoreForIRQs = NULL;
-        }
+		CoreEntry* candidate = NULL;
+		for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
+			if (!candidate->fDefunct && candidate != currentCore) {
+				targetCoreForIRQs = candidate;
+				break;
+			}
+		}
 		coreHeapsLocker.Unlock();
 	}
 
-	if (targetCoreForIRQs == NULL || targetCoreForIRQs == currentCore) return;
+	if (targetCoreForIRQs == NULL || targetCoreForIRQs->fDefunct || targetCoreForIRQs == currentCore) return;
 	if (targetCoreForIRQs->GetLoad() + kLoadDifference >= currentCore->GetLoad()) return;
 
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs,

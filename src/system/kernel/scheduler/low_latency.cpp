@@ -145,6 +145,8 @@ low_latency_choose_core(const ThreadData* threadData)
 		CoreEntry* candidateCore = NULL;
 		// Iterate through gCoreLoadHeap (less loaded cores)
 		for (int32 i = 0; (candidateCore = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
+			if (candidateCore->fDefunct)
+				continue;
 			if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 				continue;
 			chosenCore = candidateCore;
@@ -152,6 +154,8 @@ low_latency_choose_core(const ThreadData* threadData)
 		}
 		if (chosenCore == NULL) { // Fallback to gCoreHighLoadHeap
 			for (int32 i = 0; (candidateCore = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
+				if (candidateCore->fDefunct)
+					continue;
 				if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 					continue;
 				chosenCore = candidateCore;
@@ -163,6 +167,8 @@ low_latency_choose_core(const ThreadData* threadData)
 	if (chosenCore == NULL) { // Absolute fallback: iterate all cores
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
+			if (core->fDefunct)
+				continue;
 			bool hasEnabledCPU = false;
 			for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
 				if (core->CPUMask().GetBit(cpu_idx) && gCPUEnabled.GetBit(cpu_idx)) {
@@ -249,26 +255,26 @@ low_latency_rebalance_irqs(bool idle)
 
 	CoreEntry* targetCore = NULL;
 	ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
-	targetCore = gCoreLoadHeap.PeekMinimum();
-	if (targetCore == NULL && gCoreHighLoadHeap.Count() > 0 && gCoreHighLoadHeap.PeekMinimum() != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
-		// Prefer low load heap, but if empty, consider high load only if it's not current core's group
-		targetCore = gCoreHighLoadHeap.PeekMinimum();
+	CoreEntry* candidate = NULL;
+	for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
+		if (!candidate->fDefunct && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+			targetCore = candidate;
+			break;
+		}
 	}
-	// Ensure targetCore is not the current core after peeking from high load heap as well
-	if (targetCore == CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
-	    targetCore = (gCoreLoadHeap.Count() > 1 || gCoreHighLoadHeap.Count() > 1) ? gCoreLoadHeap.PeekMinimum(1) : NULL;
-	    if (targetCore == CoreEntry::GetCore(current_cpu_struct->cpu_num) && (gCoreLoadHeap.Count() > 2 || gCoreHighLoadHeap.Count() > 2)) {
-			// Try second element from other heap if first was current core
-			targetCore = gCoreHighLoadHeap.PeekMinimum(1);
-			if (targetCore == CoreEntry::GetCore(current_cpu_struct->cpu_num)) targetCore = NULL;
-		} else if (targetCore == CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
-			targetCore = NULL;
+	if (targetCore == NULL) {
+		for (int32 i = 0; (candidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
+			if (!candidate->fDefunct && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+				// Only consider from high load heap if it's not the current core's group
+				targetCore = candidate;
+				break;
+			}
 		}
 	}
 	coreHeapsLocker.Unlock();
 
 	CoreEntry* currentCore = CoreEntry::GetCore(current_cpu_struct->cpu_num);
-	if (targetCore == NULL || targetCore == currentCore)
+	if (targetCore == NULL || targetCore->fDefunct || targetCore == currentCore)
 		return;
 
 	if (targetCore->GetLoad() + kLoadDifference >= currentCore->GetLoad())

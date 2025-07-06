@@ -608,7 +608,8 @@ CoreEntry::CoreEntry()
 	fCurrentLoad(0),
 	fLoadMeasurementEpoch(0),
 	fHighLoad(false),
-	fLastLoadUpdate(0)
+	fLastLoadUpdate(0),
+	fDefunct(false)
 {
 	B_INITIALIZE_SPINLOCK(&fCPULock);
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
@@ -623,6 +624,7 @@ CoreEntry::Init(int32 id, PackageEntry* package)
 	// with its parent `package`.
 	fCoreID = id;
 	fPackage = package;
+	fDefunct = false;
 	// fCPUCount and fIdleCPUCount are managed by AddCPU/RemoveCPU
 	// and CPUGoesIdle/CPUWakesUp respectively.
 	// fCPUSet is managed by AddCPU/RemoveCPU.
@@ -793,26 +795,58 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 
 	if (fCPUCount == 0) {
 		// This was the last CPU on this core. The core is now defunct.
+		this->fDefunct = true;
+		TRACE("CoreEntry::RemoveCPU: Core %" B_PRId32 " marked as defunct.\n", this->ID());
+
 		// Unassign any threads that were still homed to this core.
 		thread_map(CoreEntry::_UnassignThread, this);
 
-		WriteSpinLocker heapsLock(gCoreHeapsLock); // Lock for global core heaps.
-		if (this->GetMinMaxHeapLink()->fIndex != -1) {
-			// Remove from whichever load heap it was in.
-			// TODO: MinMaxHeap does not have a generic Remove(Element*).
-			// This logic needs redesign or MinMaxHeap needs a Remove method.
-			// if (fHighLoad) gCoreHighLoadHeap.Remove(this);
-			// else gCoreLoadHeap.Remove(this);
+		// Force load metrics to 0 for the defunct core.
+		{
+			WriteSpinLocker loadLocker(fLoadLock);
+			fLoad = 0;
+			fCurrentLoad = 0;
+			fInstantaneousLoad = 0.0f;
+			// fHighLoad will be updated by _UpdateLoad if necessary,
+			// but a defunct core should not be considered high load.
 		}
-		heapsLock.Unlock();
+
+		// Attempt to update its key in the heaps to 0.
+		// _UpdateLoad will then be called, and if it's defunct, it should
+		// prevent re-insertion or ensure it's in gCoreLoadHeap with key 0.
+		// This specific part is tricky due to MinMaxHeap limitations.
+		// The goal is that _UpdateLoad effectively makes it inert.
+		{
+			WriteSpinLocker heapsLock(gCoreHeapsLock);
+			if (this->GetMinMaxHeapLink()->fIndex != -1) {
+				// It's in a heap. Modify its key to 0.
+				// This doesn't guarantee which heap it's in, but _UpdateLoad
+				// should sort that out based on fHighLoad.
+				// If fHighLoad was true, and we now set load to 0, _UpdateLoad
+				// should move it to gCoreLoadHeap.
+				if (fHighLoad) {
+					// Temporarily remove from high load heap by making its key largest
+					// This is a placeholder for a real Remove(this) from gCoreHighLoadHeap
+					// Then _UpdateLoad will try to insert into gCoreLoadHeap
+					// This is still imperfect without a direct Remove.
+					// A less disruptive approach is to just let _UpdateLoad handle it
+					// after fLoad is set to 0.
+				}
+				// For now, we rely on _UpdateLoad to fix its heap position given fLoad is now 0.
+				// The ModifyKey call might be redundant if _UpdateLoad correctly handles it.
+				// Let's simplify: set fLoad to 0, then call _UpdateLoad.
+			}
+		}
 
 		if (fPackage != NULL) {
 			// Remove this (now empty) core from its package's idle list.
+			// This ensures the package knows this core is no longer contributing.
 			fPackage->RemoveIdleCore(this);
 		}
 	}
 
 	// Re-calculate the core's aggregate load metrics based on remaining CPUs.
+	// If the core became defunct, _UpdateLoad will now see fDefunct = true.
 	_UpdateLoad(true); // Force update of fLoad.
 	UpdateInstantaneousLoad(); // Update fInstantaneousLoad.
 }
@@ -822,6 +856,43 @@ void
 CoreEntry::_UpdateLoad(bool forceUpdate)
 {
 	SCHEDULER_ENTER_FUNCTION();
+
+	if (this->fDefunct) {
+		// If the core is defunct, ensure its load is 0 and it's correctly
+		// (not) in heaps.
+		WriteSpinLocker loadLocker(fLoadLock);
+		fLoad = 0;
+		fCurrentLoad = 0;
+		fInstantaneousLoad = 0.0f;
+		// If it's in a heap, its key should reflect 0.
+		// And it should not be in gCoreHighLoadHeap.
+		bool wasInHighLoad = fHighLoad;
+		fHighLoad = false;
+		loadLocker.Unlock();
+
+		WriteSpinLocker heapsLock(gCoreHeapsLock);
+		if (this->GetMinMaxHeapLink()->fIndex != -1) {
+			if (wasInHighLoad) {
+				// This is where a proper Remove(this, gCoreHighLoadHeap) would be.
+				// Then Insert(this, 0, gCoreLoadHeap).
+				// With ModifyKey, we just ensure its key is 0.
+				// If it was in gCoreHighLoadHeap, it needs to move.
+				// The current MinMaxHeap might not support moving directly.
+				// Simplest for now: if it was high load, it's now 0 load.
+				// The existing _UpdateLoad logic below would try to move it.
+				// To prevent re-insertion if defunct:
+				// TODO: This still needs a robust way to remove it from *any* heap.
+				// For now, we'll rely on load balancing skipping defunct cores.
+				// The core might remain in a heap with key 0.
+				gCoreHighLoadHeap.ModifyKey(this, 0); // Try to update key if it was there
+				gCoreLoadHeap.ModifyKey(this, 0);   // Try to update key if it was there
+			} else {
+				gCoreLoadHeap.ModifyKey(this, 0);
+			}
+		}
+		// A defunct core should not be re-added to any heap by subsequent logic.
+		return;
+	}
 
 	// This function updates the core's average load (`fLoad`) based on the
 	// current loads of its constituent, enabled CPUs. This `fLoad` is used

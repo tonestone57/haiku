@@ -1453,12 +1453,21 @@ scheduler_perform_load_balance()
 		return; // No load balancing needed for single core or less than 2 cores.
 
 	ReadSpinLocker globalCoreHeapsLock(gCoreHeapsLock);
-	CoreEntry* sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum();
-	CoreEntry* targetCoreCandidate = gCoreLoadHeap.PeekMinimum();
+	CoreEntry* sourceCoreCandidate = NULL;
+	for (int32 i = 0; (sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
+		if (!sourceCoreCandidate->fDefunct)
+			break;
+	}
+
+	CoreEntry* targetCoreCandidate = NULL;
+	for (int32 i = 0; (targetCoreCandidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
+		if (!targetCoreCandidate->fDefunct)
+			break;
+	}
 	globalCoreHeapsLock.Unlock();
 
-	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
-		return; // Not enough distinct cores in heaps to balance between.
+	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate->fDefunct || targetCoreCandidate->fDefunct || sourceCoreCandidate == targetCoreCandidate)
+		return; // Not enough distinct, non-defunct cores in heaps to balance between.
 
 	// Only balance if the load difference is significant.
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)

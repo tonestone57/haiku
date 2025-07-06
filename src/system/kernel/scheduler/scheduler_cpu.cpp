@@ -88,9 +88,9 @@ CPUEntry::CPUEntry()
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
-	fMeasureActiveTime(0),
-	// Corrected order: fMlfqHighestNonEmptyLevel before fMeasureTime
+	// Corrected order: fMlfqHighestNonEmptyLevel before fMeasureActiveTime
 	fMlfqHighestNonEmptyLevel(-1),
+	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false)
 {

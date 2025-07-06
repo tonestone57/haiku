@@ -50,7 +50,6 @@ public:
 	inline	bool		IsIdle() const;
 
 	inline	bool		HasCacheExpired() const;
-	inline	CoreEntry*	Rebalance() const; // Note: Deprecated behavior via gCurrentMode->rebalance
 
 	inline	int32		GetEffectivePriority() const;
 
@@ -203,19 +202,6 @@ ThreadData::HasCacheExpired() const
 	if (gCurrentMode == NULL) return true;
 	// gCurrentMode->has_cache_expired is expected to exist
 	return gCurrentMode->has_cache_expired(this);
-}
-
-inline CoreEntry*
-ThreadData::Rebalance() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(!gSingleCore);
-	// The gCurrentMode->rebalance function pointer is deprecated and removed from the struct.
-	// Global load balancing is handled by scheduler_perform_load_balance().
-	// This function call should ideally not happen. If it does, it returns current core.
-	if (gCurrentMode == NULL /* || gCurrentMode->rebalance == NULL */) return fCore;
-	// return gCurrentMode->rebalance(this); // This line is dead
-	return fCore;
 }
 
 inline int32

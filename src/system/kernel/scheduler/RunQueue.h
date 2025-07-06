@@ -83,8 +83,6 @@ public:
 
 						RunQueue();
 
-	inline	status_t	GetInitStatus();
-
 	inline	Element*	PeekMaximum() const;
 
 	inline	void		PushFront(Element* element, unsigned int priority);
@@ -104,7 +102,7 @@ private:
 	typedef Heap<PriorityEntry, unsigned int, HeapGreaterCompare<unsigned int> >
 		PriorityHeap;
 
-			status_t	fInitStatus;
+			// status_t	fInitStatus; // Removed as it was always B_OK
 
 			PriorityEntry	fPriorityEntries[MaxPriority + 1];
 			PriorityHeap	fPriorityHeap;
@@ -234,19 +232,11 @@ RUN_QUEUE_CLASS_NAME::ConstIterator::_FindNextPriority()
 RUN_QUEUE_TEMPLATE_LIST
 RUN_QUEUE_CLASS_NAME::RunQueue()
 	:
-	fInitStatus(B_OK),
 	fPriorityHeap(MaxPriority + 1)
 {
+	// fInitStatus was removed
 	memset(fHeads, 0, sizeof(fHeads));
 	memset(fTails, 0, sizeof(fTails));
-}
-
-
-RUN_QUEUE_TEMPLATE_LIST
-status_t
-RUN_QUEUE_CLASS_NAME::GetInitStatus()
-{
-	return fInitStatus;
 }
 
 

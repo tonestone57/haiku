@@ -207,7 +207,6 @@ i915_ppgtt_alloc_va_range(struct i915_ppgtt* ppgtt, size_t size,
 	size = ALIGN(size, B_PAGE_SIZE); // Ensure size is page multiple for simplicity of VMA nodes
 
 	status_t status = B_NO_MEMORY; // Default to failure
-	struct i915_ppgtt_vma_node* free_node = NULL;
 	struct i915_ppgtt_vma_node* iter_node = NULL;
 	uint64_t aligned_start = 0;
 
@@ -218,77 +217,62 @@ i915_ppgtt_alloc_va_range(struct i915_ppgtt* ppgtt, size_t size,
 		uint64_t required_end = aligned_start + size;
 
 		if (aligned_start >= iter_node->start_addr && required_end <= iter_node->start_addr + iter_node->size) {
-			// Found a suitable free node or part of it
-			free_node = iter_node;
-			break;
+			// Found a potentially suitable free node (iter_node).
+			// Now, try to allocate memory for new prefix/suffix nodes if needed, *before* modifying the list.
+			struct i915_ppgtt_vma_node* new_prefix_node = NULL;
+			struct i915_ppgtt_vma_node* new_suffix_node = NULL;
+			bool prefix_needed = (aligned_start > iter_node->start_addr);
+			bool suffix_needed = (required_end < iter_node->start_addr + iter_node->size);
+
+			if (prefix_needed) {
+				new_prefix_node = (struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
+				if (new_prefix_node == NULL) {
+					TRACE("PPGTT VMA: Malloc failed for prefix node. Continuing search.\n");
+					// iter_node remains in free_vma_list, try next free block.
+					continue;
+				}
+			}
+
+			if (suffix_needed) {
+				new_suffix_node = (struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
+				if (new_suffix_node == NULL) {
+					TRACE("PPGTT VMA: Malloc failed for suffix node. Continuing search.\n");
+					if (new_prefix_node) free(new_prefix_node); // Free already allocated prefix
+					continue;
+				}
+			}
+
+			// All necessary mallocs succeeded. Now modify the list.
+			list_remove_item(&ppgtt->free_vma_list, iter_node); // Remove the original node
+
+			if (prefix_needed) {
+				new_prefix_node->start_addr = iter_node->start_addr;
+				new_prefix_node->size = aligned_start - iter_node->start_addr;
+				list_add_item_to_tail(&ppgtt->free_vma_list, new_prefix_node);
+				// TRACE("PPGTT VMA: Created prefix free node: start 0x%Lx, size 0x%Lx\n", new_prefix_node->start_addr, new_prefix_node->size);
+			}
+
+			if (suffix_needed) {
+				new_suffix_node->start_addr = required_end;
+				new_suffix_node->size = (iter_node->start_addr + iter_node->size) - required_end;
+				list_add_item_to_tail(&ppgtt->free_vma_list, new_suffix_node);
+				// TRACE("PPGTT VMA: Created suffix free node: start 0x%Lx, size 0x%Lx\n", new_suffix_node->start_addr, new_suffix_node->size);
+			}
+
+			free(iter_node); // Free the original node that was split or fully consumed
+
+			*va_offset_out = aligned_start;
+			status = B_OK;
+			TRACE("PPGTT VMA: Allocated VA range: start 0x%Lx, size 0x%lx\n", aligned_start, size);
+			goto allocation_done; // Found and processed a node
 		}
 	}
 
-	if (free_node != NULL) {
-		// Remove the chosen free_node from the list, it will be replaced by smaller ones or none
-		list_remove_item(&ppgtt->free_vma_list, free_node);
+	// If loop completes, no suitable node was found or processed successfully.
+	TRACE("PPGTT VMA: No suitable free VA range found for size 0x%lx, alignment 0x%Lx\n", size, alignment);
+	// status remains B_NO_MEMORY from initialization
 
-		// Case 1: Hole at the beginning due to alignment or partial use
-		if (aligned_start > free_node->start_addr) {
-			struct i915_ppgtt_vma_node* new_prefix_free_node =
-				(struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
-			if (new_prefix_free_node == NULL) {
-				// Critical: Failed to create a node for the remaining prefix.
-				// Try to add original free_node back and fail. This is tricky.
-				// For simplicity, this is a failure path that might leak VA space if not handled perfectly.
-				// A robust allocator would ensure atomicity or better recovery.
-				list_add_item_to_tail(&ppgtt->free_vma_list, free_node); // Put it back (maybe not sorted)
-				status = B_NO_MEMORY;
-				goto done;
-			}
-			new_prefix_free_node->start_addr = free_node->start_addr;
-			new_prefix_free_node->size = aligned_start - free_node->start_addr;
-			list_add_item_to_tail(&ppgtt->free_vma_list, new_prefix_free_node);
-			// TRACE("PPGTT VMA: Created prefix free node: start 0x%Lx, size 0x%Lx\n",
-			//    new_prefix_free_node->start_addr, new_prefix_free_node->size);
-		}
-
-		// Case 2: Hole at the end due to partial use
-		uint64_t allocated_end = aligned_start + size;
-		if (allocated_end < free_node->start_addr + free_node->size) {
-			struct i915_ppgtt_vma_node* new_suffix_free_node =
-				(struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
-			if (new_suffix_free_node == NULL) {
-				// Similar critical failure.
-				// TODO: Proper rollback or error handling.
-				// If prefix was added, it remains. Original free_node is removed. This leaks.
-				status = B_NO_MEMORY;
-				// Free the original free_node as we can't put it back easily with a potential prefix already added.
-				free(free_node);
-				goto done;
-			}
-			new_suffix_free_node->start_addr = allocated_end;
-			new_suffix_free_node->size = (free_node->start_addr + free_node->size) - allocated_end;
-			list_add_item_to_tail(&ppgtt->free_vma_list, new_suffix_free_node);
-			// TRACE("PPGTT VMA: Created suffix free node: start 0x%Lx, size 0x%Lx\n",
-			//    new_suffix_free_node->start_addr, new_suffix_free_node->size);
-		}
-
-		// The original free_node that was fully or partially consumed is now freed
-		free(free_node);
-
-		*va_offset_out = aligned_start;
-		status = B_OK;
-
-		// Optional: Add to allocated_vma_list
-		// struct i915_ppgtt_vma_node* alloc_node = (struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
-		// if (alloc_node) {
-		//    alloc_node->start_addr = aligned_start;
-		//    alloc_node->size = size;
-		//    list_add_item_to_tail(&ppgtt->allocated_vma_list, alloc_node);
-		// }
-		TRACE("PPGTT VMA: Allocated VA range: start 0x%Lx, size 0x%lx\n", aligned_start, size);
-	} else {
-		TRACE("PPGTT VMA: No suitable free VA range found for size 0x%lx, alignment 0x%Lx\n", size, alignment);
-		status = B_NO_MEMORY;
-	}
-
-done:
+allocation_done:
 	mutex_unlock(&ppgtt->lock);
 	return status;
 }

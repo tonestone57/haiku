@@ -245,11 +245,17 @@ bigtime_t
 ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (IsIdle() || IsRealTime()) {
-		// Real-time and Idle threads get their mode-adjusted base quantum directly.
+	if (IsIdle()) {
+		// Idle threads get mode-adjusted base quantum.
 		return GetBaseQuantumForLevel(fCurrentMlfqLevel);
 	}
+	if (IsRealTime()) {
+		// Real-time threads get *raw* base quantum, not affected by gSchedulerBaseQuantumMultiplier.
+		ASSERT(fCurrentMlfqLevel >= 0 && fCurrentMlfqLevel < NUM_MLFQ_LEVELS);
+		return kBaseQuanta[fCurrentMlfqLevel];
+	}
 
+	// For non-RT, non-idle threads:
 	bigtime_t baseQuantum = GetBaseQuantumForLevel(fCurrentMlfqLevel);
 	if (cpu == NULL || !gTrackCPULoad)
 		return baseQuantum;

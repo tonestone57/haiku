@@ -1059,6 +1059,12 @@ CoreLoadHeap::CoreLoadHeap(int32 coreCount)
 void
 CoreLoadHeap::Dump()
 {
+	WriteSpinLocker lock(gCoreHeapsLock);
+	if (!lock.IsLocked()) {
+		kprintf("CoreLoadHeap::Dump(): Failed to acquire gCoreHeapsLock. Aborting dump.\n");
+		return;
+	}
+
 	CoreEntry* entry = PeekMinimum();
 	while (entry) {
 		int32 key = GetKey(entry);

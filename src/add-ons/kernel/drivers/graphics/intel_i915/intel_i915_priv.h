@@ -22,6 +22,7 @@
 struct intel_vbt_data;
 struct intel_engine_cs;
 struct rps_info;
+struct i915_ppgtt; // Forward declare for context struct
 
 // DPMS States from GraphicsDefs.h (B_DPMS_ON, B_DPMS_STANDBY, B_DPMS_SUSPEND, B_DPMS_OFF)
 // No need to redefine them here, just ensure GraphicsDefs.h is included where they are used.
@@ -32,6 +33,89 @@ struct rps_info;
 #else
 #	define TRACE(x...) ;
 #endif
+
+// --- Platform and Capability Definitions ---
+
+// Adapted from FreeBSD i915 driver, simplified for Haiku's initial scope.
+// Keep in gen based order, and chronological order within a gen if possible.
+enum intel_platform {
+	INTEL_PLATFORM_UNINITIALIZED = 0,
+	// Gen7
+	INTEL_IVYBRIDGE,
+	INTEL_HASWELL,
+	// Gen8
+	INTEL_BROADWELL,
+	// Gen9
+	INTEL_SKYLAKE,
+	INTEL_KABYLAKE, // Example, add more as needed
+	INTEL_COFFEELAKE, // Often grouped with Kaby Lake for display
+	INTEL_COMETLAKE,  // Also Gen9.5 based like Kaby/Coffee
+	INTEL_GEMINILAKE, // LP Gen9
+	// Gen11
+	INTEL_ICELAKE,
+	INTEL_JASPERLAKE, // LP Gen11
+	// Gen12
+	INTEL_TIGERLAKE,
+	INTEL_ALDERLAKE_P, // Placeholder for Alder Lake Mobile/P
+	INTEL_ALDERLAKE_S, // Placeholder for Alder Lake Desktop/S
+	// Add more as Haiku's kSupportedDevices list is mapped
+	INTEL_PLATFORM_UNKNOWN // Fallback
+};
+
+struct intel_ip_version {
+	uint8_t ver;  // Graphics/Media IP Major Version (e.g., 7, 8, 9, 11, 12)
+	uint8_t rel;  // IP Release/Minor Version (e.g., 0, 5 for HSW GT2 vs GT3, 50 for Gen12.5)
+	uint8_t step; // IP Stepping (A0, B0 etc. - simplified to numeric for now)
+};
+
+// Corresponds to some fields from FreeBSD's intel_runtime_info
+struct intel_runtime_caps {
+	struct intel_ip_version graphics_ip;
+	struct intel_ip_version media_ip;    // For future media engine support
+
+	uint16_t device_id;             // PCI Device ID
+	uint8_t  revision_id;           // PCI Revision ID
+	uint16_t subsystem_vendor_id;
+	uint16_t subsystem_id;
+
+	// enum intel_ppgtt_type ppgtt_type; // Simplified: assume full PPGTT for relevant Gens for now
+	// uint8_t ppgtt_size_bits;          // e.g., 32 for Gen7 full, 48 for Gen8+ full
+
+	uint32_t page_sizes_gtt;        // Bitmask of supported GTT page sizes (e.g., SZ_4K, SZ_64K)
+	                                // Use Haiku's B_PAGE_SIZE for 4K. Need defines for 64K, 2M if supported.
+	uint32_t rawclk_freq_khz;       // Raw core clock frequency (often from VBT or fuse)
+};
+
+// Simplified PPGTT type enum for Haiku
+enum intel_ppgtt_type {
+	INTEL_PPGTT_NONE = 0,
+	INTEL_PPGTT_ALIASING = 1, // Gen6, Gen7
+	INTEL_PPGTT_FULL = 2      // Gen7.5 (HSW some variants), Gen8+
+};
+
+// Corresponds to boolean feature flags from FreeBSD's intel_device_info
+struct intel_static_caps { // Simplified from intel_device_info flags
+	bool is_mobile;
+	bool is_lp; // Low Power platform
+
+	bool has_llc; // Has Last Level Cache shared with CPU
+	// bool has_snoop; // If GPU can snoop CPU cache (usually true for integrated)
+
+	bool has_logical_ring_contexts; // Execlists support (Gen8+)
+	bool has_gt_uc;                 // GuC support (Gen9+)
+
+	bool gpu_reset_clobbers_display; // If a GPU reset affects display output
+	bool hws_needs_physical;         // If Hardware Status Page must be physical address
+	                                 // (True for older gens, false for Gen6+ with GGTT HWS)
+	uint8_t dma_mask_size;           // Bits for DMA addressing (e.g., 39, 40)
+	uint8_t gt_type;                 // GT1, GT2, GT3, etc. (0 if not applicable/known)
+
+	// Add initial PPGTT info here as it's often static per PCI ID group
+	enum intel_ppgtt_type initial_ppgtt_type;
+	uint8_t initial_ppgtt_size_bits;
+	uint32_t initial_page_sizes_gtt; // GTT page sizes, not PPGTT
+};
+
 
 // Gen Detection Macros (IS_IVYBRIDGE, IS_HASWELL, IS_GEN7, INTEL_GRAPHICS_GEN)
 // ... (as defined previously) ...
@@ -131,7 +215,10 @@ static inline int INTEL_GRAPHICS_GEN(uint16_t devid) {
 }
 
 #define INTEL_INFO_GEN_FROM_DEVICE_ID(devid) INTEL_GRAPHICS_GEN(devid)
-#define INTEL_DISPLAY_GEN(devInfoPtr) INTEL_GRAPHICS_GEN((devInfoPtr)->device_id)
+#define INTEL_DISPLAY_GEN(devInfoPtr) INTEL_GRAPHICS_GEN((devInfoPtr)->runtime_caps.device_id) // Use runtime_caps
+#define INTEL_GRAPHICS_VER(devInfoPtr) ((devInfoPtr)->runtime_caps.graphics_ip.ver)
+#define INTEL_MEDIA_VER(devInfoPtr)    ((devInfoPtr)->runtime_caps.media_ip.ver)
+
 
 #define MAX_FB_PAGES_PER_PIPE 16384 // Max 64MB per pipe's framebuffer GTT allocation
 
@@ -400,9 +487,16 @@ typedef struct intel_clock_params_t {
 
 
 typedef struct intel_i915_device_info {
-	// ... (all previous fields as before) ...
-	pci_info	pciinfo; uint16_t vendor_id, device_id; uint8_t revision;
-	uint16_t subsystem_vendor_id, subsystem_id;
+	pci_info	pciinfo;
+	// uint16_t	vendor_id, device_id; // Moved to runtime_caps
+	// uint8_t		revision; // Moved to runtime_caps
+	// uint16_t	subsystem_vendor_id, subsystem_id; // Moved to runtime_caps
+
+	// New capability structures
+	enum intel_platform platform;
+	struct intel_static_caps static_caps;
+	struct intel_runtime_caps runtime_caps;
+
 	uintptr_t gtt_mmio_physical_address; size_t gtt_mmio_aperture_size;
 	area_id	gtt_mmio_area_id; uint8_t* gtt_mmio_regs_addr;
 	uintptr_t mmio_physical_address; size_t mmio_aperture_size;
@@ -415,35 +509,38 @@ typedef struct intel_i915_device_info {
 	mutex gtt_allocator_lock;
 
 	// Bitmap GTT Allocator fields
-	uint32_t*	gtt_page_bitmap;          // Bitmap: 1 bit per GTT page
-	uint32_t	gtt_bitmap_size_dwords;   // Size of the bitmap array in dwords
-	uint32_t	gtt_total_pages_managed;  // Total GTT pages represented by the bitmap
-	                                      // This will be devInfo->gtt_entries_count.
-	uint32_t	gtt_free_pages_count;     // Number of currently free GTT pages (excluding scratch page)
+	uint32_t*	gtt_page_bitmap;
+	uint32_t	gtt_bitmap_size_dwords;
+	uint32_t	gtt_total_pages_managed;
+	uint32_t	gtt_free_pages_count;
 
 	// Fence Register Management (Gen < 9 primarily)
 #define I915_MAX_FENCES 16 // Common number for i965+
 	struct {
 		bool     used;
-		uint32_t gtt_offset_pages; // Starting GTT page index of the object using this fence
-		uint32_t obj_num_pages;    // Size in pages of the object using this fence
-		enum i915_tiling_mode tiling_mode; // Tiling mode of the object in this fence
-		uint32_t obj_stride;       // Stride of the object in this fence
+		uint32_t gtt_offset_pages;
+		uint32_t obj_num_pages;
+		enum i915_tiling_mode tiling_mode;
+		uint32_t obj_stride;
 	} fence_state[I915_MAX_FENCES];
 	mutex fence_allocator_lock;
 
 	// LRU list for GTT-bound evictable GEM objects
 	struct list active_lru_list;
 	mutex lru_lock;
-	uint32_t last_completed_render_seqno; // For checking if an object is idle (approximate)
-	// Potentially add similar for other engines if they exist:
+	uint32_t last_completed_render_seqno;
 	// uint32_t last_completed_blit_seqno;
 
 	struct intel_vbt_data* vbt; area_id rom_area; uint8_t* rom_base;
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;
 	display_mode current_hw_mode; intel_pipe_hw_state pipes[PRIV_MAX_PIPES];
-	area_id	framebuffer_area; void* framebuffer_addr; phys_addr_t framebuffer_phys_addr;
-	size_t framebuffer_alloc_size; // Size of primary (Pipe A) framebuffer for shared_info
+
+	// These global FB fields now primarily serve shared_info for Pipe A or last configured pipe.
+	area_id	framebuffer_area;
+	void* framebuffer_addr;
+	phys_addr_t framebuffer_phys_addr;
+	size_t framebuffer_alloc_size;
+
 	struct intel_engine_cs* rcs0; struct rps_info* rps_state;
 	uint32_t current_cdclk_freq_khz;
 	uint32_t open_count; int32_t irq_line; sem_id vblank_sem_id; void* irq_cookie;
@@ -468,13 +565,6 @@ typedef struct intel_i915_device_info {
 	uint32_t cached_deier_val;
 	uint32_t cached_gt_ier_val;
 
-	// GEM object related fields (placeholder, real struct in gem_object.h or similar)
-	// This is just to ensure intel_i915_device_info is aware of GEM objects for LRU, etc.
-	// The actual struct intel_i915_gem_object should be defined where GEM code resides.
-	// For now, assume it's forward declared or defined in an included header like gem.h
-	// (which should define struct intel_i915_gem_object).
-	// The list_node for LRU is in intel_i915_gem_object itself.
-
 	struct intel_i915_gem_object* framebuffer_bo[PRIV_MAX_PIPES];
 	uint32_t framebuffer_gtt_offset_pages[PRIV_MAX_PIPES]; // GTT page offset for each pipe's FB
 
@@ -494,6 +584,7 @@ struct intel_i915_gem_object;
 struct intel_i915_gem_object {
 	struct drm_gem_object_placeholder base; // Contains refcount
 	intel_i915_device_info* dev_priv;
+	uint32_t refcount; // Haiku specific refcount
 
 	size_t     size;             // User requested size (for linear) or minimum size from dimensions
 	size_t     allocated_size;   // Actual page-aligned size of backing store (can be > size for tiled)
@@ -556,5 +647,17 @@ intel_i915_write32(intel_i915_device_info* devInfo, uint32 offset, uint32 value)
 	}
 	*(volatile uint32_t*)(devInfo->mmio_regs_addr + offset) = value;
 }
+
+// Define GTT page size constants if not already universally available
+#ifndef SZ_4K
+#define SZ_4K ((size_t)4096)
+#endif
+#ifndef SZ_64K
+#define SZ_64K ((size_t)65536)
+#endif
+#ifndef SZ_2M
+#define SZ_2M ((size_t)(2 * 1024 * 1024))
+#endif
+
 
 #endif /* INTEL_I915_PRIV_H */

@@ -84,7 +84,14 @@ public:
 	inline	void		GoesAway();
 	inline	void		Dies();
 
+	// Timestamp (system_time()) when the thread last transitioned to a
+	// waiting/sleeping state. Used in cache affinity heuristics
+	// (especially PS mode).
 	inline	bigtime_t	WentSleep() const	{ return fWentSleep; }
+	// Cumulative active time of the core (`fCore->GetActiveTime()`) when
+	// the thread last transitioned to a waiting/sleeping state on that
+	// core. Used in cache affinity heuristics (especially LL mode) to
+	// estimate how much other work the core has done since.
 	inline	bigtime_t	WentSleepActive() const	{ return fWentSleepActive; }
 
 	inline	void		MarkEnqueued(CoreEntry* core);
@@ -94,6 +101,8 @@ public:
 
 	inline	bool		IsEnqueued() const	{ return fEnqueued; }
 
+	// EWMA of this thread's CPU consumption.
+	// See scheduler_common.h for detailed explanation of load metrics.
 	inline	int32		GetLoad() const	{ return fNeededLoad; }
 
 	inline	CoreEntry*	Core() const	{ return fCore; }
@@ -114,14 +123,7 @@ private:
 			bigtime_t	fQuantumStartWallTime;
 			bigtime_t	fLastInterruptTime;
 
-			// Timestamp (system_time()) when the thread last transitioned to a
-			// waiting/sleeping state. Used in cache affinity heuristics
-			// (especially PS mode).
 			bigtime_t	fWentSleep;
-			// Cumulative active time of the core (`fCore->GetActiveTime()`) when
-			// the thread last transitioned to a waiting/sleeping state on that
-			// core. Used in cache affinity heuristics (especially LL mode) to
-			// estimate how much other work the core has done since.
 			bigtime_t	fWentSleepActive;
 
 			bool		fEnqueued;
@@ -143,8 +145,6 @@ private:
 			bigtime_t	fMeasureAvailableActiveTime;
 			bigtime_t	fMeasureAvailableTime;
 			bigtime_t	fLastMeasureAvailableTime;
-			// EWMA of this thread's CPU consumption.
-			// See scheduler_common.h for detailed explanation of load metrics.
 			int32		fNeededLoad;
 			uint32		fLoadMeasurementEpoch;
 
@@ -292,7 +292,7 @@ ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
 	if (IsIdle())
 		return false;
 	if (hasYielded) {
-		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum;
+		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum; // Consider yielded thread to have used its quantum.
 		return true;
 	}
 	// 'wasPreempted' (from cpu_ent) is no longer used here for penalty logic.
@@ -347,88 +347,132 @@ ThreadData::SetLastMigrationTime(bigtime_t time)
 inline void
 ThreadData::Continues()
 {
+	// Called when a thread that was already running or ready is about to run
+	// again (e.g. it's the oldThread in reschedule and stays on CPU) or remains
+	// ready (e.g. it wasn't chosen to run in this reschedule pass but is
+	// re-enqueued).
+	// Its primary role here is to ensure its fNeededLoad is re-computed if
+	// core load tracking is enabled, as its activity pattern or the core's
+	// overall load situation might be changing.
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady);
+	ASSERT(fReady); // Should be in a ready state.
 	if (gTrackCoreLoad && !IsIdle())
-		_ComputeNeededLoad();
+		_ComputeNeededLoad(); // Update this thread's load contribution.
 }
 
 inline void
 ThreadData::GoesAway()
 {
+	// Called when a running/ready thread transitions to a waiting/sleeping state
+	// (e.g., blocks on a semaphore, calls snooze(), or is suspended).
+	// This function updates timestamps for cache affinity and adjusts its
+	// load contribution from the core it was associated with.
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady);
+	ASSERT(fReady); // Should have been ready before going away.
 
-	fLastInterruptTime = 0;
-	fWentSleep = system_time();
-	if (fCore != NULL)
+	fLastInterruptTime = 0; // Reset for the next run.
+	fWentSleep = system_time(); // Record wall time of sleep for cache affinity.
+	if (fCore != NULL) {
+		// Record the core's cumulative active time at the moment of sleep.
+		// Used by cache affinity logic (e.g. in low_latency mode).
 		fWentSleepActive = fCore->GetActiveTime();
-	else
+	} else
 		fWentSleepActive = 0;
 
 	if (gTrackCoreLoad && !IsIdle()) {
+		// Update load measurement stats before removing this thread's load
+		// contribution from its core.
 		bigtime_t currentTime = system_time();
+		// Accumulate any active time since last _ComputeNeededLoad.
 		fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
-		fMeasureAvailableTime = currentTime;
-		if (fCore != NULL)
+		fMeasureAvailableTime = currentTime; // Update wall time for availability.
+		if (fCore != NULL) {
+			// Remove this thread's fNeededLoad contribution from its core.
+			// The 'false' for force means Core::RemoveLoad might not immediately
+			// change Core::fLoad if it's within the same measurement epoch,
+			// but will update Core::fCurrentLoad.
 			fLoadMeasurementEpoch = fCore->RemoveLoad(fNeededLoad, false);
+		}
 	}
-	fReady = false;
+	fReady = false; // Thread is no longer in a ready-to-run state.
 }
 
 inline void
 ThreadData::Dies()
 {
+	// Called when a thread is about to be destroyed (e.g. exiting or killed).
+	// This ensures its load contribution is definitively removed from any core
+	// it might have been associated with.
 	SCHEDULER_ENTER_FUNCTION();
+	// Thread might be already not fReady if it went to sleep and then was killed.
+	// THREAD_STATE_FREE_ON_RESCHED indicates it's being cleaned up by the scheduler.
 	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED);
 	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
-		if (fReady)
+		if (fReady) { // Only remove load if it was still considered active/ready.
+			// Remove this thread's fNeededLoad contribution from its core.
+			// The 'true' for force ensures Core::fLoad is updated immediately,
+			// as the thread is permanently gone.
 			fCore->RemoveLoad(fNeededLoad, true);
+		}
 	}
-	fReady = false;
+	fReady = false; // Thread is definitely not ready anymore.
 }
 
 inline void
 ThreadData::MarkEnqueued(CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	fCore = core;
+	fCore = core; // Associate with the core it's being enqueued on.
 	if (!fReady) {
+		// If the thread wasn't ready (i.e., it was sleeping/waiting and is now waking up),
+		// update its load contribution to the new core.
 		if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
 			bigtime_t timeSlept = system_time() - fWentSleep;
-			bool updateLoad = timeSlept > 0;
+			bool updateLoad = timeSlept > 0; // Only update if it actually slept.
+			// Add its fNeededLoad to the new core.
+			// `!updateLoad` for force: if it didn't sleep (rare), update immediately.
 			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, !updateLoad);
 			if (updateLoad) {
+				// Adjust available time to account for the sleep period.
 				fMeasureAvailableTime += timeSlept;
-				_ComputeNeededLoad();
+				_ComputeNeededLoad(); // Recompute its own fNeededLoad based on new activity.
 			}
 		}
-		fReady = true;
+		fReady = true; // Mark as ready to run.
 	}
-	fThread->state = B_THREAD_READY;
-	fEnqueued = true;
+	fThread->state = B_THREAD_READY; // Update underlying thread state.
+	fEnqueued = true; // Mark as being in a run queue.
 }
 
 inline void
 ThreadData::MarkDequeued()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	fEnqueued = false;
+	fEnqueued = false; // No longer in any run queue.
 }
 
 
 inline void
 ThreadData::UpdateActivity(bigtime_t active)
 {
+	// Called after a thread has run on a CPU for a period (`active` time)
+	// to account for the CPU time it consumed during its last quantum slice.
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle())
-		return;
+		return; // Idle threads don't track quantum usage or load this way.
 
+	// Accumulate time used in the current quantum.
 	fTimeUsedInCurrentQuantum += active;
+	// Subtract any time that was "stolen" by interrupts during this slice,
+	// as that wasn't actual thread execution time.
 	fTimeUsedInCurrentQuantum -= fStolenTime;
-	fStolenTime = 0;
+	fStolenTime = 0; // Reset stolen time for the next slice.
 
 	if (gTrackCoreLoad) {
+		// Update measures used for calculating this thread's fNeededLoad.
+		// Both fMeasureAvailableTime (wall time it was running) and
+		// fMeasureAvailableActiveTime (CPU time it was running) are incremented
+		// by the 'active' CPU time it just consumed.
 		fMeasureAvailableTime += active;
 		fMeasureAvailableActiveTime += active;
 	}

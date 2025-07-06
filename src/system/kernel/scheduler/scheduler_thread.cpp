@@ -145,19 +145,9 @@ ThreadData::Init()
 
 	Thread* currentThread = thread_get_current_thread();
 	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
-		// If this thread is being created by another existing thread that has
-		// scheduler data (i.e., it's a "normal" thread creation, not from an
-		// early boot context or an unusual kernel context), inherit the creating
-		// thread's fNeededLoad. This assumes the new thread might perform
-		// similar work initially.
 		ThreadData* currentThreadData = currentThread->scheduler_data;
 		fNeededLoad = currentThreadData->fNeededLoad;
 	} else {
-		// Default fNeededLoad for brand new threads or those created in contexts
-		// where the creating thread has no scheduler data (e.g., early boot).
-		// kMaxLoad / 10 (10%) is a general baseline. This value will adapt over
-		// time as the thread runs, due to the EWMA calculation in
-		// _ComputeNeededLoad().
 		fNeededLoad = kMaxLoad / 10;
 	}
 	fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());

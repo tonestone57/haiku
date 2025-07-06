@@ -327,22 +327,31 @@ ThreadData*
 CPUEntry::ChooseNextThread(ThreadData* oldThread, bool putAtBack, int oldMlfqLevel)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fQueueLock.IsOwned());
+	ASSERT(fQueueLock.IsOwned()); // Caller must hold the run queue lock.
 
+	// If the old thread (that was just running) is still ready and belongs to
+	// this CPU's core, re-enqueue it.
+	// `putAtBack` determines if it goes to the front (if its quantum didn't end
+	// and it didn't yield) or back (if quantum ended or it yielded).
+	// `oldMlfqLevel` is its current MLFQ level (might have been demoted just before this).
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
 		&& oldThread->Core() == this->Core()) {
-		AddThread(oldThread, oldThread->CurrentMLFQLevel(), !putAtBack);
+		AddThread(oldThread, oldMlfqLevel, !putAtBack);
 	}
 
+	// Peek the highest priority thread from the run queues.
 	ThreadData* nextThreadData = PeekNextThread();
 
 	if (nextThreadData != NULL) {
-		// Successfully found a thread in the run queue.
+		// Successfully found a runnable thread in the run queue.
+		// Note: This thread is *not* removed from the queue here; the caller
+		// (scheduler_reschedule) is responsible for dequeuing it if it's chosen.
 	} else {
-		// No thread in run queue, pick the idle thread for this CPU.
+		// No suitable thread in any run queue.
+		// Fall back to this CPU's dedicated idle thread.
 		nextThreadData = PeekIdleThread();
 		if (nextThreadData == NULL) {
-			// This should ideally never happen if idle threads are correctly set up.
+			// This should be impossible if idle threads are correctly initialized.
 			panic("CPUEntry::ChooseNextThread: No idle thread found for CPU %" B_PRId32, ID());
 		}
 	}
@@ -357,38 +366,52 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 
-	cpu_ent* cpuEntry = &gCPU[fCPUNumber];
+	// This function is called after a context switch (or when the scheduler
+	// decides the current thread will continue running). It updates various
+	// time and load accounting metrics for the CPU, core, and the threads involved.
+
+	cpu_ent* cpuEntry = &gCPU[fCPUNumber]; // Low-level per-CPU data.
 	Thread* oldThread = oldThreadData->GetThread();
 
+	// Account for the time the oldThread just spent running.
 	if (!thread_is_idle_thread(oldThread)) {
 		bigtime_t activeKernelTime = oldThread->kernel_time - cpuEntry->last_kernel_time;
 		bigtime_t activeUserTime = oldThread->user_time - cpuEntry->last_user_time;
 		bigtime_t activeTime = activeKernelTime + activeUserTime;
 
-		if (activeTime < 0) activeTime = 0;
+		if (activeTime < 0) activeTime = 0; // Sanity check.
 
+		// Update overall CPU active time (used by cpufreq, etc.).
 		WriteSequentialLocker locker(cpuEntry->active_time_lock);
 		cpuEntry->active_time += activeTime;
 		locker.Unlock();
 
+		// Update this CPUEntry's measurement of active time for its fLoad calculation.
 		fMeasureActiveTime += activeTime;
+		// Update the parent CoreEntry's cumulative active time.
 		if (fCore) fCore->IncreaseActiveTime(activeTime);
 
+		// Let the thread itself account for its consumed CPU time.
 		oldThreadData->UpdateActivity(activeTime);
 	}
 
+	// If CPU load tracking is enabled, update load metrics and potentially
+	// request a CPU performance level change.
 	if (gTrackCPULoad) {
 		if (!cpuEntry->disabled)
-			ComputeLoad(); // This updates fLoad and calls UpdateInstantaneousLoad
-		else // Ensure instantaneous load is zeroed if CPU disabled
+			ComputeLoad(); // Updates fLoad and calls UpdateInstantaneousLoad.
+		else // Ensure instantaneous load is zeroed if CPU is disabled.
 			UpdateInstantaneousLoad(system_time());
-		_RequestPerformanceLevel(nextThreadData);
+		_RequestPerformanceLevel(nextThreadData); // Request cpufreq change based on new state.
 	}
 
+	// Prepare for the nextThread's run.
 	Thread* nextThread = nextThreadData->GetThread();
 	if (!thread_is_idle_thread(nextThread)) {
+		// Store current kernel/user times to calculate usage at next reschedule.
 		cpuEntry->last_kernel_time = nextThread->kernel_time;
 		cpuEntry->last_user_time = nextThread->user_time;
+		// Store interrupt time to account for stolen time later.
 		nextThreadData->SetLastInterruptTime(gCPU[fCPUNumber].interrupt_time);
 	}
 }
@@ -742,18 +765,21 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 {
 	SCHEDULER_ENTER_FUNCTION();
 
+	// This function updates the core's average load (`fLoad`) based on the
+	// current loads of its constituent, enabled CPUs. This `fLoad` is used
+	// for placing the core in the global load balancing heaps.
+	// It also manages the `fLoadMeasurementEpoch` for coordinating with
+	// `CoreEntry::AddLoad/RemoveLoad`.
+
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;
 	{ // Scope for fCPULock
-		ReadSpinLocker cpuListLock(fCPULock); // Protects iteration over fCPUSet (though fCPUSet itself is bitmask)
-											// and access to CPUEntry states.
+		ReadSpinLocker cpuListLock(fCPULock);
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
-				// CPUEntry::GetLoad() is inline and reads fLoad, which is updated by ComputeLoad.
-				// This needs to be safe if ComputeLoad is concurrent.
-				// Assuming CPUEntry::fLoad is accessed atomically or appropriately.
-				newAverageLoad += cpuEntry->GetLoad(); // Summing CPUEntry's fLoad (thread load)
+				// CPUEntry::GetLoad() returns fLoad, which is its historical thread load.
+				newAverageLoad += cpuEntry->GetLoad();
 				activeCPUsOnCore++;
 			}
 		}
@@ -762,45 +788,50 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (activeCPUsOnCore > 0) {
 		newAverageLoad /= activeCPUsOnCore;
 	} else {
-		newAverageLoad = 0; // No active CPUs, so core load is 0
+		newAverageLoad = 0; // No active CPUs on this core, so its load is 0.
 	}
-	newAverageLoad = std::min(newAverageLoad, kMaxLoad);
-
+	newAverageLoad = std::min(newAverageLoad, kMaxLoad); // Cap at kMaxLoad.
 
 	bigtime_t now = system_time();
+	// Check if the load measurement interval has passed or if a forced update is requested.
 	bool intervalEnded = now >= kLoadMeasureInterval + fLastLoadUpdate;
 
 	if (!intervalEnded && !forceUpdate)
-		return;
+		return; // No update needed yet unless forced.
 
-	// Lock order: gCoreHeapsLock then fLoadLock
+	// Lock order: gCoreHeapsLock (global) then fLoadLock (per-core).
 	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
 	WriteSpinLocker loadLocker(fLoadLock);
 
-	int32 oldKey = MinMaxHeapLinkImpl<CoreEntry, int32>::GetKey(this);
-	fLoad = newAverageLoad;
+	int32 oldKey = MinMaxHeapLinkImpl<CoreEntry, int32>::GetKey(this); // Current key in heap.
+	fLoad = newAverageLoad; // Update the core's official fLoad.
 
 	if (intervalEnded) {
+		// If the interval ended, advance the measurement epoch. This is used by
+		// AddLoad/RemoveLoad to determine if a thread's fNeededLoad should
+		// directly impact fLoad (if epochs differ) or just fCurrentLoad (if same epoch).
 		fLoadMeasurementEpoch++;
 		fLastLoadUpdate = now;
 	}
-	// fCurrentLoad is managed by AddLoad/RemoveLoad/ChangeLoad directly via atomics on fCurrentLoad.
-	// The relationship between fLoad (average of CPU fLoads) and fCurrentLoad (sum of thread fNeededLoads on core)
-	// is that fLoad is what's used for heap placement.
 
-	loadLocker.Unlock(); // Release fLoadLock before potentially modifying heaps
+	// fCurrentLoad (sum of thread fNeededLoads) is managed separately by AddLoad/RemoveLoad.
+	// fLoad (this function's concern) is what's used for heap placement in load balancing.
 
-	// fLoad is now updated. Compare with oldKey (which was based on previous fLoad).
+	loadLocker.Unlock(); // Release fLoadLock before potentially modifying heaps.
+
+	// If the load value hasn't changed and the core is already in a heap, no need to re-heap.
 	if (oldKey == fLoad && MinMaxHeapLinkImpl<CoreEntry, int32>::IsLinked()) {
 		coreHeapsLocker.Unlock();
 		return;
 	}
 
+	// Remove from old heap (if it was in one).
 	if (MinMaxHeapLinkImpl<CoreEntry, int32>::IsLinked()) {
 		if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 		else gCoreLoadHeap.Remove(this);
 	}
 
+	// Insert into the appropriate new heap based on the updated fLoad.
 	if (fLoad > kHighLoad) {
 		gCoreHighLoadHeap.Insert(this, fLoad);
 		fHighLoad = true;
@@ -808,7 +839,7 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		gCoreLoadHeap.Insert(this, fLoad);
 		fHighLoad = false;
 	}
-	// coreHeapsLocker unlocks on destruction
+	// coreHeapsLocker unlocks on destruction.
 }
 
 

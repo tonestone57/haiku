@@ -21,7 +21,20 @@
 
 
 // Calculates hardware stride and total allocated size for a tiled buffer.
-// This is a simplified version and needs generation-specific details from PRMs.
+//
+// IMPORTANT NOTE: This function currently uses generic tiling parameters (tile dimensions,
+// alignment rules) that are common for many Gen6+ Intel GPUs. However, these
+// parameters can be highly generation-specific. For fully accurate and correct
+// tiled buffer allocation, this function MUST be updated with details from the
+// Intel Programmer's Reference Manuals (PRMs) for each targeted GPU generation.
+// This includes verifying tile widths/heights in bytes/rows, specific stride
+// alignment requirements (e.g., power-of-two for some older gens), and any
+// maximum stride limitations (especially for Y-tiling when used with fences
+// on certain generations like Gen7).
+//
+// The current implementation should be considered a best-effort placeholder
+// until PRM-verified, generation-specific logic can be implemented.
+//
 static status_t
 _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 	enum i915_tiling_mode tiling_mode,
@@ -36,21 +49,17 @@ _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 		return B_BAD_VALUE;
 	}
 	uint32_t bytes_per_pixel = bpp / 8;
-	// bytes_per_pixel will not be 0 here due to bpp == 0 check above and bpp % 8 == 0 check.
 
 	uint32_t calculated_stride = 0;
 	size_t calculated_total_size = 0;
 	uint32_t gen = INTEL_GRAPHICS_GEN(devInfo->device_id);
 
-	// These are typical values for Gen6/7. May vary for other gens.
-	// X-tile: 512B wide, 8 rows high. (Typical for Gen6+)
-	// Y-tile: 128B wide, 32 rows high. (Typical for Gen6+)
-	// These values might need adjustment for different GPU generations based on PRMs.
-	// For example, older gens might have different tile dimensions or no Y-tiling.
-	const uint32_t x_tile_width_bytes = 512;
-	const uint32_t x_tile_height_rows = 8;
-	const uint32_t y_tile_width_bytes = 128;
-	const uint32_t y_tile_height_rows = 32;
+	// TODO: Verify/Refine these tile dimensions from PRMs for each supported GPU generation.
+	// These are typical for Gen6-Gen9 but may vary or have additional constraints.
+	const uint32_t x_tile_width_bytes = 512; // Width of an X-tile in bytes
+	const uint32_t x_tile_height_rows = 8;   // Height of an X-tile in rows
+	const uint32_t y_tile_width_bytes = 128; // Width of a Y-tile in bytes
+	const uint32_t y_tile_height_rows = 32;  // Height of a Y-tile in rows
 
 	// Use the provided width_px, height_px, bits_per_pixel directly
 	uint32_t image_stride_bytes = width_px * bytes_per_pixel;
@@ -67,7 +76,8 @@ _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 			TRACE("_calc_tile: X-Tiled: w%u h%u bpp%u -> img_stride%u, hw_stride%u, align_h%u, total_size%lu\n",
 				width_px, height_px, bpp, image_stride_bytes, calculated_stride, aligned_height_rows, calculated_total_size);
 		} else {
-			TRACE("_calc_tile: X-Tiling not supported/defined for Gen %u\n", gen);
+			// TODO: Define X-tiling rules for pre-Gen6 if support is intended.
+			TRACE("_calc_tile: X-Tiling not supported/defined for Gen %u with current rules.\n", gen);
 			return B_UNSUPPORTED;
 		}
 	} else if (tiling_mode == I915_TILING_Y) {
@@ -79,21 +89,26 @@ _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 			calculated_total_size = (size_t)calculated_stride * aligned_height_rows;
 			TRACE("_calc_tile: Y-Tiled: w%u h%u bpp%u -> img_stride%u, hw_stride%u, align_h%u, total_size%lu\n",
 				width_px, height_px, bpp, image_stride_bytes, calculated_stride, aligned_height_rows, calculated_total_size);
-			// Note: Y-tiling can have additional constraints on older hardware,
-			// like maximum stride for fenced Y-tiles (e.g., 8KB or 16KB on Gen7).
-			// This basic calculation does not account for such limits yet.
+
+			// TODO: Add GEN-specific checks for Y-tiling constraints, e.g.:
+			// - Maximum stride for fenced Y-tiles (e.g., 8KB or 16KB on Gen7 for display).
+			// - Surface width alignment requirements beyond tile width for some operations.
+			// These require PRM lookup per generation.
 		} else {
-			TRACE("_calc_tile: Y-Tiling not supported/defined for Gen %u\n", gen);
+			// TODO: Define Y-tiling rules for pre-Gen6 if support is intended (unlikely for Y).
+			TRACE("_calc_tile: Y-Tiling not supported/defined for Gen %u with current rules.\n", gen);
 			return B_UNSUPPORTED;
 		}
 	} else {
-		// Should not be called for I915_TILING_NONE
-		TRACE("_calc_tile: Invalid tiling_mode %d passed.\n", tiling_mode);
+		// This case should ideally not be reached if called from intel_i915_gem_object_create,
+		// which checks for I915_TILING_NONE before calling this helper.
+		TRACE("_calc_tile: Invalid tiling_mode %d passed (not X or Y).\n", tiling_mode);
 		return B_BAD_VALUE;
 	}
 
 	if (calculated_stride == 0 || calculated_total_size == 0) {
-		TRACE("_calc_tile: Calculation resulted in zero stride or size.\n");
+		TRACE("_calc_tile: Calculation resulted in zero stride or size (stride: %u, size: %lu).\n",
+			calculated_stride, calculated_total_size);
 		return B_ERROR;
 	}
 

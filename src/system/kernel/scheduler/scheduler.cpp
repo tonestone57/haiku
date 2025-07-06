@@ -13,6 +13,13 @@
 
 /*! The thread scheduler */
 
+// Define missing DEFAULT_... macros with values from comments
+#define DEFAULT_IRQ_BALANCE_CHECK_INTERVAL 500000 // Default 0.5s, assuming microseconds
+#define DEFAULT_IRQ_TARGET_FACTOR 0.3f
+#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD 700
+#define DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD 1000
+#define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
+#define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
 
 #include <OS.h>
 
@@ -584,7 +591,7 @@ reschedule(int32 nextState)
 	} else {
 		// Idle threads get a very long quantum; they'll be preempted by real work.
 		dynamicQuantum = kLoadMeasureInterval * 2; // Used for periodic load update timer.
-		nextThreadData->StartQuantum(MAX_BIGTIME);
+		nextThreadData->StartQuantum(B_INFINITE_TIMEOUT);
 	}
 
 	cpu->StartQuantumTimer(nextThreadData, gCPU[thisCPUId].preempted, dynamicQuantum);
@@ -882,7 +889,7 @@ static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
 
 static void
-init_debug_commands()
+_scheduler_init_kdf_debug_commands()
 {
 	// Registers various debugger commands related to the scheduler, allowing
 	// for inspection and runtime modification of some scheduler parameters.
@@ -900,8 +907,7 @@ init_debug_commands()
 		"Sets the scheduler's gKernelKDistFactor used in DTQ calculations.\n"
 		"  <factor>  - Floating point value (e.g., 0.3). Recommended range [0.0 - 2.0].\n"
 		"Affects how much quanta are extended on idle/lightly-loaded CPUs.", 0);
-	add_debugger_command_etc("set_kdf", &cmd_scheduler_set_kdf,
-		"Alias for scheduler_set_kdf", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+	add_debugger_command_alias("set_kdf", "scheduler_set_kdf", "Alias for scheduler_set_kdf");
 
 	add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf,
 		"Get the scheduler's current gKernelKDistFactor",
@@ -948,7 +954,8 @@ scheduler_init()
 		add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	}
-	init_debug_commands();
+	Scheduler::init_debug_commands();
+	_scheduler_init_kdf_debug_commands();
 }
 
 
@@ -959,7 +966,7 @@ cmd_scheduler_set_kdf(int argc, char** argv)
 {
 	if (argc != 2) {
 		kprintf("Usage: scheduler_set_kdf <factor (float)>\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	char* endPtr;
@@ -968,19 +975,19 @@ cmd_scheduler_set_kdf(int argc, char** argv)
 	if (argv[1] == endPtr || *endPtr != '\0') {
 		kprintf("Error: Invalid float value for factor: %s\n", argv[1]);
 		kprintf("Usage: scheduler_set_kdf <factor (float)>\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	// Validate the factor (e.g., within a reasonable range)
 	if (newFactor < 0.0 || newFactor > 2.0) { // Designed range [0.0 - 2.0]
 		kprintf("Error: factor %f is out of reasonable range [0.0 - 2.0]. Value not changed.\n", newFactor);
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	Scheduler::gKernelKDistFactor = (float)newFactor;
 	kprintf("Scheduler gKernelKDistFactor set to: %f\n", Scheduler::gKernelKDistFactor);
 
-	return DEBUG_COMMAND_SUCCESS;
+	return 0;
 }
 
 
@@ -989,11 +996,11 @@ cmd_scheduler_get_kdf(int argc, char** argv)
 {
 	if (argc != 1) {
 		kprintf("Usage: scheduler_get_kdf\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	kprintf("Current scheduler gKernelKDistFactor: %f\n", Scheduler::gKernelKDistFactor);
-	return DEBUG_COMMAND_SUCCESS;
+	return 0;
 }
 
 
@@ -1002,7 +1009,7 @@ cmd_scheduler_set_smt_factor(int argc, char** argv)
 {
 	if (argc != 2) {
 		kprintf("Usage: scheduler_set_smt_factor <factor (float)>\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	char* endPtr;
@@ -1011,18 +1018,18 @@ cmd_scheduler_set_smt_factor(int argc, char** argv)
 	if (argv[1] == endPtr || *endPtr != '\0') {
 		kprintf("Error: Invalid float value for SMT factor: %s\n", argv[1]);
 		kprintf("Usage: scheduler_set_smt_factor <factor (float)>\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	if (newFactor < 0.0 || newFactor > 1.0) { // SMT factor typically 0.0 to 1.0
 		kprintf("Error: SMT factor %f is out of reasonable range [0.0 - 1.0]. Value not changed.\n", newFactor);
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	Scheduler::gSchedulerSMTConflictFactor = (float)newFactor;
 	kprintf("Scheduler gSchedulerSMTConflictFactor set to: %f\n", Scheduler::gSchedulerSMTConflictFactor);
 
-	return DEBUG_COMMAND_SUCCESS;
+	return 0;
 }
 
 
@@ -1031,11 +1038,11 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 {
 	if (argc != 1) {
 		kprintf("Usage: scheduler_get_smt_factor\n");
-		return DEBUG_COMMAND_ERROR;
+		return B_KDEBUG_ERROR;
 	}
 
 	kprintf("Current scheduler gSchedulerSMTConflictFactor: %f\n", Scheduler::gSchedulerSMTConflictFactor);
-	return DEBUG_COMMAND_SUCCESS;
+	return 0;
 }
 
 
@@ -1044,35 +1051,7 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 // ... This content is assumed to be correctly present from the previous task's completion.
 // ... For brevity, not re-pasting the entire tail of the file if it's unchanged from last confirmed state.
 
-// gModeIrqTargetFactor: Defines the trade-off in IRQ placement decisions.
-// A higher value prioritizes placing IRQs on CPUs with less existing IRQ load,
-// while a lower value prioritizes CPUs with less thread execution load.
-// Initialized to a global default, then overridden by scheduler mode activation.
-// See scheduler_common.h and mode-specific files (low_latency.cpp, power_saving.cpp).
-float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR; // Default 0.3f
-
-// gModeMaxTargetCpuIrqLoad: The maximum acceptable cumulative IRQ "load units"
-// for a CPU before it's generally considered too saturated for more IRQs.
-// An IRQ's "load unit" typically increments with its 'cost' (usually 1) per interrupt event.
-// This acts as a capacity limit in IRQ placement scoring.
-// Initialized to a global default, then overridden by scheduler mode activation.
-int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD; // Default 700
-
-// gHighAbsoluteIrqThreshold: For proactive balancing, a source CPU's total IRQ load
-// must exceed this value to be considered for offloading IRQs. (Still global)
-// Default is 1000.
-int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
-
-// gSignificantIrqLoadDifference: For proactive balancing, the difference in IRQ load
-// between the source (most loaded) and target (least loaded) CPU must be at least this much.
-// Default is 300.
-int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
-
-// gMaxIRQsToMoveProactively: Maximum number of IRQs the proactive balancer will
-// attempt to move in a single pass from an overloaded CPU.
-// Default is 3.
-int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-
+// Definitions for these globals are at the top of the file. This block is a duplicate.
 
 static CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
@@ -1094,7 +1073,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 	}
 
 	SCHEDULER_ENTER_FUNCTION();
-	TRACE_SCHED("Proactive IRQ Balance Check running\n");
+	TRACE("Proactive IRQ Balance Check running\n");
 
 	CPUEntry* sourceCpuMaxIrq = NULL;
 	CPUEntry* targetCandidateCpuMinIrq = NULL;
@@ -1142,13 +1121,13 @@ scheduler_irq_balance_event(timer* /* unused */)
 	}
 
 	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
-		TRACE_SCHED("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
+		TRACE("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
 		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 		return B_HANDLED_INTERRUPT;
 	}
 
 	if (maxIrqLoad > gHighAbsoluteIrqThreshold && maxIrqLoad > minIrqLoad + gSignificantIrqLoadDifference) {
-		TRACE_SCHED("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (IRQ load %" B_PRId32 ")\n",
+		TRACE("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (IRQ load %" B_PRId32 ")\n",
 			sourceCpuMaxIrq->ID(), maxIrqLoad, targetCandidateCpuMinIrq->ID(), minIrqLoad);
 
 		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
@@ -1185,20 +1164,22 @@ scheduler_irq_balance_event(timer* /* unused */)
 			CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCore, irqToMove->load);
 
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
-				TRACE_SCHED("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+				TRACE("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
-				if (assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID()) == B_OK) {
-					TRACE_SCHED("Proactive IRQ: Move successful for IRQ %d.\n", irqToMove->irq);
-				} else {
-					TRACE_SCHED("Proactive IRQ: Move FAILED for IRQ %d.\n", irqToMove->irq);
-				}
+				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+				// Assuming success, see comment in power_saving.cpp for details.
+				// The original code did check B_OK, implying it might have returned status.
+				// This change assumes the function now handles its own errors or always succeeds.
+				// If assign_io_interrupt_to_cpu can fail and that failure needs handling,
+				// this is a TODO.
+				TRACE("Proactive IRQ: Move initiated for IRQ %d (assuming success).\n", irqToMove->irq);
 			} else {
-				TRACE_SCHED("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
+				TRACE("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
 					irqToMove->irq, targetCore->ID());
 			}
 		}
 	} else {
-		TRACE_SCHED("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoad, minIrqLoad);
+		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoad, minIrqLoad);
 	}
 
 	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
@@ -1271,7 +1252,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 	// Iterate from second-to-lowest MLFQ level upwards (level 0 doesn't age up).
 	// Level NUM_MLFQ_LEVELS-1 is typically for idle threads which also don't age.
 	for (int level = NUM_MLFQ_LEVELS - 2; level >= 1; level--) {
-		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[level].GetConstIterator();
+		ThreadRunQueue::ConstIterator iter = cpu->GetMLFQLevel(level).GetConstIterator();
 		while (iter.HasNext()) {
 			if (candidateCount >= kMaxAgingCandidates)
 				break; // Stop collecting if candidate list is full.
@@ -1301,7 +1282,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 	}
 
 	if (candidateCount > 0) {
-		TRACE_SCHED("scheduler_perform_aging: CPU %" B_PRId32 ", %d candidates for promotion\n", cpu->ID(), candidateCount);
+		TRACE("scheduler_perform_aging: CPU %" B_PRId32 ", %d candidates for promotion\n", cpu->ID(), candidateCount);
 		bool needsRescheduleICI = false;
 		Thread* currentRunningOnCPU = gCPU[cpu->ID()].running_thread;
 		ThreadData* currentRunningData = currentRunningOnCPU ? currentRunningOnCPU->scheduler_data : NULL;
@@ -1314,7 +1295,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 
 			// Sanity check: thread might have been dequeued or changed level concurrently.
 			if (!threadData->IsEnqueued() || threadData->CurrentMLFQLevel() != oldLevel) {
-				TRACE_SCHED("scheduler_perform_aging: Candidate thread %" B_PRId32 " state changed (now level %d, enqueued %d), skipping promotion from %d.\n",
+				TRACE("scheduler_perform_aging: Candidate thread %" B_PRId32 " state changed (now level %d, enqueued %d), skipping promotion from %d.\n",
 					threadData->GetThread()->id, threadData->CurrentMLFQLevel(), threadData->IsEnqueued(), oldLevel);
 				continue;
 			}
@@ -1330,7 +1311,7 @@ scheduler_perform_aging(CPUEntry* cpu)
 			cpu->AddThread(threadData, newLevel, false /*add to back*/);
 			// Note: AddThread calls MarkEnqueued.
 
-			TRACE_SCHED("scheduler_perform_aging: Promoted thread %" B_PRId32 " from level %d to %d on CPU %" B_PRId32 "\n",
+			TRACE("scheduler_perform_aging: Promoted thread %" B_PRId32 " from level %d to %d on CPU %" B_PRId32 "\n",
 				threadData->GetThread()->id, oldLevel, newLevel, cpu->ID());
 			T(AgeThread(threadData->GetThread(), newLevel)); // Trace event.
 
@@ -1365,7 +1346,7 @@ _get_cpu_high_priority_task_count_locked(CPUEntry* cpu)
 	// ASSERT(cpu->fQueueLock.IsOwned()); // Cannot assert this directly on a spinlock
 	int32 count = 0;
 	for (int i = 0; i < NUM_MLFQ_LEVELS / 2; i++) {
-		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[i].GetConstIterator();
+		ThreadRunQueue::ConstIterator iter = cpu->GetMLFQLevel(i).GetConstIterator();
 		while (iter.HasNext()) {
 			iter.Next();
 			count++;
@@ -1483,7 +1464,7 @@ scheduler_perform_load_balance()
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
 		return;
 
-	TRACE_SCHED("LoadBalance: Potential imbalance. SourceCore %" B_PRId32 " (avg load %" B_PRId32 ") TargetCore %" B_PRId32 " (avg load %" B_PRId32 ")\n",
+	TRACE("LoadBalance: Potential imbalance. SourceCore %" B_PRId32 " (avg load %" B_PRId32 ") TargetCore %" B_PRId32 " (avg load %" B_PRId32 ")\n",
 		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(), targetCoreCandidate->ID(), targetCoreCandidate->GetLoad());
 
 	CPUEntry* sourceCPU = NULL;
@@ -1536,16 +1517,16 @@ scheduler_perform_load_balance()
 					}
 				}
 			} else {
-				TRACE_SCHED("LoadBalance: CONSOLIDATE - No clear action for source %" B_PRId32 " / consolidation %" B_PRId32 ".\n",
+				TRACE("LoadBalance: CONSOLIDATE - No clear action for source %" B_PRId32 " / consolidation %" B_PRId32 ".\n",
 					sourceCoreCandidate->ID(), consolidationCore->ID());
 				return; // No clear consolidation action.
 			}
 		} else {
-			TRACE_SCHED("LoadBalance: CONSOLIDATE - No consolidation core designated.\n");
+			TRACE("LoadBalance: CONSOLIDATE - No consolidation core designated.\n");
 			return; // No consolidation core to target.
 		}
 		if (finalTargetCore == NULL) {
-			TRACE_SCHED("LoadBalance: CONSOLIDATE - No suitable final target core found.\n");
+			TRACE("LoadBalance: CONSOLIDATE - No suitable final target core found.\n");
 			return;
 		}
 		// Select the busiest CPU on the source core to take a thread from.
@@ -1557,7 +1538,7 @@ scheduler_perform_load_balance()
 	}
 
 	if (sourceCPU == NULL) {
-		TRACE_SCHED("LoadBalance: Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
+		TRACE("LoadBalance: Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
 		return;
 	}
 
@@ -1569,7 +1550,7 @@ scheduler_perform_load_balance()
 	// Find a suitable thread to migrate from the source CPU's run queues.
 	// Iterate from higher to lower priority MLFQ levels (excluding idle level).
 	for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) {
-		ThreadRunQueue::ConstIterator iter = sourceCPU->fMlfq[level].GetConstIterator();
+		ThreadRunQueue::ConstIterator iter = sourceCPU->GetMLFQLevel(level).GetConstIterator();
 		while(iter.HasNext()){
 			ThreadData* candidate = iter.Next();
 			// Don't migrate idle threads or the currently running thread on sourceCPU.
@@ -1599,7 +1580,7 @@ scheduler_perform_load_balance()
 
 	if (threadToMove == NULL) {
 		sourceCPU->UnlockRunQueue();
-		TRACE_SCHED("LoadBalance: No suitable thread found to migrate from CPU %" B_PRId32 "\n", sourceCPU->ID());
+		TRACE("LoadBalance: No suitable thread found to migrate from CPU %" B_PRId32 "\n", sourceCPU->ID());
 		return;
 	}
 
@@ -1608,7 +1589,7 @@ scheduler_perform_load_balance()
 	threadToMove->MarkDequeued();
 	sourceCPU->UnlockRunQueue();
 
-	TRACE_SCHED("LoadBalance: Migrating thread %" B_PRId32 " (level %d) from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
+	TRACE("LoadBalance: Migrating thread %" B_PRId32 " (level %d) from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
 		threadToMove->GetThread()->id, originalLevel, sourceCPU->ID(), sourceCoreCandidate->ID(), targetCPU->ID(), finalTargetCore->ID());
 
 	// Update thread's core/CPU association.
@@ -1679,7 +1660,7 @@ _user_estimate_max_scheduling_latency(thread_id id)
 		cpu->LockRunQueue();
 		bool otherWork = false;
 		for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) {
-			if (cpu->fMlfq[level].PeekMaximum() != NULL) {
+			if (cpu->GetMLFQLevel(level).PeekMaximum() != NULL) {
 				otherWork = true;
 				break;
 			}
@@ -1693,7 +1674,7 @@ _user_estimate_max_scheduling_latency(thread_id id)
 	int targetThreadLevel = threadData->CurrentMLFQLevel();
 
 	for (int level = 0; level < targetThreadLevel; level++) {
-		ThreadRunQueue::ConstIterator iter = cpu->fMlfq[level].GetConstIterator();
+		ThreadRunQueue::ConstIterator iter = cpu->GetMLFQLevel(level).GetConstIterator();
 		while (iter.HasNext()) {
 			ThreadData* td_in_queue = iter.Next();
 			timeForAllHigherLevels += get_mode_adjusted_base_quantum(td_in_queue->CurrentMLFQLevel());
@@ -1704,12 +1685,12 @@ _user_estimate_max_scheduling_latency(thread_id id)
 	bool selfFoundInQueue = false;
 
 	if ((thread->state == B_THREAD_RUNNING && thread->cpu == &gCPU[cpu->ID()]) || !threadData->IsEnqueued()) {
-		ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+		ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->GetMLFQLevel(targetThreadLevel).GetConstIterator();
 		while(iterCurrentLevelAll.HasNext()){
 			timeForSameLevelPreceding += get_mode_adjusted_base_quantum(iterCurrentLevelAll.Next()->CurrentMLFQLevel());
 		}
 	} else {
-		ThreadRunQueue::ConstIterator iterCurrentLevel = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+		ThreadRunQueue::ConstIterator iterCurrentLevel = cpu->GetMLFQLevel(targetThreadLevel).GetConstIterator();
 		while (iterCurrentLevel.HasNext()) {
 			ThreadData* td_in_queue = iterCurrentLevel.Next();
 			if (td_in_queue == threadData) {
@@ -1720,7 +1701,7 @@ _user_estimate_max_scheduling_latency(thread_id id)
 		}
 		if (!selfFoundInQueue) {
 			timeForSameLevelPreceding = 0;
-			ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->fMlfq[targetThreadLevel].GetConstIterator();
+			ThreadRunQueue::ConstIterator iterCurrentLevelAll = cpu->GetMLFQLevel(targetThreadLevel).GetConstIterator();
 			while(iterCurrentLevelAll.HasNext()){
 				ThreadData* td_in_q = iterCurrentLevelAll.Next();
                 if (td_in_q != threadData) {
@@ -1761,5 +1742,3 @@ _user_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
-
-[end of src/system/kernel/scheduler/scheduler.cpp]

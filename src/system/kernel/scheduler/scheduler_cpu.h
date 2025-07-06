@@ -94,6 +94,15 @@ public:
 						// New method for IRQ load
 						int32			CalculateTotalIrqLoad() const;
 
+						// Public accessor for MLFQ levels (caller must hold fQueueLock)
+						const ThreadRunQueue& GetMLFQLevel(int level) const {
+#if KDEBUG
+							ASSERT(are_interrupts_enabled() == false);
+#endif
+							ASSERT(level >= 0 && level < NUM_MLFQ_LEVELS);
+							return fMlfq[level];
+						}
+
 private:
 						void			_UpdateHighestMLFQLevel();
 						void			_RequestPerformanceLevel(
@@ -108,6 +117,7 @@ private:
 						rw_spinlock 	fSchedulerModeLock;
 
 						ThreadRunQueue	fMlfq[NUM_MLFQ_LEVELS];
+						bool			fUpdateLoadEvent;
 						int32			fMlfqHighestNonEmptyLevel;
 						spinlock		fQueueLock;
 
@@ -124,8 +134,6 @@ private:
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
-
-						bool			fUpdateLoadEvent;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
@@ -245,6 +253,7 @@ public:
 	inline				void				CoreGoesIdle(CoreEntry* core);
 	inline				void				CoreWakesUp(CoreEntry* core);
 
+	// Declaration only, definition moved to .cpp
 	inline				CoreEntry*			GetIdleCore(int32 index = 0) const;
 
 						void				AddIdleCore(CoreEntry* core);
@@ -252,6 +261,13 @@ public:
 
 	static inline		PackageEntry*		GetMostIdlePackage();
 	static inline		PackageEntry*		GetLeastIdlePackage();
+
+	// Public getters
+	inline				int32				PackageID() const { return fPackageID; }
+	inline				int32				IdleCoreCountNoLock() const { return fIdleCoreCount; }
+	inline				int32				CoreCountNoLock() const { return fCoreCount; }
+	inline				rw_spinlock&		CoreLock() { return fCoreLock; }
+	inline const		rw_spinlock&		CoreLock() const { return fCoreLock; }
 
 private:
 						int32				fPackageID;
@@ -485,7 +501,7 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 		// All cores in this package are now idle.
 		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
-		if (!this->IsLinked()) // Check if THIS package instance is already linked
+		if (!gIdlePackageList.Contains(this)) // Check if THIS package instance is already linked
 			gIdlePackageList.Add(this); // Add this package to global idle list.
 	}
 }
@@ -509,7 +525,7 @@ PackageEntry::CoreWakesUp(CoreEntry* core)
 	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
 		// Package was fully idle and now has at least one active core.
 		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
-		if (this->IsLinked()) // Check if THIS package instance is linked
+		if (gIdlePackageList.Contains(this)) // Check if THIS package instance is linked
 			gIdlePackageList.Remove(this); // Remove from global idle list.
 	}
 }
@@ -551,18 +567,6 @@ CoreEntry::GetCore(int32 cpu)
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(cpu >= 0 && cpu < smp_get_num_cpus());
 	return gCPUEntries[cpu].Core();
-}
-
-
-inline CoreEntry*
-PackageEntry::GetIdleCore(int32 index)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(fCoreLock); // Made method non-const
-	CoreEntry* element = fIdleCores.Last();
-	for (int32 i = 0; element != NULL && i < index; i++)
-		element = fIdleCores.GetPrevious(element);
-	return element;
 }
 
 

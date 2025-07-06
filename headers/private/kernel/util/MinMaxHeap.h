@@ -85,6 +85,8 @@ public:
 
 	inline	status_t	Insert(Element* element, Key key);
 
+	inline	int32		Count() const { return fMinLastElement + fMaxLastElement; }
+
 private:
 			status_t	_GrowHeap(int minimalSize = 0);
 

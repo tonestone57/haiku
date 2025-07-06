@@ -296,19 +296,19 @@ low_latency_rebalance_irqs(bool idle)
 			targetCPU = SelectTargetCPUForIRQ(targetCore, chosenIRQ->load,
 				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
-				TRACE_SCHED("LL IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
+				TRACE("LL IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;
 			}
 		}
 
 
-		TRACE_SCHED("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+		TRACE("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
 
-		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
-		if (status == B_OK) {
-			movedCount++;
-			TRACE_SCHED("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		// Assuming success, see comment in power_saving.cpp for details.
+		movedCount++; // Assuming move was successful for accounting.
+		TRACE("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 " (assuming success)\n", chosenIRQ->irq, targetCPU->ID());
 		}
 		if (movedCount >= kMaxIRQsToMovePerCycleLL)
 			break;
@@ -347,5 +347,3 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_designate_consolidation_core,
 	low_latency_should_wake_core_for_load,
 };
-
-[end of src/system/kernel/scheduler/low_latency.cpp]

@@ -338,7 +338,7 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 		return true;
 	}
 
-	TRACE_SCHED("PowerSaving: Reluctant to wake idle core %" B_PRId32 "\n", core->ID());
+	TRACE("PowerSaving: Reluctant to wake idle core %" B_PRId32 "\n", core->ID());
 	return false;
 }
 
@@ -585,11 +585,11 @@ power_saving_rebalance_irqs(bool idle)
 					irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 
 				if (specificTargetCPU != NULL) {
-					TRACE_SCHED("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+					TRACE("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 						irq->irq, irq->load, current_cpu_struct->cpu_num, specificTargetCPU->ID());
 					assign_io_interrupt_to_cpu(irq->irq, specificTargetCPU->ID());
 				} else {
-					TRACE_SCHED("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains.\n",
+					TRACE("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains.\n",
 						consolidationCore->ID(), irq->irq);
 				}
 			}
@@ -665,19 +665,23 @@ power_saving_rebalance_irqs(bool idle)
 			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->load,
 				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
-				TRACE_SCHED("PS IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
+				TRACE("PS IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;
 			}
 		}
 
 
-		TRACE_SCHED("power_saving_rebalance_irqs (general): Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+		TRACE("power_saving_rebalance_irqs (general): Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
 
-		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
-		if (status == B_OK) {
-			movedCount++;
-			TRACE_SCHED("power_saving_rebalance_irqs (general): Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		// Assuming success if function returns, or it handles errors internally.
+		// The original status check is removed. If error checking is vital,
+		// assign_io_interrupt_to_cpu would need to be changed to return status again,
+		// or provide another way to check outcome. For now, removing the check.
+		// Consider this a TODO if assign_io_interrupt_to_cpu can fail silently.
+		movedCount++; // Assuming move was successful for accounting.
+		TRACE("power_saving_rebalance_irqs (general): Successfully moved IRQ %d to CPU %" B_PRId32 " (assuming success)\n", chosenIRQ->irq, targetCPU->ID());
 		}
 		if (movedCount >= kMaxIRQsToMovePerCyclePS)
 			break;

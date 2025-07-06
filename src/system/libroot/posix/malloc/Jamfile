@@ -16,7 +16,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 		UsePrivateSystemHeaders ;
 
 		if $(HAIKU_LIBROOT_ALLOCATOR) = snmalloc {
-			Echo libroot malloc: snmalloc ;
+			Echo Libroot Malloc: snmalloc ;
 
 			# Set up include paths for snmalloc library headers and the Haiku userland PAL
 			# The snmalloc core headers are in BSD/snmalloc-main/src/
@@ -55,12 +55,12 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			;
 
 		} else if $(HAIKU_LIBROOT_ALLOCATOR) = hoard2 {
-			Echo libroot malloc: hoard2 ;
+			Echo Libroot Malloc: hoard2 ;
 			# hoard2 has its own Jamfile in its subdirectory
 			HaikuSubInclude hoard2 ;
 		} else {
 			# Default to openbsd
-			Echo libroot malloc: openbsd ;
+			Echo Libroot Malloc: openbsd ;
 			# openbsd has its own Jamfile in its subdirectory
 			HaikuSubInclude openbsd ;
 		}

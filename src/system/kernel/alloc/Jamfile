@@ -14,7 +14,7 @@ local allocatorDefines ;
 
 if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
     # Use snmalloc
-    Echo Kernel allocator: snmalloc ;
+    Echo Kernel Allocator: snmalloc ;
 
     # Ensure include paths for snmalloc core headers and the kernel PAL
     # The snmalloc core headers are in BSD/snmalloc-main/src/
@@ -36,7 +36,7 @@ if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
 
 } else {
     # Default to slab allocator (or any other chosen default)
-    Echo Kernel allocator: slab ;
+    Echo Kernel Allocator: slab ;
     # The slab allocator is currently built via src/system/kernel/slab/Jamfile
     # and its objects are directly included in src/system/kernel/Jamfile.
     # This Jamfile (alloc/Jamfile) will produce an empty kernel_allocator.o

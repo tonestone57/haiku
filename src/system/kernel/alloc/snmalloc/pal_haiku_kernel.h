@@ -28,7 +28,7 @@
 #include <slab/Slab.h> // For object_cache_alloc (used by old PAL version, now only for HaikuKernelSubMapping if not using internal pool)
 #include <kernel/thread.h> // For spinlock, disable_interrupts, etc.
 
-extern int64 gMappedPagesCount; // For tracking mapped pages globally in kernel
+extern int32 gMappedPagesCount; // For tracking mapped pages globally in kernel
 
 
 // Forward declaration

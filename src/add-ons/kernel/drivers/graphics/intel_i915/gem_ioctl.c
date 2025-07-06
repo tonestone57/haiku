@@ -30,7 +30,8 @@ static mutex gSimpleGenericHandleLock;
 #define HANDLE_TYPE_GEM_CONTEXT 2
 
 // Max number of BOs that can be GTT mapped on-demand by a single execbuf call
-#define EXECBUF_MAX_ON_DEMAND_GTT_MAPS 16
+// Increased from 16 to 128 for more complex scenes.
+#define EXECBUF_MAX_ON_DEMAND_GTT_MAPS 128
 
 
 void

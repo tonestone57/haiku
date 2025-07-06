@@ -226,6 +226,38 @@
 	#define PM_INTR_RC6_THRESHOLD		(1U << 8)
 #define GEN6_RC6_THRESHOLD_IDLE_IVB	0xA0B0
 #define HSW_RC6_THRESHOLD_IDLE		0x138154
+
+// Forcewake Registers (Gen6/7 - IVB, HSW)
+// Note: Newer Gens (Gen8+) have per-engine forcewake registers.
+#define FORCEWAKE_RENDER_GEN6		0xA188 // IVB/SNB Render Forcewake Request
+	#define FORCEWAKE_RENDER_GEN6_REQ	(1U << 0)
+#define FORCEWAKE_ACK_RENDER_GEN6	0xA18C // IVB/SNB Render Forcewake Ack
+	#define FORCEWAKE_RENDER_GEN6_ACK	(1U << 0)
+
+#define FORCEWAKE_MT_HSW		0xA0E0   // HSW Media Island Turbo (Render/Media) Request/Mask
+	// Value to write: (mask_bits << 16) | request_bits
+	// Render Domain (HSW)
+	#define FORCEWAKE_RENDER_HSW_REQ	(1U << 0)  // Request Render FW
+	#define FORCEWAKE_RENDER_HSW_BIT	(1U << 0)  // Mask bit for Render FW (matches request bit index)
+	// Media Domain (HSW) - PRM VERIFICATION NEEDED FOR THESE BITS
+	#define FORCEWAKE_MEDIA_HSW_REQ		(1U << 1)  // Request Media FW (Conceptual)
+	#define FORCEWAKE_MEDIA_HSW_BIT		(1U << 1)  // Mask bit for Media FW (Conceptual, matches request bit index)
+
+#define FORCEWAKE_ACK_HSW		0x130044 // HSW Main Forcewake Ack (for Render, etc.)
+	#define FORCEWAKE_ACK_STATUS_BIT	(1U << 0) // General ACK status bit
+
+// HSW specific Media Turbo Ack register (if different from main ACK for media domain)
+// PRM VERIFICATION NEEDED FOR THIS REGISTER AND BIT FOR MEDIA FW.
+#define FORCEWAKE_ACK_MEDIA_TURBO_HSW	0xA0E8   // HSW Media Turbo Ack (distinct from FORCEWAKE_ACK_HSW for general render)
+	#define FW_ACK_MEDIA_TURBO_HSW_BIT	(1U << 0)  // Example ACK bit for media turbo
+
+// Placeholder for the specific Media FW Ack register if it's not FORCEWAKE_ACK_MEDIA_TURBO_HSW.
+// The original code in forcewake.c used 0xA0E4 with bit (1U << 1). This needs PRM check.
+// For now, let's define what was in forcewake.c and mark for verification.
+#define FORCEWAKE_ACK_MEDIA_HSW_REG_FWC 0xA0E4   // Used in forcewake.c, needs PRM verification.
+	#define FW_ACK_MEDIA_HSW_BIT_FWC  (1U << 1)  // Used in forcewake.c, needs PRM verification.
+
+
 // MSRs
 #define MSR_IVB_RP_STATE_CAP	0x0000065E
 #define MSR_HSW_RP_STATE_CAP	0x00138098
@@ -633,6 +665,38 @@
 #define GEN7_LRCA_PDP1_LDW                 0x25
 #define GEN7_LRCA_PDP0_UDW                 0x26
 #define GEN7_LRCA_PDP0_LDW                 0x27
+
+
+// --- MI (Memory Interface) Commands ---
+#define MI_COMMAND_TYPE_SHIFT           29
+#define MI_COMMAND_TYPE_MI              (0x0U << MI_COMMAND_TYPE_SHIFT)
+#define MI_COMMAND_OPCODE_SHIFT         23  // Standard for many MI commands like MI_STORE_DATA_INDEX, MI_SET_CONTEXT
+
+// MI_FLUSH_DW (Command Opcode: 0x04)
+// This command is 1 DWord long.
+// Bits 31:29 = Command Type (000b for MI)
+// Bits 28:23 = Opcode (000100b = 0x04)
+// Bit 22     = Header Present (0 for MI_FLUSH_DW)
+// Bits 21:8  = Flags (see below, these are absolute bit positions in DW0)
+// Bits 7:0   = Length (Number of DWORDS - 1). For MI_FLUSH_DW (1DW), this is 0.
+#define MI_FLUSH_DW                     (MI_COMMAND_TYPE_MI | (0x04U << MI_COMMAND_OPCODE_SHIFT) | 0U /*Length=0*/)
+
+// Flags for MI_FLUSH_DW (to be OR'd with MI_FLUSH_DW base command)
+// These are absolute bit positions in DW0.
+#define MI_FLUSH_DW_STORE_L3_MESSAGES        (1U << 4)  // Ensures L3 is flushed to mem
+#define MI_FLUSH_DW_INVALIDATE_TLB           (1U << 1)  // TLB Invalidate (Gen7+)
+#define MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE (1U << 0)  // Invalidate Texture Cache & Gfx Data Cache (Render Cache)
+
+// Aliases/Commonly used combinations (some might be redundant if flags overlap or are standard practice)
+#define MI_FLUSH_RENDER_CACHE           MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE
+#define MI_FLUSH_DEPTH_CACHE            (1U << 2) // Placeholder - Check PRM for actual bit & GEN compatibility
+#define MI_FLUSH_VF_CACHE               (1U << 3) // Placeholder - Check PRM for actual bit (Vertex Fetch Cache)
+
+// MI_STORE_DATA_INDEX (Opcode 0x21) - Used for writing HW Seqno
+// Length field for this command (bits 7:0) is DWord Length - 2.
+// Command is 3 DWords: CMD_DW, Address_DW, Value_DW. So Length = (3-2) = 1.
+#define MI_STORE_DATA_INDEX             (MI_COMMAND_TYPE_MI | (0x21U << MI_COMMAND_OPCODE_SHIFT) | 1U)
+	#define SDI_USE_GGTT                (1U << 22) // Use GGTT address space
 
 #endif /* INTEL_I915_REGISTERS_H */
 

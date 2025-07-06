@@ -229,6 +229,238 @@ intel_i915_display_uninit(intel_i915_device_info* devInfo) {
 }
 
 
+// --- Pipe/Transcoder/Plane Configuration Functions (Stubs/Implementations) ---
+
+status_t
+intel_i915_configure_pipe_timings(intel_i915_device_info* devInfo,
+	enum transcoder_id_priv trans, const display_mode* mode)
+{
+	if (devInfo == NULL || mode == NULL || trans >= PRIV_MAX_TRANSCODERS)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_configure_pipe_timings for transcoder %d\n", trans);
+	TRACE("  Mode: %dx%d, Clock: %u kHz\n", mode->timing.h_display, mode->timing.v_display, mode->timing.pixel_clock);
+	// TODO: Implement actual register programming for HTOTAL, HBLANK, HSYNC, VTOTAL, VBLANK, VSYNC for the given transcoder.
+	// Example: intel_i915_write32(devInfo, HTOTAL_A_REG(trans), ...);
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+status_t
+intel_i915_configure_pipe_source_size(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
+	uint16 width, uint16 height)
+{
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_configure_pipe_source_size for pipe %d: %ux%u\n", pipe, width, height);
+	// TODO: Implement actual register programming for PIPESRC(pipe)
+	// Example: intel_i915_write32(devInfo, PIPESRC_REG(pipe), ((height - 1) << 16) | (width - 1));
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+status_t
+intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum transcoder_id_priv trans,
+	const display_mode* mode, uint8_t bpp_total)
+{
+	if (devInfo == NULL || mode == NULL || trans >= PRIV_MAX_TRANSCODERS)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_configure_transcoder_pipe for transcoder %d, bpp_total %u\n", trans, bpp_total);
+	// TODO: Implement actual register programming for TRANSCONF(trans)
+	// - Set transcoder mode (progressive/interlaced)
+	// - Set BPC for FDI if applicable
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+status_t
+intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
+	uint32 gtt_page_offset, uint16 width, uint16 height, uint16 stride_bytes, color_space format)
+{
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_configure_primary_plane for pipe %d\n", pipe);
+	TRACE("  GTT Page Offset: %u, Size: %ux%u, Stride: %u bytes, Format: 0x%x\n",
+		gtt_page_offset, width, height, stride_bytes, format);
+	// TODO: Implement actual register programming for:
+	// - DSPCNTR (pixel format, tiling)
+	// - DSPADDR (surface base address)
+	// - DSPSTRIDE (stride)
+	// - DSPSIZE (plane size)
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+status_t
+intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
+	const display_mode* target_mode, const struct intel_clock_params_t* clocks)
+{
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_pipe_enable for pipe %d\n", pipe);
+	// TODO: Implement actual register programming for TRANSCONF(pipe) to set TRANSCONF_ENABLE.
+	//       Wait for pipe to become active (poll TRANS_STATE_ENABLE_PENDING).
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+void
+intel_i915_pipe_disable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
+{
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+		return;
+
+	TRACE("DISPLAY: STUB intel_i915_pipe_disable for pipe %d\n", pipe);
+	// TODO: Implement actual register programming for TRANSCONF(pipe) to clear TRANSCONF_ENABLE.
+	//       Wait for pipe to become inactive.
+	// Caller must hold forcewake.
+}
+
+status_t
+intel_i915_plane_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, bool enable)
+{
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	TRACE("DISPLAY: STUB intel_i915_plane_enable for pipe %d, enable: %s\n", pipe, enable ? "true" : "false");
+	// TODO: Implement actual register programming for DSPCNTR(pipe) to set/clear DSPLANE_ENABLE.
+	// Caller must hold forcewake.
+	return B_OK;
+}
+
+status_t
+intel_i915_port_enable(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id,
+	enum pipe_id_priv pipe, const display_mode* mode)
+{
+	TRACE("DISPLAY: STUB intel_i915_port_enable (generic) for port %d, pipe %d. Should be handled by DDI/LVDS specific calls.\n", port_id, pipe);
+	return B_UNSUPPORTED;
+}
+
+void
+intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id)
+{
+	TRACE("DISPLAY: STUB intel_i915_port_disable (generic) for port %d. Should be handled by DDI/LVDS specific calls.\n", port_id);
+}
+
+// This is the entry point called by the IOCTL(INTEL_I915_SET_DISPLAY_MODE)
+// It needs to decide which pipe and port to use for the modeset.
+/*
+ * intel_display_set_mode_ioctl_entry
+ *
+ * Description:
+ *   Kernel entry point for the INTEL_I915_SET_DISPLAY_MODE IOCTL.
+ *   This function is responsible for selecting an appropriate display pipe
+ *   and output port to apply the requested display_mode. It then calls
+ *   the internal modesetting function.
+ *
+ * Current Logic:
+ *   - Defaults to using PRIV_PIPE_A.
+ *   - Selects a target port by:
+ *     1. Preferring a port that matches the VBT primary boot device type,
+ *        is connected, and has modes. LVDS/eDP are preferred, then DP, HDMI, DVI.
+ *     2. If no VBT primary match, selects the first connected port with modes.
+ *     3. As a last resort, if no connected ports are found, it defaults to the
+ *        first port listed in the VBT, regardless of its connected status.
+ *   - Calls intel_i915_display_set_mode_internal() with the chosen pipe and port.
+ *
+ * Future Enhancements:
+ *   - More sophisticated pipe selection (e.g., if Pipe A is in use).
+ *   - Better port selection logic for multi-monitor setups, considering user
+ *     preferences or specific IOCTL arguments if they were extended.
+ *   - Validation of the requested mode against port capabilities.
+ */
+status_t
+intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode)
+{
+	if (devInfo == NULL || mode == NULL)
+		return B_BAD_VALUE;
+
+	TRACE("SET_DISPLAY_MODE IOCTL: Requested mode %dx%d @ %u kHz, flags 0x%lx\n",
+		mode->virtual_width, mode->virtual_height, mode->timing.pixel_clock, mode->timing.flags);
+
+	// Simplistic selection: Use Pipe A and find the first connected port that seems suitable.
+	// A more advanced implementation would consider:
+	// - Which head/accelerant instance is making the call (if distinguishable).
+	// - User preferences for primary display / multi-monitor setup.
+	// - Port capabilities vs. mode requirements.
+	enum pipe_id_priv targetPipe = PRIV_PIPE_A;
+	enum intel_port_id_priv targetPortId = PRIV_PORT_ID_NONE;
+	intel_output_port_state* selected_port = NULL;
+
+	// Prioritize VBT boot device if it's connected and suitable
+	if (devInfo->vbt && devInfo->vbt->primary_boot_device_type != 0) {
+		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+			intel_output_port_state* port = &devInfo->ports[i];
+			// Check if this port matches the VBT primary boot device type
+			// This requires mapping VBT child device type to something comparable or using child_device_handle
+			// For now, let's simplify: if a port is connected and has modes, consider it.
+			// A better check would be against port->child_device_handle if VBT boot device info uses that.
+			// Or, if VBT boot_display[0] maps to a specific port type/index.
+			// This part is simplified for now.
+			if (port->connected && port->num_modes > 0) {
+				// A simple preference: LVDS/eDP > DP > HDMI > DVI
+				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
+					selected_port = port;
+					break;
+				}
+				if (selected_port == NULL ||
+					(port->type == PRIV_OUTPUT_DP && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP) ||
+					(port->type == PRIV_OUTPUT_HDMI && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP && selected_port->type != PRIV_OUTPUT_DP) ||
+					(port->type == PRIV_OUTPUT_TMDS_DVI && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP && selected_port->type != PRIV_OUTPUT_DP && selected_port->type != PRIV_OUTPUT_HDMI)
+					) {
+					selected_port = port;
+				}
+			}
+		}
+		if (selected_port) {
+			TRACE("Selected port %d (type %d) based on VBT primary or first connected with modes.\n",
+				selected_port->logical_port_id, selected_port->type);
+		}
+	}
+
+
+	// If VBT primary didn't yield a clear choice, or no VBT, find first connected.
+	if (selected_port == NULL) {
+		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+			intel_output_port_state* port = &devInfo->ports[i];
+			if (port->connected && port->num_modes > 0) {
+				selected_port = port;
+				TRACE("Selected first connected port %d (type %d) with modes.\n",
+					selected_port->logical_port_id, selected_port->type);
+				break;
+			}
+		}
+	}
+
+	if (selected_port != NULL) {
+		targetPortId = selected_port->logical_port_id;
+	} else {
+		TRACE("SET_DISPLAY_MODE IOCTL: No connected and suitable port found.\n");
+		// Attempt to use a VBT-defined port even if not "connected" if it's the only one
+		// This is a last resort for headless or problematic EDID.
+		if (devInfo->num_ports_detected > 0) {
+			selected_port = &devInfo->ports[0]; // Default to the first VBT port
+			targetPortId = selected_port->logical_port_id;
+			TRACE("SET_DISPLAY_MODE IOCTL: Defaulting to first VBT port %d (type %d) as a fallback.\n",
+				targetPortId, selected_port->type);
+		} else {
+			TRACE("SET_DISPLAY_MODE IOCTL: No ports defined in VBT either.\n");
+			return B_DEV_NO_MATCH;
+		}
+	}
+
+	// TODO: Future: Add logic to select a different pipe if Pipe A is already in use
+	// by another active display, or if the selected port has specific pipe constraints.
+	// For now, always use targetPipe = PRIV_PIPE_A.
+
+	return intel_i915_display_set_mode_internal(devInfo, mode, targetPipe, targetPortId);
+}
+
+
 static status_t
 intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	const display_mode* mode, enum pipe_id_priv targetPipe, enum intel_port_id_priv targetPortId)

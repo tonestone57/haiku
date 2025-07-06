@@ -35,17 +35,32 @@
 // The current implementation should be considered a best-effort placeholder
 // until PRM-verified, generation-specific logic can be implemented.
 //
+// IMPORTANT NOTE: This function currently uses generic tiling parameters (tile dimensions,
+// alignment rules) that are common for many Gen6+ Intel GPUs. However, these
+// parameters can be highly generation-specific. For fully accurate and correct
+// tiled buffer allocation, this function MUST be updated with details from the
+// Intel Programmer's Reference Manuals (PRMs) for each targeted GPU generation.
+// This includes verifying tile widths/heights in bytes/rows, specific stride
+// alignment requirements (e.g., power-of-two for some older gens), and any
+// maximum stride limitations (especially for Y-tiling when used with fences
+// on certain generations like Gen7).
+//
+// The current implementation should be considered a best-effort placeholder
+// until PRM-verified, generation-specific logic can be implemented.
+//
 static status_t
 _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 	enum i915_tiling_mode tiling_mode,
 	uint32_t width_px, uint32_t height_px, uint32_t bpp, // bits per pixel
 	uint32_t* stride_out, size_t* total_size_out)
 {
+	dprintf(DEVICE_NAME_PRIV ": WARNING: _calculate_tile_stride_and_size is using PLACEHOLDER tiling parameters for Gen %d. These MUST be verified against PRMs for correctness.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+
 	if (stride_out == NULL || total_size_out == NULL || width_px == 0 || height_px == 0 || bpp == 0)
 		return B_BAD_VALUE;
 
 	if (bpp % 8 != 0) {
-		TRACE("_calculate_tile_stride_and_size: bits_per_pixel (%u) is not a multiple of 8.\n", bpp);
+		dprintf(DEVICE_NAME_PRIV ": _calculate_tile_stride_and_size: bits_per_pixel (%u) is not a multiple of 8.\n", bpp);
 		return B_BAD_VALUE;
 	}
 	uint32_t bytes_per_pixel = bpp / 8;
@@ -151,8 +166,30 @@ void
 i915_gem_object_lru_uninit(struct intel_i915_device_info* devInfo)
 {
 	if (devInfo == NULL) return;
-	// TODO: Should ensure list is empty here or handle objects still in it?
-	// For now, just destroy lock. Objects should be removed as they are freed.
+
+	mutex_lock(&devInfo->lru_lock);
+	struct intel_i915_gem_object* obj;
+	struct intel_i915_gem_object* temp_obj;
+	int cleared_count = 0;
+
+	list_for_every_entry_safe(&devInfo->active_lru_list, obj, temp_obj, struct intel_i915_gem_object, lru_link) {
+		// This object should ideally have been unmapped and removed from LRU
+		// when its refcount dropped to zero or it was explicitly evicted.
+		// If it's still here, it's a potential leak or inconsistent state.
+		// For cleanup, remove it. The object itself will be freed if its refcount drops.
+		TRACE("GEM LRU: Uninit: Removing object %p (area %" B_PRId32 ") still on LRU list.\n",
+			obj, obj->backing_store_area);
+		list_remove_item(&devInfo->active_lru_list, obj);
+		// Note: This doesn't 'put' the object, just removes from this list.
+		// If this is the last ref to the list management, the object's own refcount
+		// should handle its destruction.
+		cleared_count++;
+	}
+	if (cleared_count > 0) {
+		TRACE("GEM LRU: Uninit: Cleared %d objects from active_lru_list during uninit.\n", cleared_count);
+	}
+	mutex_unlock(&devInfo->lru_lock);
+
 	mutex_destroy(&devInfo->lru_lock);
 	TRACE("GEM LRU: Uninitialized for device %p\n", devInfo);
 }

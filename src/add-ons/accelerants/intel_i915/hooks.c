@@ -119,6 +119,10 @@ static status_t intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 
 	if (!gInfo || gInfo->device_fd < 0) return B_BAD_VALUE;
 	if (width == 0 || height == 0 || width > MAX_CURSOR_DIM || height > MAX_CURSOR_DIM) return B_BAD_VALUE;
 	if (hot_x >= width || hot_y >= height) return B_BAD_VALUE;
+	if (width > 64 || height > 64) {
+		TRACE("SET_CURSOR_SHAPE: Requested cursor %ux%u is > 64x64. Hardware support for larger cursors (up to %ux%u) depends on GPU generation and kernel driver implementation.\n",
+			width, height, MAX_CURSOR_DIM, MAX_CURSOR_DIM);
+	}
 	if (andMask == NULL || xorMask == NULL) return B_BAD_VALUE;
 
 	// Allocate buffer for ARGB32 data

@@ -362,31 +362,24 @@ intel_engine_emit_tlb_invalidate(struct intel_engine_cs* engine)
 	// Bit 1: TLB Invalidate
 	// Bit 4: Store L3 Messages (ensures L3 is flushed to mem before other invalidations)
 	// Other bits might be relevant for specific caches (Instruction, VF, etc.)
-	// These defines should be in registers.h
-	#ifndef MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE
-	#define MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE (1 << 0)
-	#endif
-	#ifndef MI_FLUSH_DW_INVALIDATE_TLB
-	#define MI_FLUSH_DW_INVALIDATE_TLB           (1 << 1)
-	#endif
-	#ifndef MI_FLUSH_DW_STORE_L3_MESSAGES
-	#define MI_FLUSH_DW_STORE_L3_MESSAGES        (1 << 4)
-	#endif
+	// These defines are now expected to be in registers.h
 
-	flush_dw_flags = MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE |
+	flush_dw_flags = MI_FLUSH_DW_INVALIDATE_TEXTURE_CACHE | // This is also MI_FLUSH_RENDER_CACHE
 	                 MI_FLUSH_DW_INVALIDATE_TLB |
 	                 MI_FLUSH_DW_STORE_L3_MESSAGES;
+	// Add other relevant flush flags if needed, e.g. MI_FLUSH_DEPTH_CACHE, MI_FLUSH_VF_CACHE
+	// Be careful that their bit positions are correct and don't overlap unintentionally.
 
-	// MI_FLUSH_DW command: DW0 = Header (Opcode, Type, Length=0 for 1DW) | Flags
-	uint32_t mi_flush_dw_cmd = MI_FLUSH_DW_CMD_TYPE_MI | MI_FLUSH_DW_CMD_OPCODE |
-	                           MI_FLUSH_DW_LENGTH_1DW | flush_dw_flags;
+	// MI_FLUSH_DW base command is already defined in registers.h with Type, Opcode, Length.
+	// Just OR in the flags.
+	uint32_t mi_flush_dw_cmd = MI_FLUSH_DW | flush_dw_flags;
 
 	intel_engine_write_dword(engine, offset_in_dwords++, mi_flush_dw_cmd);
 	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP); // Padding
 
 	intel_engine_advance_tail(engine, cmd_len_dwords);
 
-	TRACE("Engine %s: Emitted TLB Invalidate (MI_FLUSH_DW 0x%08x).\n", engine->name, mi_flush_dw_cmd);
+	TRACE("Engine %s: Emitted TLB Invalidate (MI_FLUSH_DW 0x%08" B_PRIx32 ").\n", engine->name, mi_flush_dw_cmd);
 	return B_OK;
 }
 

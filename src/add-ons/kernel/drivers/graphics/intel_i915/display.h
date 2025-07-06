@@ -50,6 +50,9 @@ void intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id
 intel_output_port_state* intel_display_get_port_by_vbt_handle(intel_i915_device_info* devInfo, uint16_t vbt_handle);
 intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* devInfo, enum intel_port_id_priv id);
 
+// Modesetting entry point from IOCTL
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode);
+
 // DPMS Kernel Functions
 status_t intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,
 	enum pipe_id_priv pipe, uint32_t dpms_mode);

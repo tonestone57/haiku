@@ -111,18 +111,15 @@ intel_i915_forcewake_get(intel_i915_device_info* devInfo, intel_forcewake_domain
 
 	if (domains & FW_DOMAIN_MEDIA) {
 		if (atomic_add(&gForcewakeMediaRefCount, 1) == 0) { // First one for media
-			// Placeholder defines for HSW media forcewake.
-			// These should be in registers.h and verified.
-			#ifndef FORCEWAKE_MEDIA_HSW_REQ // Allow override from registers.h
-			#define FORCEWAKE_MEDIA_HSW_REQ   (1U << 1)  // Request Media FW (conceptual bit in FORCEWAKE_MT_HSW)
-			#define FORCEWAKE_MEDIA_HSW_BIT   (1U << 17) // Mask bit for Media FW (conceptual bit in FORCEWAKE_MT_HSW)
-			#define FORCEWAKE_ACK_MEDIA_HSW_REG 0xA0E4   // Media FW Ack Register (HSW)
-			#define FW_ACK_MEDIA_HSW_BIT      (1U << 1)  // Media FW Ack bit in FORCEWAKE_ACK_MEDIA_HSW_REG
-			#endif
+			// Defines like FORCEWAKE_MEDIA_HSW_REQ, FORCEWAKE_MEDIA_HSW_BIT (for mask construction),
+			// FORCEWAKE_ACK_MEDIA_HSW_REG_FWC, and FW_ACK_MEDIA_HSW_BIT_FWC are now in registers.h.
 
 			if (IS_HASWELL(devInfo->device_id)) {
+				// Construct value for FORCEWAKE_MT_HSW: (mask_bit_shifted << 16) | request_bit
+				// In registers.h, FORCEWAKE_MEDIA_HSW_BIT is defined as (1U << 1),
+				// so the mask to enable writing to this bit is (1U << (16 + 1)).
 				intel_i915_write32(devInfo, FORCEWAKE_MT_HSW, (FORCEWAKE_MEDIA_HSW_BIT << 16) | FORCEWAKE_MEDIA_HSW_REQ);
-				status_t media_status = _wait_for_ack(devInfo, FORCEWAKE_ACK_MEDIA_HSW_REG, FW_ACK_MEDIA_HSW_BIT);
+				status_t media_status = _wait_for_ack(devInfo, FORCEWAKE_ACK_MEDIA_HSW_REG_FWC, FW_ACK_MEDIA_HSW_BIT_FWC);
 				if (media_status != B_OK) {
 					TRACE("Forcewake: Failed to acquire media forcewake (status: %s)!\n", strerror(media_status));
 					atomic_add(&gForcewakeMediaRefCount, -1); // Decrement back on failure
@@ -182,13 +179,10 @@ intel_i915_forcewake_put(intel_i915_device_info* devInfo, intel_forcewake_domain
 
 	if (domains & FW_DOMAIN_MEDIA) {
 		if (atomic_add(&gForcewakeMediaRefCount, -1) == 1) { // Last one to release media
-			// Using same placeholder defines as in _get()
-			#ifndef FORCEWAKE_MEDIA_HSW_REQ // Allow override from registers.h
-			#define FORCEWAKE_MEDIA_HSW_REQ   (1U << 1)
-			#define FORCEWAKE_MEDIA_HSW_BIT   (1U << 17)
-			#endif
+			// Defines FORCEWAKE_MEDIA_HSW_BIT is now in registers.h.
 
 			if (IS_HASWELL(devInfo->device_id)) {
+				// Construct value for FORCEWAKE_MT_HSW: (mask_bit_shifted << 16) | 0 (to clear request)
 				intel_i915_write32(devInfo, FORCEWAKE_MT_HSW, (FORCEWAKE_MEDIA_HSW_BIT << 16) | 0); // Clear request
 				TRACE("Forcewake: Haswell media domain released.\n");
 			} else if (IS_IVYBRIDGE(devInfo->device_id)) {

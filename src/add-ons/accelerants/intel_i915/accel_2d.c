@@ -57,10 +57,30 @@
 // TODO: Tiling bits for blitter commands (e.g., XY_COLOR_BLT_CMD Bit 11 for Dest Tiling,
 // XY_SRC_COPY_BLT_CMD Bit 11 for Dest Tiling & Bit 15 for Src Tiling on Gen7)
 // are currently hardcoded within the command construction logic in each 2D function.
+// THIS IS A CRITICAL TODO: The current hardcoded tiling logic (assuming Gen7 bit positions)
+// WILL LIKELY CAUSE ISSUES (corruption, hangs) on other GPU generations.
 // This needs to be verified and generalized if 2D acceleration is to be correctly
 // supported on GPU generations other than Gen7, as these bit positions or meanings
 // might change. This would involve consulting PRMs for each supported generation
 // and potentially adding generation checks or more abstract tiling flag definitions.
+static bool gTilingWarningLogged = false;
+
+static void
+_check_and_log_tiling_warning()
+{
+	if (!gTilingWarningLogged && gInfo && gInfo->shared_info) {
+		// INTEL_GRAPHICS_GEN is a kernel-side macro. We need a way to get GEN here.
+		// For now, we can't reliably check the GEN from accelerant without adding it to shared_info.
+		// Let's assume if it's not Gen7, it might be an issue.
+		// This check needs improvement if shared_info->device_id is available and INTEL_GRAPHICS_GEN can be replicated.
+		// For now, log a general warning that's slightly less specific if GEN can't be determined.
+		// if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) != 7) {
+		// For now, always log this warning once, as the code is Gen7 specific.
+		syslog(LOG_WARNING, "intel_i915_accelerant_2d: WARNING! Current 2D acceleration tiling logic is Gen7 specific. Use on other GPU generations may lead to visual corruption or instability. Tiling code needs generalization.");
+		// }
+		gTilingWarningLogged = true;
+	}
+}
 
 static uint32
 get_blit_colordepth_flags(uint16 bits_per_pixel, color_space format)
@@ -210,8 +230,10 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32)
+			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits based on PRM
+				TRACE("fill_span: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+			}
 
 			// Check if framebuffer (destination) is tiled
 			// Assuming gInfo->shared_info->fb_tiling_mode is populated by kernel.
@@ -337,6 +359,8 @@ void
 intel_i915_fill_rectangle(engine_token *et, uint32 color,
 	fill_rect_params *list, uint32 count)
 {
+	_check_and_log_tiling_warning(); // Log warning once if needed
+
 	// TRACE("fill_rectangle: count %lu, color 0x%08lx\n", count, color);
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
 		return;
@@ -375,8 +399,10 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32)
+			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
+				TRACE("fill_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+			}
 
 			// Check if framebuffer (destination) is tiled
 			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
@@ -468,8 +494,10 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32)
+			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
+				TRACE("invert_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+			}
 
 			// Check if framebuffer (destination) is tiled
 			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
@@ -557,8 +585,10 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 				gInfo->shared_info->current_mode.bits_per_pixel,
 				gInfo->shared_info->current_mode.space); // Assuming dest format for now
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32)
+			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit this
+				TRACE("screen_to_screen_blit: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+			}
 
 			// Check if framebuffer (source and destination) is tiled
 			// For Gen7 (IVB/HSW):

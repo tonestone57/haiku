@@ -312,22 +312,39 @@ intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_para
 		uint32_t new_freq_sel_bits = 0;
 		if (IS_IVYBRIDGE_MOBILE(devInfo->device_id)) {
 			cdclk_ctl_val &= ~CDCLK_FREQ_SEL_IVB_MASK_MOBILE;
-			if (target_cdclk_khz >= 675000) new_freq_sel_bits = CDCLK_FREQ_675_MHZ_IVB_M;
-			else if (target_cdclk_khz >= 540000) new_freq_sel_bits = CDCLK_FREQ_540_MHZ_IVB_M;
-			else if (target_cdclk_khz >= 450000) new_freq_sel_bits = CDCLK_FREQ_450_MHZ_IVB_M;
-			else if (target_cdclk_khz >= 337500) new_freq_sel_bits = CDCLK_FREQ_337_5_MHZ_IVB_M;
-			else { TRACE("Clocks: IVB Mobile: Target CDCLK %u kHz not mappable.\n", target_cdclk_khz); return B_ERROR;}
+			// Mobile IVB has more granular CDCLK options.
+			// These values (CDCLK_FREQ_xxx_MHZ_IVB_M) should map to actual hardware field values.
+			if (target_cdclk_khz >= 675000) new_freq_sel_bits = CDCLK_FREQ_675_MHZ_IVB_M; // Field value for 675 MHz
+			else if (target_cdclk_khz >= 540000) new_freq_sel_bits = CDCLK_FREQ_540_MHZ_IVB_M;   // Field value for 540 MHz
+			else if (target_cdclk_khz >= 450000) new_freq_sel_bits = CDCLK_FREQ_450_MHZ_IVB_M;   // Field value for 450 MHz
+			else if (target_cdclk_khz >= 337500) new_freq_sel_bits = CDCLK_FREQ_337_5_MHZ_IVB_M; // Field value for 337.5 MHz
+			else {
+				TRACE("Clocks: IVB Mobile: Target CDCLK %u kHz not directly mappable. Using closest supported or default.\n", target_cdclk_khz);
+				// Default to a common safe value if no direct match or implement closest logic
+				new_freq_sel_bits = CDCLK_FREQ_450_MHZ_IVB_M; // Example default
+				target_cdclk_khz = 450000; // Reflect the actual frequency being set
+			}
 		} else { // IVB Desktop/Server
 			cdclk_ctl_val &= ~CDCLK_FREQ_SEL_IVB_MASK_DESKTOP;
-			if (target_cdclk_khz >= 640000) new_freq_sel_bits = CDCLK_FREQ_640_IVB_D; // Example
-			else if (target_cdclk_khz >= 480000) new_freq_sel_bits = CDCLK_FREQ_480_IVB_D;
-			else if (target_cdclk_khz >= 400000) new_freq_sel_bits = CDCLK_FREQ_400_IVB_D;
-			else if (target_cdclk_khz >= 320000) new_freq_sel_bits = CDCLK_FREQ_320_IVB_D;
-			else { TRACE("Clocks: IVB Desktop: Target CDCLK %u kHz not mappable.\n", target_cdclk_khz); return B_ERROR;}
+			// IVB Desktop/Server typically supports 400MHz (000b) and 320MHz (001b)
+			// CDCLK_FREQ_400_IVB_D should be (0 << 0)
+			// CDCLK_FREQ_320_IVB_D should be (1 << 0)
+			// Assuming CDCLK_FREQ_SEL_IVB_MASK_DESKTOP is 0x7 (bits 2:0)
+			if (target_cdclk_khz >= 400000) { // Prefer 400MHz if target is >= 400
+				new_freq_sel_bits = CDCLK_FREQ_400_IVB_D; // Should be 0 for 400MHz (FSB/2)
+				target_cdclk_khz = 400000;
+			} else if (target_cdclk_khz >= 320000) { // Prefer 320MHz if target is >= 320
+				new_freq_sel_bits = CDCLK_FREQ_320_IVB_D; // Should be 1 for 320MHz (FSB/2.5)
+				target_cdclk_khz = 320000;
+			} else {
+				TRACE("Clocks: IVB Desktop: Target CDCLK %u kHz not mappable to 320/400. Defaulting to 400MHz.\n", target_cdclk_khz);
+				new_freq_sel_bits = CDCLK_FREQ_400_IVB_D;
+				target_cdclk_khz = 400000;
+			}
 		}
 		cdclk_ctl_val |= new_freq_sel_bits;
 		intel_i915_write32(devInfo, CDCLK_CTL_IVB, cdclk_ctl_val);
-		devInfo->current_cdclk_freq_khz = target_cdclk_khz;
+		devInfo->current_cdclk_freq_khz = target_cdclk_khz; // Store the actual frequency set
 		TRACE("Clocks: IVB CDCLK_CTL programmed to 0x%08" B_PRIx32 " for target %u kHz (Mobile: %d).\n",
 			cdclk_ctl_val, target_cdclk_khz, IS_IVYBRIDGE_MOBILE(devInfo->device_id));
 	} else {

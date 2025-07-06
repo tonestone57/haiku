@@ -144,6 +144,9 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	}
 	// TODO: Verify MSR address and interpretation for future Gens beyond Gen12.
 	// Actual frequency control mechanisms for Gen11+ are more complex and rely on MMIO/firmware.
+	if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 11) {
+		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Reading RP_STATE_CAP MSR for Gen %d. Frequency control for Gen11+ is more complex (MMIO/firmware) and this MSR may be insufficient or misleading. Full RPS support for this Gen requires PRM review.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+	}
 
 	if (rp_state_cap != 0) {
 		devInfo->rps_state->max_p_state_val = (rp_state_cap >> 0) & 0xFF; // Max P-state (lowest GPU freq value)
@@ -275,11 +278,11 @@ intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 	if (IS_HASWELL(devInfo->device_id)) {
 		rc_ctl_reg = RENDER_C_STATE_CONTROL_HSW;
 		rc6_idle_thresh_reg = HSW_RC6_THRESHOLD_IDLE;
-		// TODO: Adjust rc6_idle_thresh_val if HSW uses different units/scale than DEFAULT_RC6_IDLE_THRESHOLD_US
+		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US for HSW (reg 0x%lx). This value (currently %u us) MUST be verified/adjusted against PRM for correct units/scale.\n", rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US);
 	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		rc_ctl_reg = RC_CONTROL_IVB;
 		rc6_idle_thresh_reg = GEN6_RC6_THRESHOLD_IDLE_IVB;
-		// TODO: Adjust rc6_idle_thresh_val if IVB/SNB uses different units/scale
+		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US for IVB/SNB (reg 0x%lx). This value (currently %u us) MUST be verified/adjusted against PRM for correct units/scale.\n", rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US);
 	} else {
 		TRACE("PM: intel_i915_pm_enable_rc6: RC6 not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);

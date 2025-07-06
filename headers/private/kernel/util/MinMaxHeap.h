@@ -87,6 +87,9 @@ public:
 	inline	status_t	Insert(Element* element, Key key);
 
 	inline	int32		Count() const { return fMinLastElement + fMaxLastElement; }
+	inline	bool		IsEmpty() const;
+	inline	bool		Contains(const Element* element) const;
+	inline	void		Clear();
 
 private:
 			status_t	_GrowHeap(int minimalSize = 0);
@@ -133,6 +136,14 @@ MinMaxHeapLinkImpl<Element, Key>::GetMinMaxHeapLink()
 }
 
 
+MIN_MAX_HEAP_TEMPLATE_LIST
+bool
+MIN_MAX_HEAP_CLASS_NAME::IsEmpty() const
+{
+	return Count() == 0;
+}
+
+
 template<typename Element, typename Key>
 MinMaxHeapLink<Element, Key>*
 MinMaxHeapStandardGetLink<Element, Key>::operator()(Element* element) const
@@ -156,6 +167,36 @@ bool
 MinMaxHeapCompare<Key>::operator()(Key a, Key b)
 {
 	return a < b;
+}
+
+
+MIN_MAX_HEAP_TEMPLATE_LIST
+bool
+MIN_MAX_HEAP_CLASS_NAME::Contains(const Element* element) const
+{
+	// const_cast is acceptable here if sGetLink does not modify the element,
+	// which it shouldn't for a GetLink functor.
+	// MinMaxHeapLink is part of the heap's internal state management, not
+	// intrinsic state of Element that Contains would modify.
+	MinMaxHeapLink<Element, Key>* link = sGetLink(const_cast<Element*>(element));
+	return link != NULL && link->fIndex != -1;
+}
+
+
+MIN_MAX_HEAP_TEMPLATE_LIST
+void
+MIN_MAX_HEAP_CLASS_NAME::Clear()
+{
+	fMinLastElement = 0;
+	fMaxLastElement = 0;
+	// Note: This simple Clear() does not iterate through previously held elements
+	// to reset their fIndex. Elements are only marked out of heap (fIndex = -1)
+	// upon explicit Remove, RemoveMinimum, or RemoveMaximum.
+	// If Clear() is used and elements are then re-checked with Contains()
+	// without being re-inserted, Contains() might give a stale true if the
+	// element was previously in the heap.
+	// However, any subsequent Insert() operation on a cleared element will
+	// assert if fIndex is not -1, effectively catching incorrect reuse.
 }
 
 

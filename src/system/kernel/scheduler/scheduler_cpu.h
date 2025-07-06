@@ -126,6 +126,13 @@ private:
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
 
+
+// Unified IRQ target selection function
+CPUEntry* SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
+	float irqTargetFactor, float smtConflictFactor,
+	int32 maxTotalIrqLoadOnTargetCPU);
+
+
 class CPUPriorityHeap : public Heap<CPUEntry, int32> {
 public:
 										CPUPriorityHeap() { }

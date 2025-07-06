@@ -1026,6 +1026,78 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 }
 
 
+// #pragma mark - Unified IRQ Target CPU Selection
+
+
+Scheduler::CPUEntry*
+Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
+	float irqTargetFactor, float smtConflictFactor,
+	int32 maxTotalIrqLoadOnTargetCPU)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(targetCore != NULL);
+
+	CPUEntry* bestCPU = NULL;
+	float bestScore = 1e9; // Initialize with a large value, lower score is better
+
+	CPUSet coreCPUs = targetCore->CPUMask();
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
+			continue;
+
+		CPUEntry* currentCPU = CPUEntry::GetCPU(i);
+		ASSERT(currentCPU->Core() == targetCore);
+
+		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
+		if (maxTotalIrqLoadOnTargetCPU > 0 && currentCpuExistingIrqLoad + irqLoadToMove >= maxTotalIrqLoadOnTargetCPU) {
+			TRACE_SCHED("SelectTargetCPUForIRQ: CPU %" B_PRId32 " fails IRQ capacity (curr:%" B_PRId32 ", add:%" B_PRId32 ", max:%" B_PRId32 ")\n",
+				currentCPU->ID(), currentCpuExistingIrqLoad, irqLoadToMove, maxTotalIrqLoadOnTargetCPU);
+			continue; // Skip this CPU, too much IRQ load already or would exceed
+		}
+
+		float threadInstantLoad = currentCPU->GetInstantaneousLoad();
+		float smtPenalty = 0.0f;
+		if (targetCore->CPUCount() > 1) { // Apply SMT penalty if choosing among SMT siblings
+			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
+			siblings.ClearBit(currentCPU->ID());
+			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+				if (siblings.GetBit(k) && !gCPU[k].disabled) {
+					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * smtConflictFactor;
+				}
+			}
+		}
+		float threadEffectiveLoad = threadInstantLoad + smtPenalty;
+
+		// Ensure denominator is not zero if maxTotalIrqLoadOnTargetCPU is used for normalization
+		// and it could be equal to irqToMoveLoad. Add 1 for safety.
+		float denominator = (maxTotalIrqLoadOnTargetCPU - irqLoadToMove + 1);
+		if (denominator <= 0) denominator = 1.0f; // Avoid division by zero or negative
+
+		float normalizedExistingIrqLoad = (maxTotalIrqLoadOnTargetCPU > 0)
+			? std::min(1.0f, (float)currentCpuExistingIrqLoad / denominator)
+			: ( (maxTotalIrqLoadOnTargetCPU == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
+
+
+		float score = (1.0f - irqTargetFactor) * threadEffectiveLoad
+						   + irqTargetFactor * normalizedExistingIrqLoad;
+
+		if (bestCPU == NULL || score < bestScore) {
+			bestScore = score;
+			bestCPU = currentCPU;
+		}
+	}
+
+	if (bestCPU != NULL) {
+		 TRACE_SCHED("SelectTargetCPUForIRQ: Selected CPU %" B_PRId32 " on core %" B_PRId32 " with score %f\n",
+			bestCPU->ID(), targetCore->ID(), bestScore);
+	} else {
+		 TRACE_SCHED("SelectTargetCPUForIRQ: No suitable CPU found on core %" B_PRId32 " for IRQ (load %" B_PRId32 ")\n",
+			targetCore->ID(), irqLoadToMove);
+	}
+	return bestCPU;
+}
+
+
 void Scheduler::init_debug_commands()
 {
 	// Initialize debug heaps only if not already (though new() is placement new)

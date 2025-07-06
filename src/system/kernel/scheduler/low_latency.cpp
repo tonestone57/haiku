@@ -175,51 +175,8 @@ low_latency_choose_core(const ThreadData* threadData)
 // or the logic for picking CPU on core, including IRQ awareness, is duplicated/adapted here.
 // Let's assume for this step we adapt the logic locally, using CPUEntry::CalculateTotalIrqLoad().
 
-// Helper to select CPU on a core, considering IRQ load (simplified for local use)
-static CPUEntry*
-_select_cpu_for_irq_on_core_ll(CoreEntry* core, int32 irqToMoveLoad)
-{
-	CPUEntry* bestCPU = NULL;
-	float bestScore = 1e9; // Lower is better
-
-	CPUSet coreCPUs = core->CPUMask();
-	for (int32 cpuIndex = 0; cpuIndex < smp_get_num_cpus(); cpuIndex++) {
-		if (!coreCPUs.GetBit(cpuIndex) || gCPU[cpuIndex].disabled)
-			continue;
-
-		CPUEntry* currentCPU = CPUEntry::GetCPU(cpuIndex);
-		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
-
-		if (currentCpuExistingIrqLoad + irqToMoveLoad >= gMaxTargetCpuIrqLoad) {
-			TRACE_SCHED("LL IRQ Target: CPU %" B_PRId32 " fails IRQ capacity.\n", currentCPU->ID());
-			continue;
-		}
-
-		float threadInstantLoad = currentCPU->GetInstantaneousLoad();
-		float smtPenalty = 0.0f;
-		if (core->CPUCount() > 1) {
-			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
-			siblings.ClearBit(currentCPU->ID());
-			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-				}
-			}
-		}
-		float threadEffectiveLoad = threadInstantLoad + smtPenalty;
-		float normalizedExistingIrqLoad = (gMaxTargetCpuIrqLoad > 0)
-			? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1))
-			: ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
-        float score = (1.0f - gIrqTargetFactor) * threadEffectiveLoad
-                           + gIrqTargetFactor * normalizedExistingIrqLoad;
-
-		if (bestCPU == NULL || score < bestScore) {
-			bestScore = score;
-			bestCPU = currentCPU;
-		}
-	}
-	return bestCPU;
-}
+// Helper _select_cpu_for_irq_on_core_ll has been removed.
+// Its logic is now part of the unified Scheduler::SelectTargetCPUForIRQ.
 
 
 const int32 kMaxIRQsToMovePerCycleLL = 3;
@@ -290,11 +247,15 @@ low_latency_rebalance_irqs(bool idle)
 	if (targetCore->GetLoad() + kLoadDifference >= currentCore->GetLoad())
 		return;
 
-	// Use the new IRQ-aware CPU selection logic
-	// CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCore, false, NULL); // Old
-	// Note: irqToMoveLoad for _select_cpu_for_irq_on_core_ll should ideally be sum of loads of IRQs in batch.
-	// For simplicity, we'll pass the load of the first (heaviest) candidate.
-	CPUEntry* targetCPU = _select_cpu_for_irq_on_core_ll(targetCore, candidateIRQs[0]->load);
+	// Use the unified Scheduler::SelectTargetCPUForIRQ function.
+	// Pass gIrqTargetFactor (global) and gSchedulerSMTConflictFactor (mode-specific for LL).
+	// gMaxTargetCpuIrqLoad is also global.
+	// TODO: Consider making gIrqTargetFactor and gMaxTargetCpuIrqLoad mode-specific if needed.
+	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCore,
+		candidateIRQs[0]->load, /* load of the heaviest IRQ to move */
+		gIrqTargetFactor,
+		gSchedulerSMTConflictFactor,
+		gMaxTargetCpuIrqLoad);
 
 	if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num)
 		return;
@@ -306,12 +267,16 @@ low_latency_rebalance_irqs(bool idle)
 
 		// If moving multiple, re-evaluate targetCPU for subsequent IRQs or check capacity.
 		// For now, this simplified batch moves to the same initially chosen targetCPU.
-		if (i > 0) { // Re-check capacity for subsequent IRQs in the batch
-			if (targetCPU->CalculateTotalIrqLoad() + chosenIRQ->load >= gMaxTargetCpuIrqLoad) {
-				TRACE_SCHED("LL IRQ Rebalance: Target CPU %" B_PRId32 " now at IRQ capacity for IRQ %d. Stopping batch.\n", targetCPU->ID(), chosenIRQ->irq);
+		// Re-select target CPU for each IRQ for better precision, or check capacity:
+		if (i > 0) {
+			targetCPU = SelectTargetCPUForIRQ(targetCore, chosenIRQ->load,
+				gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
+				TRACE_SCHED("LL IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;
 			}
 		}
+
 
 		TRACE_SCHED("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());

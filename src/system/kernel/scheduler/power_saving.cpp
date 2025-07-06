@@ -12,7 +12,7 @@
 #include <algorithm>  // For std::swap
 
 #include "scheduler_common.h" // For gKernelKDistFactor etc.
-#include "scheduler_cpu.h"
+#include "scheduler_cpu.h"    // For SelectTargetCPUForIRQ
 #include "scheduler_modes.h"
 #include "scheduler_profiler.h"
 #include "scheduler_thread.h"
@@ -399,51 +399,8 @@ power_saving_choose_core(const ThreadData* threadData)
 }
 
 
-// Helper to select CPU on a core, considering IRQ load (simplified for local use)
-static CPUEntry*
-_select_cpu_for_irq_on_core_ps(CoreEntry* core, int32 irqToMoveLoad)
-{
-	CPUEntry* bestCPU = NULL;
-	float bestScore = 1e9; // Lower is better
-
-	CPUSet coreCPUs = core->CPUMask();
-	for (int32 cpuIndex = 0; cpuIndex < smp_get_num_cpus(); cpuIndex++) {
-		if (!coreCPUs.GetBit(cpuIndex) || gCPU[cpuIndex].disabled)
-			continue;
-
-		CPUEntry* currentCPU = CPUEntry::GetCPU(cpuIndex);
-		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
-
-		if (currentCpuExistingIrqLoad + irqToMoveLoad >= gMaxTargetCpuIrqLoad) {
-			TRACE_SCHED("PS IRQ Target: CPU %" B_PRId32 " fails IRQ capacity.\n", currentCPU->ID());
-			continue;
-		}
-
-		float threadInstantLoad = currentCPU->GetInstantaneousLoad();
-		float smtPenalty = 0.0f;
-		if (core->CPUCount() > 1) {
-			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
-			siblings.ClearBit(currentCPU->ID());
-			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-				}
-			}
-		}
-		float threadEffectiveLoad = threadInstantLoad + smtPenalty;
-		float normalizedExistingIrqLoad = (gMaxTargetCpuIrqLoad > 0)
-			? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1))
-			: ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
-        float score = (1.0f - gIrqTargetFactor) * threadEffectiveLoad
-                           + gIrqTargetFactor * normalizedExistingIrqLoad;
-
-		if (bestCPU == NULL || score < bestScore) {
-			bestScore = score;
-			bestCPU = currentCPU;
-		}
-	}
-	return bestCPU;
-}
+// Helper _select_cpu_for_irq_on_core_ps has been removed.
+// Its logic is now part of the unified Scheduler::SelectTargetCPUForIRQ.
 
 
 static void
@@ -457,11 +414,19 @@ power_saving_rebalance_irqs(bool idle)
 	CoreEntry* consolidationCore = power_saving_get_consolidation_target_core(NULL);
 
 	if (idle && consolidationCore != NULL && currentCore != consolidationCore) {
-		// This is the "packing" case - move ALL IRQs. This logic remains.
+		// This is the "packing" case - move ALL IRQs.
 		SpinLocker irqLocker(current_cpu_struct->irqs_lock);
 		irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
-		// Use refined IRQ target selection for the consolidation core's CPU
-		CPUEntry* targetCPUonConsolidationCore = _select_cpu_for_irq_on_core_ps(consolidationCore, 0 /* pass average or sum of IRQs to move? For now, 0 for selecting best on core */);
+
+		// Select target CPU on the consolidation core using the unified function.
+		// Pass gIrqTargetFactor (global) and gSchedulerSMTConflictFactor (mode-specific for PS).
+		// gMaxTargetCpuIrqLoad is also global.
+		// TODO: Consider making gIrqTargetFactor and gMaxTargetCpuIrqLoad mode-specific if needed.
+		CPUEntry* targetCPUonConsolidationCore = SelectTargetCPUForIRQ(consolidationCore,
+			0, /* Pass 0 for irqLoadToMove when selecting best CPU on core generally */
+			gIrqTargetFactor,
+			gSchedulerSMTConflictFactor,
+			gMaxTargetCpuIrqLoad);
 
 		if (targetCPUonConsolidationCore != NULL) {
 			irq_assignment* nextIRQ = irq;
@@ -469,19 +434,17 @@ power_saving_rebalance_irqs(bool idle)
 				irq = nextIRQ;
 				nextIRQ = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 
-				// Check capacity on target for this specific IRQ before moving
-				if (targetCPUonConsolidationCore->CalculateTotalIrqLoad() + irq->load < gMaxTargetCpuIrqLoad) {
-					TRACE_SCHED("power_saving_rebalance_irqs (pack): Moving IRQ %d from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-						irq->irq, current_cpu_struct->cpu_num, targetCPUonConsolidationCore->ID());
-					// assign_io_interrupt_to_cpu might relock, so be careful if irqs_lock is held.
-					// Assuming assign_io_interrupt_to_cpu is safe or list iteration handles changes.
-					// For safety, if assign_io_interrupt_to_cpu is complex, it should be done outside loop or list copied.
-					// Given it's a linked list modification, this is risky.
-					// The original code did this under lock, let's trust assign_io_interrupt_to_cpu for now.
-					assign_io_interrupt_to_cpu(irq->irq, targetCPUonConsolidationCore->ID());
+				// Re-evaluate target CPU for this specific IRQ to ensure capacity.
+				CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
+					irq->load, gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+
+				if (specificTargetCPU != NULL) {
+					TRACE_SCHED("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+						irq->irq, irq->load, current_cpu_struct->cpu_num, specificTargetCPU->ID());
+					assign_io_interrupt_to_cpu(irq->irq, specificTargetCPU->ID());
 				} else {
-					TRACE_SCHED("power_saving_rebalance_irqs (pack): CPU %" B_PRId32 " at IRQ capacity for IRQ %d. IRQ remains.\n",
-						targetCPUonConsolidationCore->ID(), irq->irq);
+					TRACE_SCHED("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains.\n",
+						consolidationCore->ID(), irq->irq);
 				}
 			}
 		}
@@ -537,10 +500,11 @@ power_saving_rebalance_irqs(bool idle)
 	if (targetCoreForIRQs == NULL || targetCoreForIRQs == currentCore) return;
 	if (targetCoreForIRQs->GetLoad() + kLoadDifference >= currentCore->GetLoad()) return;
 
-	// Use the new IRQ-aware CPU selection logic
-	// CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCoreForIRQs, false, NULL); // Old
-	CPUEntry* targetCPU = _select_cpu_for_irq_on_core_ps(targetCoreForIRQs, candidateIRQs[0]->load);
-
+	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs,
+		candidateIRQs[0]->load,
+		gIrqTargetFactor,
+		gSchedulerSMTConflictFactor,
+		gMaxTargetCpuIrqLoad);
 
 	if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num)
 		return;
@@ -550,12 +514,16 @@ power_saving_rebalance_irqs(bool idle)
 		irq_assignment* chosenIRQ = candidateIRQs[i];
 		if (chosenIRQ == NULL) continue;
 
-		if (i > 0) { // Re-check capacity for subsequent IRQs in the batch
-			if (targetCPU->CalculateTotalIrqLoad() + chosenIRQ->load >= gMaxTargetCpuIrqLoad) {
-				TRACE_SCHED("PS IRQ Rebalance: Target CPU %" B_PRId32 " now at IRQ capacity for IRQ %d. Stopping batch.\n", targetCPU->ID(), chosenIRQ->irq);
+		// Re-select target CPU for each IRQ or check capacity.
+		if (i > 0) {
+			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->load,
+				gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
+				TRACE_SCHED("PS IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;
 			}
 		}
+
 
 		TRACE_SCHED("power_saving_rebalance_irqs (general): Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
@@ -583,5 +551,3 @@ scheduler_mode_operations gSchedulerPowerSavingMode = {
 	power_saving_designate_consolidation_core,
 	power_saving_should_wake_core_for_load,
 };
-
-[end of src/system/kernel/scheduler/power_saving.cpp]

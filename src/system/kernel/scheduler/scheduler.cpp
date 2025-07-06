@@ -919,65 +919,44 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 // ... This content is assumed to be correctly present from the previous task's completion.
 // ... For brevity, not re-pasting the entire tail of the file if it's unchanged from last confirmed state.
 
+// gIrqTargetFactor: Defines the trade-off in IRQ placement decisions.
+// A higher value prioritizes placing IRQs on CPUs with less existing IRQ load,
+// while a lower value prioritizes CPUs with less thread execution load.
+// Default is 0.3, meaning thread load is more heavily weighted (70%).
+// Empirically derived good starting point.
+float gIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR; // Default 0.3f
+
+// gMaxTargetCpuIrqLoad: The maximum acceptable cumulative IRQ "load units"
+// for a CPU before it's generally considered too saturated for more IRQs.
+// An IRQ's "load unit" typically increments with its 'cost' (usually 1) per interrupt event.
+// This acts as a capacity limit in IRQ placement scoring.
+// Default is 700. Empirically derived.
+int32 gMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD; // Default 700
+
+// gHighAbsoluteIrqThreshold: For proactive balancing, a source CPU's total IRQ load
+// must exceed this value to be considered for offloading IRQs.
+// Default is 1000.
+int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
+
+// gSignificantIrqLoadDifference: For proactive balancing, the difference in IRQ load
+// between the source (most loaded) and target (least loaded) CPU must be at least this much.
+// Default is 300.
+int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+
+// gMaxIRQsToMoveProactively: Maximum number of IRQs the proactive balancer will
+// attempt to move in a single pass from an overloaded CPU.
+// Default is 3.
+int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
+
+
 static CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
 {
-    SCHEDULER_ENTER_FUNCTION();
-    ASSERT(core != NULL);
-
-    CPUEntry* bestCPU = NULL;
-    float bestScore = 1e9; // Initialize with a large value, lower score is better
-
-    CPUSet coreCPUs = core->CPUMask();
-    for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-        if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
-            continue;
-
-        CPUEntry* currentCPU = CPUEntry::GetCPU(i);
-        ASSERT(currentCPU->Core() == core);
-
-        int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
-        if (currentCpuExistingIrqLoad + irqToMoveLoad >= gMaxTargetCpuIrqLoad) {
-            TRACE_SCHED("IRQ Target Sel: CPU %" B_PRId32 " fails IRQ capacity (curr:%" B_PRId32 ", add:%" B_PRId32 ", max:%" B_PRId32 ")\n",
-                currentCPU->ID(), currentCpuExistingIrqLoad, irqToMoveLoad, gMaxTargetCpuIrqLoad);
-            continue; // Skip this CPU, too much IRQ load already or would exceed
-        }
-
-        float threadInstantLoad = currentCPU->GetInstantaneousLoad();
-        float smtPenalty = 0.0f;
-        if (core->CPUCount() > 1) { // Apply SMT penalty if choosing among SMT siblings
-            CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
-            siblings.ClearBit(currentCPU->ID());
-            for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-                if (siblings.GetBit(k) && !gCPU[k].disabled) {
-                    smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-                }
-            }
-        }
-        float threadEffectiveLoad = threadInstantLoad + smtPenalty;
-
-        float normalizedExistingIrqLoad = (gMaxTargetCpuIrqLoad > 0 && gMaxTargetCpuIrqLoad > currentCpuExistingIrqLoad)
-            ? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1))
-            : ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
-
-        float score = (1.0f - gIrqTargetFactor) * threadEffectiveLoad
-                           + gIrqTargetFactor * normalizedExistingIrqLoad;
-
-        if (bestCPU == NULL || score < bestScore) {
-            bestScore = score;
-            bestCPU = currentCPU;
-        }
-    }
-
-    if (bestCPU != NULL) {
-         TRACE_SCHED("IRQ Target Sel: Selected CPU %" B_PRId32 " on core %" B_PRId32 " with combined score %f (effThreadLoad %f, normIrqLoad %f)\n",
-            bestCPU->ID(), core->ID(), bestScore, (bestCPU->GetInstantaneousLoad()),
-			(gMaxTargetCpuIrqLoad > 0) ? (float)bestCPU->CalculateTotalIrqLoad() / gMaxTargetCpuIrqLoad : 0.0f);
-    } else {
-         TRACE_SCHED("IRQ Target Sel: No suitable CPU found on core %" B_PRId32 " for IRQ (load %" B_PRId32 ")\n",
-            core->ID(), irqToMoveLoad);
-    }
-    return bestCPU;
+	// This function is called by the proactive IRQ balancer.
+	// It uses the global gIrqTargetFactor and gMaxTargetCpuIrqLoad.
+	// The gSchedulerSMTConflictFactor is mode-dependent and reflects the current scheduler mode.
+	return SelectTargetCPUForIRQ(core, irqToMoveLoad, gIrqTargetFactor,
+		gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
 }
 
 

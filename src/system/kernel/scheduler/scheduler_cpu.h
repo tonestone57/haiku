@@ -484,8 +484,8 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 	fIdleCores.Add(core); // Add to this package's list of idle cores.
 	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 		// All cores in this package are now idle.
-		WriteSpinLocker _(gIdlePackageLock); // Lock for global idle package list.
-		if (!DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
+		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
+		if (!this->IsLinked()) // Check if THIS package instance is already linked
 			gIdlePackageList.Add(this); // Add this package to global idle list.
 	}
 }
@@ -508,8 +508,8 @@ PackageEntry::CoreWakesUp(CoreEntry* core)
 	fIdleCoreCount--;
 	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
 		// Package was fully idle and now has at least one active core.
-		WriteSpinLocker _(gIdlePackageLock); // Lock for global idle package list.
-		if (DoublyLinkedListLinkImpl<PackageEntry>::IsLinked())
+		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
+		if (this->IsLinked()) // Check if THIS package instance is linked
 			gIdlePackageList.Remove(this); // Remove from global idle list.
 	}
 }
@@ -555,10 +555,10 @@ CoreEntry::GetCore(int32 cpu)
 
 
 inline CoreEntry*
-PackageEntry::GetIdleCore(int32 index) const
+PackageEntry::GetIdleCore(int32 index)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(fCoreLock);
+	ReadSpinLocker lock(fCoreLock); // Made method non-const
 	CoreEntry* element = fIdleCores.Last();
 	for (int32 i = 0; element != NULL && i < index; i++)
 		element = fIdleCores.GetPrevious(element);

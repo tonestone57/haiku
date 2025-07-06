@@ -28,7 +28,7 @@
 #include <timer.h>
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
-#include <util/Algorithm.h> // For std::swap
+#include <algorithm> // For std::swap (was <util/Algorithm.h>)
 
 // For strtod in debugger command
 #include <stdlib.h>
@@ -67,11 +67,35 @@ float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
 // IRQ balancing parameters
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
+
+// gModeIrqTargetFactor: Defines the trade-off in IRQ placement decisions.
+// A higher value prioritizes placing IRQs on CPUs with less existing IRQ load,
+// while a lower value prioritizes CPUs with less thread execution load.
+// Initialized to a global default, then overridden by scheduler mode activation.
+// See scheduler_common.h and mode-specific files (low_latency.cpp, power_saving.cpp).
+float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR; // Default 0.3f
+
+// gModeMaxTargetCpuIrqLoad: The maximum acceptable cumulative IRQ "load units"
+// for a CPU before it's generally considered too saturated for more IRQs.
+// An IRQ's "load unit" typically increments with its 'cost' (usually 1) per interrupt event.
+// This acts as a capacity limit in IRQ placement scoring.
+// Initialized to a global default, then overridden by scheduler mode activation.
+int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD; // Default 700
+
+// gHighAbsoluteIrqThreshold: For proactive balancing, a source CPU's total IRQ load
+// must exceed this value to be considered for offloading IRQs. (Still global)
+// Default is 1000.
 int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
+
+// gSignificantIrqLoadDifference: For proactive balancing, the difference in IRQ load
+// between the source (most loaded) and target (least loaded) CPU must be at least this much.
+// Default is 300.
 int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+
+// gMaxIRQsToMoveProactively: Maximum number of IRQs the proactive balancer will
+// attempt to move in a single pass from an overloaded CPU.
+// Default is 3.
 int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-float gIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
-int32 gMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
 
 
 }	// namespace Scheduler
@@ -178,9 +202,13 @@ enqueue_thread_on_cpu(Thread* thread, CPUEntry* cpu, CoreEntry* core, bool newTh
 	Thread* currentThreadOnTarget = gCPU[cpu->ID()].running_thread;
 	bool invokeScheduler = false;
 	if (currentThreadOnTarget == NULL || thread_is_idle_thread(currentThreadOnTarget)) {
+		// Target CPU is idle or running its idle thread, so a reschedule is needed.
 		invokeScheduler = true;
 	} else {
 		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
+		// Reschedule if the new thread is higher priority (lower MLFQ level)
+		// or if it's the same level and this is the current CPU (to ensure
+		// round-robin for same-priority threads on the current CPU).
 		if (mlfqLevel < currentThreadDataOnTarget->CurrentMLFQLevel()
 			|| (mlfqLevel == currentThreadDataOnTarget->CurrentMLFQLevel()
 				&& cpu->ID() == smp_get_current_cpu())) {
@@ -190,8 +218,10 @@ enqueue_thread_on_cpu(Thread* thread, CPUEntry* cpu, CoreEntry* core, bool newTh
 
 	if (invokeScheduler) {
 		if (cpu->ID() == smp_get_current_cpu()) {
+			// If target is current CPU, just set a flag to invoke scheduler on exit.
 			gCPU[cpu->ID()].invoke_scheduler = true;
 		} else {
+			// If target is another CPU, send an IPI to trigger its scheduler.
 			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
 	}
@@ -201,14 +231,18 @@ enqueue_thread_on_cpu(Thread* thread, CPUEntry* cpu, CoreEntry* core, bool newTh
 void
 scheduler_enqueue_in_run_queue(Thread *thread)
 {
+	// This function is called when a thread becomes ready to run (e.g., woken up).
+	// It determines the target CPU/core for the thread and enqueues it there.
+	// The caller must hold the thread's scheduler_lock with interrupts disabled.
 	ASSERT(!are_interrupts_enabled());
 	SCHEDULER_ENTER_FUNCTION();
-	SchedulerModeLocker locker;
+	SchedulerModeLocker locker; // Ensures scheduler mode parameters are stable.
 	TRACE("scheduler_enqueue_in_run_queue: thread %" B_PRId32 " with base priority %" B_PRId32 "\n",
 		thread->id, thread->priority);
 	ThreadData* threadData = thread->scheduler_data;
 	CPUEntry* targetCPU = NULL;
 	CoreEntry* targetCore = NULL;
+	// ChooseCoreAndCPU considers affinity, current scheduler mode, and load.
 	threadData->ChooseCoreAndCPU(targetCore, targetCPU);
 	ASSERT(targetCPU != NULL && targetCore != NULL && threadData->Core() == targetCore);
 	enqueue_thread_on_cpu(thread, targetCPU, targetCore, true);
@@ -218,6 +252,9 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 int32
 scheduler_set_thread_priority(Thread *thread, int32 priority)
 {
+	// Sets the base priority of a thread and updates its MLFQ level.
+	// If the thread is ready and its MLFQ level changes, or if it's an RT thread
+	// whose priority changes, it will be re-evaluated in its run queue.
 	ASSERT(are_interrupts_enabled());
 	InterruptsSpinLocker interruptLocker(thread->scheduler_lock);
 	SchedulerModeLocker modeLocker;
@@ -231,21 +268,30 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	thread->priority = priority;
 	int oldMlfqLevel = threadData->CurrentMLFQLevel();
 	int newMlfqLevel = ThreadData::MapPriorityToMLFQLevel(priority);
+	// Re-queueing is needed if MLFQ level changes, or for real-time threads if their
+	// exact priority changes (as RT threads are sorted by exact priority within their level).
 	bool needsRequeue = (newMlfqLevel != oldMlfqLevel) || (threadData->IsRealTime() && priority != oldBasePriority);
 	threadData->SetMLFQLevel(newMlfqLevel);
 
 	if (!needsRequeue) {
+		// If no re-queue needed but thread is running, still flag scheduler
+		// as effective priority might change due to base priority change.
 		if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL)
 			gCPU[thread->cpu->cpu_num].invoke_scheduler = true;
 		return oldBasePriority;
 	}
 
+	// If re-queue is needed, but thread is not currently in B_THREAD_READY state
+	// (e.g., it's sleeping, waiting), no action in run queue is taken now.
+	// If it's running, flag its CPU's scheduler.
 	if (thread->state != B_THREAD_READY) {
 		if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL)
 			gCPU[thread->cpu->cpu_num].invoke_scheduler = true;
 		return oldBasePriority;
 	}
 
+	// Thread is B_THREAD_READY and needs re-queueing.
+	// It must have a previous_cpu or current_cpu context if it's READY.
 	ASSERT(threadData->Core() != NULL || thread->previous_cpu != NULL);
 	CPUEntry* cpu = NULL;
 	if (thread->previous_cpu != NULL) cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
@@ -253,22 +299,25 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	else panic("scheduler_set_thread_priority: Ready thread %" B_PRId32 " has no cpu context", thread->id);
 
 	ASSERT(cpu != NULL);
+	// Ensure threadData is associated with the correct core before queue manipulation.
 	if (threadData->Core() == NULL) threadData->MarkEnqueued(cpu->Core());
 	ASSERT(cpu->Core() == threadData->Core());
 
-	T(RemoveThread(thread));
+	T(RemoveThread(thread)); // Trace event.
 
 	cpu->LockRunQueue();
-	if (threadData->IsEnqueued()) {
+	if (threadData->IsEnqueued()) { // Should always be true if B_THREAD_READY.
 		cpu->RemoveFromQueue(threadData, oldMlfqLevel);
 		threadData->MarkDequeued();
 	}
-	cpu->AddThread(threadData, newMlfqLevel, false);
+	// Add back to the (potentially new) MLFQ level.
+	cpu->AddThread(threadData, newMlfqLevel, false /* add to back */);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadRemovedFromRunQueue, thread);
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
 
+	// Trigger reschedule on the CPU where the thread is queued.
 	if (cpu->ID() == smp_get_current_cpu()) gCPU[cpu->ID()].invoke_scheduler = true;
 	else smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 
@@ -671,28 +720,46 @@ scheduler_set_operation_mode(scheduler_mode mode)
 void
 scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 {
+	// This function is called to enable or disable a CPU for scheduling.
+	// It ensures that when a CPU is disabled, its threads are migrated
+	// (implicitly, by forcing its idle thread and then having the load
+	// balancer or `RemoveCPU` logic handle them) and IRQs are moved.
+	// When enabled, it's added back to its core's scheduling structures.
 #if KDEBUG
 	if (are_interrupts_enabled())
 		panic("scheduler_set_cpu_enabled: called with interrupts enabled");
 #endif
 	dprintf("scheduler: %s CPU %" B_PRId32 "\n", enabled ? "enabling" : "disabling", cpuID);
-	InterruptsBigSchedulerLocker _;
-	if (gCurrentMode != NULL && gCurrentMode->set_cpu_enabled != NULL) // Check gCurrentMode
+	InterruptsBigSchedulerLocker _; // Ensures all schedulers are locked for this topology change.
+	if (gCurrentMode != NULL && gCurrentMode->set_cpu_enabled != NULL) {
+		// Notify the current scheduler mode about the CPU state change.
 		gCurrentMode->set_cpu_enabled(cpuID, enabled);
+	}
 	CPUEntry* cpuEntry = CPUEntry::GetCPU(cpuID);
 	CoreEntry* core = cpuEntry->Core();
-	ASSERT(core->CPUCount() >= 0); // Core's CPU count should be valid
+	ASSERT(core->CPUCount() >= 0); // Sanity check core's CPU count.
+
 	if (enabled) {
+		// Add the CPU back to active scheduling.
 		cpuEntry->Start();
 	} else {
+		// Prepare CPU for disabling:
+		// - Set its priority to idle to ensure it doesn't pick new work.
+		// - Remove it from its core's CPU management. This involves
+		//   re-homing/re-queueing threads that were on this CPU.
 		cpuEntry->UpdatePriority(B_IDLE_PRIORITY);
-		ThreadEnqueuer enqueuer;
+		ThreadEnqueuer enqueuer; // Helper to re-enqueue threads.
 		core->RemoveCPU(cpuEntry, enqueuer);
 	}
-	gCPU[cpuID].disabled = !enabled;
+
+	gCPU[cpuID].disabled = !enabled; // Update global CPU disabled status.
 	if (enabled) gCPUEnabled.SetBitAtomic(cpuID);
 	else gCPUEnabled.ClearBitAtomic(cpuID);
+
 	if (!enabled) {
+		// If disabling, stop the CPUEntry (migrates its IRQs) and
+		// send an ICI to force it through reschedule one last time
+		// to run its idle thread and acknowledge the disabled state.
 		cpuEntry->Stop();
 		if (smp_get_current_cpu() != cpuID)
 			smp_send_ici(cpuID, SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
@@ -781,6 +848,7 @@ init()
 
 static int32 scheduler_aging_event(timer* /*unused*/)
 {
+	// This timer event periodically triggers aging for all enabled CPUs.
     int32 numCPUs = smp_get_num_cpus();
     for (int32 i = 0; i < numCPUs; i++) {
         if (gCPUEnabled.GetBit(i)) {
@@ -795,6 +863,7 @@ static int32 scheduler_aging_event(timer* /*unused*/)
 
 static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
+	// This timer event periodically triggers load balancing if not on a single-core system.
 	if (!gSingleCore)
 		scheduler_perform_load_balance();
     add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
@@ -815,6 +884,8 @@ static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 static void
 init_debug_commands()
 {
+	// Registers various debugger commands related to the scheduler, allowing
+	// for inspection and runtime modification of some scheduler parameters.
 #if SCHEDULER_TRACING
 	add_debugger_command_etc("scheduler", &cmd_scheduler,
 		"Analyze scheduler tracing information",
@@ -1390,8 +1461,15 @@ static void
 scheduler_perform_load_balance()
 {
 	SCHEDULER_ENTER_FUNCTION();
+	// This function attempts to balance load across cores.
+	// It identifies a source core (most loaded from gCoreHighLoadHeap) and a
+	// target core (least loaded from gCoreLoadHeap).
+	// If a significant imbalance exists, it tries to migrate a suitable thread
+	// from a CPU on the source core to a CPU on the target core.
+	// The exact behavior (spread vs. consolidate) depends on gSchedulerLoadBalancePolicy.
+
 	if (gSingleCore || gCoreCount < 2)
-		return;
+		return; // No load balancing needed for single core or less than 2 cores.
 
 	ReadSpinLocker globalCoreHeapsLock(gCoreHeapsLock);
 	CoreEntry* sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum();
@@ -1399,8 +1477,9 @@ scheduler_perform_load_balance()
 	globalCoreHeapsLock.Unlock();
 
 	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
-		return;
+		return; // Not enough distinct cores in heaps to balance between.
 
+	// Only balance if the load difference is significant.
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
 		return;
 
@@ -1409,29 +1488,34 @@ scheduler_perform_load_balance()
 
 	CPUEntry* sourceCPU = NULL;
 	CPUEntry* targetCPU = NULL;
-	CoreEntry* finalTargetCore = NULL;
+	CoreEntry* finalTargetCore = NULL; // The core chosen to receive the thread.
 
+	// Determine the final target core based on the load balance policy.
 	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) {
 		CoreEntry* consolidationCore = NULL;
+		// Try to get the designated consolidation core from the current scheduler mode.
 		if (gCurrentMode != NULL && gCurrentMode->get_consolidation_target_core != NULL)
 			consolidationCore = gCurrentMode->get_consolidation_target_core(NULL);
 
+		// If no specific one is returned, ask the mode to designate one.
 		if (consolidationCore == NULL && gCurrentMode != NULL && gCurrentMode->designate_consolidation_core != NULL) {
 			consolidationCore = gCurrentMode->designate_consolidation_core(NULL);
 		}
 
 		if (consolidationCore != NULL) {
+			// If a consolidation core exists:
 			if (sourceCoreCandidate != consolidationCore &&
 				(consolidationCore->GetLoad() < kHighLoad || consolidationCore->GetInstantaneousLoad() < 0.8f)) {
+				// If source is not the consolidation core, and consolidation core has capacity, target it.
 				finalTargetCore = consolidationCore;
 			} else if (sourceCoreCandidate == consolidationCore && sourceCoreCandidate->GetLoad() > kVeryHighLoad) {
-				// Spill-over logic refined
+				// If source *is* the consolidation core but it's very loaded, try to spill over.
 				CoreEntry* spillTarget = NULL;
-				// Prefer least loaded *active* core first
+				// Prefer least loaded *active* core first for spill-over.
 				for (int32 i = 0; i < gCoreCount; ++i) {
 					CoreEntry* core = &gCoreEntries[i];
-					if (core == consolidationCore || core->GetLoad() == 0) continue; // Skip self and idle
-					if (core->GetLoad() < kHighLoad) { // Has capacity
+					if (core == consolidationCore || core->GetLoad() == 0) continue; // Skip self and idle.
+					if (core->GetLoad() < kHighLoad) { // Has capacity.
 						if (spillTarget == NULL || core->GetLoad() < spillTarget->GetLoad()) {
 							spillTarget = core;
 						}
@@ -1439,32 +1523,35 @@ scheduler_perform_load_balance()
 				}
 				if (spillTarget != NULL) {
 					finalTargetCore = spillTarget;
-				} else { // No suitable active core, consider waking an idle one
-					finalTargetCore = targetCoreCandidate; // Overall least loaded (might be idle)
-					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
+				} else {
+					// No suitable active core for spill-over, consider overall least loaded (might be idle).
+					finalTargetCore = targetCoreCandidate;
+					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL; // Don't target self.
+					// If chosen spill target is idle, check if mode allows waking it.
 					if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0
 						&& gCurrentMode->should_wake_core_for_load != NULL) {
-						// Estimate load of a typical thread for the check
-						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5)) {
-							finalTargetCore = NULL;
+						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5 /* rough estimate */)) {
+							finalTargetCore = NULL; // Mode advises against waking.
 						}
 					}
 				}
 			} else {
 				TRACE_SCHED("LoadBalance: CONSOLIDATE - No clear action for source %" B_PRId32 " / consolidation %" B_PRId32 ".\n",
 					sourceCoreCandidate->ID(), consolidationCore->ID());
-				return;
+				return; // No clear consolidation action.
 			}
 		} else {
 			TRACE_SCHED("LoadBalance: CONSOLIDATE - No consolidation core designated.\n");
-			return;
+			return; // No consolidation core to target.
 		}
 		if (finalTargetCore == NULL) {
 			TRACE_SCHED("LoadBalance: CONSOLIDATE - No suitable final target core found.\n");
 			return;
 		}
+		// Select the busiest CPU on the source core to take a thread from.
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	} else { // SCHED_LOAD_BALANCE_SPREAD
+		// For spread policy, the initial targetCoreCandidate (overall least loaded) is the goal.
 		finalTargetCore = targetCoreCandidate;
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	}
@@ -1475,34 +1562,37 @@ scheduler_perform_load_balance()
 	}
 
 	ThreadData* threadToMove = NULL;
-	int originalLevel = -1;
+	int originalLevel = -1; // MLFQ level of the thread to move.
 	bigtime_t now = system_time();
 
 	sourceCPU->LockRunQueue();
+	// Find a suitable thread to migrate from the source CPU's run queues.
+	// Iterate from higher to lower priority MLFQ levels (excluding idle level).
 	for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) {
 		ThreadRunQueue::ConstIterator iter = sourceCPU->fMlfq[level].GetConstIterator();
 		while(iter.HasNext()){
 			ThreadData* candidate = iter.Next();
+			// Don't migrate idle threads or the currently running thread on sourceCPU.
 			if (candidate->IsIdle() || candidate->GetThread() == gCPU[sourceCPU->ID()].running_thread)
 				continue;
+			// Don't migrate pinned threads.
 			if (candidate->GetThread()->pinned_to_cpu != 0)
 				continue;
 
-			// Use refined target selection for threads too, for consistency, or keep _scheduler_select_cpu_on_core?
-			// For now, keep original for thread load balancing target CPU on core.
-			// The new _scheduler_select_cpu_for_irq is specific.
+			// Select the least busy CPU on the final target core for this candidate thread.
 			targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
-			if (targetCPU == NULL || targetCPU == sourceCPU) {
+			if (targetCPU == NULL || targetCPU == sourceCPU) { // No suitable target CPU or it's the same.
 				targetCPU = NULL;
 				continue;
 			}
 
+			// Avoid migrating a thread too frequently.
 			if (now - candidate->LastMigrationTime() < kMinTimeBetweenMigrations)
 				continue;
 
 			threadToMove = candidate;
 			originalLevel = level;
-			break;
+			break; // Found a candidate.
 		}
 		if (threadToMove != NULL) break;
 	}
@@ -1513,6 +1603,7 @@ scheduler_perform_load_balance()
 		return;
 	}
 
+	// Remove the chosen thread from the source CPU's run queue.
 	sourceCPU->RemoveFromQueue(threadToMove, originalLevel);
 	threadToMove->MarkDequeued();
 	sourceCPU->UnlockRunQueue();
@@ -1520,20 +1611,25 @@ scheduler_perform_load_balance()
 	TRACE_SCHED("LoadBalance: Migrating thread %" B_PRId32 " (level %d) from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
 		threadToMove->GetThread()->id, originalLevel, sourceCPU->ID(), sourceCoreCandidate->ID(), targetCPU->ID(), finalTargetCore->ID());
 
+	// Update thread's core/CPU association.
 	if (threadToMove->Core() != NULL)
-		threadToMove->UnassignCore(false);
+		threadToMove->UnassignCore(false); // Unassign from old core if it was homed.
 
-	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
+	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()]; // Set for potential cache affinity.
+	// ChooseCoreAndCPU will re-assign fCore and add its load to the new core.
 	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU);
 	ASSERT(threadToMove->Core() == finalTargetCore);
 
+	// Add thread to the target CPU's run queue.
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove, threadToMove->CurrentMLFQLevel(), false);
+	targetCPU->AddThread(threadToMove, threadToMove->CurrentMLFQLevel(), false /* add to back */);
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(now);
-	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
+	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID())); // Trace event.
 
+	// If the migrated thread is higher priority than what's on the target CPU,
+	// trigger a reschedule on the target CPU.
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
 	if (currentOnTarget == NULL || thread_is_idle_thread(currentOnTarget) ||

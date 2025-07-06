@@ -31,21 +31,8 @@ public:
 typedef AutoLocker<CPUEntry, CPURunQueueLocking> CPURunQueueLocker;
 
 
-class CoreRunQueueLocking {
-public:
-	inline bool Lock(CoreEntry* core)
-	{
-		core->LockRunQueue();
-		return true;
-	}
-
-	inline void Unlock(CoreEntry* core)
-	{
-		core->UnlockRunQueue();
-	}
-};
-
-typedef AutoLocker<CoreEntry, CoreRunQueueLocking> CoreRunQueueLocker;
+// CoreRunQueueLocking and CoreRunQueueLocker have been removed as CoreEntry
+// does not have a single run queue. Locking must be done per-CPUEntry.
 
 class CoreCPUHeapLocking {
 public:

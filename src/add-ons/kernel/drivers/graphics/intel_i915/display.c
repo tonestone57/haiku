@@ -290,12 +290,40 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	// A more optimized approach might check if existing BO can be reused if dimensions/tiling match.
 	// For now, always recreate to ensure correct properties for the new mode.
 	if (devInfo->framebuffer_bo != NULL) {
-		TRACE("Modeset: Releasing old framebuffer_bo (area %" B_PRId32 ").\n",
-			devInfo->framebuffer_bo->backing_store_area);
-		// If the framebuffer was mapped to a fixed GTT offset (like devInfo->framebuffer_gtt_offset, often 0),
-		// that mapping needs to be undone before the object is fully released, so the GTT entries
-		// point to the scratch page. intel_i915_gem_object_put calls unmap_gtt which handles this.
-		intel_i915_gem_object_put(devInfo->framebuffer_bo);
+		TRACE("Modeset: Releasing old framebuffer_bo (area %" B_PRId32 ", gtt_offset_pages %u, num_pages %lu).\n",
+			devInfo->framebuffer_bo->backing_store_area,
+			devInfo->framebuffer_bo->gtt_offset_pages, // This should be devInfo->framebuffer_gtt_offset
+			devInfo->framebuffer_bo->num_phys_pages);
+
+		// Manually clear the GTT bitmap entries for the old framebuffer if it was mapped
+		// to the fixed framebuffer_gtt_offset.
+		if (devInfo->framebuffer_bo->gtt_mapped &&
+			devInfo->framebuffer_bo->gtt_offset_pages == devInfo->framebuffer_gtt_offset &&
+			devInfo->framebuffer_gtt_offset != (uint32_t)-1) { // Ensure it's a valid offset
+
+			mutex_lock(&devInfo->gtt_allocator_lock);
+			for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
+				uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+				if (pte_idx < devInfo->gtt_total_pages_managed) {
+					if (_gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
+						_gtt_clear_bit(pte_idx, devInfo->gtt_page_bitmap);
+						devInfo->gtt_free_pages_count++;
+					} else {
+						TRACE("Modeset: WARNING - GTT page %u for old FB was already free in bitmap!\n", pte_idx);
+					}
+				}
+			}
+			mutex_unlock(&devInfo->gtt_allocator_lock);
+			// The GTT PTEs themselves will be pointed to scratch page by intel_i915_gtt_unmap_memory.
+			// Call it here before clearing bitmap state, then prevent gem_object_put from doing it again.
+			intel_i915_gtt_unmap_memory(devInfo,
+				devInfo->framebuffer_gtt_offset * B_PAGE_SIZE,
+				devInfo->framebuffer_bo->num_phys_pages);
+			// Mark that this BO is no longer GTT mapped at this fixed offset from display driver's perspective
+			devInfo->framebuffer_bo->gtt_mapped = false;
+			devInfo->framebuffer_bo->gtt_offset_pages = (uint32_t)-1;
+		}
+		intel_i915_gem_object_put(devInfo->framebuffer_bo); // Now unmap_gtt inside put won't re-free GTT space
 		devInfo->framebuffer_bo = NULL;
 	}
 	// Reset fields that will be repopulated by the new BO, or may become invalid if BO creation fails.
@@ -346,12 +374,49 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	}
 
 	TRACE("Modeset: Mapping framebuffer_bo to GTT page offset %u.\n", devInfo->framebuffer_gtt_offset);
+
+	// Manually mark these GTT pages as used in the bitmap, as it's a fixed mapping not using gtt_alloc_space.
+	mutex_lock(&devInfo->gtt_allocator_lock);
+	for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
+		uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+		if (pte_idx < devInfo->gtt_total_pages_managed) {
+			if (!_gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
+				_gtt_set_bit(pte_idx, devInfo->gtt_page_bitmap);
+				devInfo->gtt_free_pages_count--;
+			} else {
+				// This should not happen if previous FB cleanup was correct
+				TRACE("Modeset: WARNING - GTT page %u for new FB was already set in bitmap!\n", pte_idx);
+			}
+		} else {
+			TRACE("Modeset: ERROR - GTT page %u for new FB exceeds total GTT pages %u!\n",
+				pte_idx, devInfo->gtt_total_pages_managed);
+			status = B_BAD_INDEX; // Should have been caught by num_phys_pages vs available space earlier
+			break;
+		}
+	}
+	mutex_unlock(&devInfo->gtt_allocator_lock);
+	if (status != B_OK) {
+		// If marking bits failed (e.g. out of bounds), we have a problem.
+		// Unwind framebuffer_bo creation.
+		goto modeset_fail_fb_bo_created;
+	}
+
 	status = intel_i915_gem_object_map_gtt(devInfo->framebuffer_bo,
 		devInfo->framebuffer_gtt_offset, /* GTT Page Offset */
 		fb_gtt_cache_type);
 	if (status != B_OK) {
 		TRACE("Modeset: Failed to map framebuffer GEM object to GTT: %s\n", strerror(status));
-		goto modeset_fail_fb_bo_created; // New label
+		// Need to un-mark the bits in bitmap if GTT map fails
+		mutex_lock(&devInfo->gtt_allocator_lock);
+		for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
+			uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+			if (pte_idx < devInfo->gtt_total_pages_managed && _gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
+				_gtt_clear_bit(pte_idx, devInfo->gtt_page_bitmap);
+				devInfo->gtt_free_pages_count++;
+			}
+		}
+		mutex_unlock(&devInfo->gtt_allocator_lock);
+		goto modeset_fail_fb_bo_created;
 	}
 
 	// This new_bytes_per_row will be used for plane configuration. It must be the hardware stride.

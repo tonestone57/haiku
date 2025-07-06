@@ -176,25 +176,17 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	// to prevent the gtt_alloc_space function from allocating them for other GEM objects.
 	// This marking should occur in `intel_i915_display_set_mode_internal()` in `display.c`
 	// when the framebuffer_bo is created/recreated and its size (num_phys_pages) is known.
-	// Similarly, when a framebuffer_bo is destroyed or resized smaller, the previously
-	// used GTT pages in the bitmap should be marked as 'free'.
 	//
 	// This function (`intel_i915_gtt_init`) only sets up the initial state (scratch page).
 	// --- End Bitmap Allocator Init ---
 
+#ifdef DEBUG
+	dprintf(DEVICE_NAME_PRIV ": GTT WARN: Fixed framebuffer GTT regions (for display scanout) must be manually marked as 'used' in the gtt_page_bitmap by display modesetting code after framebuffer BO creation. This init only reserves the scratch page.\n");
+#endif
+
 	if (devInfo->shared_info) {
 		devInfo->shared_info->gtt_aperture_size = devInfo->gtt_aperture_actual_size;
 	}
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	return B_OK;
-
-err_gtt_table_area:
-	delete_area(devInfo->gtt_table_area); devInfo->gtt_table_area = -1;
-err_scratch_area:
-	delete_area(devInfo->scratch_page_area); devInfo->scratch_page_area = -1;
-err_lock:
-	mutex_destroy(&devInfo->gtt_allocator_lock);
-	if (devInfo->gtt_page_bitmap) { free(devInfo->gtt_page_bitmap); devInfo->gtt_page_bitmap = NULL; }
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	// --- Initialize Fence Allocator ---
 	intel_i915_fences_init(devInfo); // Initialize fence states
@@ -239,11 +231,15 @@ intel_i915_fences_init(intel_i915_device_info* devInfo)
 		devInfo->fence_state[i].obj_stride = 0;
 
 		if (fw_status == B_OK && devInfo->mmio_regs_addr) {
-			// Assuming FENCE_REG_INDEX(i) is base of 64-bit register. Clear low dword.
-			uint32_t fence_reg_low = FENCE_REG_INDEX(i);
-			if (fence_reg_low < devInfo->mmio_aperture_size - 8) { // Basic check
-				intel_i915_write32(devInfo, fence_reg_low, 0);
-				intel_i915_write32(devInfo, fence_reg_low + 4, 0); // Clear high dword
+			// Use Gen6+ style fence registers
+			uint32_t fence_reg_lo_addr = FENCE_REG_GEN6_LO(i);
+			uint32_t fence_reg_hi_addr = FENCE_REG_GEN6_HI(i);
+
+			// Basic check to avoid writing out of MMIO bounds if I915_MAX_FENCES is too large
+			// for the actual hardware register block.
+			if (fence_reg_hi_addr < devInfo->mmio_aperture_size - 4) { // Check against size - 4 for hi reg
+				intel_i915_write32(devInfo, fence_reg_lo_addr, 0); // Clear valid bit and all other fields
+				intel_i915_write32(devInfo, fence_reg_hi_addr, 0); // Clear upper address bits
 			}
 		}
 	}
@@ -329,7 +325,7 @@ intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 
 	if (num_pages > devInfo->gtt_free_pages_count) {
 		mutex_unlock(&devInfo->gtt_allocator_lock);
-		TRACE("GTT Alloc: Not enough free pages globally (%lu available) for %lu pages.\n",
+		TRACE("GTT Alloc: Not enough free pages globally (%u available) for %lu pages.\n",
 			devInfo->gtt_free_pages_count, num_pages);
 		return B_NO_MEMORY;
 	}
@@ -428,7 +424,7 @@ intel_i915_gtt_free_space(intel_i915_device_info* devInfo,
 	for (size_t i = 0; i < num_pages; ++i) {
 		if (!_gtt_is_bit_set(gtt_page_offset + i, devInfo->gtt_page_bitmap)) {
 			all_were_set = false; // Trying to free an already free page
-			TRACE("GTT Free: Warning - page %lu in range (offset %u, num %lu) was already free.\n",
+			TRACE("GTT Free: Warning - page %u in range (offset %u, num %lu) was already free.\n",
 				gtt_page_offset + i, gtt_page_offset, num_pages);
 			// Decide on strictness: return error, or just clear what's set? For now, proceed.
 		}
@@ -528,3 +524,7 @@ intel_i915_gtt_unmap_memory(intel_i915_device_info* devInfo,
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
 }
+
+```
+
+I will also update `gem_object.c` and `gtt.c` now that `registers.h` has the basic fence defines.

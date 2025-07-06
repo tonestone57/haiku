@@ -104,7 +104,7 @@ static const uint16 kSupportedDevices[] = {
 	// 0x3577, 0x2562, 0x2572, 0x3582, 0x358e,
 };
 intel_i915_device_info* gDeviceInfo[MAX_SUPPORTED_CARDS];
-status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode);
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipe);
 
 
 extern "C" const char** publish_devices(void) { /* ... */ return (const char**)gDeviceNames; }
@@ -153,7 +153,7 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->mmio_area_id = -1;
 		gDeviceInfo[gDeviceCount]->shared_info_area = -1;
 		gDeviceInfo[gDeviceCount]->gtt_mmio_area_id = -1;
-		gDeviceInfo[gDeviceCount]->framebuffer_area = -1;
+		gDeviceInfo[gDeviceCount]->framebuffer_area = -1; // This global one is for Pipe A / shared_info
 		gDeviceInfo[gDeviceCount]->open_count = 0;
 		gDeviceInfo[gDeviceCount]->irq_line = info.u.h0.interrupt_line;
 		gDeviceInfo[gDeviceCount]->vblank_sem_id = -1;
@@ -167,14 +167,39 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->gtt_mmio_aperture_size = info.u.h0.base_register_sizes[2];
 		gDeviceInfo[gDeviceCount]->rcs0 = NULL;
 		gDeviceInfo[gDeviceCount]->rps_state = NULL;
-		gDeviceInfo[gDeviceCount]->framebuffer_bo = NULL; // Initialize new framebuffer_bo field
-		// Initialize framebuffer_gtt_offset.
-		// GTT page 0 is reserved for the scratch page (see intel_i915_gtt_init in gtt.c).
-		// The primary display framebuffer will typically start at GTT page 1.
-		// This is a fixed offset. If dynamic GTT allocation for the framebuffer
-		// were desired, this would be set to (uint32_t)-1 and allocated during modeset.
-		gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset = 1; // Page index
+
+		// Initialize per-pipe framebuffer BOs and GTT offsets
+		for (int k = 0; k < PRIV_MAX_PIPES; ++k) {
+			gDeviceInfo[gDeviceCount]->framebuffer_bo[k] = NULL;
+			gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[k] = (uint32_t)-1; // Default to invalid
+		}
+		// Assign fixed, non-overlapping GTT regions for each pipe's potential framebuffer.
+		// GTT page 0 is reserved for scratch.
+		if (PRIV_PIPE_A < PRIV_MAX_PIPES)
+			gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_A] = 1; // After scratch
+
+		if (PRIV_PIPE_B < PRIV_MAX_PIPES) {
+			if (gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_A] != (uint32_t)-1) {
+				gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_B] =
+					gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_A] + MAX_FB_PAGES_PER_PIPE;
+			}
+		}
+		if (PRIV_PIPE_C < PRIV_MAX_PIPES) {
+			if (PRIV_PIPE_B < PRIV_MAX_PIPES && gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_B] != (uint32_t)-1) {
+				gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_C] =
+					gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_B] + MAX_FB_PAGES_PER_PIPE;
+			} else if (PRIV_PIPE_A < PRIV_MAX_PIPES && gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_A] != (uint32_t)-1) {
+				// Fallback to base off Pipe A if Pipe B wasn't set up (e.g. PRIV_MAX_PIPES was 1, but C is valid)
+				// This case is unlikely if PRIV_MAX_PIPES is small like 3.
+				gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_C] =
+					gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset_pages[PRIV_PIPE_A] + (2 * MAX_FB_PAGES_PER_PIPE);
+			}
+		}
+		// Note: This fixed offset scheme assumes GTT aperture is large enough.
+		// A check against total GTT size vs (last_pipe_offset + MAX_FB_PAGES_PER_PIPE) would be good.
+
 		for (int k = 0; k < PRIV_MAX_PIPES; k++) {
+			// framebuffer_bo[k] is already NULLed above
 			gDeviceInfo[gDeviceCount]->cursor_bo[k] = NULL;
 			gDeviceInfo[gDeviceCount]->cursor_gtt_offset_pages[k] = 0;
 			gDeviceInfo[gDeviceCount]->cursor_visible[k] = false;
@@ -309,10 +334,12 @@ static status_t intel_i915_free(void* cookie) {
 		}
 	}
 
-	// Cleanup framebuffer BO
-	if (devInfo->framebuffer_bo != NULL) {
-		intel_i915_gem_object_put(devInfo->framebuffer_bo);
-		devInfo->framebuffer_bo = NULL;
+	// Cleanup per-pipe framebuffer BOs
+	for (int i = 0; i < PRIV_MAX_PIPES; i++) {
+		if (devInfo->framebuffer_bo[i] != NULL) {
+			intel_i915_gem_object_put(devInfo->framebuffer_bo[i]);
+			devInfo->framebuffer_bo[i] = NULL;
+		}
 	}
 
 	intel_i915_gtt_cleanup(devInfo);
@@ -328,7 +355,7 @@ static status_t intel_i915_free(void* cookie) {
 static status_t intel_i915_read(void* c, off_t p, void* b, size_t* n) { *n = 0; return B_IO_ERROR; }
 static status_t intel_i915_write(void* c, off_t p, const void* b, size_t* n) { *n = 0; return B_IO_ERROR; }
 
-status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode); // Ensure prototype
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipe); // Ensure prototype
 
 static status_t
 intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
@@ -339,8 +366,28 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_GET_SHARED_INFO: /* ... */ return B_OK;
 		case INTEL_I915_SET_DISPLAY_MODE: {
 			display_mode user_mode;
-			if (user_memcpy(&user_mode, buffer, sizeof(display_mode))!=B_OK) return B_BAD_ADDRESS;
-			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode);
+			if (user_memcpy(&user_mode, buffer, sizeof(display_mode)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			// Determine target_pipe based on devInfo instance
+			// This assumes gDeviceInfo array index maps to head/pipe index
+			enum pipe_id_priv targetPipe = PRIV_PIPE_INVALID;
+			for (uint32 i = 0; i < gDeviceCount; i++) {
+				if (gDeviceInfo[i] == devInfo) {
+					if (i == 0) targetPipe = PRIV_PIPE_A;
+					else if (i == 1) targetPipe = PRIV_PIPE_B;
+					else if (i == 2) targetPipe = PRIV_PIPE_C;
+					// Add more mappings if PRIV_MAX_PIPES increases
+					break;
+				}
+			}
+
+			if (targetPipe == PRIV_PIPE_INVALID) {
+				TRACE("SET_DISPLAY_MODE IOCTL: Could not determine target pipe for devInfo %p\n", devInfo);
+				return B_BAD_VALUE; // Or default to Pipe A if that's safer
+			}
+			TRACE("SET_DISPLAY_MODE IOCTL: devInfo %p maps to targetPipe %d\n", devInfo, targetPipe);
+			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode, targetPipe);
 		}
 		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_MMAP_AREA: return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
@@ -368,85 +415,88 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			devInfo->cursor_x[args.pipe] = args.x;
 			devInfo->cursor_y[args.pipe] = args.y;
 
-			// TODO: Program CURxCNTR for pipe args.pipe
-			// Example conceptual steps:
-			// uint32_t cur_cntr_reg = CURCNTR_FOR_PIPE(args.pipe); // Needs actual register macro
-			// uint32_t cur_cntr_val = intel_i915_read32(devInfo, cur_cntr_reg);
-			// cur_cntr_val &= ~CURSOR_MODE_MASK_CONCEPTUAL; // Clear old mode
-			// if (args.is_visible) {
-			//    // Assume ARGB 256x256 for now, this needs to be flexible or based on bitmap set
-			//    // devInfo->cursor_format[args.pipe] should hold the mode bits if they are static per bitmap.
-			//    // For example, if CURSOR_MODE_ARGB_256x256_GENERIC is a defined value:
-			//    cur_cntr_val |= CURSOR_MODE_ARGB_256x256_GENERIC | CURSOR_ENABLE_CONCEPTUAL;
-			//    devInfo->cursor_format[args.pipe] = CURSOR_MODE_ARGB_256x256_GENERIC;
-			// } else {
-			//    cur_cntr_val &= ~CURSOR_ENABLE_CONCEPTUAL;
-			//    // Optionally set mode to OFF: cur_cntr_val |= CURSOR_MODE_OFF_CONCEPTUAL;
-			// }
-			// intel_i915_write32(devInfo, cur_cntr_reg, cur_cntr_val);
-			TRACE("SetCursorState: TODO - Program CURxCNTR for pipe %u. Visible: %d. Format needs to be set (e.g. ARGB 256x256).\n",
-				args.pipe, args.is_visible);
-			// For now, store a conceptual format if enabling, assuming ARGB 256x256.
-			// This should ideally come from hardware capabilities / selected mode,
-			// and should match the size of the bitmap set via SET_CURSOR_BITMAP.
-			if (args.is_visible) {
-				// Example: This conceptual 0x07 might correspond to CURSOR_MODE_256_ARGB_AX on some Intel gens.
-				// This needs to be replaced with actual register bit values from <registers.h> once defined,
-				// and selected based on devInfo->cursor_width and devInfo->cursor_height.
-				// For example:
-				// if (devInfo->cursor_width[args.pipe] <= 64 && devInfo->cursor_height[args.pipe] <= 64)
-				//   devInfo->cursor_format[args.pipe] = CURSOR_MODE_64_ARGB_HW_VALUE;
-				// else if (devInfo->cursor_width[args.pipe] <= 128 && devInfo->cursor_height[args.pipe] <= 128)
-				//   devInfo->cursor_format[args.pipe] = CURSOR_MODE_128_ARGB_HW_VALUE;
-				// else // up to 256x256
-				//   devInfo->cursor_format[args.pipe] = CURSOR_MODE_256_ARGB_HW_VALUE;
-				// If no bitmap set yet, or invalid dimensions, perhaps default to a common mode like 64x64 ARGB or OFF.
-				if (devInfo->cursor_bo[args.pipe] == NULL || devInfo->cursor_width[args.pipe] == 0) {
-					TRACE("SetCursorState: Warning - showing cursor for pipe %u but no bitmap set or invalid dimensions. Using placeholder format.\n", args.pipe);
-					devInfo->cursor_format[args.pipe] = 0x07; // Placeholder for 256x256 ARGB
-				} else {
-					// Simplified: Assume 256x256 ARGB if any bitmap is set.
-					// Real logic would check devInfo->cursor_width/height.
-					devInfo->cursor_format[args.pipe] = 0x07; // Placeholder
-				}
-			} else {
-				devInfo->cursor_format[args.pipe] = 0x00; // Placeholder for CURSOR_MODE_OFF
+			uint32_t cur_cntr_val = 0;
+			uint32_t cur_pos_val = 0;
+			int effective_x, effective_y;
+			uint32_t cursor_ctrl_reg = CURSOR_CONTROL_REG(args.pipe);
+			uint32_t cursor_pos_reg = CURSOR_POS_REG(args.pipe);
+
+			if (cursor_ctrl_reg == 0xFFFFFFFF || cursor_pos_reg == 0xFFFFFFFF) {
+				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+				return B_BAD_INDEX; // Pipe not supported by these macros
 			}
 
+			// CURxCNTR Programming
+			cur_cntr_val = intel_i915_read32(devInfo, cursor_ctrl_reg);
+			cur_cntr_val &= ~(MCURSOR_MODE_MASK | MCURSOR_GAMMA_ENABLE | MCURSOR_TRICKLE_FEED_DISABLE); // Clear old mode and relevant flags
 
-			// TODO: Program CURxPOS for pipe args.pipe
-			// int effective_x = args.x - devInfo->cursor_hot_x[args.pipe];
-			// int effective_y = args.y - devInfo->cursor_hot_y[args.pipe];
-			// uint32_t cur_pos_val = 0;
-			// if (effective_x < 0) cur_pos_val |= CURSOR_POS_X_SIGN_CONCEPTUAL;
-			// cur_pos_val |= ((abs(effective_x) & CURSOR_POS_X_VAL_MASK_CONCEPTUAL) << CURSOR_POS_X_SHIFT_CONCEPTUAL);
-			// if (effective_y < 0) cur_pos_val |= CURSOR_POS_Y_SIGN_CONCEPTUAL;
-			// cur_pos_val |= ((abs(effective_y) & CURSOR_POS_Y_VAL_MASK_CONCEPTUAL) << CURSOR_POS_Y_SHIFT_CONCEPTUAL);
-			// uint32_t cur_pos_reg = CURPOS_FOR_PIPE(args.pipe); // Needs actual register macro
-			// intel_i915_write32(devInfo, cur_pos_reg, cur_pos_val);
-			TRACE("SetCursorState: TODO - Program CURxPOS for pipe %u. X: %d, Y: %d (HotX: %u, HotY: %u)\n",
-				args.pipe, args.x, args.y, devInfo->cursor_hot_x[args.pipe], devInfo->cursor_hot_y[args.pipe]);
+			if (args.is_visible && devInfo->cursor_bo[args.pipe] != NULL &&
+				devInfo->cursor_width[args.pipe] > 0 && devInfo->cursor_height[args.pipe] > 0) {
+
+				if (devInfo->cursor_width[args.pipe] <= 64 && devInfo->cursor_height[args.pipe] <= 64) {
+					cur_cntr_val |= MCURSOR_MODE_64_ARGB_AX;
+				} else if (devInfo->cursor_width[args.pipe] <= 128 && devInfo->cursor_height[args.pipe] <= 128) {
+					// Check if Gen supports 128x128, MCURSOR_MODE_128_ARGB_AX might only be for Gen5+
+					// For Gen7 (IVB/HSW), 128x128 ARGB should be supported.
+					cur_cntr_val |= MCURSOR_MODE_128_ARGB_AX;
+				} else if (devInfo->cursor_width[args.pipe] <= 256 && devInfo->cursor_height[args.pipe] <= 256) {
+					// Check if Gen supports 256x256
+					cur_cntr_val |= MCURSOR_MODE_256_ARGB_AX;
+				} else {
+					// Invalid dimensions for hardware cursor modes
+					TRACE("SetCursorState: Invalid cursor dimensions %ux%u for pipe %u. Disabling cursor.\n",
+						devInfo->cursor_width[args.pipe], devInfo->cursor_height[args.pipe], args.pipe);
+					cur_cntr_val |= MCURSOR_MODE_DISABLE;
+				}
+				// Common flags for enabled cursor
+				if ((cur_cntr_val & MCURSOR_MODE_MASK) != MCURSOR_MODE_DISABLE) {
+					cur_cntr_val |= MCURSOR_TRICKLE_FEED_DISABLE; // Recommended for Gen4+
+					cur_cntr_val |= MCURSOR_GAMMA_ENABLE;       // Typically enabled for ARGB cursors
+				}
+			} else {
+				cur_cntr_val |= MCURSOR_MODE_DISABLE;
+			}
+			devInfo->cursor_format[args.pipe] = cur_cntr_val & (MCURSOR_MODE_MASK | MCURSOR_GAMMA_ENABLE); // Store mode bits
+
+			intel_i915_write32(devInfo, cursor_ctrl_reg, cur_cntr_val);
+			TRACE("SetCursorState: Pipe %u, CURxCNTR (0x%lx) = 0x%lx\n", args.pipe, cursor_ctrl_reg, cur_cntr_val);
+
+			// CURxPOS Programming (only if visible and mode is not disabled)
+			if ((cur_cntr_val & MCURSOR_MODE_MASK) != MCURSOR_MODE_DISABLE) {
+				effective_x = args.x - devInfo->cursor_hot_x[args.pipe];
+				effective_y = args.y - devInfo->cursor_hot_y[args.pipe];
+
+				if (effective_x < 0) {
+					cur_pos_val |= CURSOR_POS_X_SIGN;
+					effective_x = -effective_x;
+				}
+				cur_pos_val |= (effective_x << CURSOR_POS_X_SHIFT) & CURSOR_POS_X_MASK;
+
+				if (effective_y < 0) {
+					cur_pos_val |= CURSOR_POS_Y_SIGN;
+					effective_y = -effective_y;
+				}
+				cur_pos_val |= (effective_y << CURSOR_POS_Y_SHIFT) & CURSOR_POS_Y_MASK;
+
+				intel_i915_write32(devInfo, cursor_pos_reg, cur_pos_val);
+				TRACE("SetCursorState: Pipe %u, CURxPOS (0x%lx) = 0x%lx (eff_x: %d, eff_y: %d)\n",
+					args.pipe, cursor_pos_reg, cur_pos_val,
+					args.x - devInfo->cursor_hot_x[args.pipe], args.y - devInfo->cursor_hot_y[args.pipe]);
+			} else {
+				// If cursor is disabled, position doesn't strictly matter, but can clear it.
+				// intel_i915_write32(devInfo, cursor_pos_reg, 0);
+				TRACE("SetCursorState: Pipe %u, Cursor disabled, CURxPOS not updated.\n", args.pipe);
+			}
 
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-			return B_OK; // Return B_OK as software state is updated, HW part is TODO
+			return B_OK;
 		}
 		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
-			// return intel_i915_set_cursor_bitmap_ioctl(devInfo, buffer, length); // This function will be implemented now
-			// TRACE("IOCTL: INTEL_I915_IOCTL_SET_CURSOR_BITMAP (STUBBED in intel_i915.c)\n");
-			// return B_UNSUPPORTED; // Placeholder until fully implemented
-			// return B_UNSUPPORTED; // Placeholder until fully implemented
 			intel_i915_set_cursor_bitmap_args args;
 			if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
 
 			if (args.pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
-			// Assuming ARGB32 format, 4 bytes per pixel. Max cursor size 256x256.
-			// TODO: Get max cursor dimensions from hardware/VBT if variable.
-			// For now, assume a common max like 256x256 for buffer allocation,
-			// but actual programming will use args.width/height.
-			// TODO: When programming CURxCNTR, ensure width/height match a hardware-supported
-			// cursor mode (e.g., 64x64, 128x128, 256x256). The current BO allocation
-			// is flexible up to 256x256.
 			if (args.width == 0 || args.height == 0 || args.width > 256 || args.height > 256)
 				return B_BAD_VALUE;
 			if (args.bitmap_size != (size_t)args.width * args.height * 4) // 4 bytes for ARGB32
@@ -456,17 +506,18 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			status_t status = B_OK;
 			void* bo_cpu_addr = NULL;
 			size_t required_bo_size = ROUND_TO_PAGE_SIZE(args.bitmap_size);
+			uint32_t cursor_base_reg = CURSOR_BASE_REG(args.pipe);
 
-			// Forcewake for register access if any, and for GTT operations
+			if (cursor_base_reg == 0xFFFFFFFF) return B_BAD_INDEX; // Pipe not supported
+
 			status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 			if (status != B_OK) return status;
 
-			// Manage cursor BO: release old if size changed or not present
 			if (devInfo->cursor_bo[args.pipe] != NULL &&
 				devInfo->cursor_bo[args.pipe]->allocated_size < required_bo_size) {
 				intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
 				devInfo->cursor_bo[args.pipe] = NULL;
-				devInfo->cursor_gtt_offset_pages[args.pipe] = (uint32_t)-1; // Mark GTT offset as invalid
+				devInfo->cursor_gtt_offset_pages[args.pipe] = (uint32_t)-1;
 			}
 
 			if (devInfo->cursor_bo[args.pipe] == NULL) {
@@ -490,10 +541,9 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				devInfo->cursor_gtt_offset_pages[args.pipe] = gtt_page_offset;
 
 				status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[args.pipe],
-					devInfo->cursor_gtt_offset_pages[args.pipe], GTT_CACHE_UNCACHED); // Cursors often UC
+					devInfo->cursor_gtt_offset_pages[args.pipe], GTT_CACHE_UNCACHED);
 				if (status != B_OK) {
 					TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
-					// GTT space was allocated, need to free it if map fails
 					intel_i915_gtt_free_space(devInfo, devInfo->cursor_gtt_offset_pages[args.pipe], devInfo->cursor_bo[args.pipe]->num_phys_pages);
 					intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
 					devInfo->cursor_bo[args.pipe] = NULL;
@@ -502,34 +552,28 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				}
 			}
 
-			// Copy data from userspace to cursor BO
 			status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[args.pipe], &bo_cpu_addr);
 			if (status != B_OK) {
 				TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
-				goto bitmap_ioctl_done; // BO and GTT space might still be allocated
+				goto bitmap_ioctl_done;
 			}
 
 			if (copy_from_user(bo_cpu_addr, (void*)args.user_bitmap_ptr, args.bitmap_size) != B_OK) {
 				status = B_BAD_ADDRESS;
-				// Unmap CPU, but don't destroy BO as it might be partially written or used later
-				intel_i915_gem_object_unmap_cpu(devInfo->cursor_bo[args.pipe]); // no-op
+				intel_i915_gem_object_unmap_cpu(devInfo->cursor_bo[args.pipe]);
 				goto bitmap_ioctl_done;
 			}
-			intel_i915_gem_object_unmap_cpu(devInfo->cursor_bo[args.pipe]); // no-op
+			intel_i915_gem_object_unmap_cpu(devInfo->cursor_bo[args.pipe]);
 
-			// Update devInfo with new cursor properties
 			devInfo->cursor_width[args.pipe] = args.width;
 			devInfo->cursor_height[args.pipe] = args.height;
 			devInfo->cursor_hot_x[args.pipe] = args.hot_x;
 			devInfo->cursor_hot_y[args.pipe] = args.hot_y;
-			// devInfo->cursor_format[args.pipe] will be set by set_cursor_state based on mode bits.
 
-			// TODO: Program CURxBASE register with GTT offset of cursor_bo[args.pipe]
-			// uint32_t cursor_base_reg = CURABASE_FOR_PIPE(args.pipe); // Conceptual
-			// uint32_t cursor_gtt_hw_addr = devInfo->cursor_gtt_offset_pages[args.pipe] * B_PAGE_SIZE;
-			// intel_i915_write32(devInfo, cursor_base_reg, cursor_gtt_hw_addr);
-			TRACE("SetCursorBitmap: TODO - Program CURxBASE for pipe %u with GTT offset 0x%x (page %u)\n",
-				args.pipe, devInfo->cursor_gtt_offset_pages[args.pipe] * B_PAGE_SIZE, devInfo->cursor_gtt_offset_pages[args.pipe]);
+			uint32_t cursor_gtt_hw_addr = devInfo->cursor_gtt_offset_pages[args.pipe] * B_PAGE_SIZE;
+			intel_i915_write32(devInfo, cursor_base_reg, cursor_gtt_hw_addr);
+			TRACE("SetCursorBitmap: Pipe %u, CURxBASE (0x%lx) = 0x%lx (GTT page %u)\n",
+				args.pipe, cursor_base_reg, cursor_gtt_hw_addr, devInfo->cursor_gtt_offset_pages[args.pipe]);
 
 		bitmap_ioctl_done:
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
@@ -540,8 +584,6 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			if (buffer == NULL || length != sizeof(intel_i915_get_dpms_mode_args))
 				return B_BAD_VALUE;
 			intel_i915_get_dpms_mode_args args;
-			// Only need to copy the pipe index from userland for which to get the mode.
-			// The mode field will be populated by the kernel and copied back.
 			if (copy_from_user(&args.pipe, &((intel_i915_get_dpms_mode_args*)buffer)->pipe, sizeof(args.pipe)) != B_OK)
 				return B_BAD_ADDRESS;
 
@@ -577,11 +619,8 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			if (args.count == 0 || args.count > 256 || (args.first_color + args.count) > 256)
 				return B_BAD_VALUE;
 
-			// Max color data size: 256 entries * 4 bytes/entry (RGBA) = 1024 bytes
-			// Haiku's color_data is {r,g,b,a} but palette hardware is often {r,g,b} (24-bit).
-			// Assuming kernel function will handle the format.
-			uint8 kernel_color_data[256 * 4]; // Max possible size
-			size_t data_size_to_copy = args.count * sizeof(uint32); // Assuming B_RGB32 like structure
+			uint8 kernel_color_data[256 * 4];
+			size_t data_size_to_copy = args.count * sizeof(uint32);
 
 			if (args.user_color_data_ptr == 0) return B_BAD_ADDRESS;
 			if (copy_from_user(kernel_color_data, (void*)args.user_color_data_ptr, data_size_to_copy) != B_OK)

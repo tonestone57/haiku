@@ -363,12 +363,11 @@
 
 
 // TODO: Define dedicated DisplayPort AUX Channel Registers here.
-// These are essential for DisplayPort communication (DPCD access, link training).
-// They are typically per-port (e.g., PCH_DPA_AUX_CH_CTL, PCH_DPA_AUX_CH_DATA1-5, etc.,
-// or CPU integrated equivalents like DDI_AUX_CH_CTL(PORT_A) on newer gens).
-// The exact register addresses and bit definitions need to be sourced from
-// Intel Programmer's Reference Manuals (PRMs) or Linux/FreeBSD i915 driver source
-// for the targeted GPU generations (e.g., SandyBridge through Kaby Lake/Coffee Lake).
+// IMPORTANT: The exact register addresses (e.g., DDI_AUX_CH_CTL(port), DDI_AUX_CH_DATA1(port)...)
+// and bit definitions are generation-specific (e.g., pre-SKL PCH-based AUX vs. SKL+ DDI-integrated AUX)
+// and MUST be sourced from Intel Programmer's Reference Manuals (PRMs).
+// Common base addresses for PCH (pre-SKL): PCH_DPB_AUX_CH_CTL (0xe4110), PCH_DPC_AUX_CH_CTL (0xe4210), etc.
+// For SKL+ integrated AUX, it's often relative to DDI base, e.g., DDI_AUX_CTL_A (0x64010/0x164010 depending on PHY).
 //
 // Example structure (conceptual, actual names/offsets vary by GEN):
 // #define DPA_AUX_CH_CTL          0x64010 // Example Address for Port A
@@ -462,20 +461,40 @@
 #define DPCD_TRAINING_LANE3_SET             0x106
 	#define DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT  0
 	#define DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT   3
+	#define DPCD_TRAINING_LANE_VOLTAGE_SWING_MASK	0x3
+	#define DPCD_TRAINING_LANE_PRE_EMPHASIS_MASK	(0x3 << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT)
+	// Specific values for VS/PE levels (from DP spec)
+	#define DPCD_VOLTAGE_SWING_LEVEL_0		0
+	#define DPCD_VOLTAGE_SWING_LEVEL_1		1
+	#define DPCD_VOLTAGE_SWING_LEVEL_2		2
+	#define DPCD_VOLTAGE_SWING_LEVEL_3		3
+	#define DPCD_PRE_EMPHASIS_LEVEL_0		0
+	#define DPCD_PRE_EMPHASIS_LEVEL_1		1
+	#define DPCD_PRE_EMPHASIS_LEVEL_2		2
+	#define DPCD_PRE_EMPHASIS_LEVEL_3		3
+
 
 #define DPCD_DOWNSPREAD_CTRL                0x107
 	#define DPCD_SPREAD_AMP_0_5_PERCENT     (1U << 4)
 	#define DPCD_MSA_TIMING_PAR_IGNORE_EN   (1U << 7)
+#define DPCD_MAIN_LINK_CHANNEL_CODING		0x008 // Added from ddi.c
+
 
 #define DPCD_LANE0_1_STATUS                 0x202
 #define DPCD_LANE2_3_STATUS                 0x203
 	#define DPCD_LANE0_CR_DONE              (1U << 0)
-	#define DPCD_LANE0_CE_DONE              (1U << 1)
-	#define DPCD_LANE0_SL_DONE              (1U << 2)
+	#define DPCD_LANE0_CHANNEL_EQ_DONE      (1U << 1)
+	#define DPCD_LANE0_SYMBOL_LOCKED        (1U << 2)
 	#define DPCD_LANE1_CR_DONE              (1U << 4)
-	#define DPCD_LANE1_CE_DONE              (1U << 5)
-	#define DPCD_LANE1_SL_DONE              (1U << 6)
-	#define DPCD_LANE2_CR_DONE              (1U << 0)
+	#define DPCD_LANE1_CHANNEL_EQ_DONE      (1U << 5)
+	#define DPCD_LANE1_SYMBOL_LOCKED        (1U << 6)
+	#define DPCD_LANE2_CR_DONE              (1U << 0) // Note: These are for the second register (0x203)
+	#define DPCD_LANE2_CHANNEL_EQ_DONE      (1U << 1)
+	#define DPCD_LANE2_SYMBOL_LOCKED        (1U << 2)
+	#define DPCD_LANE3_CR_DONE              (1U << 4)
+	#define DPCD_LANE3_CHANNEL_EQ_DONE      (1U << 5)
+	#define DPCD_LANE3_SYMBOL_LOCKED        (1U << 6)
+
 
 #define DPCD_LANE_ALIGN_STATUS_UPDATED      0x204
 	#define DPCD_INTERLANE_ALIGN_DONE       (1U << 0)
@@ -493,6 +512,12 @@
 	#define DPCD_POWER_D0                   0x01
 	#define DPCD_POWER_D3                   0x02
 	#define DPCD_POWER_D3_AUX_OFF           0x05
+
+// eDP Specific DPCD Addresses (examples)
+#define DPCD_EDP_DISPLAY_CONTROL_REGISTER		0x700
+	#define EDP_DISPLAY_CTL_REG_ENABLE_BACKLIGHT	(1U << 0)
+#define DPCD_EDP_BACKLIGHT_BRIGHTNESS_MSB		0x721
+#define DPCD_EDP_BACKLIGHT_BRIGHTNESS_LSB		0x722
 
 
 // --- HDMI Audio / InfoFrame Registers ---
@@ -590,62 +615,70 @@
 #define LGC_PALETTE_B           0x4A800
 #define LGC_PALETTE_C           0x4B000
 
+// --- Cursor Registers (Gen4-Gen7+) ---
+// Pipe A
+#define CURACNTR                (_PIPE_A_BASE + 0x0080)
+#define CURABASE                (_PIPE_A_BASE + 0x0084)
+#define CURAPOS                 (_PIPE_A_BASE + 0x0088)
+// Pipe B (IVB+ style, offset from Pipe B base)
+#define CURBCNTR                (_PIPE_B_BASE + 0x0080)
+#define CURBBASE                (_PIPE_B_BASE + 0x0084)
+#define CURBPOS                 (_PIPE_B_BASE + 0x0088)
+// Pipe C (if similar registers exist, needs verification for specific Gens)
+// #define CURCCNTR             (_PIPE_C_BASE + 0x0080) // Example if Pipe C has one
+// #define CURCBASE             (_PIPE_C_BASE + 0x0084)
+// #define CURCPOS              (_PIPE_C_BASE + 0x0088)
+
+// Generic macros for accessing cursor registers by pipe
+// These currently only support Pipe A and B based on common Gen7 configurations.
+// Pipe C might need different handling or use sprite planes.
+#define CURSOR_CONTROL_REG(pipe)    ((pipe) == PRIV_PIPE_A ? CURACNTR : ((pipe) == PRIV_PIPE_B ? CURBCNTR : 0xFFFFFFFF)) // Error value for unsupported
+#define CURSOR_BASE_REG(pipe)       ((pipe) == PRIV_PIPE_A ? CURABASE : ((pipe) == PRIV_PIPE_B ? CURBBASE : 0xFFFFFFFF))
+#define CURSOR_POS_REG(pipe)        ((pipe) == PRIV_PIPE_A ? CURAPOS  : ((pipe) == PRIV_PIPE_B ? CURBPOS  : 0xFFFFFFFF))
+
+// Bitfields for CURxCNTR (Cursor Control Register)
+// These are based on MCURSOR_ bits from Intel drivers, common for Gen4-Gen7+
+#define MCURSOR_MODE_MASK           0x00000027  // Bits 0, 1, 2, 5 combined for mode
+#define     MCURSOR_MODE_DISABLE    0x00
+#define     MCURSOR_MODE_64_ARGB_AX 0x07        // 64x64 ARGB (often includes XRGB)
+#define     MCURSOR_MODE_128_ARGB_AX 0x02       // 128x128 ARGB (Gen specific, e.g. Gen5+)
+#define     MCURSOR_MODE_256_ARGB_AX 0x03       // 256x256 ARGB (Gen specific, e.g. Gen5+)
+#define MCURSOR_GAMMA_ENABLE        (1U << 26)  // Enable gamma correction for cursor
+#define MCURSOR_TRICKLE_FEED_DISABLE (1U << 14) // Disable trickle feed for cursor (recommended for Gen4+)
+// Note: The MCURSOR_MODE_xxx values implicitly enable the cursor.
+// To disable, write MCURSOR_MODE_DISABLE.
+
+// Bitfields for CURxPOS (Cursor Position Register)
+#define CURSOR_POS_Y_SIGN           (1U << 31)  // Y Position Sign (1 = negative)
+#define CURSOR_POS_Y_MASK           0x7FFF0000  // Bits 30:16 for Y value (abs)
+#define CURSOR_POS_Y_SHIFT          16
+#define CURSOR_POS_X_SIGN           (1U << 15)  // X Position Sign (1 = negative)
+#define CURSOR_POS_X_MASK           0x00007FFF  // Bits 14:0 for X value (abs)
+#define CURSOR_POS_X_SHIFT          0
+
+// --- Fence Registers (Gen6/7 Style for Tiling) ---
+// Base address for Gen6+ hardware fences (covers up to 16 or 32 fences typically)
+#define FENCE_REG_GEN6_BASE         0x100000
+// Macro to get the low dword of the i-th fence register
+#define FENCE_REG_GEN6_LO(i)        (FENCE_REG_GEN6_BASE + (i) * 8)
+// Macro to get the high dword of the i-th fence register
+#define FENCE_REG_GEN6_HI(i)        (FENCE_REG_GEN6_BASE + (i) * 8 + 4)
+
+#define FENCE_REG_LO_VALID          (1U << 0)
+#define FENCE_REG_LO_TILING_Y_SELECT (1U << 1) // Set for Y-tiled, clear for X (on SNB/IVB)
+// Bits [27:16] PITCH_IN_TILES_MINUS_1 (Stride in tiles - 1). Tile width is 512B for X, 128B for Y. (SNB/IVB)
+#define FENCE_REG_LO_PITCH_SHIFT_GEN6           16
+#define FENCE_REG_LO_PITCH_MASK_GEN6            (0xFFF << FENCE_REG_LO_PITCH_SHIFT_GEN6)
+// Bits [31:28] Maximum Valid Tile X Address (for Y-tiled surfaces, width in tiles - 1) (SNB/IVB)
+#define FENCE_REG_LO_MAX_WIDTH_TILES_SHIFT_GEN6 28
+#define FENCE_REG_LO_MAX_WIDTH_TILES_MASK_GEN6  (0xF << FENCE_REG_LO_MAX_WIDTH_TILES_SHIFT_GEN6)
+// Bits [7:0] of FENCE_REG_HI for GTT Address [39:32]
+#define FENCE_REG_HI_GTT_ADDR_39_32_SHIFT       0
+#define FENCE_REG_HI_GTT_ADDR_39_32_MASK        (0xFFU << FENCE_REG_HI_GTT_ADDR_39_32_SHIFT)
+
+
 // --- Gen7 (IVB/HSW) Logical Ring Context Area (LRCA) DWord Offsets ---
 #define GEN7_LRCA_CTX_CONTROL              0x01
-#define GEN7_LRCA_RING_HEAD                0x02
-
-// --- Cursor Registers ---
-// TODO: These are conceptual offsets and bit definitions.
-// Actual register addresses and bitfields MUST be verified from Intel PRMs
-// for each supported GPU generation (e.g., Gen7-Gen9).
-
-// Per-pipe cursor registers (example for Pipe A, offsets from _PIPE_A_BASE usually 0x80, 0x84, 0x88)
-// CURxCNTR: Cursor Control Register
-// #define CURACNTR                (_PIPE_A_BASE + 0x0080) // Example for Pipe A
-// #define CURBCNTR                (_PIPE_B_BASE + 0x0080) // Example for Pipe B
-// #define CURCCNTR                (_PIPE_C_BASE + 0x0080) // Example for Pipe C (if exists)
-	// Bits for CURxCNTR (Conceptual - actual bits vary significantly by GEN)
-	// #define CURSOR_MODE_SHIFT           28 // Or other shifts
-	// #define CURSOR_MODE_MASK            (7U << CURSOR_MODE_SHIFT)
-		// #define CURSOR_MODE_OFF         (0U << CURSOR_MODE_SHIFT)
-		// #define CURSOR_MODE_64_ARGB_AX  (2U << CURSOR_MODE_SHIFT) // Often 64x64 ARGB
-		// #define CURSOR_MODE_128_ARGB_AX (3U << CURSOR_MODE_SHIFT) // (Gen specific)
-		// #define CURSOR_MODE_256_ARGB_AX (4U << CURSOR_MODE_SHIFT) // (Gen specific)
-		// #define CURSOR_MODE_64_MONO     (5U << CURSOR_MODE_SHIFT) // Legacy monochrome
-	// #define CURSOR_ENABLE               (1U << 0) // Or (1U << 31) on some gens
-	// #define CURSOR_GAMMA_ENABLE         (1U << 26) // Or other bit
-	// #define CURSOR_FORMAT_SHIFT         5          // Example for format within a mode
-	// #define CURSOR_FORMAT_ARGB          (1U << CURSOR_FORMAT_SHIFT) // Example
-	// #define CURSOR_STRIDE_SHIFT         10         // Example if stride is part of control
-
-// CURxBASE: Cursor Base Address Register (GTT offset of cursor image)
-// #define CURABASE                (_PIPE_A_BASE + 0x0084)
-// #define CURBBASE                (_PIPE_B_BASE + 0x0084)
-// #define CURCBASE                (_PIPE_C_BASE + 0x0084)
-	// Base address is typically page-aligned GTT offset.
-
-// CURxPOS: Cursor Position Register
-// #define CURAPOS                 (_PIPE_A_BASE + 0x0088)
-// #define CURBPOS                 (_PIPE_B_BASE + 0x0088)
-// #define CURCPOS                 (_PIPE_C_BASE + 0x0088)
-	// Bits for CURxPOS (Conceptual)
-	// #define CURSOR_POS_X_SIGN           (1U << 31)
-	// #define CURSOR_POS_X_MASK           0x7FFF0000 // Bits 30:16 for X value
-	// #define CURSOR_POS_X_SHIFT          16
-	// #define CURSOR_POS_Y_SIGN           (1U << 15)
-	// #define CURSOR_POS_Y_MASK           0x00007FFF // Bits 14:0 for Y value
-	// #define CURSOR_POS_Y_SHIFT          0
-
-// CURxSIZE: Cursor Size Register (Some newer gens like SKL+ for universal planes)
-// For older CURSOR_MODE based sizes, this might not exist or is different.
-// #define CURASIZE                (_PIPE_A_BASE + 0x00A0) // Example
-
-// Palette registers for cursor if using palettized formats (less common for ARGB)
-// #define CURAPAL0                (_PIPE_A_BASE + 0x0090)
-// #define CURAPAL1                (_PIPE_A_BASE + 0x0094)
-// #define CURAPAL2                (_PIPE_A_BASE + 0x0098)
-// #define CURAPAL3                (_PIPE_A_BASE + 0x009C)
-
 #define GEN7_LRCA_RING_HEAD                0x02
 #define GEN7_LRCA_RING_TAIL                0x03
 #define GEN7_LRCA_RING_BUFFER_START        0x04
@@ -699,5 +732,3 @@
 	#define SDI_USE_GGTT                (1U << 22) // Use GGTT address space
 
 #endif /* INTEL_I915_REGISTERS_H */
-
-[end of src/add-ons/kernel/drivers/graphics/intel_i915/registers.h]

@@ -133,6 +133,8 @@ static inline int INTEL_GRAPHICS_GEN(uint16_t devid) {
 #define INTEL_INFO_GEN_FROM_DEVICE_ID(devid) INTEL_GRAPHICS_GEN(devid)
 #define INTEL_DISPLAY_GEN(devInfoPtr) INTEL_GRAPHICS_GEN((devInfoPtr)->device_id)
 
+#define MAX_FB_PAGES_PER_PIPE 16384 // Max 64MB per pipe's framebuffer GTT allocation
+
 // GEM Object creation flags (extend as needed)
 #define I915_BO_ALLOC_CONTIGUOUS (1 << 0) // Hint that pages should be physically contiguous (not strictly enforced by current area allocator)
 #define I915_BO_ALLOC_CPU_CLEAR  (1 << 1) // Clear buffer with zeros upon allocation
@@ -313,10 +315,10 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	enum pipe_id_priv current_pipe;
 	// VBT-derived panel properties
 	uint8_t  panel_bits_per_color; // From LFP data or general panel type
-	bool     panel_is_dual_channel; // For LVDS
-	uint8_t  backlight_control_source; // 0=CPU PWM, 1=PCH PWM, 2=eDP AUX (conceptual values)
-	bool     backlight_pwm_active_low; // True if PWM signal is active low for brightness
-	uint16_t backlight_pwm_freq_hz;    // PWM frequency from VBT
+	bool     panel_is_dual_channel;    // For LVDS
+	uint8_t  backlight_control_source; // From VBT: 0=CPU PWM, 1=PCH PWM, 2=eDP AUX
+	bool     backlight_pwm_active_low; // From VBT
+	uint16_t backlight_pwm_freq_hz;    // From VBT
 	bool     lvds_border_enabled;      // For panel fitter border
 	// DPCD-derived properties (for DP/eDP ports)
 	struct {
@@ -441,7 +443,7 @@ typedef struct intel_i915_device_info {
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;
 	display_mode current_hw_mode; intel_pipe_hw_state pipes[PRIV_MAX_PIPES];
 	area_id	framebuffer_area; void* framebuffer_addr; phys_addr_t framebuffer_phys_addr;
-	size_t framebuffer_alloc_size; uint32_t framebuffer_gtt_offset;
+	size_t framebuffer_alloc_size; // Size of primary (Pipe A) framebuffer for shared_info
 	struct intel_engine_cs* rcs0; struct rps_info* rps_state;
 	uint32_t current_cdclk_freq_khz;
 	uint32_t open_count; int32_t irq_line; sem_id vblank_sem_id; void* irq_cookie;
@@ -473,7 +475,8 @@ typedef struct intel_i915_device_info {
 	// (which should define struct intel_i915_gem_object).
 	// The list_node for LRU is in intel_i915_gem_object itself.
 
-	struct intel_i915_gem_object* framebuffer_bo; // Primary scanout framebuffer GEM object
+	struct intel_i915_gem_object* framebuffer_bo[PRIV_MAX_PIPES];
+	uint32_t framebuffer_gtt_offset_pages[PRIV_MAX_PIPES]; // GTT page offset for each pipe's FB
 
 } intel_i915_device_info;
 

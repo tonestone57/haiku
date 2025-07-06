@@ -29,7 +29,7 @@ static uint32 get_dspcntr_format_bits(color_space f) { /* ... */ return DISPPLAN
 // static enum intel_output_type_priv vbt_device_type_to_output_type(uint16_t v) { /* ... */ return PRIV_OUTPUT_NONE; } // In vbt.c
 // static uint8_t vbt_ddc_pin_to_gmbus_pin(uint8_t v) { /* ... */ return GMBUS_PIN_DISABLED; } // In vbt.c
 static status_t intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
-	const display_mode* mode, enum pipe_id_priv targetPipe, enum intel_port_id_priv targetPortId);
+	const display_mode* mode, enum pipe_id_priv targetPipeInternal, enum intel_port_id_priv targetPortId);
 
 static uint32_t
 get_bpp_from_colorspace(color_space cs)
@@ -104,7 +104,7 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 		if (!port->present_in_vbt) continue;
 
 		if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP ||
-			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_DVI ||
+			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI ||
 			port->type == PRIV_OUTPUT_ANALOG) {
 			if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
 				// Read Block 0
@@ -176,45 +176,41 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	display_mode initial_mode_to_set; bool found_initial_mode = false;
 	/* ... (logic to find preferred_port_for_initial_modeset and initial_mode_to_set - no MMIO) ... */
 	if (found_initial_mode && preferred_port_for_initial_modeset != NULL &&
-		preferred_port_for_initial_modeset->logical_port_id != PRIV_PORT_ID_NONE) {
+		preferred_port_for_initial_modeset->logical_port_id != PRIV_PORT_ID_NONE) { // Pass PRIV_PIPE_A for initial modeset
 		// intel_i915_display_set_mode_internal will handle its own forcewake
-		intel_i915_display_set_mode_internal(devInfo, &initial_mode_to_set, PRIV_PIPE_A,
+		intel_i915_display_set_mode_internal(devInfo, &initial_mode_to_set, PRIV_PIPE_A, // Initial modeset on Pipe A
 			preferred_port_for_initial_modeset->logical_port_id);
 	} else { /* ... (set shared_info current_mode to 0) ... */ }
 	/* ... (populate shared_info preferred_mode_suggestion, primary_edid, min/max_pixel_clock - no MMIO) ... */
 
 	// Explicitly disable hardware cursors on all pipes to ensure a clean state.
-	// This logic is currently a placeholder as actual register definitions are missing.
-	TRACE("display_init: Attempting to disable hardware cursors for all pipes (currently conceptual).\n");
-#if 0 // TODO: Enable this block once CURSOR_CONTROL_REG and related bits are defined in registers.h
+	TRACE("display_init: Disabling hardware cursors for all pipes.\n");
 	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (fw_status == B_OK) {
 		for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; ++pipe_idx) {
-			// Conceptual register access - replace with actual macros from registers.h
-			// uint32_t cursor_ctrl_reg = CURSOR_CONTROL_REG((enum pipe_id_priv)pipe_idx);
-			// uint32_t val = intel_i915_read32(devInfo, cursor_ctrl_reg);
-			// val &= ~CURSOR_ENABLE_BIT_CONCEPTUAL;
-			// val = (val & ~CURSOR_MODE_MASK_CONCEPTUAL) | CURSOR_MODE_OFF_BITS_CONCEPTUAL;
-			// intel_i915_write32(devInfo, cursor_ctrl_reg, val);
-			// TRACE("display_init: Disabled cursor for pipe %d (conceptual write to 0x%x with value 0x%x)\n",
-			//    pipe_idx, cursor_ctrl_reg, val);
-
-			// For now, just ensure software state is off, which is done by memset in init_driver
+			uint32_t cursor_ctrl_reg = CURSOR_CONTROL_REG((enum pipe_id_priv)pipe_idx);
+			if (cursor_ctrl_reg != 0xFFFFFFFF) { // Check if register is valid for this pipe
+				uint32_t val = intel_i915_read32(devInfo, cursor_ctrl_reg);
+				val &= ~(MCURSOR_MODE_MASK | MCURSOR_GAMMA_ENABLE); // Clear mode and gamma
+				val |= MCURSOR_MODE_DISABLE; // Set to disable
+				// MCURSOR_TRICKLE_FEED_DISABLE is usually set when enabling, not strictly needed for disable.
+				intel_i915_write32(devInfo, cursor_ctrl_reg, val);
+				TRACE("display_init: Disabled cursor for pipe %d (CURxCNTR 0x%lx set to 0x%lx)\n",
+					pipe_idx, cursor_ctrl_reg, val);
+			}
+			// Ensure software state reflects this
 			devInfo->cursor_visible[pipe_idx] = false;
-			devInfo->cursor_format[pipe_idx] = 0; // Conceptual "off" format
+			devInfo->cursor_format[pipe_idx] = MCURSOR_MODE_DISABLE;
 		}
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	} else {
-		TRACE("display_init: Failed to get forcewake for disabling cursors: %s\n", strerror(fw_status));
+		TRACE("display_init: Failed to get forcewake for disabling cursors: %s. Software state set.\n", strerror(fw_status));
+		// Still set software state if forcewake fails
+		for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; ++pipe_idx) {
+			devInfo->cursor_visible[pipe_idx] = false;
+			devInfo->cursor_format[pipe_idx] = MCURSOR_MODE_DISABLE;
+		}
 	}
-#else
-	TRACE("display_init: Hardware cursor disable logic is placeholder due to missing register definitions.\n");
-	// Ensure software state reflects cursors are off (already done by memset in init_driver, but for clarity):
-	for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; ++pipe_idx) {
-		devInfo->cursor_visible[pipe_idx] = false;
-		devInfo->cursor_format[pipe_idx] = 0; // Represents an "off" or undefined state
-	}
-#endif
 
 	return B_OK;
 }
@@ -358,13 +354,15 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
  *   the internal modesetting function.
  *
  * Current Logic:
- *   - Defaults to using PRIV_PIPE_A.
+ *   - Uses the targetPipeFromIOCtl provided by the IOCTL handler.
  *   - Selects a target port by:
- *     1. Preferring a port that matches the VBT primary boot device type,
+ *     1. If targetPipeFromIOCtl is Pipe A: Preferring a port that matches the VBT primary boot device type,
  *        is connected, and has modes. LVDS/eDP are preferred, then DP, HDMI, DVI.
- *     2. If no VBT primary match, selects the first connected port with modes.
+ *     2. If no VBT primary match (or not Pipe A), or if that port is unsuitable for the targetPipe,
+ *        selects the first available connected port with modes that is not already assigned to a different pipe,
+ *        or is already assigned to the current targetPipeFromIOCtl.
  *     3. As a last resort, if no connected ports are found, it defaults to the
- *        first port listed in the VBT, regardless of its connected status.
+ *        first port listed in the VBT, regardless of its connected status (if targetPipe is A).
  *   - Calls intel_i915_display_set_mode_internal() with the chosen pipe and port.
  *
  * Future Enhancements:
@@ -372,108 +370,99 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
  *   - Better port selection logic for multi-monitor setups, considering user
  *     preferences or specific IOCTL arguments if they were extended.
  *   - Validation of the requested mode against port capabilities.
+ *   - More robust VBT parsing for pipe-to-port capabilities to ensure a port can be driven by the target pipe.
  */
 status_t
-intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode)
+intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipeFromIOCtl)
 {
 	if (devInfo == NULL || mode == NULL)
 		return B_BAD_VALUE;
 
-	TRACE("SET_DISPLAY_MODE IOCTL: Requested mode %dx%d @ %u kHz, flags 0x%lx\n",
-		mode->virtual_width, mode->virtual_height, mode->timing.pixel_clock, mode->timing.flags);
+	TRACE("SET_DISPLAY_MODE IOCTL for Pipe %d: Mode %dx%d @ %u kHz, flags 0x%lx\n",
+		targetPipeFromIOCtl, mode->virtual_width, mode->virtual_height, mode->timing.pixel_clock, mode->timing.flags);
 
-	// Simplistic selection: Use Pipe A and find the first connected port that seems suitable.
-	// A more advanced implementation would consider:
-	// - Which head/accelerant instance is making the call (if distinguishable).
-	// - User preferences for primary display / multi-monitor setup.
-	// - Port capabilities vs. mode requirements.
-	enum pipe_id_priv targetPipe = PRIV_PIPE_A;
 	enum intel_port_id_priv targetPortId = PRIV_PORT_ID_NONE;
 	intel_output_port_state* selected_port = NULL;
 
-	// Prioritize VBT boot device if it's connected and suitable
-	if (devInfo->vbt && devInfo->vbt->primary_boot_device_type != 0) {
+	// Attempt to select a port
+	// Priority 1: If targetPipe is A, try to use VBT primary boot device or preferred external.
+	if (targetPipeFromIOCtl == PRIV_PIPE_A && devInfo->vbt && devInfo->vbt->primary_boot_device_type != 0) {
 		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
 			intel_output_port_state* port = &devInfo->ports[i];
-			// Check if this port matches the VBT primary boot device type
-			// This requires mapping VBT child device type to something comparable or using child_device_handle
-			// For now, let's simplify: if a port is connected and has modes, consider it.
-			// A better check would be against port->child_device_handle if VBT boot device info uses that.
-			// Or, if VBT boot_display[0] maps to a specific port type/index.
-			// This part is simplified for now.
-			if (port->connected && port->num_modes > 0) {
-				// A simple preference: LVDS/eDP > DP > HDMI > DVI
+			if (port->connected && port->num_modes > 0 &&
+				(port->current_pipe_assignment == PRIV_PIPE_INVALID || port->current_pipe_assignment == targetPipeFromIOCtl)) {
 				if (port->type == PRIV_OUTPUT_LVDS || port->type == PRIV_OUTPUT_EDP) {
-					selected_port = port;
-					break;
+					selected_port = port; break;
 				}
 				if (selected_port == NULL ||
 					(port->type == PRIV_OUTPUT_DP && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP) ||
 					(port->type == PRIV_OUTPUT_HDMI && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP && selected_port->type != PRIV_OUTPUT_DP) ||
-					(port->type == PRIV_OUTPUT_TMDS_DVI && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP && selected_port->type != PRIV_OUTPUT_DP && selected_port->type != PRIV_OUTPUT_HDMI)
-					) {
+					(port->type == PRIV_OUTPUT_TMDS_DVI && selected_port->type != PRIV_OUTPUT_LVDS && selected_port->type != PRIV_OUTPUT_EDP && selected_port->type != PRIV_OUTPUT_DP && selected_port->type != PRIV_OUTPUT_HDMI)) {
 					selected_port = port;
 				}
 			}
 		}
 		if (selected_port) {
-			TRACE("Selected port %d (type %d) based on VBT primary or first connected with modes.\n",
+			TRACE("Selected port %d (type %d) based on VBT primary/preference for Pipe A.\n",
 				selected_port->logical_port_id, selected_port->type);
 		}
 	}
 
-
-	// If VBT primary didn't yield a clear choice, or no VBT, find first connected.
+	// Priority 2: Find any available connected port for the target pipe.
 	if (selected_port == NULL) {
 		for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
-			intel_output_port_state* port = &devInfo->ports[i];
-			if (port->connected && port->num_modes > 0) {
-				selected_port = port;
-				TRACE("Selected first connected port %d (type %d) with modes.\n",
-					selected_port->logical_port_id, selected_port->type);
-				break;
+			if (devInfo->ports[i].current_pipe_assignment == PRIV_PIPE_INVALID ||
+				devInfo->ports[i].current_pipe_assignment == targetPipeFromIOCtl) {
+				intel_output_port_state* port = &devInfo->ports[i];
+				if (port->connected && port->num_modes > 0) {
+					selected_port = port;
+					TRACE("Selected first available connected port %d (type %d) with modes for pipe %d.\n",
+						selected_port->logical_port_id, selected_port->type, targetPipeFromIOCtl);
+					break;
+				}
 			}
 		}
 	}
 
+	// Priority 3: Fallback (mainly for Pipe A or single head scenarios)
 	if (selected_port != NULL) {
 		targetPortId = selected_port->logical_port_id;
 	} else {
-		TRACE("SET_DISPLAY_MODE IOCTL: No connected and suitable port found.\n");
-		// Attempt to use a VBT-defined port even if not "connected" if it's the only one
-		// This is a last resort for headless or problematic EDID.
-		if (devInfo->num_ports_detected > 0) {
-			selected_port = &devInfo->ports[0]; // Default to the first VBT port
+		TRACE("SET_DISPLAY_MODE IOCTL: No connected and suitable port found for pipe %d.\n", targetPipeFromIOCtl);
+		if (devInfo->num_ports_detected > 0 && targetPipeFromIOCtl == PRIV_PIPE_A) { // Fallback only for Pipe A if no other choice
+			selected_port = &devInfo->ports[0];
 			targetPortId = selected_port->logical_port_id;
-			TRACE("SET_DISPLAY_MODE IOCTL: Defaulting to first VBT port %d (type %d) as a fallback.\n",
-				targetPortId, selected_port->type);
+			TRACE("SET_DISPLAY_MODE IOCTL: Defaulting to first VBT port %d (type %d) for pipe %d as a fallback.\n",
+				targetPortId, selected_port->type, targetPipeFromIOCtl);
 		} else {
-			TRACE("SET_DISPLAY_MODE IOCTL: No ports defined in VBT either.\n");
+			TRACE("SET_DISPLAY_MODE IOCTL: No suitable port could be assigned to pipe %d.\n", targetPipeFromIOCtl);
 			return B_DEV_NO_MATCH;
 		}
 	}
 
-	// TODO: Future: Add logic to select a different pipe if Pipe A is already in use
-	// by another active display, or if the selected port has specific pipe constraints.
-	// For now, always use targetPipe = PRIV_PIPE_A.
+	// TODO: Multi-Monitor Enhancement: The current port selection logic for a given targetPipeFromIOCtl
+	// is basic. A more robust implementation should:
+	// 1. Consult VBT for valid pipe-to-port mappings for the targetPipeFromIOCtl.
+	// 2. Handle cases where the preferred port for a pipe might already be in use by another pipe (if sharing is not possible).
+	// 3. Allow userspace (e.g., Display preflet) to specify a target port for a given head/pipe.
 
-	return intel_i915_display_set_mode_internal(devInfo, mode, targetPipe, targetPortId);
+	return intel_i915_display_set_mode_internal(devInfo, mode, targetPipeFromIOCtl, targetPortId);
 }
 
 
 static status_t
 intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
-	const display_mode* mode, enum pipe_id_priv targetPipe, enum intel_port_id_priv targetPortId)
+	const display_mode* mode, enum pipe_id_priv targetPipeInternal, enum intel_port_id_priv targetPortId)
 {
 	TRACE("display_set_mode_internal: pipe %d, port %d, mode %dx%d\n",
-		targetPipe, targetPortId, mode->virtual_width, mode->virtual_height);
+		targetPipeInternal, targetPortId, mode->virtual_width, mode->virtual_height);
 	status_t status;
 	struct intel_clock_params_t clock_params;
 	char areaName[64];
 	enum gtt_caching_type fb_gtt_cache_type = GTT_CACHE_WRITE_COMBINING; // For GPU access via GTT
 	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, targetPortId);
 
-	if (!mode || targetPipe == PRIV_PIPE_INVALID || !port_state) return B_BAD_VALUE;
+	if (!mode || targetPipeInternal == PRIV_PIPE_INVALID || !port_state) return B_BAD_VALUE;
 
 	status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
 	if (status != B_OK) {
@@ -482,38 +471,38 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	}
 
 	// --- Disable existing configuration on the target pipe/port ---
-	if (devInfo->pipes[targetPipe].enabled) {
-		TRACE("Disabling pipe %d for modeset.\n", targetPipe);
+	if (devInfo->pipes[targetPipeInternal].enabled) {
+		TRACE("Disabling pipe %d for modeset.\n", targetPipeInternal);
 		enum intel_port_id_priv old_port_id = PRIV_PORT_ID_NONE;
 		intel_output_port_state* old_port_state = NULL;
 		for(int i=0; i < devInfo->num_ports_detected; ++i) {
-			if (devInfo->ports[i].current_pipe_assignment == targetPipe) {
+			if (devInfo->ports[i].current_pipe_assignment == targetPipeInternal) {
 				old_port_state = &devInfo->ports[i];
 				old_port_id = old_port_state->logical_port_id;
 				break;
 			}
 		}
 
-		if (old_port_id != PRIV_PORT_ID_NONE && old_port_state != NULL) {
+		if (old_port_id != PRIV_PORT_ID_NONE && old_port_state != NULL) { // A port was using this pipe
 			if (old_port_state->type == PRIV_OUTPUT_LVDS || old_port_state->type == PRIV_OUTPUT_EDP) {
 				intel_lvds_set_backlight(devInfo, old_port_state, false); // Manages its own FW
 				uint32_t t3_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t3_ms > 0) ?
 					devInfo->vbt->panel_power_t3_ms : DEFAULT_T3_BL_PANEL_MS;
 				snooze(t3_delay_ms * 1000);
 			}
-			intel_i915_plane_enable(devInfo, targetPipe, false);
+			intel_i915_plane_enable(devInfo, targetPipeInternal, false);
 			intel_i915_port_disable(devInfo, old_port_id); // Dispatches, internal functions handle FW if needed
-			if (devInfo->pipes[targetPipe].cached_clock_params.needs_fdi) {
-				intel_i915_enable_fdi(devInfo, targetPipe, false);
+			if (devInfo->pipes[targetPipeInternal].cached_clock_params.needs_fdi) {
+				intel_i915_enable_fdi(devInfo, targetPipeInternal, false);
 			}
-			intel_i915_pipe_disable(devInfo, targetPipe);
+			intel_i915_pipe_disable(devInfo, targetPipeInternal);
 			if (old_port_state->type == PRIV_OUTPUT_LVDS || old_port_state->type == PRIV_OUTPUT_EDP) {
 				intel_lvds_panel_power_off(devInfo, old_port_state); // Manages its own FW
 			}
-			intel_i915_enable_dpll_for_pipe(devInfo, targetPipe, false, &devInfo->pipes[targetPipe].cached_clock_params);
+			intel_i915_enable_dpll_for_pipe(devInfo, targetPipeInternal, false, &devInfo->pipes[targetPipeInternal].cached_clock_params);
 			old_port_state->current_pipe_assignment = PRIV_PIPE_INVALID;
 		}
-		devInfo->pipes[targetPipe].enabled = false;
+		devInfo->pipes[targetPipeInternal].enabled = false;
 	}
 
 	// --- Framebuffer Setup ---
@@ -534,136 +523,102 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 		| I915_BO_ALLOC_CPU_CLEAR;
 
 	// If a framebuffer GEM object already exists, release it.
-	// A more optimized approach might check if existing BO can be reused if dimensions/tiling match.
-	// For now, always recreate to ensure correct properties for the new mode.
-	if (devInfo->framebuffer_bo != NULL) {
-		struct intel_i915_gem_object* old_fb_bo = devInfo->framebuffer_bo;
+	if (devInfo->framebuffer_bo[targetPipeInternal] != NULL) {
+		struct intel_i915_gem_object* old_fb_bo = devInfo->framebuffer_bo[targetPipeInternal];
 		TRACE("Modeset: Releasing old framebuffer_bo (area %" B_PRId32 ", gtt_offset_pages %u, num_pages %lu).\n",
 			old_fb_bo->backing_store_area,
-			old_fb_bo->gtt_offset_pages, // This should match devInfo->framebuffer_gtt_offset
+			old_fb_bo->gtt_offset_pages,
 			old_fb_bo->num_phys_pages);
 
-		// If the old framebuffer was mapped to the fixed GTT offset, we must manually manage its
-		// GTT bitmap entries and PTEs before putting the GEM object.
 		if (old_fb_bo->gtt_mapped &&
-			old_fb_bo->gtt_offset_pages == devInfo->framebuffer_gtt_offset &&
-			devInfo->framebuffer_gtt_offset != (uint32_t)-1) {
-
-			// Step 1: Point GTT entries to scratch page.
-			// This is done first to ensure display stops accessing the memory before we modify bitmap.
+			old_fb_bo->gtt_offset_pages == devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] &&
+			devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] != (uint32_t)-1) {
 			intel_i915_gtt_unmap_memory(devInfo,
-				devInfo->framebuffer_gtt_offset * B_PAGE_SIZE,
+				devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] * B_PAGE_SIZE,
 				old_fb_bo->num_phys_pages);
-
-			// Step 2: Clear bits in GTT bitmap and update free count.
 			mutex_lock(&devInfo->gtt_allocator_lock);
-			for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
-				uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+			for (uint32_t i = 0; i < old_fb_bo->num_phys_pages; ++i) {
+				uint32_t pte_idx = devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] + i;
 				if (pte_idx < devInfo->gtt_total_pages_managed) {
 					if (_gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
 						_gtt_clear_bit(pte_idx, devInfo->gtt_page_bitmap);
 						devInfo->gtt_free_pages_count++;
 					} else {
-						TRACE("Modeset: WARNING - GTT page %u for old FB was already free in bitmap!\n", pte_idx);
+						TRACE("Modeset: WARNING - GTT page %u for old FB on pipe %d was already free in bitmap!\n", pte_idx, targetPipeInternal);
 					}
 				}
 			}
 			mutex_unlock(&devInfo->gtt_allocator_lock);
-			// The GTT PTEs themselves have been pointed to scratch page by the call to
-			// intel_i915_gtt_unmap_memory above.
-			// Step 3: Mark the GEM object as no longer GTT mapped at this fixed offset
-			// to prevent intel_i915_gem_object_unmap_gtt (called via put) from
-			// attempting to re-free these GTT pages from the bitmap or re-unmap PTEs.
 			old_fb_bo->gtt_mapped = false;
 			old_fb_bo->gtt_offset_pages = (uint32_t)-1;
 		}
-		intel_i915_gem_object_put(old_fb_bo); // Now unmap_gtt inside put won't try to act on this GTT mapping
-		devInfo->framebuffer_bo = NULL;
+		intel_i915_gem_object_put(old_fb_bo);
+		devInfo->framebuffer_bo[targetPipeInternal] = NULL;
 	}
-	// Reset fields that will be repopulated by the new BO, or may become invalid if BO creation fails.
-	devInfo->framebuffer_addr = NULL;
-	devInfo->framebuffer_phys_addr = 0;
-	devInfo->framebuffer_alloc_size = 0;
-	devInfo->framebuffer_area = -1; // Will be set from the new BO's backing_store_area
+	if (targetPipeInternal == PRIV_PIPE_A) {
+		devInfo->framebuffer_addr = NULL;
+		devInfo->framebuffer_phys_addr = 0;
+		devInfo->framebuffer_alloc_size = 0;
+		devInfo->framebuffer_area = -1;
+	}
 
-	TRACE("Modeset: Creating new framebuffer_bo: %ux%u %ubpp, flags 0x%lx\n",
-		fb_width_px, fb_height_px, fb_bpp, fb_gem_flags);
+	TRACE("Modeset: Creating new framebuffer_bo for pipe %d: %ux%u %ubpp, flags 0x%lx\n",
+		targetPipeInternal, fb_width_px, fb_height_px, fb_bpp, fb_gem_flags);
 
-	// Pass 0 for initial_size, dimensions will dictate the actual size.
-	status = intel_i915_gem_object_create(devInfo, 0 /*initial_size*/, fb_gem_flags,
-		fb_width_px, fb_height_px, fb_bpp, &devInfo->framebuffer_bo);
+	status = intel_i915_gem_object_create(devInfo, 0 , fb_gem_flags,
+		fb_width_px, fb_height_px, fb_bpp, &devInfo->framebuffer_bo[targetPipeInternal]);
 	if (status != B_OK) {
 		TRACE("Modeset: Failed to create framebuffer GEM object: %s\n", strerror(status));
-		devInfo->framebuffer_bo = NULL; // Ensure it's NULL on failure
+		devInfo->framebuffer_bo[targetPipeInternal] = NULL;
 		goto modeset_fail_fw;
 	}
 
-	// Store new framebuffer properties from the GEM object
-	devInfo->framebuffer_addr = devInfo->framebuffer_bo->kernel_virtual_address;
-	devInfo->framebuffer_phys_addr = (devInfo->framebuffer_bo->num_phys_pages > 0)
-		? devInfo->framebuffer_bo->phys_pages_list[0] : 0;
-	devInfo->framebuffer_alloc_size = devInfo->framebuffer_bo->allocated_size;
-	devInfo->framebuffer_area = devInfo->framebuffer_bo->backing_store_area;
-
-	// Map the new framebuffer to its GTT offset.
-	// The primary plane programming uses devInfo->framebuffer_gtt_offset,
-	// which is assumed to be a fixed GTT offset for the primary framebuffer (e.g., page 0 after scratch).
-	// If devInfo->framebuffer_gtt_offset was dynamic, it would be allocated here.
-	// For now, assume it's fixed (e.g., 0, or just after scratch page if that's how it's set up).
-	// Let's define a fixed GTT page offset for the framebuffer for now, e.g., page 1 (after scratch page at 0).
-	// This needs to be coordinated with GTT init and plane programming.
-	// A common approach is framebuffer at GTT offset 0 for simplicity if scratch page is handled differently or not at 0.
-	// If devInfo->scratch_page_gtt_offset is always 0 (as it is), then FB cannot also be at 0.
-	// For now, let's assume devInfo->framebuffer_gtt_offset will be set to a valid, pre-determined
-	// GTT page offset for the scanout framebuffer (e.g., 0 or 1).
-	// If it's still (uint32_t)-1 from init, it means it wasn't assigned a fixed offset.
-	// This part of the logic (assigning GTT offset for framebuffer) needs to be robust.
-	// Let's assume devInfo->framebuffer_gtt_offset is set to a valid fixed GTT page index for the framebuffer
-	// during driver init if a fixed mapping is used, e.g. devInfo->framebuffer_gtt_offset = 1; (page index)
-	// For this example, let's assume it's already set in devInfo. If not, an error.
-	if (devInfo->framebuffer_gtt_offset == (uint32_t)-1) {
-		// This indicates an issue in setup, as the FB needs a known GTT offset for scanout.
-		TRACE("Modeset: Framebuffer GTT offset (devInfo->framebuffer_gtt_offset) is not pre-determined. Cannot map.\n");
-		status = B_ERROR; goto modeset_fail_fb_bo_created; // New label
+	if (targetPipeInternal == PRIV_PIPE_A) {
+		devInfo->framebuffer_addr = devInfo->framebuffer_bo[targetPipeInternal]->kernel_virtual_address;
+		devInfo->framebuffer_phys_addr = (devInfo->framebuffer_bo[targetPipeInternal]->num_phys_pages > 0)
+			? devInfo->framebuffer_bo[targetPipeInternal]->phys_pages_list[0] : 0;
+		devInfo->framebuffer_alloc_size = devInfo->framebuffer_bo[targetPipeInternal]->allocated_size;
+		devInfo->framebuffer_area = devInfo->framebuffer_bo[targetPipeInternal]->backing_store_area;
 	}
 
-	TRACE("Modeset: Mapping framebuffer_bo to GTT page offset %u.\n", devInfo->framebuffer_gtt_offset);
+	if (devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] == (uint32_t)-1) {
+		TRACE("Modeset: Framebuffer GTT offset for pipe %d is not pre-determined. Cannot map.\n", targetPipeInternal);
+		status = B_ERROR; goto modeset_fail_fb_bo_created;
+	}
 
-	// Manually mark these GTT pages as used in the bitmap, as it's a fixed mapping not using gtt_alloc_space.
+	TRACE("Modeset: Mapping framebuffer_bo for pipe %d to GTT page offset %u.\n",
+		targetPipeInternal, devInfo->framebuffer_gtt_offset_pages[targetPipeInternal]);
+
 	mutex_lock(&devInfo->gtt_allocator_lock);
-	for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
-		uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+	for (uint32_t i = 0; i < devInfo->framebuffer_bo[targetPipeInternal]->num_phys_pages; ++i) {
+		uint32_t pte_idx = devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] + i;
 		if (pte_idx < devInfo->gtt_total_pages_managed) {
 			if (!_gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
 				_gtt_set_bit(pte_idx, devInfo->gtt_page_bitmap);
 				devInfo->gtt_free_pages_count--;
 			} else {
-				// This should not happen if previous FB cleanup was correct
 				TRACE("Modeset: WARNING - GTT page %u for new FB was already set in bitmap!\n", pte_idx);
 			}
 		} else {
 			TRACE("Modeset: ERROR - GTT page %u for new FB exceeds total GTT pages %u!\n",
 				pte_idx, devInfo->gtt_total_pages_managed);
-			status = B_BAD_INDEX; // Should have been caught by num_phys_pages vs available space earlier
+			status = B_BAD_INDEX;
 			break;
 		}
 	}
 	mutex_unlock(&devInfo->gtt_allocator_lock);
 	if (status != B_OK) {
-		// If marking bits failed (e.g. out of bounds), we have a problem.
-		// Unwind framebuffer_bo creation.
 		goto modeset_fail_fb_bo_created;
 	}
 
-	status = intel_i915_gem_object_map_gtt(devInfo->framebuffer_bo,
-		devInfo->framebuffer_gtt_offset, /* GTT Page Offset */
+	status = intel_i915_gem_object_map_gtt(devInfo->framebuffer_bo[targetPipeInternal],
+		devInfo->framebuffer_gtt_offset_pages[targetPipeInternal],
 		fb_gtt_cache_type);
 	if (status != B_OK) {
 		TRACE("Modeset: Failed to map framebuffer GEM object to GTT: %s\n", strerror(status));
-		// Need to un-mark the bits in bitmap if GTT map fails
 		mutex_lock(&devInfo->gtt_allocator_lock);
-		for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
-			uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
+		for (uint32_t i = 0; i < devInfo->framebuffer_bo[targetPipeInternal]->num_phys_pages; ++i) {
+			uint32_t pte_idx = devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] + i;
 			if (pte_idx < devInfo->gtt_total_pages_managed && _gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
 				_gtt_clear_bit(pte_idx, devInfo->gtt_page_bitmap);
 				devInfo->gtt_free_pages_count++;
@@ -673,148 +628,146 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 		goto modeset_fail_fb_bo_created;
 	}
 
-	// This new_bytes_per_row will be used for plane configuration. It must be the hardware stride.
-	uint32_t new_bytes_per_row = devInfo->framebuffer_bo->stride;
+	uint32_t new_bytes_per_row = devInfo->framebuffer_bo[targetPipeInternal]->stride;
 	if (new_bytes_per_row == 0) {
-		// This should not happen if GEM object creation was successful for a dimensioned buffer.
 		TRACE("Modeset: ERROR - framebuffer_bo has zero stride after creation!\n");
-		status = B_ERROR; goto modeset_fail_fb_gtt_mapped; // New label
+		status = B_ERROR; goto modeset_fail_fb_gtt_mapped;
 	}
 
-	// --- Program Hardware for New Mode ---
-	// Forcewake is already held from the top of this function.
-	status = intel_i915_calculate_display_clocks(devInfo, mode, targetPipe, targetPortId, &clock_params);
+	status = intel_i915_calculate_display_clocks(devInfo, mode, targetPipeInternal, targetPortId, &clock_params);
 	if (status != B_OK) goto modeset_fail_fw;
-	devInfo->pipes[targetPipe].cached_clock_params = clock_params; // Cache for DPMS off / future use
+	devInfo->pipes[targetPipeInternal].cached_clock_params = clock_params;
 
 	status = intel_i915_program_cdclk(devInfo, &clock_params);
 	if (status != B_OK) goto modeset_fail_fw;
-	status = intel_i915_program_dpll_for_pipe(devInfo, targetPipe, &clock_params);
+	status = intel_i915_program_dpll_for_pipe(devInfo, targetPipeInternal, &clock_params);
 	if (status != B_OK) goto modeset_fail_fw;
 
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
-		status = intel_lvds_panel_power_on(devInfo, port_state); // Manages its own FW
+		status = intel_lvds_panel_power_on(devInfo, port_state);
 		if (status != B_OK) { TRACE("Modeset: panel_power_on failed.\n"); goto modeset_fail_dpll_program_only; }
 	}
 
-	status = intel_i915_enable_dpll_for_pipe(devInfo, targetPipe, true, &clock_params);
+	status = intel_i915_enable_dpll_for_pipe(devInfo, targetPipeInternal, true, &clock_params);
 	if (status != B_OK) {
 		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
-			intel_lvds_panel_power_off(devInfo, port_state); // Manages its own FW
-		goto modeset_fail_fw; // DPLL enable failed, FW already held.
+			intel_lvds_panel_power_off(devInfo, port_state);
+		goto modeset_fail_fw;
 	}
 
-	status = intel_i915_configure_pipe_timings(devInfo, (enum transcoder_id_priv)targetPipe, mode);
+	status = intel_i915_configure_pipe_timings(devInfo, (enum transcoder_id_priv)targetPipeInternal, mode);
 	if (status != B_OK) goto modeset_fail_dpll_enabled;
-	status = intel_i915_configure_pipe_source_size(devInfo, targetPipe, mode->virtual_width, mode->virtual_height);
+	status = intel_i915_configure_pipe_source_size(devInfo, targetPipeInternal, mode->virtual_width, mode->virtual_height);
 	if (status != B_OK) goto modeset_fail_dpll_enabled;
-	status = intel_i915_configure_transcoder_pipe(devInfo, (enum transcoder_id_priv)targetPipe, mode, bytes_per_pixel * 8);
+	status = intel_i915_configure_transcoder_pipe(devInfo, (enum transcoder_id_priv)targetPipeInternal, mode, fb_bpp);
 	if (status != B_OK) goto modeset_fail_dpll_enabled;
-	status = intel_i915_configure_primary_plane(devInfo, targetPipe, devInfo->framebuffer_gtt_offset,
+	status = intel_i915_configure_primary_plane(devInfo, targetPipeInternal, devInfo->framebuffer_gtt_offset_pages[targetPipeInternal],
 		mode->virtual_width, mode->virtual_height, new_bytes_per_row, mode->space);
 	if (status != B_OK) goto modeset_fail_dpll_enabled;
 
 	if (clock_params.needs_fdi) {
-		status = intel_i915_program_fdi(devInfo, targetPipe, &clock_params);
+		status = intel_i915_program_fdi(devInfo, targetPipeInternal, &clock_params);
 		if (status != B_OK) goto modeset_fail_dpll_enabled;
 	}
-	status = intel_i915_pipe_enable(devInfo, targetPipe, mode, &clock_params);
+	status = intel_i915_pipe_enable(devInfo, targetPipeInternal, mode, &clock_params);
 	if (status != B_OK) goto modeset_fail_dpll_enabled_fdi_prog;
 
 	if (clock_params.needs_fdi) {
-		status = intel_i915_enable_fdi(devInfo, targetPipe, true);
+		status = intel_i915_enable_fdi(devInfo, targetPipeInternal, true);
 		if (status != B_OK) goto modeset_fail_pipe_enabled;
 	}
 
-	// Enable the specific port type (LVDS or DDI)
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
-		status = intel_lvds_port_enable(devInfo, port_state, targetPipe, mode);
+		status = intel_lvds_port_enable(devInfo, port_state, targetPipeInternal, mode);
 	} else if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
-		status = intel_ddi_port_enable(devInfo, port_state, targetPipe, mode, &clock_params);
+		status = intel_ddi_port_enable(devInfo, port_state, targetPipeInternal, mode, &clock_params);
 	} else {
-		// Analog VGA or other non-digital, may not need specific port enable beyond what pipe/transcoder does.
-		// Or might have its own function. For now, assume B_OK for these.
 		TRACE("Modeset: Port type %d does not require specific DDI/LVDS port enable.\n", port_state->type);
 	}
-	if (status != B_OK) goto modeset_fail_fdi_enabled; // Use fdi_enabled as a common point before this
+	if (status != B_OK) goto modeset_fail_fdi_enabled;
 
-	status = intel_i915_plane_enable(devInfo, targetPipe, true);
-	if (status != B_OK) goto modeset_fail_port_enabled; // 'port_enabled' here means DDI/LVDS port
+	status = intel_i915_plane_enable(devInfo, targetPipeInternal, true);
+	if (status != B_OK) goto modeset_fail_port_enabled;
 
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
 		uint32_t t2_delay_ms = (devInfo->vbt && devInfo->vbt->panel_power_t2_ms > 0) ?
 			devInfo->vbt->panel_power_t2_ms : DEFAULT_T2_PANEL_BL_MS;
 		snooze(t2_delay_ms * 1000);
-		intel_lvds_set_backlight(devInfo, port_state, true); // Manages its own FW
+		intel_lvds_set_backlight(devInfo, port_state, true);
 	}
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
 
-	// Update shared info with the new mode details
 	devInfo->shared_info->current_mode = *mode;
 
-	if (devInfo->framebuffer_bo != NULL) {
-		devInfo->shared_info->bytes_per_row = devInfo->framebuffer_bo->stride;
-		devInfo->shared_info->framebuffer_size = devInfo->framebuffer_bo->allocated_size;
-		devInfo->shared_info->framebuffer_physical = (devInfo->framebuffer_bo->num_phys_pages > 0)
-			? devInfo->framebuffer_bo->phys_pages_list[0] : 0;
-		devInfo->shared_info->framebuffer_area = devInfo->framebuffer_bo->backing_store_area;
-		devInfo->shared_info->fb_tiling_mode = devInfo->framebuffer_bo->actual_tiling_mode;
+	if (devInfo->framebuffer_bo[targetPipeInternal] != NULL) {
+		devInfo->shared_info->bytes_per_row = devInfo->framebuffer_bo[targetPipeInternal]->stride;
+		devInfo->shared_info->framebuffer_size = devInfo->framebuffer_bo[targetPipeInternal]->allocated_size;
+		devInfo->shared_info->framebuffer_physical = devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] * B_PAGE_SIZE;
+		devInfo->shared_info->framebuffer_area = devInfo->framebuffer_bo[targetPipeInternal]->backing_store_area;
+		devInfo->shared_info->fb_tiling_mode = devInfo->framebuffer_bo[targetPipeInternal]->actual_tiling_mode;
 
-		// Sanity check for stride, as it's critical for userspace.
-		if (devInfo->framebuffer_bo->stride == 0 && devInfo->framebuffer_bo->actual_tiling_mode != I915_TILING_NONE) {
+		if (devInfo->framebuffer_bo[targetPipeInternal]->stride == 0 &&
+			devInfo->framebuffer_bo[targetPipeInternal]->actual_tiling_mode != I915_TILING_NONE) {
 			TRACE("DISPLAY: WARNING - Tiled framebuffer_bo has zero stride in shared_info setup!\n");
 		}
-		if (devInfo->framebuffer_bo->stride == 0 && fb_width_px > 0 && fb_bpp > 0) {
-			// Fallback for linear if stride somehow ended up 0 but we have dimensions
-			// This case should ideally be fully handled by GEM object creation logic.
-			if (devInfo->framebuffer_bo->actual_tiling_mode == I915_TILING_NONE) {
+		if (devInfo->framebuffer_bo[targetPipeInternal]->stride == 0 && fb_width_px > 0 && fb_bpp > 0) {
+			if (devInfo->framebuffer_bo[targetPipeInternal]->actual_tiling_mode == I915_TILING_NONE) {
 				devInfo->shared_info->bytes_per_row = ALIGN(fb_width_px * (fb_bpp / 8), 64);
 				TRACE("DISPLAY: WARNING - Linear framebuffer_bo has zero stride, calculated %u for shared_info.\n",
 					devInfo->shared_info->bytes_per_row);
 			}
 		}
-
 	} else {
-		// This case should ideally not be reached if framebuffer_bo creation was successful.
-		// If it failed, shared_info might contain stale or zeroed data.
-		TRACE("DISPLAY: WARNING - framebuffer_bo is NULL during shared_info population!\n");
-		devInfo->shared_info->bytes_per_row = new_bytes_per_row; // From local calculation, might be inaccurate if BO failed
+		TRACE("DISPLAY: WARNING - framebuffer_bo[%d] is NULL during shared_info population!\n", targetPipeInternal);
+		devInfo->shared_info->bytes_per_row = new_bytes_per_row;
 		devInfo->shared_info->framebuffer_size = 0;
 		devInfo->shared_info->framebuffer_physical = 0;
 		devInfo->shared_info->framebuffer_area = -1;
 		devInfo->shared_info->fb_tiling_mode = I915_TILING_NONE;
 	}
 
-	devInfo->pipes[targetPipe].enabled = true;
-	devInfo->pipes[targetPipe].current_mode = *mode; // Cache the successfully set mode
-	port_state->current_pipe_assignment = targetPipe; // Mark port as using this pipe
+	devInfo->pipes[targetPipeInternal].enabled = true;
+	devInfo->pipes[targetPipeInternal].current_mode = *mode;
+	port_state->current_pipe_assignment = targetPipeInternal;
 
 	TRACE("display_set_mode_internal: Successfully set mode %dx%d on pipe %d, port %d. FB Tiling: %d, Stride: %u\n",
-		mode->virtual_width, mode->virtual_height, targetPipe, targetPortId,
+		mode->virtual_width, mode->virtual_height, targetPipeInternal, targetPortId,
 		devInfo->shared_info->fb_tiling_mode, devInfo->shared_info->bytes_per_row);
 
 	return B_OK;
 
-modeset_fail_port_enabled: // This label means DDI/LVDS port enable failed or plane enable failed
-	// If intel_i915_port_enable (which now calls ddi/lvds specific) succeeded but plane_enable failed,
-	// we need to disable the DDI/LVDS port that was just enabled.
+modeset_fail_port_enabled:
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
 		intel_lvds_port_disable(devInfo, port_state);
 	} else if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
 		intel_ddi_port_disable(devInfo, port_state);
 	}
-	// Fall through
 modeset_fail_fdi_enabled:
-	if (clock_params.needs_fdi) intel_i915_enable_fdi(devInfo, targetPipe, false);
+	if (clock_params.needs_fdi) intel_i915_enable_fdi(devInfo, targetPipeInternal, false);
 modeset_fail_pipe_enabled:
-	intel_i915_pipe_disable(devInfo, targetPipe);
+	intel_i915_pipe_disable(devInfo, targetPipeInternal);
 modeset_fail_dpll_enabled_fdi_prog:
 	if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP)
 		intel_lvds_panel_power_off(devInfo, port_state);
 modeset_fail_dpll_program_only:
 modeset_fail_dpll:
-	intel_i915_enable_dpll_for_pipe(devInfo, targetPipe, false, &clock_params);
+	intel_i915_enable_dpll_for_pipe(devInfo, targetPipeInternal, false, &clock_params);
+modeset_fail_fb_gtt_mapped:
+	mutex_lock(&devInfo->gtt_allocator_lock);
+	for (uint32_t i = 0; i < devInfo->framebuffer_bo[targetPipeInternal]->num_phys_pages; ++i) {
+		uint32_t pte_idx = devInfo->framebuffer_gtt_offset_pages[targetPipeInternal] + i;
+		if (pte_idx < devInfo->gtt_total_pages_managed && _gtt_is_bit_set(pte_idx, devInfo->gtt_page_bitmap)) {
+			_gtt_clear_bit(pte_idx, devInfo->gtt_page_bitmap);
+			devInfo->gtt_free_pages_count++;
+		}
+	}
+	mutex_unlock(&devInfo->gtt_allocator_lock);
+modeset_fail_fb_bo_created:
+	if (devInfo->framebuffer_bo[targetPipeInternal] != NULL) {
+		intel_i915_gem_object_put(devInfo->framebuffer_bo[targetPipeInternal]);
+		devInfo->framebuffer_bo[targetPipeInternal] = NULL;
+	}
 modeset_fail_fw:
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
 	TRACE("Modeset failed: %s\n", strerror(status));
@@ -970,4 +923,17 @@ intel_i915_set_cursor_state_ioctl(intel_i915_device_info* devInfo, void* buffer,
 	/* ... (main logic) ... */
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	return B_OK;
+}
+
+// Helper to get port_state by logical_port_id
+intel_output_port_state*
+intel_display_get_port_by_id(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id)
+{
+	if (!devInfo || port_id == PRIV_PORT_ID_NONE) return NULL;
+	for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].logical_port_id == port_id) {
+			return &devInfo->ports[i];
+		}
+	}
+	return NULL;
 }

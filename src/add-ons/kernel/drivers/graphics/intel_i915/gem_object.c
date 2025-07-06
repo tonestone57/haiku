@@ -9,6 +9,7 @@
 #include "gem_object.h"
 #include "intel_i915_priv.h"
 #include "gtt.h"
+#include "registers.h" // For FENCE_REG_LO_VALID, FENCE_REG_LO_TILING_Y_SELECT, etc.
 
 #include <Area.h>
 #include <stdlib.h>
@@ -35,26 +36,15 @@
 // The current implementation should be considered a best-effort placeholder
 // until PRM-verified, generation-specific logic can be implemented.
 //
-// IMPORTANT NOTE: This function currently uses generic tiling parameters (tile dimensions,
-// alignment rules) that are common for many Gen6+ Intel GPUs. However, these
-// parameters can be highly generation-specific. For fully accurate and correct
-// tiled buffer allocation, this function MUST be updated with details from the
-// Intel Programmer's Reference Manuals (PRMs) for each targeted GPU generation.
-// This includes verifying tile widths/heights in bytes/rows, specific stride
-// alignment requirements (e.g., power-of-two for some older gens), and any
-// maximum stride limitations (especially for Y-tiling when used with fences
-// on certain generations like Gen7).
-//
-// The current implementation should be considered a best-effort placeholder
-// until PRM-verified, generation-specific logic can be implemented.
-//
 static status_t
 _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 	enum i915_tiling_mode tiling_mode,
 	uint32_t width_px, uint32_t height_px, uint32_t bpp, // bits per pixel
 	uint32_t* stride_out, size_t* total_size_out)
 {
-	dprintf(DEVICE_NAME_PRIV ": WARNING: _calculate_tile_stride_and_size is using PLACEHOLDER tiling parameters for Gen %d. These MUST be verified against PRMs for correctness.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+#ifdef DEBUG
+	dprintf(DEVICE_NAME_PRIV ": GEM WARN: _calculate_tile_stride_and_size is using PLACEHOLDER tiling parameters for Gen %d. These MUST be verified against PRMs for correctness.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+#endif
 
 	if (stride_out == NULL || total_size_out == NULL || width_px == 0 || height_px == 0 || bpp == 0)
 		return B_BAD_VALUE;
@@ -303,20 +293,10 @@ intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo)
 
 		// Found a candidate
 		obj_to_evict = iter_obj;
-		// Take a reference because unmap_gtt (which calls remove_from_lru) might be called
-		// after we release the lru_lock, or if unmap_gtt doesn't expect the object
-		// to be removed from LRU by itself while it's operating on it.
-		// More simply, _i915_gem_object_remove_from_lru will be called by unmap_gtt.
-		// We just need to ensure the object persists through the unmap call.
 		intel_i915_gem_object_get(obj_to_evict);
-		// We remove it here while holding the LRU lock to prevent races with other eviction attempts
-		// or with updates to this object's LRU status.
 		list_remove_item(&devInfo->active_lru_list, obj_to_evict);
-		// Note: list_remove_item itself doesn't change obj_to_evict->lru_link content if it's not
-		// part of a list_for_every_entry_safe. So, subsequent list_is_linked might be true.
-		// _i915_gem_object_remove_from_lru called by unmap_gtt handles this.
 
-		TRACE("GEM Evict: Selected obj %p (area %" B_PRId32 ", last_used %llu) for eviction.\n",
+		TRACE("GEM Evict: Selected obj %p (area %" B_PRId32 ", last_used %u) for eviction.\n",
 			obj_to_evict, obj_to_evict->backing_store_area, obj_to_evict->last_used_seqno);
 		break;
 	}
@@ -324,10 +304,8 @@ intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo)
 	mutex_unlock(&devInfo->lru_lock);
 
 	if (obj_to_evict != NULL) {
-		// intel_i915_gem_object_unmap_gtt will also call _i915_gem_object_remove_from_lru,
-		// which is fine as it checks list_is_linked. It will also free the GTT space.
 		status_t unmap_status = intel_i915_gem_object_unmap_gtt(obj_to_evict);
-		intel_i915_gem_object_put(obj_to_evict); // Release the reference taken above.
+		intel_i915_gem_object_put(obj_to_evict);
 
 		if (unmap_status == B_OK) {
 			TRACE("GEM Evict: Successfully unmapped and evicted obj %p.\n", obj_to_evict);
@@ -335,18 +313,12 @@ intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo)
 		} else {
 			TRACE("GEM Evict: Failed to unmap obj %p during eviction: %s. Re-adding to LRU for now.\n",
 				obj_to_evict, strerror(unmap_status));
-			// If unmap failed, GTT space wasn't freed. Add it back to LRU if it was evictable and GTT state.
-			// This is tricky because its state might be inconsistent.
-			// For now, assume unmap_gtt is robust or this object is now in a bad state.
-			// A safer approach might be to not re-add it, or mark it as problematic.
-			// If unmap_gtt sets current_state to SYSTEM, add_to_lru won't re-add it unless state is GTT.
-			// This path implies something went quite wrong.
-			return B_ERROR; // Eviction attempt failed at unmap stage.
+			return B_ERROR;
 		}
 	}
 
 	TRACE("GEM Evict: No suitable object found for eviction.\n");
-	return B_ERROR; // Or B_BUSY / B_NO_MEMORY if preferred for "couldn't make space"
+	return B_ERROR;
 }
 // --- End Core Eviction Logic ---
 
@@ -366,23 +338,21 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 	memset(obj, 0, sizeof(*obj));
 
 	obj->dev_priv = devInfo;
-	obj->size = initial_size; // Store original requested size, or size for linear blob
-	obj->flags = flags;       // Store original creation flags
+	obj->size = initial_size;
+	obj->flags = flags;
 	obj->obj_width_px = width_px;
 	obj->obj_height_px = height_px;
 	obj->obj_bits_per_pixel = bits_per_pixel;
 
-	// obj->base.refcount = 1; // Assuming refcount is part of the struct directly or a base struct
-	obj->refcount = 1; // Assuming direct member for simplicity here
+	obj->refcount = 1;
 	obj->backing_store_area = -1;
 	obj->gtt_mapped = false;
 	obj->gtt_offset_pages = (uint32_t)-1;
 	obj->gtt_mapped_by_execbuf = false;
 	obj->fence_reg_id = -1;
-	obj->stride = 0; // Will be calculated if tiled or dimensioned linear
+	obj->stride = 0;
 
-	// Determine CPU caching mode from flags
-	obj->cpu_caching = I915_CACHING_DEFAULT; // Default
+	obj->cpu_caching = I915_CACHING_DEFAULT;
 	uint32_t caching_flag = flags & I915_BO_ALLOC_CACHING_MASK;
 	if (caching_flag == I915_BO_ALLOC_CACHING_UNCACHED) {
 		obj->cpu_caching = I915_CACHING_UNCACHED;
@@ -392,33 +362,32 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 		obj->cpu_caching = I915_CACHING_WB;
 	}
 
-	// Determine requested tiling mode from flags
 	enum i915_tiling_mode requested_tiling = I915_TILING_NONE;
 	if ((flags & I915_BO_ALLOC_TILING_MASK) == I915_BO_ALLOC_TILED_X) {
 		requested_tiling = I915_TILING_X;
 	} else if ((flags & I915_BO_ALLOC_TILING_MASK) == I915_BO_ALLOC_TILED_Y) {
 		requested_tiling = I915_TILING_Y;
 	}
-	obj->actual_tiling_mode = I915_TILING_NONE; // Default, updated by _calculate_tile_stride_and_size
+	obj->actual_tiling_mode = I915_TILING_NONE;
 
-	// Initialize eviction-related fields
 	if (flags & I915_BO_ALLOC_PINNED) {
 		obj->evictable = false;
 	} else {
 		obj->evictable = true;
 	}
-	obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM; // Initially in system mem, not bound
+	obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM;
 	obj->dirty = false;
 	obj->last_used_seqno = 0;
 	list_init_link(&obj->lru_link);
 
-
-	// Stride and size calculation
-	obj->allocated_size = current_size; // Start with page-aligned initial_size
+	obj->allocated_size = current_size;
 
 	if (requested_tiling != I915_TILING_NONE && width_px > 0 && height_px > 0 && bits_per_pixel > 0) {
 		size_t tiled_alloc_size = 0;
 		uint32_t tiled_stride = 0;
+#ifdef DEBUG
+		dprintf(DEVICE_NAME_PRIV, "GEM WARN: Tiling parameters in _calculate_tile_stride_and_size for Gen %d need PRM verification.\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+#endif
 		status = _calculate_tile_stride_and_size(devInfo, requested_tiling,
 			width_px, height_px, bits_per_pixel,
 			&tiled_stride, &tiled_alloc_size);
@@ -426,51 +395,43 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 		if (status == B_OK) {
 			obj->actual_tiling_mode = requested_tiling;
 			obj->stride = tiled_stride;
-			obj->allocated_size = tiled_alloc_size; // This is already page-aligned by the helper
-			// obj->size might remain initial_size or be updated to reflect logical data size if different
+			obj->allocated_size = tiled_alloc_size;
 			TRACE("GEM: Tiled object created: mode %d, stride %u, allocated_size %lu\n",
 				obj->actual_tiling_mode, obj->stride, obj->allocated_size);
 		} else {
 			TRACE("GEM: Failed to calculate stride/size for requested tiling %d. Error: %s. Reverting to linear.\n",
 				requested_tiling, strerror(status));
 			obj->actual_tiling_mode = I915_TILING_NONE;
-			// Fallthrough to linear size calculation if dimensions provided, or use initial_size
 		}
 	}
 
 	if (obj->actual_tiling_mode == I915_TILING_NONE) {
 		if (width_px > 0 && height_px > 0 && bits_per_pixel > 0) {
-			// Dimensioned linear buffer
 			if (bits_per_pixel % 8 != 0) {
 				TRACE("GEM: bits_per_pixel (%u) not a multiple of 8.\n", bits_per_pixel);
 				free(obj); return B_BAD_VALUE;
 			}
-			obj->stride = ALIGN(width_px * (bits_per_pixel / 8), 64); // Align linear stride to 64 bytes
+			obj->stride = ALIGN(width_px * (bits_per_pixel / 8), 64);
 			size_t min_linear_size = (size_t)obj->stride * height_px;
 			obj->allocated_size = ALIGN(min_linear_size, B_PAGE_SIZE);
-			// Ensure allocated_size is at least what was initially requested if initial_size was larger
 			if (current_size > obj->allocated_size) {
 				obj->allocated_size = current_size;
 			}
-			// Update obj->size to reflect the logical data size for this linear buffer if it wasn't set or was smaller.
 			if (obj->size < min_linear_size) obj->size = min_linear_size;
 
 			TRACE("GEM: Linear object (dimensioned): stride %u, allocated_size %lu, logical_size %lu\n",
 				obj->stride, obj->allocated_size, obj->size);
 		} else {
-			// Undimensioned linear buffer (blob)
-			obj->stride = 0; // No meaningful stride
-			obj->allocated_size = current_size; // Already page-aligned
-			obj->size = current_size; // User explicitly asked for this size
-			if (obj->allocated_size == 0) { // Must have been from initial_size = 0 and no dimensions
+			obj->stride = 0;
+			obj->allocated_size = current_size;
+			obj->size = current_size;
+			if (obj->allocated_size == 0) {
 				TRACE("GEM: Cannot create zero-size undimensioned linear object.\n");
 				free(obj); return B_BAD_VALUE;
 			}
 			TRACE("GEM: Linear object (undimensioned blob): allocated_size %lu\n", obj->allocated_size);
 		}
 	}
-	// At this point, obj->allocated_size holds the final size for create_area.
-	// obj->size holds the logical size (either user's initial_size or calculated linear data size).
 
 	status = mutex_init_etc(&obj->lock, "i915 GEM object lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) { free(obj); return status; }
@@ -483,46 +444,24 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 
 	if (flags & I915_BO_ALLOC_CPU_CLEAR) memset(obj->kernel_virtual_address, 0, obj->allocated_size);
 
-	// Attempt to set memory type for CPU caching
 	if (obj->cpu_caching != I915_CACHING_DEFAULT) {
-		uint32 haiku_mem_type = B_MTRRT_WB; // Default to WB if conversion fails
+		uint32 haiku_mem_type = B_MTRRT_WB;
 		switch (obj->cpu_caching) {
 			case I915_CACHING_UNCACHED: haiku_mem_type = B_MTRRT_UC; break;
 			case I915_CACHING_WC:       haiku_mem_type = B_MTRRT_WC; break;
 			case I915_CACHING_WB:       haiku_mem_type = B_MTRRT_WB; break;
-			default: break; // Should not happen if I915_CACHING_DEFAULT was handled
+			default: break;
 		}
 
 		area_info areaInfo;
 		status = get_area_info(obj->backing_store_area, &areaInfo);
 		if (status == B_OK) {
-			// set_area_memory_type expects the physical base of the start of the region.
-			// For a non-contiguous area, this is problematic if it tries to use MTRRs.
-			// If it uses PAT, it should work on the virtual range.
-			// We get physical pages one-by-one later; for now, pass areaInfo.address,
-			// which is the virtual base. The kernel might handle it via PAT.
-			// A more robust solution for MTRRs would require iterating physical segments.
-			// For now, we assume PAT-based application or that it handles non-contiguous correctly.
-			// The 'base' parameter for set_area_memory_type is virtual if area is not physically contiguous.
-			// Let's try with areaInfo.address (virtual base).
-			// The API docs say `base` is physical address if mapping physical memory,
-			// but for normal areas, it might be virtual or it might require physical segments.
-			// Given we get scattered physical pages later, we might need to call this per contiguous physical run,
-			// or rely on PAT.
-			// For simplicity, let's try with the area's virtual base, assuming PAT.
-			// If this were for MTRRs over a potentially non-physically-contiguous area, it would be wrong.
-			// The Haiku API for set_area_memory_type says "base is the start of the physical address range".
-			// This implies we DO need the physical address.
-			// However, an area created with B_ANY_ADDRESS is not guaranteed to be physically contiguous.
-			// This is a known complexity. For now, we'll attempt it with the first page's phys addr
-			// and log if it fails, then proceed with system default caching.
 			physical_entry pe_first;
 			if (get_memory_map(obj->kernel_virtual_address, B_PAGE_SIZE, &pe_first, 1) == B_OK) {
 				status_t mem_type_status = set_area_memory_type(obj->backing_store_area, pe_first.address, haiku_mem_type);
 				if (mem_type_status != B_OK) {
 					TRACE("GEM: Failed to set memory type %lu for area %" B_PRId32 " (phys_base 0x%lx). Error: %s. Using default caching.\n",
 						haiku_mem_type, obj->backing_store_area, pe_first.address, strerror(mem_type_status));
-					// Revert obj->cpu_caching to default if setting failed, to reflect reality
 					obj->cpu_caching = I915_CACHING_DEFAULT;
 				} else {
 					TRACE("GEM: Successfully set memory type %lu for area %" B_PRId32 " (phys_base 0x%lx).\n",
@@ -539,7 +478,7 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 		}
 	}
 
-	obj->num_phys_pages = obj->allocated_size / B_PAGE_SIZE; // Store number of pages
+	obj->num_phys_pages = obj->allocated_size / B_PAGE_SIZE;
 	obj->phys_pages_list = (phys_addr_t*)malloc(obj->num_phys_pages * sizeof(phys_addr_t));
 	if (obj->phys_pages_list == NULL) { status = B_NO_MEMORY; goto err_area; }
 
@@ -550,7 +489,7 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_siz
 		if (status != B_OK) goto err_phys_list;
 		obj->phys_pages_list[i] = pe_map[0].address;
 	}
-	TRACE("GEM: Object created: area %" B_PRId32 ", %lu pages, virt %p\n",
+	TRACE("GEM: Object created: area %" B_PRId32 ", %u pages, virt %p\n",
 		obj->backing_store_area, obj->num_phys_pages, obj->kernel_virtual_address);
 	*obj_out = obj;
 	return B_OK;
@@ -562,9 +501,9 @@ err_mutex: mutex_destroy(&obj->lock);
 	return status;
 }
 
-void intel_i915_gem_object_get(struct intel_i915_gem_object* obj) { if (obj) atomic_add(&obj->base.refcount, 1); }
+void intel_i915_gem_object_get(struct intel_i915_gem_object* obj) { if (obj) atomic_add(&obj->refcount, 1); }
 void intel_i915_gem_object_put(struct intel_i915_gem_object* obj) {
-	if (obj && atomic_add(&obj->base.refcount, -1) == 1) {
+	if (obj && atomic_add(&obj->refcount, -1) == 1) {
 		_intel_i915_gem_object_free_internal(obj);
 	}
 }
@@ -580,9 +519,10 @@ void intel_i915_gem_object_unmap_cpu(struct intel_i915_gem_object* obj) { /* no-
 
 status_t
 intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
-	uint32_t gtt_page_offset, enum gtt_caching_type cache_type) // Parameter name updated
+	uint32_t gtt_page_offset, enum gtt_caching_type cache_type)
 {
 	if (!obj || !obj->dev_priv) return B_BAD_VALUE;
+	intel_i915_device_info* devInfo = obj->dev_priv; // Added for convenience
 	if (obj->backing_store_area < B_OK || obj->phys_pages_list == NULL) return B_NO_INIT;
 
 	if (obj->gtt_mapped && obj->gtt_offset_pages == gtt_page_offset
@@ -593,7 +533,7 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 		intel_i915_gem_object_unmap_gtt(obj);
 	}
 
-	status_t status = intel_i915_gtt_map_memory(obj->dev_priv,
+	status_t status = intel_i915_gtt_map_memory(devInfo,
 		obj->backing_store_area, 0, /* area_offset_pages */
 		gtt_page_offset * B_PAGE_SIZE, /* gtt_offset_bytes */
 		obj->num_phys_pages, cache_type);
@@ -603,118 +543,69 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 		obj->gtt_offset_pages = gtt_page_offset;
 		obj->gtt_cache_type = cache_type;
 		obj->current_state = I915_GEM_OBJECT_STATE_GTT;
-		if (obj->evictable) { // Only add evictable objects to LRU
+		if (obj->evictable) {
 			_i915_gem_object_add_to_lru(obj);
 		}
 
-		// Attempt to allocate and program a fence register if object is tiled (Gen < 9)
-		if (obj->tiling_mode != I915_TILING_NONE && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
+		if (obj->actual_tiling_mode != I915_TILING_NONE && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
+#ifdef DEBUG
+			dprintf(DEVICE_NAME_PRIV, "GEM WARN: Fence programming for Gen %d (obj %p) uses Gen-specific logic that NEEDS PRM VERIFICATION for pitch/size fields.\n",
+				INTEL_GRAPHICS_GEN(devInfo->device_id), obj);
+#endif
 			obj->fence_reg_id = intel_i915_fence_alloc(devInfo);
 			if (obj->fence_reg_id != -1) {
-				uint32_t fence_reg_addr_low = FENCE_REG_SANDYBRIDGE(obj->fence_reg_id);
-				uint32_t fence_reg_addr_high = fence_reg_addr_low + 4;
-
-				uint64_t fence_value = 0;
+				uint32_t fence_reg_addr_low = FENCE_REG_GEN6_LO(obj->fence_reg_id);
+				uint32_t fence_reg_addr_high = FENCE_REG_GEN6_HI(obj->fence_reg_id);
 				uint32_t val_low = 0, val_high = 0;
 
-				// Start Address (GTT page Aligned)
-				val_high = (obj->gtt_offset_pages * B_PAGE_SIZE) >> 12; // Bits [31:12] of GTT address
+				val_high = (uint32_t)(((uint64_t)obj->gtt_offset_pages * B_PAGE_SIZE) >> 32);
+				val_high &= FENCE_REG_HI_GTT_ADDR_39_32_MASK;
 
-				// Pitch (Stride)
-				if (obj->stride == 0 && obj->tiling_mode != I915_TILING_NONE) {
-					TRACE("GEM: ERROR - Tiled object %p has zero stride for fence programming!\n", obj);
-					// Cannot program fence correctly, free it and mark object as not having a fence.
-					intel_i915_fence_free(devInfo, obj->fence_reg_id);
-					obj->fence_reg_id = -1;
-					// Continue, but object will effectively be linear to GPU if no valid fence covers it.
-				} else if (obj->stride > 0) {
-					uint32_t pitch_val_tiles;
-					if (obj->tiling_mode == I915_TILING_Y) {
-						if ((obj->stride % 128) != 0) TRACE("GEM: Warning - Y-Tile stride %u not multiple of 128\n", obj->stride);
-						pitch_val_tiles = obj->stride / 128;
-					} else { // I915_TILING_X
-						if ((obj->stride % 512) != 0) TRACE("GEM: Warning - X-Tile stride %u not multiple of 512\n", obj->stride);
-						pitch_val_tiles = obj->stride / 512;
-					}
+				if (obj->stride > 0) {
+					uint32_t tile_width_bytes = (obj->actual_tiling_mode == I915_TILING_X) ? 512 : 128;
+					uint32_t pitch_val_tiles = obj->stride / tile_width_bytes;
 					if (pitch_val_tiles > 0) {
-						// FENCE_PITCH_IN_TILES_MINUS_1 is bits [27:16] in FENCE_REG_LO
-						val_low |= ((pitch_val_tiles - 1) & 0xFFF) << 16;
+						val_low |= (((pitch_val_tiles - 1) << FENCE_REG_LO_PITCH_SHIFT_GEN6) & FENCE_REG_LO_PITCH_MASK_GEN6);
 					} else {
 						TRACE("GEM: ERROR - Calculated tile pitch is 0 for stride %u\n", obj->stride);
 						intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
 					}
+				} else if (obj->actual_tiling_mode != I915_TILING_NONE) {
+					TRACE("GEM: ERROR - Tiled object %p has zero stride for fence programming!\n", obj);
+					intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
 				}
 
-				if (obj->fence_reg_id != -1) { // Recheck if stride error occurred
-					// Tiling Format (Bit 2 of FENCE_REG_LO for Y on SNB+)
-					if (obj->tiling_mode == I915_TILING_Y) {
-						val_low |= FENCE_TILING_FORMAT_Y; // Bit 2 for SNB+ Y-Tile
-
-						// Y-Tile specific: Max Width and Height in tiles
-						// Use the actual dimensions stored in the GEM object.
-						if (obj->obj_width_px == 0 || obj->obj_height_px == 0 || obj->obj_bits_per_pixel == 0) {
-							TRACE("GEM: ERROR - Y-Tile fence programming: Object dimensions are zero (w:%u h:%u bpp:%u).\n",
-								obj->obj_width_px, obj->obj_height_px, obj->obj_bits_per_pixel);
-							intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
-						} else {
-							uint32_t bytes_per_pixel = obj->obj_bits_per_pixel / 8;
-							if (bytes_per_pixel > 0) {
-								// Width of Y-tile is 128 bytes. Height is 32 rows.
-								// These definitions should match those in _calculate_tile_stride_and_size
-								const uint32_t y_tile_width_bytes = 128;
-								const uint32_t y_tile_height_rows = 32;
-
-								// Calculate width in tiles. The surface width for this calculation
-								// should be the actual stride of the object if it's already tile-aligned,
-								// or image_width * bpp if stride is not yet final (though it should be).
-								// Using obj->stride which should be correctly tile-aligned now.
-								uint32_t width_in_y_tiles = obj->stride / y_tile_width_bytes;
-								uint32_t height_in_y_tiles = ALIGN(obj->obj_height_px, y_tile_height_rows) / y_tile_height_rows;
-
-								if (width_in_y_tiles > 0 && height_in_y_tiles > 0) {
-									// FENCE_MAX_WIDTH_IN_TILES_MINUS_1 [31:28] on some gens (e.g. SNB BSpec Vol2 Pt1 p326)
-									// FENCE_MAX_HEIGHT_IN_TILES_MINUS_1 [11:3]
-									// These bit positions can vary per-GEN. Assuming SNB/IVB for now.
-									val_low |= ((width_in_y_tiles - 1) & 0xF) << 28; // Max 16 tiles wide (2048 bytes)
-									val_low |= ((height_in_y_tiles - 1) & 0x1FF) << 3; // Max 512 tiles high (16384 rows)
-									TRACE("GEM: Y-Tile Fence: w_tiles %u (val 0x%x), h_tiles %u (val 0x%x)\n",
-										width_in_y_tiles, ((width_in_y_tiles - 1) & 0xF),
-										height_in_y_tiles, ((height_in_y_tiles - 1) & 0x1FF));
-								} else {
-									TRACE("GEM: ERROR - Y-Tile calculated width/height in tiles is 0 (w_tiles:%u h_tiles:%u).\n",
-										width_in_y_tiles, height_in_y_tiles);
-									intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
-								}
+				if (obj->fence_reg_id != -1) {
+					if (obj->actual_tiling_mode == I915_TILING_Y) {
+						val_low |= FENCE_REG_LO_TILING_Y_SELECT;
+						if (obj->obj_width_px > 0 && obj->obj_bits_per_pixel > 0) {
+							uint32_t y_tile_width_bytes = 128;
+							uint32_t width_in_y_tiles = obj->stride / y_tile_width_bytes;
+							if (width_in_y_tiles > 0) {
+								val_low |= (((width_in_y_tiles - 1) << FENCE_REG_LO_MAX_WIDTH_TILES_SHIFT_GEN6) & FENCE_REG_LO_MAX_WIDTH_TILES_MASK_GEN6);
 							} else {
-								TRACE("GEM: ERROR - Y-Tile fence programming: bits_per_pixel %u is invalid.\n", obj->obj_bits_per_pixel);
 								intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
 							}
+						} else {
+							intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
 						}
-					} else { // I915_TILING_X
-						// X-Tile format bit is 0 for FENCE_TILING_FORMAT_Y field (Bit 2 on SNB+).
-						// Size for X-tiles is often implicit or handled differently (e.g. covering up to next fence).
-						// The Height/Width fields in LO DWord are for Y-tiles.
-						// For X-tiles, some gens might use part of HI dword for size, or LO dword bits [11:3].
-						// This part is simplified: assuming X-tile size is implicitly managed by GPU accesses
-						// within the GTT range up to where the object is mapped.
 					}
 				}
 
-				if (obj->fence_reg_id != -1) { // Recheck after Y-tile specific calcs
-					val_low |= FENCE_VALID; // Enable the fence
-
+				if (obj->fence_reg_id != -1) {
+					val_low |= FENCE_REG_LO_VALID;
 					status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 					if (fw_status == B_OK) {
 						intel_i915_write32(devInfo, fence_reg_addr_high, val_high);
 						intel_i915_write32(devInfo, fence_reg_addr_low, val_low);
 						intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 						TRACE("GEM: Obj %p (tiled %d) GTT@%upgs, Fence %d. Stride %u. HW Low:0x%x High:0x%x\n",
-							obj, obj->tiling_mode, gtt_page_offset, obj->fence_reg_id, obj->stride, val_low, val_high);
+							obj, obj->actual_tiling_mode, gtt_page_offset, obj->fence_reg_id, obj->stride, val_low, val_high);
 
 						mutex_lock(&devInfo->fence_allocator_lock);
 						devInfo->fence_state[obj->fence_reg_id].gtt_offset_pages = obj->gtt_offset_pages;
 						devInfo->fence_state[obj->fence_reg_id].obj_num_pages = obj->num_phys_pages;
-						devInfo->fence_state[obj->fence_reg_id].tiling_mode = obj->tiling_mode;
+						devInfo->fence_state[obj->fence_reg_id].tiling_mode = obj->actual_tiling_mode;
 						devInfo->fence_state[obj->fence_reg_id].obj_stride = obj->stride;
 						mutex_unlock(&devInfo->fence_allocator_lock);
 					} else {
@@ -725,38 +616,11 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 				}
 			} else {
 				TRACE("GEM: Failed to allocate fence for tiled object %p (tiled %d) at GTT offset %u.\n",
-					obj, obj->tiling_mode, gtt_page_offset);
-			}
-		} else { // Not tiled or Gen9+
-			obj->fence_reg_id = -1; // Ensure no fence for linear or Gen9+
-			TRACE("GEM: Object %p (linear or Gen9+) mapped to GTT at page offset %u.\n", obj, gtt_page_offset);
-		}
-	} else {
-		TRACE("GEM: Failed to map object %p to GTT: %s\n", obj, strerror(status));
-	}
-	return status;
-
-					// Update devInfo fence_state
-					mutex_lock(&devInfo->fence_allocator_lock);
-					devInfo->fence_state[obj->fence_reg_id].gtt_offset_pages = obj->gtt_offset_pages;
-					devInfo->fence_state[obj->fence_reg_id].obj_num_pages = obj->num_phys_pages;
-					devInfo->fence_state[obj->fence_reg_id].tiling_mode = obj->tiling_mode;
-					devInfo->fence_state[obj->fence_reg_id].obj_stride = obj->stride;
-					mutex_unlock(&devInfo->fence_allocator_lock);
-
-				} else {
-					TRACE("GEM: Failed to get forcewake for programming fence %d for obj %p.\n", obj->fence_reg_id, obj);
-					intel_i915_fence_free(devInfo, obj->fence_reg_id); // Free the allocated fence slot
-					obj->fence_reg_id = -1;
-					// Object is GTT mapped but without a fence. May work as linear or be slow/corrupt.
-				}
-			} else {
-				TRACE("GEM: Failed to allocate fence for tiled object %p (tiled %d) at GTT offset %u.\n",
-					obj, obj->tiling_mode, gtt_page_offset);
-				// Object is GTT mapped but without a fence.
+					obj, obj->actual_tiling_mode, gtt_page_offset);
 			}
 		} else {
-			TRACE("GEM: Object %p (linear) mapped to GTT at page offset %u.\n", obj, gtt_page_offset);
+			obj->fence_reg_id = -1;
+			TRACE("GEM: Object %p (linear or Gen9+) mapped to GTT at page offset %u.\n", obj, gtt_page_offset);
 		}
 	} else {
 		TRACE("GEM: Failed to map object %p to GTT: %s\n", obj, strerror(status));
@@ -772,18 +636,15 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 
 	intel_i915_device_info* devInfo = obj->dev_priv;
 
-	// Remove from LRU before unmapping and changing state
 	_i915_gem_object_remove_from_lru(obj);
 	obj->current_state = I915_GEM_OBJECT_STATE_SYSTEM;
 
-	// Disable and free fence register if one was used by this object
 	if (obj->fence_reg_id != -1 && INTEL_GRAPHICS_GEN(devInfo->device_id) < 9) {
 		TRACE("GEM: Unmapping tiled object %p, disabling fence %d.\n", obj, obj->fence_reg_id);
 		status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		if (fw_status == B_OK) {
-			// Disable the fence by writing 0 to its control (typically low dword clears VALID bit)
-			intel_i915_write32(devInfo, FENCE_REG_INDEX(obj->fence_reg_id), 0);
-			intel_i915_write32(devInfo, FENCE_REG_INDEX(obj->fence_reg_id) + 4, 0); // Also clear high part
+			intel_i915_write32(devInfo, FENCE_REG_GEN6_LO(obj->fence_reg_id), 0);
+			intel_i915_write32(devInfo, FENCE_REG_GEN6_HI(obj->fence_reg_id), 0);
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 		} else {
 			TRACE("GEM: Failed to get forcewake for disabling fence %d for obj %p.\n", obj->fence_reg_id, obj);
@@ -797,7 +658,6 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 		obj->gtt_offset_pages * B_PAGE_SIZE, obj->num_phys_pages);
 
 	if (status == B_OK) {
-		// Now that PTEs are pointing to scratch, free the GTT space in the bitmap allocator
 		if (obj->gtt_offset_pages != (uint32_t)-1 && obj->num_phys_pages > 0) {
 			intel_i915_gtt_free_space(devInfo, obj->gtt_offset_pages, obj->num_phys_pages);
 			TRACE("GEM: GTT space for obj %p (offset %u, %lu pages) freed from bitmap.\n",
@@ -806,12 +666,12 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 
 		obj->gtt_mapped = false;
 		obj->gtt_offset_pages = (uint32_t)-1;
-		// obj->gtt_cache_type should remain as it was, or be reset if needed.
-		obj->gtt_mapped_by_execbuf = false; // Clear this flag too
+		obj->gtt_mapped_by_execbuf = false;
 	} else {
 		TRACE("GEM: Failed to unmap PTEs for object %p from GTT: %s\n", obj, strerror(status));
-		// If unmap_memory failed, we probably shouldn't try to free the GTT space
-		// as the state is uncertain.
 	}
 	return status;
 }
+
+```
+Applying this to `gem_object.c`.

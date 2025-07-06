@@ -7,8 +7,8 @@
  */
 
 #include "i915_ppgtt.h"
-#include "gem_object.h" // For GEM object creation and manipulation
-#include "gtt.h"          // For GTT mapping of PD/PT BOs
+#include "gem_object.h" // For intel_i915_gem_object and its functions
+#include "gtt.h"          // For GTT allocation and cache types
 #include <stdlib.h>
 #include <string.h>
 #include <kernel/util/atomic.h>
@@ -41,13 +41,12 @@ _i915_ppgtt_actual_destroy(struct i915_ppgtt* ppgtt)
 
 	// Unmap and release Page Directory GEM object
 	if (ppgtt->pd_bo != NULL) {
-		// pd_bo *is* GTT mapped because its GTT address goes into the context's PDP.
+		// pd_bo *is* GTT mapped because its GTT address goes into the context's PDP entry.
 		if (ppgtt->pd_bo->gtt_mapped) {
 			intel_i915_gem_object_unmap_gtt(ppgtt->pd_bo);
 			// GTT space for pd_bo was allocated by map_gtt if it used the allocator.
 			// Or, if it was a fixed offset, it doesn't need gtt_free_space.
 			// Assuming map_gtt handles this correctly.
-			// For simplicity, if map_gtt used gtt_alloc_space, unmap_gtt should use gtt_free_space.
 			// The current unmap_gtt now calls gtt_free_space.
 		}
 		// Unmap CPU (no-op for area backed)
@@ -113,7 +112,7 @@ i915_ppgtt_create(struct intel_i915_device_info* devInfo, struct i915_ppgtt** pp
 	// CPU caching: WC or UC. GPU GTT caching: UC.
 	uint32_t pd_flags = I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR |
 	                    I915_BO_ALLOC_PINNED | I915_BO_ALLOC_CACHING_WC;
-	status = intel_i915_gem_object_create(devInfo, B_PAGE_SIZE, pd_flags, &ppgtt->pd_bo);
+	status = intel_i915_gem_object_create(devInfo, B_PAGE_SIZE, pd_flags, 0, 0, 0, &ppgtt->pd_bo); // Pass 0 for w/h/bpp for non-display BO
 	if (status != B_OK) {
 		TRACE("PPGTT: Failed to create Page Directory BO: %s\n", strerror(status));
 		goto err_destroy_lock;
@@ -363,11 +362,6 @@ i915_ppgtt_free_va_range(struct i915_ppgtt* ppgtt, uint64_t va_offset, size_t si
 	// A robust coalescing strategy typically involves keeping the free list sorted by address.
 	// For now: Add if not merged. A more robust version would iterate, remove all mergeable, add one large.
 
-	// Simpler approach:
-	// 1. Iterate and try to extend an existing free block that ends at new_free_node->start_addr
-	// 2. Iterate and try to extend an existing free block that starts at new_free_node->start_addr + new_free_node->size
-	// 3. If both found, merge all three. If one found, merge two. If none, add new_free_node.
-
 	// Reset new_free_node pointer for clarity in the following simplified merge logic
 	struct i915_ppgtt_vma_node* node_being_freed = (struct i915_ppgtt_vma_node*)malloc(sizeof(struct i915_ppgtt_vma_node));
 	if(node_being_freed == NULL) { free(new_free_node); mutex_unlock(&ppgtt->lock); return; } // Out of memory for temp
@@ -402,7 +396,7 @@ i915_ppgtt_free_va_range(struct i915_ppgtt* ppgtt, uint64_t va_offset, size_t si
 		list_add_item_to_tail(&ppgtt->free_vma_list, node_being_freed);
 		// TRACE("PPGTT VMA: Added new free node: start 0x%Lx, size 0x%Lx\n", node_being_freed->start_addr, node_being_freed->size);
 	} else {
-		// If it merged (node_being_freed now points to an expanded existing node),
+		// If it merged (node_being_freed now points to an existing, modified node in the list),
 		// we need to check again if this *newly expanded* node can merge with another one.
 		// This suggests a loop for coalescing until no more merges are possible,
 		// or a strategy that removes all mergeable neighbors and adds one combined node.
@@ -411,8 +405,6 @@ i915_ppgtt_free_va_range(struct i915_ppgtt* ppgtt, uint64_t va_offset, size_t si
 		// If it was merged into a *preceding* node, that node might now be able to merge with its *original* successor.
 		// If it was merged into a *succeeding* node, that node might now be able to merge with its *original* predecessor.
 		// This is complex. The current one-pass merge attempt is a simplification.
-		// A fully robust coalescing algorithm is non-trivial with linked lists not strictly sorted
-		// or when modifying the list while iterating.
 		// The TRACE messages for merged blocks would be more useful if they showed the final state.
 	}
 
@@ -467,7 +459,7 @@ i915_ppgtt_bind_object(struct i915_ppgtt* ppgtt, struct intel_i915_gem_object* o
 			// However, PTs are referenced by physical address in PDEs, so no GTT mapping needed for PT BOs themselves.
 			uint32_t pt_flags = I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR |
 			                    I915_BO_ALLOC_PINNED | I915_BO_ALLOC_CACHING_WC; // WC for CPU writes
-			status = intel_i915_gem_object_create(ppgtt->dev_priv, B_PAGE_SIZE, pt_flags, &pt_bo);
+			status = intel_i915_gem_object_create(ppgtt->dev_priv, B_PAGE_SIZE, pt_flags, 0,0,0, &pt_bo); // Pass 0 for w/h/bpp
 			if (status != B_OK) {
 				TRACE("PPGTT Bind: Failed to create PT BO for PDE %u: %s\n", pde_idx, strerror(status));
 				break;
@@ -516,7 +508,11 @@ i915_ppgtt_bind_object(struct i915_ppgtt* ppgtt, struct intel_i915_gem_object* o
 		}
 		// Note: GPU cacheability (from gpu_cache_type) is not directly set in Gen7 PTEs here.
 		// It's typically handled by MOCS via surface state or render commands.
-		// If a simple UC/WB bit existed in PTEs for PPGTT, it would be set here.
+#ifdef DEBUG
+		if (gpu_cache_type != GTT_CACHE_NONE && gpu_cache_type != GTT_CACHE_WB_GEN7) { // WB is default (0)
+			dprintf(DEVICE_NAME_PRIV, "PPGTT Bind: Gen7 PTEs do not directly control fine-grained GPU caching like GGTT PTEs. Cache type %d requested but MOCS usually handles this for PPGTT.\n", gpu_cache_type);
+		}
+#endif
 		// TRACE("PPGTT Bind: PTE %u in PT for PDE %u set to phys 0x%Lx (obj page %u)\n",
 		//    pte_idx, pde_idx, obj->phys_pages_list[page_idx], page_idx);
 		if (status != B_OK) break; // Break if PT creation or map failed inside loop
@@ -581,9 +577,11 @@ i915_ppgtt_unbind_object(struct i915_ppgtt* ppgtt, uint64_t ppgtt_addr, size_t s
 		gen7_ppgtt_pte_t* pte = &pt_cpu_map[pte_idx];
 		*pte = 0; // Mark PTE as not present (and clear other flags).
 
-		// TODO: Advanced: Check if the entire Page Table (PT) is now empty.
+		// TODO: PPGTT Optimization: Check if the entire Page Table (PT) (ppgtt->pt_bos[pde_idx])
+		// is now empty (all PTEs are invalid).
 		// If so, the PT's GEM object (ppgtt->pt_bos[pde_idx]) could be freed,
-		// and the corresponding PDE in ppgtt->pd_cpu_map[pde_idx] could be cleared.
+		// its GTT space (if any was allocated for it directly) freed,
+		// and the corresponding PDE in ppgtt->pd_cpu_map[pde_idx] (ppgtt->pd_bo) also cleared (set to not present).
 		// This requires iterating all PTEs in the PT, which is costly here.
 		// For initial version, PTs are not dynamically freed once allocated.
 	}
@@ -613,3 +611,6 @@ i915_ppgtt_unbind_object(struct i915_ppgtt* ppgtt, uint64_t ppgtt_addr, size_t s
 		ppgtt_addr, size, ppgtt->needs_tlb_invalidate ? "SET" : "NOT SET");
 	return status; // Return status of PTE clearing operations
 }
+
+```
+And for `gem_context.c`:

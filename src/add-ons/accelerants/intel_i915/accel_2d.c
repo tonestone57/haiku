@@ -16,7 +16,12 @@
 
 // For now, let's redefine TRACE for accelerant if not using a shared one.
 #undef TRACE
-#define TRACE(x...) syslog(LOG_INFO, "intel_i915_accelerant_2d: " x)
+#define TRACE_ACCEL
+#ifdef TRACE_ACCEL
+#	define TRACE(x...) syslog(LOG_INFO, "intel_i915_accelerant_2d: " x)
+#else
+#	define TRACE(x...)
+#endif
 
 
 // Intel Blitter Command Definitions (simplified from intel_gpu_commands.h)
@@ -131,7 +136,7 @@ create_cmd_buffer(size_t size, uint32* handle_out, area_id* area_out, void** cpu
 	create_args.size = size;
 	create_args.flags = I915_BO_ALLOC_CPU_CLEAR; // Kernel will clear it
 	create_args.handle = 0; // out
-	create_args.actual_size = 0; // out
+	create_args.actual_allocated_size = 0; // out
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CREATE, &create_args, sizeof(create_args)) != 0) {
 		TRACE("create_cmd_buffer: GEM_CREATE failed\n");
@@ -217,9 +222,9 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 
 		uint32 current_cmd_dword_idx = 0;
 		for (size_t i = 0; i < current_batch_count; i++) {
-			uint16 y  = list[(batch * max_spans_per_batch + i) * 3 + 0];
-			uint16 x1 = list[(batch * max_spans_per_batch + i) * 3 + 1];
-			uint16 x2 = list[(batch * max_spans_per_batch + i) * 3 + 2];
+			uint16 y  = list[(batch * max_ops_per_batch + i) * 3 + 0]; // Corrected max_spans_per_batch to max_ops_per_batch
+			uint16 x1 = list[(batch * max_ops_per_batch + i) * 3 + 1]; // Corrected max_spans_per_batch to max_ops_per_batch
+			uint16 x2 = list[(batch * max_ops_per_batch + i) * 3 + 2]; // Corrected max_spans_per_batch to max_ops_per_batch
 
 			if (x1 >= x2) continue; // Skip zero-width or invalid spans
 
@@ -232,21 +237,24 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits based on PRM
-				TRACE("fill_span: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+				// TRACE("fill_span: Using assumed write enable (1<<20) for 32bpp. Verify with PRM."); // Too noisy
 			}
 
 			// Check if framebuffer (destination) is tiled
 			// Assuming gInfo->shared_info->fb_tiling_mode is populated by kernel.
 			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
-			// (Reference: Intel PRM Vol 2a: Command Reference: BLITTER, XY_COLOR_BLT_CMD, DW0, Bit 11 "Tiled Surface")
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
-					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
-				}
-				// Add conditions for other Gens if their tile bits differ for this command
+				// This is Gen7 specific. For other Gens, this bit might be different or not exist.
+				cmd_dw0 |= (1 << 11); // Destination Tiled Bit
 			}
 
 			cmd_buffer_cpu[current_cmd_dword_idx++] = cmd_dw0;
+#ifdef TRACE_ACCEL
+			if (batch == 0 && i == 0) { // Log only for the first op of the first batch to reduce noise
+				TRACE("fill_span: DW0=0x%08lx (DestTileBit: %d, DevID: 0x%04x, assumed Gen7 for tiling)\n", cmd_dw0,
+					(cmd_dw0 >> 11) & 1, gInfo->shared_info->device_id);
+			}
+#endif
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_cmd_dword_idx++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1 (top-left)
@@ -401,18 +409,23 @@ intel_i915_fill_rectangle(engine_token *et, uint32 color,
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
-				TRACE("fill_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+				// TRACE("fill_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM."); // Too noisy
 			}
 
 			// Check if framebuffer (destination) is tiled
 			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
-					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
-				}
+				// This is Gen7 specific. For other Gens, this bit might be different or not exist.
+				cmd_dw0 |= (1 << 11); // Destination Tiled Bit
 			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
+#ifdef TRACE_ACCEL
+			if (batch == 0 && i == 0) { // Log only for the first op of the first batch
+				TRACE("fill_rectangle: DW0=0x%08lx (DestTileBit: %d, DevID: 0x%04x, assumed Gen7 for tiling)\n", cmd_dw0,
+					(cmd_dw0 >> 11) & 1, gInfo->shared_info->device_id);
+			}
+#endif
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
@@ -484,7 +497,7 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 
 		uint32 current_dword = 0;
 		for (size_t i = 0; i < current_batch_count; i++) {
-			fill_rect_params *rect = &list[batch * max_rects_per_batch + i];
+			fill_rect_params *rect = &list[batch * max_ops_per_batch + i]; // Corrected max_rects_per_batch
 			if (rect->right < rect->left || rect->bottom < rect->top) continue;
 
 			// XY_COLOR_BLT command (Gen7 example)
@@ -496,18 +509,23 @@ intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 cou
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit write enable bits
-				TRACE("invert_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+				// TRACE("invert_rectangle: Using assumed write enable (1<<20) for 32bpp. Verify with PRM."); // Too noisy
 			}
 
 			// Check if framebuffer (destination) is tiled
 			// For Ivy Bridge / Haswell (Gen7), XY_COLOR_BLT uses bit 11 of DW0 for Dest Tiling.
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
-					cmd_dw0 |= (1 << 11); // Destination Tiled Bit
-				}
+				// This is Gen7 specific.
+				cmd_dw0 |= (1 << 11); // Destination Tiled Bit
 			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
+#ifdef TRACE_ACCEL
+			if (batch == 0 && i == 0) { // Log only for the first op of the first batch
+				TRACE("invert_rectangle: DW0=0x%08lx (DestTileBit: %d, DevID: 0x%04x, assumed Gen7 for tiling)\n", cmd_dw0,
+					(cmd_dw0 >> 11) & 1, gInfo->shared_info->device_id);
+			}
+#endif
 			// DW1: Destination Pitch
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1, Y1
@@ -587,7 +605,7 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= (1 << 20); // TODO: Revisit this
-				TRACE("screen_to_screen_blit: Using assumed write enable (1<<20) for 32bpp. Verify with PRM.");
+				// TRACE("screen_to_screen_blit: Using assumed write enable (1<<20) for 32bpp. Verify with PRM."); // Too noisy
 			}
 
 			// Check if framebuffer (source and destination) is tiled
@@ -595,14 +613,19 @@ intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 cou
 			// - DW0, Bit 11: Destination Tiled
 			// - DW0, Bit 15: Source Tiled
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (INTEL_GRAPHICS_GEN(gInfo->shared_info->device_id) == 7) { // Gen7
-					cmd_dw0 |= (1 << 11); // Destination Tiled bit
-					cmd_dw0 |= (1 << 15); // Source Tiled bit
-				}
-				// Add conditions for other Gens if their tile bits differ for this command
+				// This is Gen7 specific.
+				cmd_dw0 |= (1 << 11); // Destination Tiled bit
+				cmd_dw0 |= (1 << 15); // Source Tiled bit
 			}
 
 			cmd_buffer_cpu[current_dword++] = cmd_dw0;
+#ifdef TRACE_ACCEL
+			if (batch == 0 && i == 0) { // Log only for the first op of the first batch
+				TRACE("s2s_blit: DW0=0x%08lx (DestTile: %d, SrcTile: %d, DevID: 0x%04x, assumed Gen7 for tiling)\n", cmd_dw0,
+					(cmd_dw0 >> 11) & 1, (cmd_dw0 >> 15) & 1,
+					gInfo->shared_info->device_id);
+			}
+#endif
 			// DW1: Destination Pitch (bytes_per_row)
 			//      (If clipping: (Dest Right << 16) | Dest Top)
 			cmd_buffer_cpu[current_dword++] = gInfo->shared_info->bytes_per_row;

@@ -27,13 +27,20 @@ static bigtime_t gLastGpuActivityTime = 0; // Global, or per-devInfo? For now, g
 #define RPS_IDLE_DOWNCLOCK_TIMEOUT_MS 500 // Time GPU must be idle before downclocking
 #define RPS_BUSY_UPCLOCK_TIMEOUT_MS 100   // Time GPU must be busy before upclocking (heuristic)
 
-// Default RPS Evaluation Intervals and Thresholds (units depend on HW, often 1.28us ticks or counts)
-// These are illustrative and need tuning based on PRM and desired responsiveness.
-#define DEFAULT_RP_DOWN_TIMEOUT_US 64000 // ~64ms (e.g., 50000 * 1.28us)
-#define DEFAULT_RP_UP_TIMEOUT_US   32000 // ~32ms (e.g., 25000 * 1.28us)
-#define DEFAULT_RP_DOWN_THRESHOLD  100   // Number of idle evaluations before down-clock interrupt
-#define DEFAULT_RP_UP_THRESHOLD    50    // Number of busy evaluations before up-clock interrupt
-#define DEFAULT_RC6_IDLE_THRESHOLD_US 10000 // ~10ms before trying to enter RC6
+// Default RPS Evaluation Intervals and Thresholds
+// WARNING: These values are placeholders and MUST be verified against Intel PRMs
+// for specific Gen7 (IVB/HSW) devices for correct units (e.g., 1.28us ticks, command counts)
+// and optimal behavior. Incorrect values can lead to poor performance or power management.
+#define DEFAULT_RP_DOWN_TIMEOUT_US 64000 // ~64ms (e.g., 50000 * 1.28us ticks) - PRM VERIFICATION NEEDED
+#define DEFAULT_RP_UP_TIMEOUT_US   32000 // ~32ms (e.g., 25000 * 1.28us ticks) - PRM VERIFICATION NEEDED
+#define DEFAULT_RP_DOWN_THRESHOLD  100   // Number of idle evaluations - PRM VERIFICATION NEEDED
+#define DEFAULT_RP_UP_THRESHOLD    50    // Number of busy evaluations - PRM VERIFICATION NEEDED
+
+// Default RC6 Idle Threshold
+// WARNING: This value is a placeholder. The actual register units (e.g., 1.28us ticks,
+// multiples of 128ns, etc.) and appropriate scale MUST be verified against Intel PRMs
+// for Gen7 (IVB/HSW) devices.
+#define DEFAULT_RC6_IDLE_THRESHOLD_US 10000 // ~10ms - PRM VERIFICATION NEEDED (units and scale)
 
 
 static bool
@@ -168,6 +175,8 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 			devInfo->rps_state->min_p_state_val, devInfo->rps_state->max_p_state_val, devInfo->rps_state->default_p_state_val);
 
 		if (status == B_OK && devInfo->rps_state->max_p_state_val != 0) {
+			dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using placeholder RPS timeouts/thresholds. These values (DownTimeout=%u us, UpTimeout=%u us, DownThresh=%u, UpThresh=%u) MUST be verified against Intel PRMs for correct units and optimal behavior.\n",
+				DEFAULT_RP_DOWN_TIMEOUT_US, DEFAULT_RP_UP_TIMEOUT_US, DEFAULT_RP_DOWN_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
 			intel_i915_write32(devInfo, GEN6_RP_INTERRUPT_LIMITS,
 				(devInfo->rps_state->max_p_state_val << RP_INT_LIMITS_LOW_PSTATE_SHIFT) |
 				(devInfo->rps_state->min_p_state_val << RP_INT_LIMITS_HIGH_PSTATE_SHIFT));
@@ -278,11 +287,11 @@ intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 	if (IS_HASWELL(devInfo->device_id)) {
 		rc_ctl_reg = RENDER_C_STATE_CONTROL_HSW;
 		rc6_idle_thresh_reg = HSW_RC6_THRESHOLD_IDLE;
-		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US for HSW (reg 0x%lx). This value (currently %u us) MUST be verified/adjusted against PRM for correct units/scale.\n", rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US);
+		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US (%u us) for HSW (reg 0x%lx). This value MUST be verified/adjusted against Intel PRM for correct units/scale.\n", DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_reg);
 	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		rc_ctl_reg = RC_CONTROL_IVB;
 		rc6_idle_thresh_reg = GEN6_RC6_THRESHOLD_IDLE_IVB;
-		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US for IVB/SNB (reg 0x%lx). This value (currently %u us) MUST be verified/adjusted against PRM for correct units/scale.\n", rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US);
+		dprintf(DEVICE_NAME_PRIV ": PM WARNING: Using DEFAULT_RC6_IDLE_THRESHOLD_US (%u us) for IVB/SNB (reg 0x%lx). This value MUST be verified/adjusted against Intel PRM for correct units/scale.\n", DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_reg);
 	} else {
 		TRACE("PM: intel_i915_pm_enable_rc6: RC6 not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
@@ -485,6 +494,8 @@ intel_i915_pm_resume(intel_i915_device_info* devInfo)
 	if (devInfo->rps_state->max_p_state_val != 0) { // If RPS is configured/was active
 		fw_status_rps = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 		if (fw_status_rps == B_OK) {
+			dprintf(DEVICE_NAME_PRIV ": PM WARNING (Resume): Using placeholder RPS timeouts/thresholds. These values (DownTimeout=%u us, UpTimeout=%u us, DownThresh=%u, UpThresh=%u) MUST be verified against Intel PRMs for correct units and optimal behavior.\n",
+				DEFAULT_RP_DOWN_TIMEOUT_US, DEFAULT_RP_UP_TIMEOUT_US, DEFAULT_RP_DOWN_THRESHOLD, DEFAULT_RP_UP_THRESHOLD);
 			intel_i915_write32(devInfo, GEN6_RP_INTERRUPT_LIMITS,
 				(devInfo->rps_state->max_p_state_val << RP_INT_LIMITS_LOW_PSTATE_SHIFT) |
 				(devInfo->rps_state->min_p_state_val << RP_INT_LIMITS_HIGH_PSTATE_SHIFT));

@@ -151,8 +151,13 @@ ThreadData::Init()
 	Thread* currentThread = thread_get_current_thread();
 	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
 		ThreadData* currentThreadData = currentThread->scheduler_data;
-		fNeededLoad = currentThreadData->fNeededLoad;
+		fNeededLoad = currentThreadData->fNeededLoad; // Inherit from creating thread if possible
 	} else {
+		// Default initial needed load for new threads (not inheriting).
+		// This is a general heuristic. Its impact, especially on core waking
+		// decisions in power-saving mode, is discussed in comments within
+		// `power_saving_should_wake_core_for_load()` in `power_saving.cpp`.
+		// fNeededLoad adapts over time based on actual thread activity.
 		fNeededLoad = kMaxLoad / 10;
 	}
 	fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());

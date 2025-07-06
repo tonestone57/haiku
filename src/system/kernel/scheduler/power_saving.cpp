@@ -276,12 +276,24 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	// thread_load_estimate is threadData->GetLoad() (i.e., fNeededLoad).
-	// For newly created threads that don't inherit load from a parent, this
-	// defaults to kMaxLoad / 10 (10% of max load). See ThreadData::Init().
-	// The accuracy of this initial estimate for new threads can influence
-	// the first few core waking decisions. However, fNeededLoad adapts as the
-	// thread runs.
+	// thread_load_estimate is threadData->GetLoad() (i.e., fNeededLoad from ThreadData).
+	// For newly created threads that don't inherit fNeededLoad from a parent,
+	// this defaults to kMaxLoad / 10 (10% of max load) - see ThreadData::Init().
+	//
+	// Impact of this initial estimate on core waking:
+	// - If many lightweight new threads are created: The 10% estimate per thread
+	//   might collectively make the consolidationTarget appear to fill up faster
+	//   than it would if their true (lower) load was known. This could lead to
+	//   this function returning 'true' (deciding to wake 'core') sooner than
+	//   strictly necessary if the consolidationTarget could have handled them.
+	// - If a CPU-intensive new thread is created: The 10% estimate significantly
+	//   under-represents its true demand. If consolidationTarget is, e.g., 70% busy
+	//   and kVeryHighLoad is 85%, adding 10% keeps it < 85%. This function might
+	//   return 'false', preventing 'core' from waking and forcing the heavy thread
+	//   onto an already busy consolidationTarget, impacting performance until its
+	//   fNeededLoad adapts upwards.
+	// The 10% default is a general heuristic. fNeededLoad adapts over time, so
+	// this primarily affects the first few placement/waking decisions for a new thread.
 
 	if (core->GetLoad() > 0 || core->GetActiveTime() > 0) {
 		// The core is already active (has some load or has been active recently),
@@ -294,17 +306,18 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 	if (consolidationTarget != NULL && consolidationTarget != core) {
 		// A different core is designated for consolidation.
 		// If that consolidation core has capacity for this thread's estimated load
-		// without exceeding kVeryHighLoad, prefer using it instead of waking `core`.
+		// (sum of current load and new thread's estimate) without exceeding
+		// kVeryHighLoad, prefer using it instead of waking `core`.
 		if (consolidationTarget->GetLoad() + thread_load_estimate < kVeryHighLoad) {
 			return false;
 		}
 	} else if (consolidationTarget == core) {
 		// The core being considered for waking *is* the consolidation target.
-		// It's okay to wake it.
+		// It's okay to wake it, as it's the preferred place for tasks.
 		return true;
 	}
 
-	// No suitable consolidation target, or it's full.
+	// No suitable consolidation target (or it's full / this is it but it's idle).
 	// Check other active cores before deciding to wake this idle `core`.
 	int32 activeCoreCount = 0;
 	int32 overloadedActiveCoreCount = 0;

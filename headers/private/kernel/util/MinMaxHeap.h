@@ -82,6 +82,7 @@ public:
 
 	inline	void		RemoveMinimum();
 	inline	void		RemoveMaximum();
+	inline	void		Remove(Element* element);
 
 	inline	status_t	Insert(Element* element, Key key);
 
@@ -489,6 +490,116 @@ MIN_MAX_HEAP_CLASS_NAME::_RemoveLast(bool minTree)
 	link->fIndex = 0;
 	link->fMinTree = minTree;
 	_MoveDown(link);
+}
+
+
+MIN_MAX_HEAP_TEMPLATE_LIST
+void
+MIN_MAX_HEAP_CLASS_NAME::Remove(Element* element)
+{
+	MinMaxHeapLink<Element, Key>* link = sGetLink(element);
+
+	// If element is not in the heap, do nothing.
+	if (link->fIndex == -1)
+		return;
+
+	// Determine which tree the element is in and its current index.
+	bool isInMinTree = link->fMinTree;
+	int indexInTree = link->fIndex;
+	Element** currentTree = isInMinTree ? fMinElements : fMaxElements;
+	int& currentLastElement = isInMinTree ? fMinLastElement : fMaxLastElement;
+
+	ASSERT(indexInTree >= 0 && indexInTree < currentLastElement);
+	ASSERT(currentTree[indexInTree] == element); // Ensure we are removing the correct element
+
+	// Get the element that will replace the one being removed.
+	// This is the last element in the "overall" heap structure.
+	// We prefer to take from the larger of the two heaps to maintain balance.
+	bool takeFromMinTree;
+	if (fMinLastElement == 0 && fMaxLastElement == 0) {
+		// Should not happen if link->fIndex != -1
+		ASSERT(false);
+		return;
+	} else if (fMinLastElement == 0) {
+		takeFromMinTree = false;
+	} else if (fMaxLastElement == 0) {
+		takeFromMinTree = true;
+	} else {
+		// Default to taking from the heap that has more elements,
+		// or minTree if equal (arbitrary consistent choice).
+		takeFromMinTree = fMinLastElement >= fMaxLastElement;
+	}
+
+	Element** replacementTree = takeFromMinTree ? fMinElements : fMaxElements;
+	int& replacementLastElement = takeFromMinTree ? fMinLastElement : fMaxLastElement;
+
+	// If the element to remove is the one we were going to use as replacement,
+	// then it's simply a matter of decrementing the count.
+	if (element == replacementTree[replacementLastElement - 1]) {
+		replacementLastElement--;
+#if KDEBUG
+		link->fIndex = -1;
+#endif
+		// If removing this element emptied one tree and the other tree is also empty,
+		// and the removed element was the *only* element in the heap, we are done.
+		// Otherwise, if one tree became empty but the other is not, and the element
+		// removed was from the *other* tree (which implies it was the only element
+		// in that tree), then the heap logic might be more complex.
+		// However, the common case is that `_RemoveLast` called by RemoveMinimum/Maximum
+		// handles the "last element" scenarios correctly. This generic Remove
+		// primarily deals with non-root, non-last elements.
+		// If the removed element was the *only* element in the heap, both
+		// fMinLastElement and fMaxLastElement will be 0 now.
+		if (fMinLastElement == 0 && fMaxLastElement == 0)
+			return;
+
+		// If the removed element was the last in its specific tree,
+		// and that tree is now empty, we might need to rebalance or check consistency.
+		// However, the general replacement logic below should handle this.
+		// The main concern is that if currentLastElement is now 0,
+		// and the replacement element was also from this tree, this path is correct.
+		// If the replacement element was from the *other* tree, the logic below handles it.
+		return;
+	}
+
+	// Get the actual replacement element.
+	Element* replacementElement = replacementTree[replacementLastElement - 1];
+	MinMaxHeapLink<Element, Key>* replacementLink = sGetLink(replacementElement);
+	replacementLastElement--;
+
+	// Place the replacement element into the slot of the removed element.
+	currentTree[indexInTree] = replacementElement;
+	replacementLink->fIndex = indexInTree;
+	replacementLink->fMinTree = isInMinTree; // It takes the tree type of the slot.
+
+	// Restore heap property for the replacement element.
+	// We need to decide whether to move it up or down.
+	// This is similar to ModifyKey: if its key is "out of place" relative
+	// to its parent (for _MoveUp) or children (for _MoveDown).
+	// A simpler approach is to try _MoveUp, and if it doesn't move, try _MoveDown.
+	// Or, compare with parent: if it should go up, call _MoveUp. Else, _MoveDown.
+	Key replacementKey = replacementLink->fKey;
+	bool moved = false;
+	if (indexInTree > 0) {
+		int parentIndex = (indexInTree - 1) / 2;
+		Key parentKey = sGetLink(currentTree[parentIndex])->fKey;
+		// If in min-tree and smaller than parent, or in max-tree and larger than parent
+		if (sCompare(replacementKey, parentKey) ^ !isInMinTree) {
+			_MoveUp(replacementLink);
+			moved = true;
+		}
+	}
+	if (!moved) {
+		// If not moved up, try moving down (or if it was root, it must move down).
+		// Also, after moving up, it might need to change trees or move down further.
+		// The _MoveDown logic includes _ChangeTree if necessary.
+		_MoveDown(replacementLink);
+	}
+
+
+#if KDEBUG
+	link->fIndex = -1; // Mark original element as removed.
+#endif
 }
 
 

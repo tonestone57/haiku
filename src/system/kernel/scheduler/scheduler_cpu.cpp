@@ -908,31 +908,25 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	SCHEDULER_ENTER_FUNCTION();
 
 	if (this->fDefunct) {
-		// If the core is defunct, ensure its load metrics are zeroed.
+		// If the core is defunct, ensure its load metrics are zeroed and remove from heaps.
 		WriteSpinLocker loadLocker(fLoadLock);
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
-		bool wasInHighLoadHeap = fHighLoad; // Capture state before changing fHighLoad
-		fHighLoad = false; // A defunct core is not considered high-load
+		bool wasInHighLoadHeap = fHighLoad;
+		fHighLoad = false;
 		loadLocker.Unlock();
 
 		WriteSpinLocker heapsLock(gCoreHeapsLock);
-		// If the core is currently linked into a heap, update its key to 0.
-		// It will remain in whichever heap it was in, but with key 0.
-		// The load balancer must explicitly check core->fDefunct and skip it.
-		if (this->GetMinMaxHeapLink()->fIndex != -1) {
+		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If it's in a heap
 			if (wasInHighLoadHeap) {
-				// It was in gCoreHighLoadHeap. Update its key there to 0.
-				// It remains in gCoreHighLoadHeap but won't be picked due to fDefunct.
-				gCoreHighLoadHeap.ModifyKey(this, 0);
+				gCoreHighLoadHeap.Remove(this);
 			} else {
-				// It was (or should be) in gCoreLoadHeap. Update its key there to 0.
-				gCoreLoadHeap.ModifyKey(this, 0);
+				gCoreLoadHeap.Remove(this);
 			}
+			// MinMaxHeap::Remove sets fIndex to -1.
 		}
-		// No attempt to move between heaps or re-insert if defunct.
-		// It will be ignored by virtue of its fDefunct flag in load balancing.
+		// Defunct core is now fully removed from load balancing heaps.
 		return;
 	}
 
@@ -997,6 +991,9 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	WriteSpinLocker loadLocker(fLoadLock);
 
 	int32 oldKey = this->GetMinMaxHeapLink()->fKey; // Current key in heap, if linked.
+	bool wasInAHeap = this->GetMinMaxHeapLink()->fIndex != -1;
+	bool wasInHighLoadHeap = fHighLoad;
+
 	fLoad = newAverageLoad; // Update the core's official fLoad.
 
 	if (intervalEnded) {
@@ -1012,33 +1009,26 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 
 	loadLocker.Unlock(); // Release fLoadLock before potentially modifying heaps.
 
-	// If the load value hasn't changed and the core is already in a heap, no need to re-heap.
-	if (oldKey == fLoad && this->GetMinMaxHeapLink()->fIndex != -1) {
+	// Determine target heap state
+	bool targetIsHighLoad = fLoad > kHighLoad;
+
+	// If the load value hasn't changed AND the core is already in the correct heap type,
+	// no need to re-heap.
+	if (wasInAHeap && oldKey == fLoad && wasInHighLoadHeap == targetIsHighLoad) {
 		coreHeapsLocker.Unlock();
 		return;
 	}
 
 	// Remove from old heap (if it was in one).
-	if (this->GetMinMaxHeapLink()->fIndex != -1) {
-		// TODO: MinMaxHeap does not have a generic Remove(Element*).
-		// This logic needs redesign or MinMaxHeap needs a proper Remove method.
-		// The original code attempted to remove 'this' (CoreEntry) here.
-		// Without a generic Remove, 'this' element might remain in the old heap (orphaned)
-		// or the subsequent Insert call might fail if the heap asserts on fIndex
-		// (MinMaxHeap::Insert asserts link->fIndex == -1).
-		// For now, the problematic .Remove(this) calls remain commented out.
-		// if (fHighLoad) gCoreHighLoadHeap.Remove(this);
-		// else gCoreLoadHeap.Remove(this);
-
-		// NOTE: Removing the fIndex = -1 workaround. If 'this' was in a heap
-		// and not properly removed, the Insert below might fail or lead to duplicates/corruption.
-		// This makes the lack of a proper Remove more evident.
+	if (wasInAHeap) {
+		if (wasInHighLoadHeap)
+			gCoreHighLoadHeap.Remove(this);
+		else
+			gCoreLoadHeap.Remove(this);
 	}
 
 	// Insert into the appropriate new heap based on the updated fLoad.
-	// This Insert will likely fail an assertion if the element was already in a heap
-	// and not properly removed above (due to fIndex != -1).
-	if (fLoad > kHighLoad) {
+	if (targetIsHighLoad) {
 		gCoreHighLoadHeap.Insert(this, fLoad);
 		fHighLoad = true;
 	} else {

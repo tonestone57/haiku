@@ -11,11 +11,11 @@
 
 // Main snmalloc include - this should bring in necessary core types and APIs.
 // The exact path might need adjustment based on final include structure in Haiku's build.
-#include "snmalloc/snmalloc_core.h"
+#include <snmalloc/snmalloc_core.h>
 // PAL Data Structures, which often contain fork handling logic.
-#include "snmalloc/pal/pal_ds.h"
+#include <snmalloc/pal/pal_ds.h>
 // PAL for Haiku (userland) to ensure its definitions are available if needed by PALDS.
-#include "snmalloc/pal/pal_haiku.h"
+#include <snmalloc/pal/pal_haiku.h>
 
 
 // Global flag to track if snmalloc's core/global components are initialized.

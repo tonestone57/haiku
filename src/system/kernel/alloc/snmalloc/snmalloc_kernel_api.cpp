@@ -8,7 +8,7 @@
 // how snmalloc is integrated as a third-party library.
 #include <snmalloc/snmalloc_core.h> // Or snmalloc_front.h / snmalloc.h - main entry point for ThreadAlloc
 #include <snmalloc/adapters/ThreadAlloc.h> // For snmalloc::ThreadAlloc
-#include <snmalloc/pal/pal_haiku_kernel.h> // For snmalloc::PALHaikuKernel for init
+#include "pal_haiku_kernel.h" // For snmalloc::PALHaikuKernel for init - Now local
 
 // Haiku kernel includes
 #include <string.h> // For memset

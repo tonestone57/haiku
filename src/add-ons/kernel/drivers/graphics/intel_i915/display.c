@@ -305,17 +305,25 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	// A more optimized approach might check if existing BO can be reused if dimensions/tiling match.
 	// For now, always recreate to ensure correct properties for the new mode.
 	if (devInfo->framebuffer_bo != NULL) {
+		struct intel_i915_gem_object* old_fb_bo = devInfo->framebuffer_bo;
 		TRACE("Modeset: Releasing old framebuffer_bo (area %" B_PRId32 ", gtt_offset_pages %u, num_pages %lu).\n",
-			devInfo->framebuffer_bo->backing_store_area,
-			devInfo->framebuffer_bo->gtt_offset_pages, // This should be devInfo->framebuffer_gtt_offset
-			devInfo->framebuffer_bo->num_phys_pages);
+			old_fb_bo->backing_store_area,
+			old_fb_bo->gtt_offset_pages, // This should match devInfo->framebuffer_gtt_offset
+			old_fb_bo->num_phys_pages);
 
-		// Manually clear the GTT bitmap entries for the old framebuffer if it was mapped
-		// to the fixed framebuffer_gtt_offset.
-		if (devInfo->framebuffer_bo->gtt_mapped &&
-			devInfo->framebuffer_bo->gtt_offset_pages == devInfo->framebuffer_gtt_offset &&
-			devInfo->framebuffer_gtt_offset != (uint32_t)-1) { // Ensure it's a valid offset
+		// If the old framebuffer was mapped to the fixed GTT offset, we must manually manage its
+		// GTT bitmap entries and PTEs before putting the GEM object.
+		if (old_fb_bo->gtt_mapped &&
+			old_fb_bo->gtt_offset_pages == devInfo->framebuffer_gtt_offset &&
+			devInfo->framebuffer_gtt_offset != (uint32_t)-1) {
 
+			// Step 1: Point GTT entries to scratch page.
+			// This is done first to ensure display stops accessing the memory before we modify bitmap.
+			intel_i915_gtt_unmap_memory(devInfo,
+				devInfo->framebuffer_gtt_offset * B_PAGE_SIZE,
+				old_fb_bo->num_phys_pages);
+
+			// Step 2: Clear bits in GTT bitmap and update free count.
 			mutex_lock(&devInfo->gtt_allocator_lock);
 			for (uint32_t i = 0; i < devInfo->framebuffer_bo->num_phys_pages; ++i) {
 				uint32_t pte_idx = devInfo->framebuffer_gtt_offset + i;
@@ -329,16 +337,15 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 				}
 			}
 			mutex_unlock(&devInfo->gtt_allocator_lock);
-			// The GTT PTEs themselves will be pointed to scratch page by intel_i915_gtt_unmap_memory.
-			// Call it here before clearing bitmap state, then prevent gem_object_put from doing it again.
-			intel_i915_gtt_unmap_memory(devInfo,
-				devInfo->framebuffer_gtt_offset * B_PAGE_SIZE,
-				devInfo->framebuffer_bo->num_phys_pages);
-			// Mark that this BO is no longer GTT mapped at this fixed offset from display driver's perspective
-			devInfo->framebuffer_bo->gtt_mapped = false;
-			devInfo->framebuffer_bo->gtt_offset_pages = (uint32_t)-1;
+			// The GTT PTEs themselves have been pointed to scratch page by the call to
+			// intel_i915_gtt_unmap_memory above.
+			// Step 3: Mark the GEM object as no longer GTT mapped at this fixed offset
+			// to prevent intel_i915_gem_object_unmap_gtt (called via put) from
+			// attempting to re-free these GTT pages from the bitmap or re-unmap PTEs.
+			old_fb_bo->gtt_mapped = false;
+			old_fb_bo->gtt_offset_pages = (uint32_t)-1;
 		}
-		intel_i915_gem_object_put(devInfo->framebuffer_bo); // Now unmap_gtt inside put won't re-free GTT space
+		intel_i915_gem_object_put(old_fb_bo); // Now unmap_gtt inside put won't try to act on this GTT mapping
 		devInfo->framebuffer_bo = NULL;
 	}
 	// Reset fields that will be repopulated by the new BO, or may become invalid if BO creation fails.

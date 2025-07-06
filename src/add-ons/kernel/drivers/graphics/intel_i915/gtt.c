@@ -170,21 +170,16 @@ intel_i915_gtt_init(intel_i915_device_info* devInfo)
 	_gtt_set_bit(0, devInfo->gtt_page_bitmap);
 	devInfo->gtt_free_pages_count = devInfo->gtt_total_pages_managed - 1; // -1 for scratch page
 
-	// TODO: If the primary framebuffer uses a fixed GTT offset (e.g., devInfo->framebuffer_gtt_offset = 1),
-	// that range also needs to be marked as 'used' in the gtt_page_bitmap here.
-	// This would require knowing the maximum potential size of the initial framebuffer
-	// to reserve an adequate number of pages. For example:
-	// if (devInfo->framebuffer_gtt_offset != (uint32_t)-1 && devInfo->framebuffer_gtt_offset > 0) {
-	//    size_t max_fb_pages = SOME_MAX_EXPECTED_FB_SIZE_IN_PAGES; // e.g., for 4K display
-	//    if (devInfo->framebuffer_gtt_offset + max_fb_pages <= devInfo->gtt_total_pages_managed) {
-	//        for (size_t i = 0; i < max_fb_pages; ++i) {
-	//            if (!_gtt_is_bit_set(devInfo->framebuffer_gtt_offset + i, devInfo->gtt_page_bitmap)) {
-	//                _gtt_set_bit(devInfo->framebuffer_gtt_offset + i, devInfo->gtt_page_bitmap);
-	//                devInfo->gtt_free_pages_count--;
-	//            }
-	//        }
-	//    }
-	// }
+	// NOTE: The primary display framebuffer is typically mapped to a fixed GTT offset
+	// (e.g., devInfo->framebuffer_gtt_offset, often page 1).
+	// The GTT pages for this framebuffer MUST be marked as 'used' in the gtt_page_bitmap
+	// to prevent the gtt_alloc_space function from allocating them for other GEM objects.
+	// This marking should occur in `intel_i915_display_set_mode_internal()` in `display.c`
+	// when the framebuffer_bo is created/recreated and its size (num_phys_pages) is known.
+	// Similarly, when a framebuffer_bo is destroyed or resized smaller, the previously
+	// used GTT pages in the bitmap should be marked as 'free'.
+	//
+	// This function (`intel_i915_gtt_init`) only sets up the initial state (scratch page).
 	// --- End Bitmap Allocator Init ---
 
 	if (devInfo->shared_info) {

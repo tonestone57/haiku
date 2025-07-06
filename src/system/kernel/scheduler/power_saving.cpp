@@ -374,6 +374,14 @@ power_saving_switch_to_mode()
 
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 	sSmallTaskCore = NULL;
+
+	// gSchedulerSMTConflictFactor: Set to a lower value (0.40f) for Power Saving.
+	// Rationale: Makes the scheduler more tolerant of placing tasks on SMT
+	// siblings, even if one is active. This supports the goal of consolidating
+	// work onto fewer physical cores by better utilizing the logical processors
+	// of an already active core before considering waking an entirely new core.
+	// This can save power if the SMT sharing is reasonably efficient for the
+	// running tasks.
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	// Mode-specific IRQ balancing parameters

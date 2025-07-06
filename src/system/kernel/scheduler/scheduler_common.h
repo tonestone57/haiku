@@ -195,6 +195,34 @@ extern SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy;
 // Initialized with global defaults, then overridden by scheduler mode switch.
 extern float gModeIrqTargetFactor;
 extern int32 gModeMaxTargetCpuIrqLoad;
+
+// SMT (Simultaneous Multi-Threading) Conflict Factor.
+// This factor is set by scheduler modes and used in CPU selection logic
+// (e.g., Scheduler::SelectTargetCPUForIRQ, CPUEntry::_scheduler_select_cpu_on_core)
+// to quantify the undesirability of placing a task on a CPU whose SMT
+// sibling(s) are busy. The load of an SMT sibling is multiplied by this
+// factor to calculate a penalty.
+// - A higher factor means stronger avoidance of busy SMT contexts.
+// - A lower factor means more willingness to utilize SMT siblings.
+// The optimal value is hardware and workload dependent and requires empirical tuning.
+//
+// Future Testing/Tuning Considerations for SMT Factor:
+// - Workload Types for Testing:
+//   - CPU-bound, SMT-friendly parallel tasks (e.g., compilation, some rendering):
+//     Measure throughput scaling.
+//   - CPU-bound, SMT-unfriendly tasks (e.g., heavy FPU, cache-thrashing):
+//     Measure impact of contention.
+//   - Mixed workloads: Latency-sensitive interactive tasks alongside CPU-bound SMT tasks.
+//   - IRQ-intensive workloads: Observe IRQ latency and system responsiveness.
+// - Key Metrics:
+//   - Application/benchmark completion times.
+//   - Interactive task responsiveness (latency).
+//   - IRQ handling latencies.
+//   - CPU utilization (per logical and physical core).
+//   - Power consumption (especially for Power Saving mode).
+// - Methodology: Vary factor in small increments for each mode and observe metrics.
+extern float gSchedulerSMTConflictFactor; // Value set by current scheduler mode.
+
 // --- End Mode-Settable Global Parameters ---
 
 

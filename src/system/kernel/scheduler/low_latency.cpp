@@ -33,6 +33,14 @@ low_latency_switch_to_mode()
 	gSchedulerBaseQuantumMultiplier = 1.0f;
 	gSchedulerAgingThresholdMultiplier = 1.0f;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+
+	// gSchedulerSMTConflictFactor: Set to a higher value (0.60f) for Low Latency.
+	// Rationale: Prioritizes minimizing latency by more strongly discouraging
+	// the placement of tasks on a CPU if its SMT sibling is busy. This helps
+	// reduce contention for shared CPU resources (execution units, L1/L2 cache),
+	// which can be critical for latency-sensitive operations. Assumes that finding
+	// an entirely idle core or a CPU with an idle SMT sibling is preferable for
+	// performance, even if it means slightly lower overall SMT utilization under load.
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
 	// Mode-specific IRQ balancing parameters

@@ -93,7 +93,14 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	devInfo->rps_state->dev_priv = devInfo;
 
 	devInfo->rps_state->rc6_supported = is_rc6_supported_by_platform(devInfo);
-	devInfo->rps_state->desired_rc6_mask_hw = IS_HASWELL(devInfo->device_id) ? HSW_RC_CTL_RC6_ENABLE : IVB_RC_CTL_RC6_ENABLE;
+	// Set the desired RC6 mask to enable all RC6 states (RC6, RC6p, RC6pp) by default if supported.
+	if (IS_HASWELL(devInfo->device_id)) {
+		devInfo->rps_state->desired_rc6_mask_hw = HSW_RC_CTL_RC6_ENABLE | HSW_RC_CTL_RC6p_ENABLE | HSW_RC_CTL_RC6pp_ENABLE;
+	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
+		devInfo->rps_state->desired_rc6_mask_hw = IVB_RC_CTL_RC6_ENABLE | IVB_RC_CTL_RC6P_ENABLE | IVB_RC_CTL_RC6PP_ENABLE;
+	} else {
+		devInfo->rps_state->desired_rc6_mask_hw = 0; // No RC6 for older or unhandled gens
+	}
 
 	status = mutex_init_etc(&devInfo->rps_state->lock, "i915 RPS/RC6 lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) { free(devInfo->rps_state); devInfo->rps_state = NULL; return status; }
@@ -175,15 +182,23 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 	}
 
 	if (devInfo->rps_state->rc6_supported) {
-		if (status == B_OK) {
-			uint32_t rc6_idle_thresh_reg = IS_HASWELL(devInfo->device_id) ? HSW_RC6_THRESHOLD_IDLE : GEN6_RC6_THRESHOLD_IDLE_IVB;
-			intel_i915_write32(devInfo, rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US);
-			TRACE("PM: RC6 Idle Threshold (Reg 0x%x) set to %u us (value %u).\n",
-				rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US, DEFAULT_RC6_IDLE_THRESHOLD_US);
+		// RC6 hardware setup (control register, thresholds) is now handled by intel_i915_pm_enable_rc6.
+		// Call it here if forcewake was successfully acquired for other PM init.
+		if (status == B_OK) { // status here refers to the forcewake acquisition status from earlier
+			intel_i915_pm_enable_rc6(devInfo);
+		} else {
+			TRACE("PM: Forcewake not acquired earlier, skipping initial call to intel_i915_pm_enable_rc6.\n");
+			// Mark that driver policy is to have it enabled, work handler might try later if FW available.
+			// However, intel_i915_pm_enable_rc6 itself checks and handles forcewake.
+			// So, it's safe to call, but good to note why it might not do anything yet.
+			// For robustness, ensure rc6_enabled_by_driver reflects intent vs actual attempt.
+			// The enable_rc6 function will set rc6_enabled_by_driver = true if it succeeds in writing.
+			// If forcewake fails inside enable_rc6, it won't set this flag.
+			intel_i915_pm_enable_rc6(devInfo); // Attempt anyway, it will handle its own forcewake.
 		}
-		intel_i915_pm_enable_rc6(devInfo);
 
-		if (gPmWorkQueue && !devInfo->rps_state->rc6_work_scheduled && devInfo->rps_state->rc6_enabled_by_driver) {
+		// Schedule work item if RC6 is supported (it will also handle RPS if enabled)
+		if (gPmWorkQueue && !devInfo->rps_state->rc6_work_scheduled) {
 			if (queue_work_item(gPmWorkQueue, &devInfo->rps_state->rc6_work_item,
 						intel_i915_rc6_work_handler, devInfo->rps_state, RC6_IDLE_TIMEOUT_MS * 1000) == B_OK) {
 				devInfo->rps_state->rc6_work_scheduled = true;
@@ -191,6 +206,7 @@ intel_i915_pm_init(intel_i915_device_info* devInfo)
 		}
 	}
 
+	// Release the forcewake acquired at the start of pm_init if it was successful
 	if (status == B_OK) {
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 	}
@@ -252,23 +268,37 @@ intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 	}
 
 	uint32_t rc_ctl_reg;
-	uint32_t enable_mask = devInfo->rps_state->desired_rc6_mask_hw;
+	uint32_t rc6_idle_thresh_reg;
+	uint32_t rc6_idle_thresh_val = DEFAULT_RC6_IDLE_THRESHOLD_US; // Default common value
+	// desired_rc6_mask_hw is already set in rps_state during pm_init
 
-	if (IS_IVYBRIDGE(devInfo->device_id)) {
-		rc_ctl_reg = RC_CONTROL_IVB;
-	} else if (IS_HASWELL(devInfo->device_id)) {
+	if (IS_HASWELL(devInfo->device_id)) {
 		rc_ctl_reg = RENDER_C_STATE_CONTROL_HSW;
+		rc6_idle_thresh_reg = HSW_RC6_THRESHOLD_IDLE;
+		// TODO: Adjust rc6_idle_thresh_val if HSW uses different units/scale than DEFAULT_RC6_IDLE_THRESHOLD_US
+	} else if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
+		rc_ctl_reg = RC_CONTROL_IVB;
+		rc6_idle_thresh_reg = GEN6_RC6_THRESHOLD_IDLE_IVB;
+		// TODO: Adjust rc6_idle_thresh_val if IVB/SNB uses different units/scale
 	} else {
-		TRACE("PM: RC6 enable not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
+		TRACE("PM: intel_i915_pm_enable_rc6: RC6 not implemented for Gen %d\n", INTEL_GRAPHICS_GEN(devInfo->device_id));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 		return;
 	}
 
+	// Program RC6 Idle Thresholds
+	// TODO: Determine appropriate, PRM-verified default values for these thresholds.
+	intel_i915_write32(devInfo, rc6_idle_thresh_reg, rc6_idle_thresh_val);
+	TRACE("PM: RC6 Idle Threshold (Reg 0x%x) set to conceptual value %u (raw %u) during RC6 enable.\n",
+		rc6_idle_thresh_reg, DEFAULT_RC6_IDLE_THRESHOLD_US, rc6_idle_thresh_val);
+
+	// Enable RC6 states
 	uint32_t rc_ctl_val = intel_i915_read32(devInfo, rc_ctl_reg);
-	rc_ctl_val |= enable_mask;
+	rc_ctl_val |= devInfo->rps_state->desired_rc6_mask_hw; // Use the comprehensive mask
 	intel_i915_write32(devInfo, rc_ctl_reg, rc_ctl_val);
 	devInfo->rps_state->rc6_enabled_by_driver = true;
-	TRACE("PM: RC6 enabled in HW (Reg 0x%x Val 0x%08x, MaskUsed 0x%x).\n", rc_ctl_reg, rc_ctl_val, enable_mask);
+	TRACE("PM: RC6 enabled in HW (Reg 0x%x Val 0x%08x, MaskUsed 0x%x).\n",
+		rc_ctl_reg, rc_ctl_val, devInfo->rps_state->desired_rc6_mask_hw);
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 }

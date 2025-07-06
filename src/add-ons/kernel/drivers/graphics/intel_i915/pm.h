@@ -10,6 +10,16 @@
 
 #include "intel_i915_priv.h"
 #include <kernel/OS.h>
+
+// TODO: Consider adding runtime RC6 control functions if specific driver operations
+// (e.g., sensitive command submissions, modesetting sequences not fully covered by
+// existing power state management) are found to require temporarily inhibiting RC6 entry.
+// This would involve functions like:
+//   void intel_i915_pm_runtime_disable_rc6(intel_i915_device_info* devInfo);
+//   void intel_i915_pm_runtime_enable_rc6(intel_i915_device_info* devInfo);
+// These would modify RC6 enable bits without changing the overall driver policy
+// (rc6_enabled_by_driver) and might use a separate internal flag.
+
 #include <kernel/thread.h>
 
 

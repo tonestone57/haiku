@@ -50,8 +50,10 @@ struct intel_i915_gem_object {
 extern "C" {
 #endif
 
-status_t intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
-	uint32_t flags, struct intel_i915_gem_object** obj_out);
+status_t intel_i915_gem_object_create(intel_i915_device_info* devInfo,
+	size_t initial_size, uint32_t flags,
+	uint32_t width_px, uint32_t height_px, uint32_t bits_per_pixel,
+	struct intel_i915_gem_object** obj_out);
 
 void intel_i915_gem_object_put(struct intel_i915_gem_object* obj);
 void intel_i915_gem_object_get(struct intel_i915_gem_object* obj);

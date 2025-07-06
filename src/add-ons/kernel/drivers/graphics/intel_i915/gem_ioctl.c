@@ -117,12 +117,31 @@ intel_i915_gem_create_ioctl(intel_i915_device_info* devInfo, void* buffer, size_
 	intel_i915_gem_create_args args; struct intel_i915_gem_object* obj; status_t status;
 	if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
-	if (args.size == 0) return B_BAD_VALUE;
-	status = intel_i915_gem_object_create(devInfo, args.size, args.flags, &obj);
+
+	// Validate size and dimensions. If dimensions are provided, size might be 0 initially
+	// or used as a minimum. If no dimensions, size must be non-zero.
+	if (args.size == 0 && (args.width_px == 0 || args.height_px == 0 || args.bits_per_pixel == 0)) {
+		TRACE("GEM_CREATE: Invalid size (0) and no dimensions provided.\n");
+		return B_BAD_VALUE;
+	}
+	if ((args.width_px > 0 || args.height_px > 0 || args.bits_per_pixel > 0) &&
+		(args.width_px == 0 || args.height_px == 0 || args.bits_per_pixel == 0)) {
+		TRACE("GEM_CREATE: Incomplete dimensions provided (w:%u h:%u bpp:%u).\n",
+			args.width_px, args.height_px, args.bits_per_pixel);
+		return B_BAD_VALUE;
+	}
+
+
+	// The signature of intel_i915_gem_object_create will be updated in the next step
+	// to accept width, height, bpp. Tiling is inferred from args.flags.
+	status = intel_i915_gem_object_create(devInfo, args.size, args.flags,
+		args.width_px, args.height_px, args.bits_per_pixel, &obj);
 	if (status != B_OK) return status;
+
 	status = _generic_handle_create(obj, HANDLE_TYPE_GEM_OBJECT, &args.handle);
 	if (status != B_OK) { intel_i915_gem_object_put(obj); return status; }
-	args.actual_size = obj->allocated_size;
+
+	args.actual_allocated_size = obj->allocated_size; // Use the new field name
 	intel_i915_gem_object_put(obj);
 	if (copy_to_user(buffer, &args, sizeof(args)) != B_OK) {
 		_generic_handle_close(args.handle, HANDLE_TYPE_GEM_OBJECT); return B_BAD_ADDRESS;

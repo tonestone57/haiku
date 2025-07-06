@@ -466,7 +466,68 @@ typedef struct intel_i915_device_info {
 	uint32_t cached_deier_val;
 	uint32_t cached_gt_ier_val;
 
+	// GEM object related fields (placeholder, real struct in gem_object.h or similar)
+	// This is just to ensure intel_i915_device_info is aware of GEM objects for LRU, etc.
+	// The actual struct intel_i915_gem_object should be defined where GEM code resides.
+	// For now, assume it's forward declared or defined in an included header like gem.h
+	// (which should define struct intel_i915_gem_object).
+	// The list_node for LRU is in intel_i915_gem_object itself.
+
 } intel_i915_device_info;
+
+
+// GEM object structure (typically in a gem_object.h or gem.h, but placed here for context if not separate)
+// This is a forward declaration if it's in another header included by gem_object.c
+struct intel_i915_gem_object;
+
+// Structure for GEM object, needs to be defined before use in intel_i915_gem_object_create.
+// If gem_object.h defines it, this might be redundant or need careful include order.
+// For this plan, assume we are defining/extending it here for clarity of what's needed.
+// If it's defined in gem.h or gem_object.h, those files would be modified.
+// Let's assume it's part of intel_i915_priv.h for now for the new fields.
+
+struct intel_i915_gem_object {
+	struct drm_gem_object_placeholder base; // Contains refcount
+	intel_i915_device_info* dev_priv;
+
+	size_t     size;             // User requested size (for linear) or minimum size from dimensions
+	size_t     allocated_size;   // Actual page-aligned size of backing store (can be > size for tiled)
+	uint32_t   flags;            // Original creation flags
+
+	// New dimension fields
+	uint32_t   obj_width_px;
+	uint32_t   obj_height_px;
+	uint32_t   obj_bits_per_pixel;
+	uint32_t   stride;           // Calculated stride in bytes (0 for non-2D buffers)
+	enum i915_tiling_mode actual_tiling_mode; // Resolved tiling mode
+
+	area_id    backing_store_area;
+	phys_addr_t* phys_pages_list;  // Array of physical page addresses
+	uint32_t   num_phys_pages;     // Number of physical pages in phys_pages_list
+
+	void*      kernel_virtual_address;
+
+	// GTT mapping state
+	uint32_t   gtt_offset_pages;   // Start page offset in GTT if mapped
+	bool       gtt_mapped;
+	enum gtt_caching_type gtt_cache_type; // Caching used for GTT mapping
+	bool       gtt_mapped_by_execbuf; // True if current GTT map was by execbuf
+
+	// Tiling fence state (for pre-Gen9)
+	int        fence_reg_id;       // ID of hardware fence register used, or -1
+
+	// LRU list and eviction state
+	struct list_link lru_link;     // For active_lru_list in devInfo
+	bool       evictable;
+	bool       dirty;              // Needs writeback before eviction (not fully implemented)
+	uint32_t   last_used_seqno;    // Last engine sequence number that used this BO
+
+	enum i915_caching_mode cpu_caching; // Requested CPU caching for the object
+	enum i915_gem_object_state current_state; // SYSTEM, GTT, VRAM (placeholder)
+
+	mutex      lock; // Per-object lock
+};
+
 
 // MMIO Access (Forcewake must be handled by caller)
 static inline uint32

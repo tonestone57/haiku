@@ -64,10 +64,16 @@ typedef struct {
 } intel_i915_get_shared_area_info_args;
 
 typedef struct {
-	uint64 size;
-	uint32 flags;
-	uint32 handle;
-	uint64 actual_size;
+	uint64 size;    // Input: Desired size if not using dimensions, or min size. Output: Padded size for linear.
+	uint32 flags;   // Input: Standard BO_ALLOC flags (tiling, caching, etc.)
+	uint32 handle;  // Output: Handle to the created object
+	uint64 actual_allocated_size; // Output: Actual size allocated by kernel (especially for tiled)
+
+	// New fields for dimensioned buffer creation
+	uint32 width_px;        // Input: Width in pixels (optional, for dimensioned BOs)
+	uint32 height_px;       // Input: Height in pixels (optional)
+	uint32 bits_per_pixel;  // Input: Bits per pixel (optional)
+	// Tiling mode is inferred from 'flags' (I915_BO_ALLOC_TILED_X/Y)
 } intel_i915_gem_create_args;
 
 typedef struct {
@@ -145,6 +151,14 @@ typedef struct {
 	uint32_t mode;
 } intel_i915_set_dpms_mode_args;
 
+// For intel_i915_gem_create_args:
+// The 'size' field is an input from the user. If creating a non-dimensioned
+// buffer (e.g., a shader program or scratch space), this is the primary size.
+// If creating a dimensioned buffer (width_px, height_px, bits_per_pixel are non-zero),
+// 'size' can be 0, or if non-zero, it can act as a minimum requested size; the kernel
+// will calculate the actual needed size based on dimensions and tiling, which might be larger.
+// 'actual_allocated_size' is an output from the kernel indicating the true, page-aligned
+// (and tile-geometry-aligned if applicable) size of the allocated buffer object.
 
 typedef struct {
 	area_id			regs_clone_area;

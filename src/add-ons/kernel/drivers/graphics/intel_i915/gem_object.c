@@ -28,60 +28,79 @@ _calculate_tile_stride_and_size(struct intel_i915_device_info* devInfo,
 	uint32_t width_px, uint32_t height_px, uint32_t bpp, // bits per pixel
 	uint32_t* stride_out, size_t* total_size_out)
 {
-	if (stride_out == NULL || total_size_out == NULL || bpp == 0 || width_px == 0 || height_px == 0)
+	if (stride_out == NULL || total_size_out == NULL || width_px == 0 || height_px == 0 || bpp == 0)
 		return B_BAD_VALUE;
 
+	if (bpp % 8 != 0) {
+		TRACE("_calculate_tile_stride_and_size: bits_per_pixel (%u) is not a multiple of 8.\n", bpp);
+		return B_BAD_VALUE;
+	}
 	uint32_t bytes_per_pixel = bpp / 8;
-	if (bytes_per_pixel == 0) return B_BAD_VALUE; // Should not happen if bpp > 0
+	// bytes_per_pixel will not be 0 here due to bpp == 0 check above and bpp % 8 == 0 check.
 
 	uint32_t calculated_stride = 0;
 	size_t calculated_total_size = 0;
 	uint32_t gen = INTEL_GRAPHICS_GEN(devInfo->device_id);
 
 	// These are typical values for Gen6/7. May vary for other gens.
-	// X-tile: 512B wide, 8 rows high.
-	// Y-tile: 128B wide, 32 rows high.
+	// X-tile: 512B wide, 8 rows high. (Typical for Gen6+)
+	// Y-tile: 128B wide, 32 rows high. (Typical for Gen6+)
+	// These values might need adjustment for different GPU generations based on PRMs.
+	// For example, older gens might have different tile dimensions or no Y-tiling.
 	const uint32_t x_tile_width_bytes = 512;
 	const uint32_t x_tile_height_rows = 8;
 	const uint32_t y_tile_width_bytes = 128;
 	const uint32_t y_tile_height_rows = 32;
 
+	// Use the provided width_px, height_px, bits_per_pixel directly
+	uint32_t image_stride_bytes = width_px * bytes_per_pixel;
+
 	if (tiling_mode == I915_TILING_X) {
-		if (gen >= 6) { // SNB+
-			calculated_stride = ALIGN(width_px * bytes_per_pixel, x_tile_width_bytes);
+		if (gen >= 6) { // SandyBridge and newer generally support X-tiling
+			// Stride must be a multiple of tile width (512 bytes for X-tiles)
+			// and for some gens, also a power of two, or within certain range.
+			// For simplicity, align to tile width.
+			calculated_stride = ALIGN(image_stride_bytes, x_tile_width_bytes);
+			// Height must be a multiple of tile height (8 rows for X-tiles)
 			uint32_t aligned_height_rows = ALIGN(height_px, x_tile_height_rows);
 			calculated_total_size = (size_t)calculated_stride * aligned_height_rows;
+			TRACE("_calc_tile: X-Tiled: w%u h%u bpp%u -> img_stride%u, hw_stride%u, align_h%u, total_size%lu\n",
+				width_px, height_px, bpp, image_stride_bytes, calculated_stride, aligned_height_rows, calculated_total_size);
 		} else {
-			// Older gens might have different X-tile rules or might not support it well.
-			TRACE("X-Tiling not fully defined for Gen %u\n", gen);
+			TRACE("_calc_tile: X-Tiling not supported/defined for Gen %u\n", gen);
 			return B_UNSUPPORTED;
 		}
 	} else if (tiling_mode == I915_TILING_Y) {
-		if (gen >= 6) { // SNB+ (Y-tiling more complex, this is still simplified)
-			// Stride must be multiple of Y-tile width (128B for common Y-tiles)
-			calculated_stride = ALIGN(width_px * bytes_per_pixel, y_tile_width_bytes);
-			// Height must be multiple of Y-tile height (32 rows)
+		if (gen >= 6) { // SandyBridge and newer generally support Y-tiling
+			// Stride must be a multiple of Y-tile width (128 bytes for common Y-tiles)
+			calculated_stride = ALIGN(image_stride_bytes, y_tile_width_bytes);
+			// Height must be a multiple of Y-tile height (32 rows)
 			uint32_t aligned_height_rows = ALIGN(height_px, y_tile_height_rows);
-			// Total width in bytes for allocation might also need alignment to tile width.
-			// The surface width used for stride might differ from image width if padding is needed.
-			// This simplified calculation uses the stride based on aligned image width.
 			calculated_total_size = (size_t)calculated_stride * aligned_height_rows;
-
-			// Y-tiling on some gens (e.g. Gen7 for display) might have max stride limits for fences.
-			// This is not handled here yet.
+			TRACE("_calc_tile: Y-Tiled: w%u h%u bpp%u -> img_stride%u, hw_stride%u, align_h%u, total_size%lu\n",
+				width_px, height_px, bpp, image_stride_bytes, calculated_stride, aligned_height_rows, calculated_total_size);
+			// Note: Y-tiling can have additional constraints on older hardware,
+			// like maximum stride for fenced Y-tiles (e.g., 8KB or 16KB on Gen7).
+			// This basic calculation does not account for such limits yet.
 		} else {
-			TRACE("Y-Tiling not fully defined for Gen %u\n", gen);
+			TRACE("_calc_tile: Y-Tiling not supported/defined for Gen %u\n", gen);
 			return B_UNSUPPORTED;
 		}
 	} else {
-		return B_BAD_VALUE; // Should not be called for I915_TILING_NONE
+		// Should not be called for I915_TILING_NONE
+		TRACE("_calc_tile: Invalid tiling_mode %d passed.\n", tiling_mode);
+		return B_BAD_VALUE;
 	}
 
-	if (calculated_stride == 0 || calculated_total_size == 0)
-		return B_ERROR; // Calculation failed
+	if (calculated_stride == 0 || calculated_total_size == 0) {
+		TRACE("_calc_tile: Calculation resulted in zero stride or size.\n");
+		return B_ERROR;
+	}
 
 	*stride_out = calculated_stride;
-	*total_size_out = ALIGN(calculated_total_size, B_PAGE_SIZE); // Ensure final size is page aligned
+	// Final size must be page-aligned.
+	*total_size_out = ALIGN(calculated_total_size, B_PAGE_SIZE);
+	TRACE("_calc_tile: Final stride %u, page-aligned total_size %lu\n", *stride_out, *total_size_out);
 
 	return B_OK;
 }
@@ -265,22 +284,26 @@ intel_i915_gem_evict_one_object(struct intel_i915_device_info* devInfo)
 
 
 status_t
-intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
-	uint32_t flags, struct intel_i915_gem_object** obj_out)
+intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t initial_size,
+	uint32_t flags, uint32_t width_px, uint32_t height_px, uint32_t bits_per_pixel,
+	struct intel_i915_gem_object** obj_out)
 {
-	TRACE("GEM: Creating object (size %lu, flags 0x%lx)\n", size, flags);
+	TRACE("GEM: Creating object (initial_size %lu, flags 0x%lx, w %u, h %u, bpp %u)\n",
+		initial_size, flags, width_px, height_px, bits_per_pixel);
 	status_t status = B_OK; char areaName[64];
-	if (size == 0) return B_BAD_VALUE;
-	size = ROUND_TO_PAGE_SIZE(size);
+	size_t current_size = ROUND_TO_PAGE_SIZE(initial_size);
 
 	struct intel_i915_gem_object* obj = (struct intel_i915_gem_object*)malloc(sizeof(*obj));
 	if (obj == NULL) return B_NO_MEMORY;
 	memset(obj, 0, sizeof(*obj));
 
 	obj->dev_priv = devInfo;
-	obj->size = size;
-	obj->allocated_size = size;
-	obj->flags = flags; // Store original flags
+	obj->size = initial_size; // Store original requested size, or size for linear blob
+	obj->flags = flags;       // Store original creation flags
+	obj->obj_width_px = width_px;
+	obj->obj_height_px = height_px;
+	obj->obj_bits_per_pixel = bits_per_pixel;
+
 	// obj->base.refcount = 1; // Assuming refcount is part of the struct directly or a base struct
 	obj->refcount = 1; // Assuming direct member for simplicity here
 	obj->backing_store_area = -1;
@@ -288,6 +311,7 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 	obj->gtt_offset_pages = (uint32_t)-1;
 	obj->gtt_mapped_by_execbuf = false;
 	obj->fence_reg_id = -1;
+	obj->stride = 0; // Will be calculated if tiled or dimensioned linear
 
 	// Determine CPU caching mode from flags
 	obj->cpu_caching = I915_CACHING_DEFAULT; // Default
@@ -300,13 +324,14 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 		obj->cpu_caching = I915_CACHING_WB;
 	}
 
-	// Determine tiling mode from flags
-	obj->tiling_mode = I915_TILING_NONE;
+	// Determine requested tiling mode from flags
+	enum i915_tiling_mode requested_tiling = I915_TILING_NONE;
 	if ((flags & I915_BO_ALLOC_TILING_MASK) == I915_BO_ALLOC_TILED_X) {
-		obj->tiling_mode = I915_TILING_X;
+		requested_tiling = I915_TILING_X;
 	} else if ((flags & I915_BO_ALLOC_TILING_MASK) == I915_BO_ALLOC_TILED_Y) {
-		obj->tiling_mode = I915_TILING_Y;
+		requested_tiling = I915_TILING_Y;
 	}
+	obj->actual_tiling_mode = I915_TILING_NONE; // Default, updated by _calculate_tile_stride_and_size
 
 	// Initialize eviction-related fields
 	if (flags & I915_BO_ALLOC_PINNED) {
@@ -321,49 +346,63 @@ intel_i915_gem_object_create(intel_i915_device_info* devInfo, size_t size,
 
 
 	// Stride and size calculation
-	obj->stride = 0; // Default for non-tiled or if calculation fails
-	if (obj->tiling_mode != I915_TILING_NONE) {
-		// CRITICAL ASSUMPTION: For this to work, 'width_px', 'height_px', and 'bpp'
-		// must be available to intel_i915_gem_object_create.
-		// This likely requires changing intel_i915_gem_create_args IOCTL structure.
-		// For now, using placeholder values if these are not passed.
-		// This is a MAJOR simplification point.
-		uint32_t temp_width_px = 1024; // Placeholder - MUST BECOME A PARAMETER
-		uint32_t temp_height_px = 768; // Placeholder - MUST BECOME A PARAMETER
-		uint32_t temp_bpp = 32;      // Placeholder - MUST BECOME A PARAMETER
+	obj->allocated_size = current_size; // Start with page-aligned initial_size
 
-		// If 'size' was originally width*height*bpp/8, we could try to infer,
-		// but width/height/bpp are needed separately for correct tiling.
-		// Example: if size = 1024*768*4, and we assume 32bpp, width=1024, height=768.
+	if (requested_tiling != I915_TILING_NONE && width_px > 0 && height_px > 0 && bits_per_pixel > 0) {
+		size_t tiled_alloc_size = 0;
+		uint32_t tiled_stride = 0;
+		status = _calculate_tile_stride_and_size(devInfo, requested_tiling,
+			width_px, height_px, bits_per_pixel,
+			&tiled_stride, &tiled_alloc_size);
 
-		size_t original_requested_size = size; // Keep the original requested size for reference if needed
-
-		status = _calculate_tile_stride_and_size(devInfo, obj->tiling_mode,
-			temp_width_px, temp_height_px, temp_bpp,
-			&obj->stride, &obj->allocated_size);
-
-		if (status != B_OK) {
-			TRACE("GEM: Failed to calculate stride/size for tiled object. Reverting to linear.\n");
-			obj->tiling_mode = I915_TILING_NONE;
-			obj->stride = ALIGN(temp_width_px * (temp_bpp / 8), 64); // Basic linear stride alignment
-			obj->allocated_size = ALIGN(obj->stride * temp_height_px, B_PAGE_SIZE);
-			if (obj->allocated_size < original_requested_size) obj->allocated_size = ALIGN(original_requested_size, B_PAGE_SIZE);
-
+		if (status == B_OK) {
+			obj->actual_tiling_mode = requested_tiling;
+			obj->stride = tiled_stride;
+			obj->allocated_size = tiled_alloc_size; // This is already page-aligned by the helper
+			// obj->size might remain initial_size or be updated to reflect logical data size if different
+			TRACE("GEM: Tiled object created: mode %d, stride %u, allocated_size %lu\n",
+				obj->actual_tiling_mode, obj->stride, obj->allocated_size);
 		} else {
-			TRACE("GEM: Tiled object: mode %d, calculated stride %u, alloc_size %lu\n",
-				obj->tiling_mode, obj->stride, obj->allocated_size);
-			// Ensure allocated_size is page aligned (already done by _calculate_tile_stride_and_size)
-			// And ensure 'size' used for area creation is this new allocated_size
-			size = obj->allocated_size; // THIS IS KEY: update 'size' for create_area
+			TRACE("GEM: Failed to calculate stride/size for requested tiling %d. Error: %s. Reverting to linear.\n",
+				requested_tiling, strerror(status));
+			obj->actual_tiling_mode = I915_TILING_NONE;
+			// Fallthrough to linear size calculation if dimensions provided, or use initial_size
 		}
-	} else {
-		// Linear buffer: Stride is typically width * bpp/8, page align size.
-		// If width/bpp known: obj->stride = ALIGN(temp_width_px * (temp_bpp / 8), 64);
-		// For now, if linear, stride might be set by display driver for framebuffer.
-		// obj->allocated_size is already 'size' which is page-aligned earlier.
-		// For generic linear BOs, stride isn't as critical until used as a 2D surface.
 	}
 
+	if (obj->actual_tiling_mode == I915_TILING_NONE) {
+		if (width_px > 0 && height_px > 0 && bits_per_pixel > 0) {
+			// Dimensioned linear buffer
+			if (bits_per_pixel % 8 != 0) {
+				TRACE("GEM: bits_per_pixel (%u) not a multiple of 8.\n", bits_per_pixel);
+				free(obj); return B_BAD_VALUE;
+			}
+			obj->stride = ALIGN(width_px * (bits_per_pixel / 8), 64); // Align linear stride to 64 bytes
+			size_t min_linear_size = (size_t)obj->stride * height_px;
+			obj->allocated_size = ALIGN(min_linear_size, B_PAGE_SIZE);
+			// Ensure allocated_size is at least what was initially requested if initial_size was larger
+			if (current_size > obj->allocated_size) {
+				obj->allocated_size = current_size;
+			}
+			// Update obj->size to reflect the logical data size for this linear buffer if it wasn't set or was smaller.
+			if (obj->size < min_linear_size) obj->size = min_linear_size;
+
+			TRACE("GEM: Linear object (dimensioned): stride %u, allocated_size %lu, logical_size %lu\n",
+				obj->stride, obj->allocated_size, obj->size);
+		} else {
+			// Undimensioned linear buffer (blob)
+			obj->stride = 0; // No meaningful stride
+			obj->allocated_size = current_size; // Already page-aligned
+			obj->size = current_size; // User explicitly asked for this size
+			if (obj->allocated_size == 0) { // Must have been from initial_size = 0 and no dimensions
+				TRACE("GEM: Cannot create zero-size undimensioned linear object.\n");
+				free(obj); return B_BAD_VALUE;
+			}
+			TRACE("GEM: Linear object (undimensioned blob): allocated_size %lu\n", obj->allocated_size);
+		}
+	}
+	// At this point, obj->allocated_size holds the final size for create_area.
+	// obj->size holds the logical size (either user's initial_size or calculated linear data size).
 
 	status = mutex_init_etc(&obj->lock, "i915 GEM object lock", MUTEX_FLAG_CLONE_NAME);
 	if (status != B_OK) { free(obj); return status; }
@@ -544,30 +583,47 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 						val_low |= FENCE_TILING_FORMAT_Y; // Bit 2 for SNB+ Y-Tile
 
 						// Y-Tile specific: Max Width and Height in tiles
-						// These require width_px, height_px, bpp from object creation.
-						// Assuming they are available or object stores them (obj->width_px, obj->height_px, obj->bpp).
-						// This is a MAJOR placeholder.
-						uint32_t temp_width_px = 1024;  // Placeholder - obj should store its dimensions
-						uint32_t temp_height_px = 768; // Placeholder
-						uint32_t temp_bpp = 32;        // Placeholder
+						// Use the actual dimensions stored in the GEM object.
+						if (obj->obj_width_px == 0 || obj->obj_height_px == 0 || obj->obj_bits_per_pixel == 0) {
+							TRACE("GEM: ERROR - Y-Tile fence programming: Object dimensions are zero (w:%u h:%u bpp:%u).\n",
+								obj->obj_width_px, obj->obj_height_px, obj->obj_bits_per_pixel);
+							intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
+						} else {
+							uint32_t bytes_per_pixel = obj->obj_bits_per_pixel / 8;
+							if (bytes_per_pixel > 0) {
+								// Width of Y-tile is 128 bytes. Height is 32 rows.
+								// These definitions should match those in _calculate_tile_stride_and_size
+								const uint32_t y_tile_width_bytes = 128;
+								const uint32_t y_tile_height_rows = 32;
 
-						uint32_t bytes_per_pixel = temp_bpp / 8;
-						if (bytes_per_pixel > 0) {
-							uint32_t width_in_y_tiles = ALIGN(temp_width_px * bytes_per_pixel, 128) / 128;
-							uint32_t height_in_y_tiles = ALIGN(temp_height_px, 32) / 32;
+								// Calculate width in tiles. The surface width for this calculation
+								// should be the actual stride of the object if it's already tile-aligned,
+								// or image_width * bpp if stride is not yet final (though it should be).
+								// Using obj->stride which should be correctly tile-aligned now.
+								uint32_t width_in_y_tiles = obj->stride / y_tile_width_bytes;
+								uint32_t height_in_y_tiles = ALIGN(obj->obj_height_px, y_tile_height_rows) / y_tile_height_rows;
 
-							if (width_in_y_tiles > 0 && height_in_y_tiles > 0) {
-								// FENCE_MAX_WIDTH_IN_TILES_MINUS_1 [31:28]
-								val_low |= ((width_in_y_tiles - 1) & 0xF) << 28;
-								// FENCE_MAX_HEIGHT_IN_TILES_MINUS_1 [11:3]
-								val_low |= ((height_in_y_tiles - 1) & 0x1FF) << 3;
+								if (width_in_y_tiles > 0 && height_in_y_tiles > 0) {
+									// FENCE_MAX_WIDTH_IN_TILES_MINUS_1 [31:28] on some gens (e.g. SNB BSpec Vol2 Pt1 p326)
+									// FENCE_MAX_HEIGHT_IN_TILES_MINUS_1 [11:3]
+									// These bit positions can vary per-GEN. Assuming SNB/IVB for now.
+									val_low |= ((width_in_y_tiles - 1) & 0xF) << 28; // Max 16 tiles wide (2048 bytes)
+									val_low |= ((height_in_y_tiles - 1) & 0x1FF) << 3; // Max 512 tiles high (16384 rows)
+									TRACE("GEM: Y-Tile Fence: w_tiles %u (val 0x%x), h_tiles %u (val 0x%x)\n",
+										width_in_y_tiles, ((width_in_y_tiles - 1) & 0xF),
+										height_in_y_tiles, ((height_in_y_tiles - 1) & 0x1FF));
+								} else {
+									TRACE("GEM: ERROR - Y-Tile calculated width/height in tiles is 0 (w_tiles:%u h_tiles:%u).\n",
+										width_in_y_tiles, height_in_y_tiles);
+									intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
+								}
 							} else {
-								TRACE("GEM: ERROR - Y-Tile width/height in tiles is 0.\n");
+								TRACE("GEM: ERROR - Y-Tile fence programming: bits_per_pixel %u is invalid.\n", obj->obj_bits_per_pixel);
 								intel_i915_fence_free(devInfo, obj->fence_reg_id); obj->fence_reg_id = -1;
 							}
 						}
 					} else { // I915_TILING_X
-						// X-Tile format bit is 0 for FENCE_TILING_FORMAT_Y field.
+						// X-Tile format bit is 0 for FENCE_TILING_FORMAT_Y field (Bit 2 on SNB+).
 						// Size for X-tiles is often implicit or handled differently (e.g. covering up to next fence).
 						// The Height/Width fields in LO DWord are for Y-tiles.
 						// For X-tiles, some gens might use part of HI dword for size, or LO dword bits [11:3].

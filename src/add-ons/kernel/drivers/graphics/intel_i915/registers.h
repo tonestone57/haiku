@@ -225,8 +225,8 @@
 	// HSW_RC_CTL_EI_MODE_ENABLE (Bit 29 in RENDER_C_STATE_CONTROL_HSW) should be added if distinct logic for HSW EI mode is needed.
 	// For now, assuming GEN6_RC_CTL_EI_MODE can be adapted or HSW uses a combined enable bit.
 	#define HSW_RC_CTL_TO_MODE_ENABLE   (1U << 30) // In RENDER_C_STATE_CONTROL_HSW, enables timeout based mode (often used by Linux for HSW RC6)
+	#define HSW_RC_CTL_EI_MODE_ENABLE   (1U << 29) // In RENDER_C_STATE_CONTROL_HSW, enables event based mode
 #define GEN6_RP_INTERRUPT_LIMITS	0xA02C
-	#define RP_INT_LIMITS_LOW_PSTATE_SHIFT  0
 	#define RP_INT_LIMITS_HIGH_PSTATE_SHIFT 16
 #define GEN6_RP_DOWN_TIMEOUT		0xA010
 #define GEN6_RP_UP_TIMEOUT			0xA014
@@ -243,9 +243,36 @@
 #define GEN6_RC6_THRESHOLD_IDLE_IVB	0xA0B0
 #define HSW_RC6_THRESHOLD_IDLE		0x138154
 
-#define GEN6_RC_EVALUATION_INTERVAL		0xA09C // Corrected from 0xA090 based on some PRMs/Linux, was RC_CONTROL_IVB
-#define GEN6_RC_IDLE_HYSTERSIS			0xA0B8 // Corrected from 0xA094 based on some PRMs/Linux, was RC_STATE_IVB
-// RING_MAX_IDLE is per-engine, e.g., GEN7_RCS_MAX_IDLE_REG (0x2078) for render
+#define GEN6_RC_EVALUATION_INTERVAL		0xA09C
+#define GEN6_RC_IDLE_HYSTERSIS			0xA0B8
+// GEN7_RCS_MAX_IDLE_REG (0x2078) for render engine max idle count is already present above.
+
+// --- Fence Register and Tiling Constants (Gen6/7) ---
+// For FENCE_REG_GEN6_LO(i) bitfields:
+// FENCE_REG_LO_VALID and FENCE_REG_LO_TILING_Y_SELECT are already defined correctly.
+// Pitch for Gen6 (SNB): (StrideInHardwareUnits - 1). Hardware unit is 128 bytes. 10-bit field [25:16].
+#define   SNB_FENCE_REG_LO_PITCH_SHIFT            16
+#define   SNB_FENCE_REG_LO_PITCH_MASK             (0x3FFU << SNB_FENCE_REG_LO_PITCH_SHIFT)
+#define   SNB_FENCE_MAX_PITCH_HW_VALUE            0x3FF // Max value for 10-bit field (1023)
+// Pitch for Gen7 (IVB/HSW): (StrideInHardwareUnits - 1). Hardware unit is 128 bytes. 12-bit field [27:16].
+#define   IVB_HSW_FENCE_REG_LO_PITCH_SHIFT        16
+#define   IVB_HSW_FENCE_REG_LO_PITCH_MASK         (0xFFFU << IVB_HSW_FENCE_REG_LO_PITCH_SHIFT)
+#define   IVB_HSW_FENCE_MAX_PITCH_HW_VALUE        0xFFF // Max value for 12-bit field (4095)
+#define   GEN6_7_FENCE_PITCH_UNIT_BYTES           128
+
+// Max Valid Tile X Address for Y-Tiled surfaces on Gen6/7: (WidthInYTiles - 1)
+// WidthInYTiles = StrideInBytes / 128B_YTileWidth. Field is 4 bits [31:28] for IVB/HSW.
+// FENCE_REG_LO_MAX_WIDTH_TILES_SHIFT_IVB_HSW and _MASK_IVB_HSW are already defined correctly.
+
+// For FENCE_REG_GEN6_HI(i) bitfields:
+// FENCE_REG_HI_GTT_ADDR_39_32_SHIFT and _MASK are already defined correctly.
+
+// Tile Geometry Constants (Gen6/7)
+#define GEN6_7_XTILE_WIDTH_BYTES 512
+#define GEN6_7_XTILE_HEIGHT_ROWS 8
+#define GEN6_7_YTILE_WIDTH_BYTES 128
+#define GEN6_7_YTILE_HEIGHT_ROWS 32
+// --- End of Fence and Tiling Constants ---
 
 // Forcewake Registers (Gen6/7 - IVB, HSW)
 // Note: Newer Gens (Gen8+) have per-engine forcewake registers.

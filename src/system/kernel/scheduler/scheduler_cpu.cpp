@@ -886,19 +886,23 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	// Remove from old heap (if it was in one).
 	if (this->GetMinMaxHeapLink()->fIndex != -1) {
 		// TODO: MinMaxHeap does not have a generic Remove(Element*).
-		// This logic needs redesign or MinMaxHeap needs a Remove method.
-		// The following lines would cause errors.
+		// This logic needs redesign or MinMaxHeap needs a proper Remove method.
+		// The original code attempted to remove 'this' (CoreEntry) here.
+		// Without a generic Remove, 'this' element might remain in the old heap (orphaned)
+		// or the subsequent Insert call might fail if the heap asserts on fIndex
+		// (MinMaxHeap::Insert asserts link->fIndex == -1).
+		// For now, the problematic .Remove(this) calls remain commented out.
 		// if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 		// else gCoreLoadHeap.Remove(this);
 
-		// As a temporary workaround, explicitly clear fIndex, so it *appears*
-		// removed for the subsequent Insert. This is NOT a correct fix for heap integrity
-		// but prevents errors with the Insert calls if the element was already in a heap.
-		// The element will be orphaned in its original heap.
-		this->GetMinMaxHeapLink()->fIndex = -1;
+		// NOTE: Removing the fIndex = -1 workaround. If 'this' was in a heap
+		// and not properly removed, the Insert below might fail or lead to duplicates/corruption.
+		// This makes the lack of a proper Remove more evident.
 	}
 
 	// Insert into the appropriate new heap based on the updated fLoad.
+	// This Insert will likely fail an assertion if the element was already in a heap
+	// and not properly removed above (due to fIndex != -1).
 	if (fLoad > kHighLoad) {
 		gCoreHighLoadHeap.Insert(this, fLoad);
 		fHighLoad = true;

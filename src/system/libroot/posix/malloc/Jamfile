@@ -36,11 +36,18 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 				# Optional: -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="random_pagemap"
 			;
 
+			# Compile snmalloc_hooks.cpp with its specific flags into an intermediate object
 			# snmalloc_hooks.cpp is in the same directory as this Jamfile ($(SUBDIR))
-			MergeObject <$(architecture)>posix_malloc.o :
-				snmalloc_hooks.cpp
-				: # Target specific flags
+			# UsePrivateSystemHeaders (called earlier) should provide Haiku kit includes.
+			Object <$(architecture)>snmalloc_hooks.o : # Intermediate object name
+				snmalloc_hooks.cpp                 # Source file (relative to this Jamfile)
+				: # Action flags for this specific Object rule
 				$(snmallocTargetFlags)
+			;
+
+			# Merge the specifically compiled object into the final target name
+			MergeObject <$(architecture)>posix_malloc.o :
+				<$(architecture)>snmalloc_hooks.o // Use the intermediate object
 			;
 
 		} else if $(HAIKU_LIBROOT_ALLOCATOR) = hoard2 {

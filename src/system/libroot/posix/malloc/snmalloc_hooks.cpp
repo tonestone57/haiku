@@ -7,7 +7,7 @@
  */
 
 #include <pthread.h> // For pthread_once
-#include <kits/support/TLS.h>    // For Haiku's TLS (tls_set, tls_get)
+#include <support/TLS.h>    // For Haiku's TLS (tls_set, tls_get)
 
 // Define the PAL type *before* including core snmalloc headers that might use it.
 // This PALHaikuUser should be defined in "snmalloc/pal_haiku_user.h"

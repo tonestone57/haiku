@@ -276,19 +276,36 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	if (core->GetLoad() > 0 || core->GetActiveTime() > 0)
+	// thread_load_estimate is threadData->GetLoad() (i.e., fNeededLoad).
+	// For newly created threads that don't inherit load from a parent, this
+	// defaults to kMaxLoad / 10 (10% of max load). See ThreadData::Init().
+	// The accuracy of this initial estimate for new threads can influence
+	// the first few core waking decisions. However, fNeededLoad adapts as the
+	// thread runs.
+
+	if (core->GetLoad() > 0 || core->GetActiveTime() > 0) {
+		// The core is already active (has some load or has been active recently),
+		// so no "waking" is needed in a power sense. It's okay to use it.
 		return true;
+	}
 
 	CoreEntry* consolidationTarget = sSmallTaskCore;
 
 	if (consolidationTarget != NULL && consolidationTarget != core) {
+		// A different core is designated for consolidation.
+		// If that consolidation core has capacity for this thread's estimated load
+		// without exceeding kVeryHighLoad, prefer using it instead of waking `core`.
 		if (consolidationTarget->GetLoad() + thread_load_estimate < kVeryHighLoad) {
 			return false;
 		}
 	} else if (consolidationTarget == core) {
+		// The core being considered for waking *is* the consolidation target.
+		// It's okay to wake it.
 		return true;
 	}
 
+	// No suitable consolidation target, or it's full.
+	// Check other active cores before deciding to wake this idle `core`.
 	int32 activeCoreCount = 0;
 	int32 overloadedActiveCoreCount = 0;
 	for(int32 i=0; i < gCoreCount; ++i) {

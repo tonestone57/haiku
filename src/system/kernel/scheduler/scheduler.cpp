@@ -194,11 +194,11 @@ enqueue_thread_on_cpu(Thread* thread, CPUEntry* cpu, CoreEntry* core, bool newTh
 	SCHEDULER_ENTER_FUNCTION();
 	ThreadData* threadData = thread->scheduler_data;
 	int mlfqLevel = threadData->CurrentMLFQLevel();
-	int32 sortPriority = threadData->GetEffectivePriority();
+	// int32 sortPriority = threadData->GetEffectivePriority(); // Unused variable
 
-	T(EnqueueThread(thread, sortPriority));
+	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
 	TRACE("enqueue_thread_on_cpu: thread %" B_PRId32 " (level %d, prio %" B_PRId32 ") onto CPU %" B_PRId32 "\n",
-		thread->id, mlfqLevel, sortPriority, cpu->ID());
+		thread->id, mlfqLevel, threadData->GetEffectivePriority(), cpu->ID());
 
 	cpu->LockRunQueue();
 	cpu->AddThread(threadData, mlfqLevel, false);
@@ -1387,7 +1387,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		// SMT penalty is only applied when we prefer the *least* busy CPU,
 		// as it makes busy SMT siblings less attractive.
 		if (!preferBusiest && core->CPUCount() > 1) {
-			CPUSet siblings = gCPU[currentCPU->ID()].sibling_cpus;
+			CPUSet siblings = gCPU[currentCPU->ID()].arch.sibling_cpus;
 			siblings.ClearBit(currentCPU->ID());
 			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 				if (siblings.GetBit(k) && !gCPU[k].disabled) {

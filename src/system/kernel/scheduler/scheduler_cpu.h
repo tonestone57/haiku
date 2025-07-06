@@ -501,6 +501,8 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 		// All cores in this package are now idle.
 		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
+		// gIdlePackageList.Contains() is O(N_idle_packages). This is acceptable
+		// as N_idle_packages is expected to be very small.
 		if (!gIdlePackageList.Contains(this)) // Check if THIS package instance is already linked
 			gIdlePackageList.Add(this); // Add this package to global idle list.
 	}

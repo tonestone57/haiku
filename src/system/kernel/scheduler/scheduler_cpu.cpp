@@ -46,12 +46,12 @@ public:
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 
 private:
-	struct CoreThreadsData {
-			CoreEntry*	fCore;
-			int32		fLoad;
-	};
+	// struct CoreThreadsData { // Unused
+	// 		CoreEntry*	fCore; // Unused
+	// 		int32		fLoad; // Unused
+	// }; // Unused
 
-	static	void		_AnalyzeCoreThreads(Thread* thread, void* data);
+	// static	void		_AnalyzeCoreThreads(Thread* thread, void* data); // Unused
 };
 
 
@@ -1185,15 +1185,15 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 }
 
 
-/* static */ void
-DebugDumper::_AnalyzeCoreThreads(Thread* thread, void* data)
-{
-	CoreThreadsData* threadsData = static_cast<CoreThreadsData*>(data);
-	if (thread->scheduler_data != NULL && thread->scheduler_data->Core() == threadsData->fCore) {
-		// This function seems incomplete or was for a different purpose.
-		// If it's meant to sum load, it should do: threadsData->fLoad += thread->scheduler_data->GetLoad();
-	}
-}
+// /* static */ void
+// DebugDumper::_AnalyzeCoreThreads(Thread* thread, void* data)
+// {
+// 	CoreThreadsData* threadsData = static_cast<CoreThreadsData*>(data);
+// 	if (thread->scheduler_data != NULL && thread->scheduler_data->Core() == threadsData->fCore) {
+// 		// This function seems incomplete or was for a different purpose.
+// 		// If it's meant to sum load, it should do: threadsData->fLoad += thread->scheduler_data->GetLoad();
+// 	}
+// }
 
 
 static int

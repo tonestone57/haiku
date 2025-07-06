@@ -1207,6 +1207,12 @@ scheduler_enable_scheduling()
 void
 scheduler_update_policy()
 {
+	// Check if CPU performance scaling (cpufreq) is available and functional.
+	// increase_cpu_performance(0) is used as a proxy: if it returns B_OK,
+	// it implies the cpufreq infrastructure is present. If cpufreq is available,
+	// more detailed CPU load tracking (gTrackCPULoad) is enabled, as cpufreq
+	// is a primary consumer of this information for making scaling decisions.
+	// If cpufreq is not available, fine-grained CPU load tracking might be less critical.
 	gTrackCPULoad = increase_cpu_performance(0) == B_OK;
 	gTrackCoreLoad = !gSingleCore || gTrackCPULoad;
 	dprintf("scheduler switches: single core: %s, cpu load tracking: %s,"

@@ -32,6 +32,8 @@ if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
     # Pass a define to kernel build to indicate snmalloc is used,
     # if any C++ code elsewhere in the kernel needs to know.
     allocatorDefines = -DKERNEL_ALLOCATOR_SNMALLOC ;
+    # Add snmalloc hardening flags
+    allocatorDefines += -DSNMALLOC_CHECK_CLIENT=1 -DSNMALLOC_PAGEID=1 ;
     SubDirC++Flags $(SubDirC++Flags) $(allocatorDefines) ;
 
 } else {

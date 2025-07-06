@@ -27,7 +27,8 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			# Add a specific define to tell snmalloc_hooks.cpp or snmalloc core
 			# if it's being built for userland with this specific PAL.
 			# This might also inform which snmalloc configuration to use.
-			SubDirC++Flags -DLIBC_MALLOC_SNMALLOC_Hooks ;
+			# Also add snmalloc hardening flags.
+			SubDirC++Flags -DLIBC_MALLOC_SNMALLOC_Hooks -DSNMALLOC_CHECK_CLIENT=1 -DSNMALLOC_PAGEID=1 ;
 
 
 			# snmalloc is largely header-only for its core logic.

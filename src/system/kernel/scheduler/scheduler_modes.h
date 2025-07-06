@@ -27,6 +27,12 @@ struct scheduler_mode_operations {
 
 	void					(*switch_to_mode)();
 	void					(*set_cpu_enabled)(int32 cpu, bool enabled);
+	// Determines if a thread's presumed cache affinity with its previous core
+	// should be considered "expired" or "cold". If true, the scheduler may
+	// be more inclined to choose a different core for the thread based on
+	// current load or other policies, rather than prioritizing the previous core
+	// for cache warmth. Mode-specific heuristics (e.g., time since last run,
+	// activity on the previous core) are used.
 	bool					(*has_cache_expired)(
 								const Scheduler::ThreadData* threadData);
 	Scheduler::CoreEntry*	(*choose_core)( // For initial thread placement

@@ -473,6 +473,8 @@ typedef struct intel_i915_device_info {
 	// (which should define struct intel_i915_gem_object).
 	// The list_node for LRU is in intel_i915_gem_object itself.
 
+	struct intel_i915_gem_object* framebuffer_bo; // Primary scanout framebuffer GEM object
+
 } intel_i915_device_info;
 
 

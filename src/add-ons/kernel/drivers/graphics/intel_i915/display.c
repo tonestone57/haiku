@@ -31,6 +31,33 @@ static uint32 get_dspcntr_format_bits(color_space f) { /* ... */ return DISPPLAN
 static status_t intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 	const display_mode* mode, enum pipe_id_priv targetPipe, enum intel_port_id_priv targetPortId);
 
+static uint32_t
+get_bpp_from_colorspace(color_space cs)
+{
+	switch (cs) {
+		case B_RGB32_LITTLE:
+		case B_RGBA32_LITTLE:
+		case B_RGB32_BIG:
+		case B_RGBA32_BIG:
+		// B_RGB24_BIG is often handled as 32bpp with padding by hardware/drivers
+		case B_RGB24_BIG:
+			return 32;
+		case B_RGB16_LITTLE:
+		case B_RGB16_BIG:
+			return 16;
+		case B_RGB15_LITTLE:
+		case B_RGBA15_LITTLE:
+		case B_RGB15_BIG:
+		case B_RGBA15_BIG:
+			return 16; // Treat 15bpp as 16bpp for allocation and stride
+		case B_CMAP8:
+			return 8;
+		default:
+			TRACE("DISPLAY: get_bpp_from_colorspace: Unknown color_space %d, defaulting to 32 bpp.\n", cs);
+			return 32;
+	}
+}
+
 // Helper to check if a mode already exists in a list
 static bool mode_already_in_list(const display_mode* mode, const display_mode* list, int count) {
 	for (int i = 0; i < count; i++) {
@@ -223,28 +250,98 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 		devInfo->pipes[targetPipe].enabled = false;
 	}
 
-	// --- Framebuffer Setup (No MMIO, GTT mapping handles its own FW if needed for flush) ---
-	// This section is responsible for creating/configuring devInfo->framebuffer_bo
-	// Ensure it's created with I915_BO_ALLOC_PINNED and I915_BO_ALLOC_CACHING_WC.
-	// Example conceptual creation:
-	// if (devInfo->framebuffer_bo == NULL || devInfo->framebuffer_bo->size < new_fb_size) {
-	//    if (devInfo->framebuffer_bo) { /* unmap and put old bo */ }
-	//    uint32_t fb_flags = I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED | I915_BO_ALLOC_CACHING_WC;
-	//    // Add tiling flags if framebuffer should be tiled
-	//    // if (enable_fb_tiling) fb_flags |= I915_BO_ALLOC_TILED_X;
-	//    status = intel_i915_gem_object_create(devInfo, new_fb_size, fb_flags, &devInfo->framebuffer_bo);
-	//    if (status != B_OK) goto modeset_fail_fw;
-	//    // Stride for framebuffer_bo must be correctly calculated here by gem_object_create or display driver
-	//    // and area created. Then GTT map it.
-	// }
-	// The existing code for framebuffer area creation and GTT mapping follows...
-	// Assume new_bytes_per_row holds the correct hardware stride (linear or tiled).
-	/* ... (existing framebuffer area logic, then GTT map using fb_gtt_cache_type) ... */
-	// After GTT mapping:
-	// devInfo->shared_info->framebuffer_physical = devInfo->framebuffer_bo->phys_pages_list[0]; // If needed by accelerant directly
-	// devInfo->framebuffer_phys_addr = devInfo->framebuffer_bo->phys_pages_list[0]; // For shared info
-	// devInfo->framebuffer_gtt_offset = devInfo->framebuffer_bo->gtt_offset_pages;
+	// --- Framebuffer Setup ---
+	uint32_t fb_width_px = mode->virtual_width;
+	uint32_t fb_height_px = mode->virtual_height;
+	uint32_t fb_bpp = get_bpp_from_colorspace(mode->space);
 
+	if (fb_bpp == 0 || (fb_bpp % 8 != 0)) {
+		status = B_BAD_VALUE; TRACE("Modeset: Invalid BPP %u from colorspace %u.\n", fb_bpp, mode->space);
+		goto modeset_fail_fw;
+	}
+
+	// For primary scanout, X-tiling is preferred on Gen6+
+	// Framebuffer must be pinned and should be cleared. WC caching is often good for CPU writes.
+	uint32_t fb_gem_flags = I915_BO_ALLOC_TILED_X
+		| I915_BO_ALLOC_CACHING_WC
+		| I915_BO_ALLOC_PINNED
+		| I915_BO_ALLOC_CPU_CLEAR;
+
+	// If a framebuffer GEM object already exists, release it.
+	// A more optimized approach might check if existing BO can be reused if dimensions/tiling match.
+	// For now, always recreate to ensure correct properties for the new mode.
+	if (devInfo->framebuffer_bo != NULL) {
+		TRACE("Modeset: Releasing old framebuffer_bo (area %" B_PRId32 ").\n",
+			devInfo->framebuffer_bo->backing_store_area);
+		// If the framebuffer was mapped to a fixed GTT offset (like devInfo->framebuffer_gtt_offset, often 0),
+		// that mapping needs to be undone before the object is fully released, so the GTT entries
+		// point to the scratch page. intel_i915_gem_object_put calls unmap_gtt which handles this.
+		intel_i915_gem_object_put(devInfo->framebuffer_bo);
+		devInfo->framebuffer_bo = NULL;
+	}
+	// Reset fields that will be repopulated by the new BO, or may become invalid if BO creation fails.
+	devInfo->framebuffer_addr = NULL;
+	devInfo->framebuffer_phys_addr = 0;
+	devInfo->framebuffer_alloc_size = 0;
+	devInfo->framebuffer_area = -1; // Will be set from the new BO's backing_store_area
+
+	TRACE("Modeset: Creating new framebuffer_bo: %ux%u %ubpp, flags 0x%lx\n",
+		fb_width_px, fb_height_px, fb_bpp, fb_gem_flags);
+
+	// Pass 0 for initial_size, dimensions will dictate the actual size.
+	status = intel_i915_gem_object_create(devInfo, 0 /*initial_size*/, fb_gem_flags,
+		fb_width_px, fb_height_px, fb_bpp, &devInfo->framebuffer_bo);
+	if (status != B_OK) {
+		TRACE("Modeset: Failed to create framebuffer GEM object: %s\n", strerror(status));
+		devInfo->framebuffer_bo = NULL; // Ensure it's NULL on failure
+		goto modeset_fail_fw;
+	}
+
+	// Store new framebuffer properties from the GEM object
+	devInfo->framebuffer_addr = devInfo->framebuffer_bo->kernel_virtual_address;
+	devInfo->framebuffer_phys_addr = (devInfo->framebuffer_bo->num_phys_pages > 0)
+		? devInfo->framebuffer_bo->phys_pages_list[0] : 0;
+	devInfo->framebuffer_alloc_size = devInfo->framebuffer_bo->allocated_size;
+	devInfo->framebuffer_area = devInfo->framebuffer_bo->backing_store_area;
+
+	// Map the new framebuffer to its GTT offset.
+	// The primary plane programming uses devInfo->framebuffer_gtt_offset,
+	// which is assumed to be a fixed GTT offset for the primary framebuffer (e.g., page 0 after scratch).
+	// If devInfo->framebuffer_gtt_offset was dynamic, it would be allocated here.
+	// For now, assume it's fixed (e.g., 0, or just after scratch page if that's how it's set up).
+	// Let's define a fixed GTT page offset for the framebuffer for now, e.g., page 1 (after scratch page at 0).
+	// This needs to be coordinated with GTT init and plane programming.
+	// A common approach is framebuffer at GTT offset 0 for simplicity if scratch page is handled differently or not at 0.
+	// If devInfo->scratch_page_gtt_offset is always 0 (as it is), then FB cannot also be at 0.
+	// For now, let's assume devInfo->framebuffer_gtt_offset will be set to a valid, pre-determined
+	// GTT page offset for the scanout framebuffer (e.g., 0 or 1).
+	// If it's still (uint32_t)-1 from init, it means it wasn't assigned a fixed offset.
+	// This part of the logic (assigning GTT offset for framebuffer) needs to be robust.
+	// Let's assume devInfo->framebuffer_gtt_offset is set to a valid fixed GTT page index for the framebuffer
+	// during driver init if a fixed mapping is used, e.g. devInfo->framebuffer_gtt_offset = 1; (page index)
+	// For this example, let's assume it's already set in devInfo. If not, an error.
+	if (devInfo->framebuffer_gtt_offset == (uint32_t)-1) {
+		// This indicates an issue in setup, as the FB needs a known GTT offset for scanout.
+		TRACE("Modeset: Framebuffer GTT offset (devInfo->framebuffer_gtt_offset) is not pre-determined. Cannot map.\n");
+		status = B_ERROR; goto modeset_fail_fb_bo_created; // New label
+	}
+
+	TRACE("Modeset: Mapping framebuffer_bo to GTT page offset %u.\n", devInfo->framebuffer_gtt_offset);
+	status = intel_i915_gem_object_map_gtt(devInfo->framebuffer_bo,
+		devInfo->framebuffer_gtt_offset, /* GTT Page Offset */
+		fb_gtt_cache_type);
+	if (status != B_OK) {
+		TRACE("Modeset: Failed to map framebuffer GEM object to GTT: %s\n", strerror(status));
+		goto modeset_fail_fb_bo_created; // New label
+	}
+
+	// This new_bytes_per_row will be used for plane configuration. It must be the hardware stride.
+	uint32_t new_bytes_per_row = devInfo->framebuffer_bo->stride;
+	if (new_bytes_per_row == 0) {
+		// This should not happen if GEM object creation was successful for a dimensioned buffer.
+		TRACE("Modeset: ERROR - framebuffer_bo has zero stride after creation!\n");
+		status = B_ERROR; goto modeset_fail_fb_gtt_mapped; // New label
+	}
 
 	// --- Program Hardware for New Mode ---
 	// Forcewake is already held from the top of this function.
@@ -317,21 +414,37 @@ intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo,
 
 	// Update shared info with the new mode details
 	devInfo->shared_info->current_mode = *mode;
-	devInfo->shared_info->bytes_per_row = new_bytes_per_row; // This must be the hardware stride
-	devInfo->shared_info->framebuffer_size = devInfo->framebuffer_alloc_size;
-	devInfo->shared_info->framebuffer_physical = devInfo->framebuffer_phys_addr; // This is physical system memory address
-	                                                                           // The GTT offset is devInfo->framebuffer_gtt_offset
-	// Populate tiling mode for the framebuffer into shared_info
-	if (devInfo->framebuffer_bo != NULL) { // Assuming framebuffer_bo is the GEM object for the FB
-		devInfo->shared_info->fb_tiling_mode = devInfo->framebuffer_bo->tiling_mode;
-		// Ensure bytes_per_row in shared_info IS the object's actual hardware stride
-		if (devInfo->framebuffer_bo->stride != 0) {
-			devInfo->shared_info->bytes_per_row = devInfo->framebuffer_bo->stride;
-		} else if (devInfo->framebuffer_bo->tiling_mode != I915_TILING_NONE) {
-			// This case should ideally not happen if stride calculation is robust.
-			TRACE("Display: WARNING - Framebuffer is tiled but stride is 0 in GEM object! Using linear bpr for shared_info.\n");
+
+	if (devInfo->framebuffer_bo != NULL) {
+		devInfo->shared_info->bytes_per_row = devInfo->framebuffer_bo->stride;
+		devInfo->shared_info->framebuffer_size = devInfo->framebuffer_bo->allocated_size;
+		devInfo->shared_info->framebuffer_physical = (devInfo->framebuffer_bo->num_phys_pages > 0)
+			? devInfo->framebuffer_bo->phys_pages_list[0] : 0;
+		devInfo->shared_info->framebuffer_area = devInfo->framebuffer_bo->backing_store_area;
+		devInfo->shared_info->fb_tiling_mode = devInfo->framebuffer_bo->actual_tiling_mode;
+
+		// Sanity check for stride, as it's critical for userspace.
+		if (devInfo->framebuffer_bo->stride == 0 && devInfo->framebuffer_bo->actual_tiling_mode != I915_TILING_NONE) {
+			TRACE("DISPLAY: WARNING - Tiled framebuffer_bo has zero stride in shared_info setup!\n");
 		}
+		if (devInfo->framebuffer_bo->stride == 0 && fb_width_px > 0 && fb_bpp > 0) {
+			// Fallback for linear if stride somehow ended up 0 but we have dimensions
+			// This case should ideally be fully handled by GEM object creation logic.
+			if (devInfo->framebuffer_bo->actual_tiling_mode == I915_TILING_NONE) {
+				devInfo->shared_info->bytes_per_row = ALIGN(fb_width_px * (fb_bpp / 8), 64);
+				TRACE("DISPLAY: WARNING - Linear framebuffer_bo has zero stride, calculated %u for shared_info.\n",
+					devInfo->shared_info->bytes_per_row);
+			}
+		}
+
 	} else {
+		// This case should ideally not be reached if framebuffer_bo creation was successful.
+		// If it failed, shared_info might contain stale or zeroed data.
+		TRACE("DISPLAY: WARNING - framebuffer_bo is NULL during shared_info population!\n");
+		devInfo->shared_info->bytes_per_row = new_bytes_per_row; // From local calculation, might be inaccurate if BO failed
+		devInfo->shared_info->framebuffer_size = 0;
+		devInfo->shared_info->framebuffer_physical = 0;
+		devInfo->shared_info->framebuffer_area = -1;
 		devInfo->shared_info->fb_tiling_mode = I915_TILING_NONE;
 	}
 

@@ -167,6 +167,13 @@ extern "C" status_t init_driver(void) {
 		gDeviceInfo[gDeviceCount]->gtt_mmio_aperture_size = info.u.h0.base_register_sizes[2];
 		gDeviceInfo[gDeviceCount]->rcs0 = NULL;
 		gDeviceInfo[gDeviceCount]->rps_state = NULL;
+		gDeviceInfo[gDeviceCount]->framebuffer_bo = NULL; // Initialize new framebuffer_bo field
+		// Initialize framebuffer_gtt_offset.
+		// GTT page 0 is reserved for the scratch page (see intel_i915_gtt_init in gtt.c).
+		// The primary display framebuffer will typically start at GTT page 1.
+		// This is a fixed offset. If dynamic GTT allocation for the framebuffer
+		// were desired, this would be set to (uint32_t)-1 and allocated during modeset.
+		gDeviceInfo[gDeviceCount]->framebuffer_gtt_offset = 1; // Page index
 		for (int k = 0; k < PRIV_MAX_PIPES; k++) {
 			gDeviceInfo[gDeviceCount]->cursor_bo[k] = NULL;
 			gDeviceInfo[gDeviceCount]->cursor_gtt_offset_pages[k] = 0;
@@ -300,6 +307,12 @@ static status_t intel_i915_free(void* cookie) {
 			intel_i915_gem_object_put(devInfo->cursor_bo[k]);
 			devInfo->cursor_bo[k] = NULL;
 		}
+	}
+
+	// Cleanup framebuffer BO
+	if (devInfo->framebuffer_bo != NULL) {
+		intel_i915_gem_object_put(devInfo->framebuffer_bo);
+		devInfo->framebuffer_bo = NULL;
 	}
 
 	intel_i915_gtt_cleanup(devInfo);

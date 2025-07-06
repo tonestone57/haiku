@@ -311,11 +311,15 @@ low_latency_rebalance_irqs(bool idle)
 		TRACE("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
 
-		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
-		// Assuming success, see comment in power_saving.cpp for details.
-		movedCount++; // Assuming move was successful for accounting.
-		TRACE("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 " (assuming success)\n", chosenIRQ->irq, targetCPU->ID());
+		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		if (status == B_OK) {
+			movedCount++;
+			TRACE("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+		} else {
+			TRACE("low_latency_rebalance_irqs: Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
+				chosenIRQ->irq, targetCPU->ID(), strerror(status));
 		}
+		// Continue to next candidate even if one fails, up to kMaxIRQsToMovePerCycleLL attempts
 		if (movedCount >= kMaxIRQsToMovePerCycleLL)
 			break;
 	}

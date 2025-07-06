@@ -1166,13 +1166,17 @@ scheduler_irq_balance_event(timer* /* unused */)
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
 				TRACE("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
-				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
-				// Assuming success, see comment in power_saving.cpp for details.
-				// The original code did check B_OK, implying it might have returned status.
-				// This change assumes the function now handles its own errors or always succeeds.
-				// If assign_io_interrupt_to_cpu can fail and that failure needs handling,
-				// this is a TODO.
-				TRACE("Proactive IRQ: Move initiated for IRQ %d (assuming success).\n", irqToMove->irq);
+				status_t status = assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+				if (status == B_OK) {
+					TRACE("Proactive IRQ: Successfully moved IRQ %d to CPU %" B_PRId32 ".\n",
+						irqToMove->irq, finalTargetCpu->ID());
+				} else {
+					TRACE("Proactive IRQ: Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
+						irqToMove->irq, finalTargetCpu->ID(), strerror(status));
+					// Optionally, consider if the IRQ should be re-added to a candidate list
+					// or if the failure implies it cannot be moved from sourceCpuMaxIrq.
+					// For now, just trace the error.
+				}
 			} else {
 				TRACE("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
 					irqToMove->irq, targetCore->ID());

@@ -591,7 +591,11 @@ power_saving_rebalance_irqs(bool idle)
 				if (specificTargetCPU != NULL) {
 					TRACE("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 						irq->irq, irq->load, current_cpu_struct->cpu_num, specificTargetCPU->ID());
-					assign_io_interrupt_to_cpu(irq->irq, specificTargetCPU->ID());
+				status_t status = assign_io_interrupt_to_cpu(irq->irq, specificTargetCPU->ID());
+				if (status != B_OK) {
+					TRACE("power_saving_rebalance_irqs (pack): Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
+						irq->irq, specificTargetCPU->ID(), strerror(status));
+				}
 				} else {
 					TRACE("power_saving_rebalance_irqs (pack): Consolidation Core %" B_PRId32 " has no CPU with capacity for IRQ %d. IRQ remains.\n",
 						consolidationCore->ID(), irq->irq);
@@ -678,15 +682,15 @@ power_saving_rebalance_irqs(bool idle)
 		TRACE("power_saving_rebalance_irqs (general): Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
 
-		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
-		// Assuming success if function returns, or it handles errors internally.
-		// The original status check is removed. If error checking is vital,
-		// assign_io_interrupt_to_cpu would need to be changed to return status again,
-		// or provide another way to check outcome. For now, removing the check.
-		// Consider this a TODO if assign_io_interrupt_to_cpu can fail silently.
-		movedCount++; // Assuming move was successful for accounting.
-		TRACE("power_saving_rebalance_irqs (general): Successfully moved IRQ %d to CPU %" B_PRId32 " (assuming success)\n", chosenIRQ->irq, targetCPU->ID());
+		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		if (status == B_OK) {
+			movedCount++;
+			TRACE("power_saving_rebalance_irqs (general): Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+		} else {
+			TRACE("power_saving_rebalance_irqs (general): Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
+				chosenIRQ->irq, targetCPU->ID(), strerror(status));
 		}
+		// Continue to next candidate even if one fails, up to kMaxIRQsToMovePerCyclePS attempts
 		if (movedCount >= kMaxIRQsToMovePerCyclePS)
 			break;
 	}

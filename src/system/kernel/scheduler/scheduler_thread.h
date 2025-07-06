@@ -24,6 +24,10 @@ struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData>,
 private:
 	inline	void		_InitBase();
 
+	// Returns a calculated minimal priority, used as a floor for non-real-time threads.
+	// This ensures that even with penalties (historically) or other adjustments,
+	// the effective priority doesn't drop below a system-defined active threshold.
+	// Called by _ComputeEffectivePriority().
 	inline	int32		_GetMinimalPriority() const;
 
 	inline	CoreEntry*	_ChooseCore() const;

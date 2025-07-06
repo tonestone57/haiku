@@ -20,6 +20,92 @@
 #include "RunQueue.h"
 
 
+// Kernel Scheduler Load Metrics Overview:
+// The scheduler uses several metrics to gauge CPU, core, and thread load.
+// Understanding these is key to understanding scheduling decisions.
+//
+// 1. CPUEntry::fLoad (defined in scheduler_cpu.h)
+//    - Purpose: Represents the historical, longer-term measure of a specific
+//      CPU's utilization by actual thread execution (non-idle time).
+//    - Calculation: Based on `compute_load()` (see <load_tracking.h>), which
+//      typically uses `fMeasureActiveTime` (accumulated active time of threads
+//      on this CPU) versus `fMeasureTime` (wall time over which fMeasureActiveTime
+//      was accumulated). Scaled to `kMaxLoad`.
+//    - Timescale: Longer-term than fInstantaneousLoad.
+//    - Usage: Primarily contributes to `CoreEntry::fLoad` for core-level balancing.
+//
+// 2. CPUEntry::fInstantaneousLoad (defined in scheduler_cpu.h)
+//    - Purpose: A responsive, Exponentially Weighted Moving Average (EWMA) of
+//      a CPU's very recent activity (idle vs. non-idle proportion of time).
+//    - Calculation: EWMA with `kInstantLoadEWMAAlpha` (0.4f), updated after
+//      each thread runs or periodically when idle.
+//      `new_load = (alpha * current_sample) + ((1-alpha) * old_load)`.
+//    - Timescale: Very recent / short-term.
+//    - Usage:
+//      - Dynamic Time Quantum (DTQ) calculation in `ThreadData::CalculateDynamicQuantum()`:
+//        Higher load leads to smaller quantum extensions.
+//      - IRQ Placement Scoring in `Scheduler::SelectTargetCPUForIRQ()`:
+//        Contributes to the `threadEffectiveLoad` part of the score.
+//      - CPU Frequency Scaling via `CPUEntry::_RequestPerformanceLevel()`.
+//      - Contributes to `CoreEntry::fInstantaneousLoad`.
+//
+// 3. CoreEntry::fLoad (defined in scheduler_cpu.h)
+//    - Purpose: Average historical thread execution load across all enabled
+//      CPUs belonging to this physical core.
+//    - Calculation: Average of `fLoad` from its constituent enabled `CPUEntry`s.
+//      Updated by `CoreEntry::_UpdateLoad()`.
+//    - Timescale: Longer-term, reflecting overall core business.
+//    - Usage:
+//      - Key for placing `CoreEntry` objects in `gCoreLoadHeap` / `gCoreHighLoadHeap`,
+//        driving core-level load balancing decisions.
+//      - Checked against thresholds (e.g., `kVeryHighLoad`) in Power Saving mode
+//        for consolidation core suitability (`power_saving_get_consolidation_target_core`).
+//
+// 4. CoreEntry::fInstantaneousLoad (defined in scheduler_cpu.h)
+//    - Purpose: Average recent activity (EWMA) across all enabled CPUs of this core.
+//    - Calculation: Average of `fInstantaneousLoad` from its `CPUEntry`s.
+//    - Timescale: Short-term.
+//    - Usage: Currently calculated but not heavily used in major scheduling
+//      decisions visible in `scheduler.cpp` or mode files. Available for future
+//      use or more fine-grained decisions by scheduler modes if needed.
+//
+// 5. ThreadData::fNeededLoad (defined in scheduler_thread.h)
+//    - Purpose: An EWMA representing a thread's typical CPU consumption demand
+//      when it runs, scaled to `kMaxLoad`.
+//    - Calculation: EWMA (alpha 0.5f) based on the thread's own ratio of
+//      `fMeasureAvailableActiveTime` to `fMeasureAvailableTime` (its run time
+//      vs. its ready/running wall time).
+//    - Timescale: Reflects the thread's own recent behavior.
+//    - Usage:
+//      - Contributes to `CoreEntry::fCurrentLoad` when a thread is homed to a core.
+//      - Used as `thread_load_estimate` in Power Saving mode's
+//        `power_saving_should_wake_core_for_load()` and `power_saving_choose_core()`.
+//
+// 6. CoreEntry::fCurrentLoad (defined in scheduler_cpu.h)
+//    - Purpose: The sum of `fNeededLoad` for all threads currently considering
+//      this core their primary core (i.e., `threadData->fCore == thisCore` and
+//      thread is ready/running).
+//    - Calculation: Atomically updated by `CoreEntry::AddLoad()`, `RemoveLoad()`,
+//      `ChangeLoad()` as threads are assigned to/removed from the core.
+//    - Relationship with CoreEntry::fLoad & fLoadMeasurementEpoch:
+//      `CoreEntry::fLoad` is derived from actual CPU execution time (via CPUEntry::fLoad).
+//      `CoreEntry::fCurrentLoad` is demand-based (sum of thread needs).
+//      The `fLoadMeasurementEpoch` on `CoreEntry` helps bridge these. When a
+//      thread is added/removed via `CoreEntry::AddLoad/RemoveLoad`:
+//      - If the thread's own load measurement was significantly out of sync with
+//        the core's current measurement period (epochs differ), the thread's
+//        `fNeededLoad` *directly* adjusts `CoreEntry::fLoad`. This provides a
+//        more immediate update to `CoreEntry::fLoad` than waiting for the
+//        change in thread presence to be reflected purely through CPU execution time.
+//      - If epochs match, it implies the thread's load is already (or about to be)
+//        accounted for in the current execution-based measurement cycle for
+//        `CoreEntry::fLoad`, so only `CoreEntry::fCurrentLoad` (the sum of demands)
+//        is adjusted, and `CoreEntry::fLoad` will naturally update later via
+//        `CoreEntry::_UpdateLoad()`.
+//      This mechanism allows `CoreEntry::fLoad` (used for balancing) to react more
+//      quickly to significant changes in thread demand on the core.
+
+
 //#define TRACE_SCHEDULER
 #ifdef TRACE_SCHEDULER
 #	define TRACE(...) dprintf_no_syslog(__VA_ARGS__)

@@ -136,6 +136,8 @@ private:
 			bigtime_t	fMeasureAvailableActiveTime;
 			bigtime_t	fMeasureAvailableTime;
 			bigtime_t	fLastMeasureAvailableTime;
+			// EWMA of this thread's CPU consumption.
+			// See scheduler_common.h for detailed explanation of load metrics.
 			int32		fNeededLoad;
 			uint32		fLoadMeasurementEpoch;
 

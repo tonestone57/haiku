@@ -111,7 +111,11 @@ private:
 						int32			fMlfqHighestNonEmptyLevel;
 						spinlock		fQueueLock;
 
+						// Historical thread execution load on this CPU.
+						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fLoad;
+						// EWMA of recent CPU activity (busy vs. idle time).
+						// See scheduler_common.h for detailed explanation of load metrics.
 						float			fInstantaneousLoad;
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
@@ -207,8 +211,14 @@ private:
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
 
+						// Average historical thread execution load of CPUs on this core.
+						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fLoad;
+						// Average EWMA of recent CPU activity of CPUs on this core.
+						// See scheduler_common.h for detailed explanation of load metrics.
 						float			fInstantaneousLoad;
+						// Sum of fNeededLoad from threads primarily associated with this core.
+						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fCurrentLoad;
 						uint32			fLoadMeasurementEpoch;
 						bool			fHighLoad;

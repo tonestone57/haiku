@@ -431,11 +431,11 @@ power_saving_switch_to_mode()
 	// running tasks.
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
-	// Mode-specific IRQ balancing parameters
-	gModeIrqTargetFactor = 0.2f; // Higher emphasis on thread load for consolidation
-	gModeMaxTargetCpuIrqLoad = 800;  // Allow more IRQ load on consolidation CPUs
+	// Set mode-specific IRQ balancing parameters for power saving mode.
+	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
+	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
-	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: CONSOLIDATE, SMT Factor: %.2f, IRQ Target Factor: %.2f, Max IRQ Load: %" B_PRId32 "\n",
+	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f, BaseQuantumMult: %.2f, AgingMult: %.2f, LB Policy: CONSOLIDATE, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
 		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 

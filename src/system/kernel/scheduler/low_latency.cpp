@@ -34,20 +34,20 @@ low_latency_switch_to_mode()
 	gSchedulerAgingThresholdMultiplier = 1.0f;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 
-	// gSchedulerSMTConflictFactor: Set to a higher value (0.60f) for Low Latency.
+	// Set SMT conflict factor for low latency mode.
 	// Rationale: Prioritizes minimizing latency by more strongly discouraging
-	// the placement of tasks on a CPU if its SMT sibling is busy. This helps
-	// reduce contention for shared CPU resources (execution units, L1/L2 cache),
-	// which can be critical for latency-sensitive operations. Assumes that finding
-	// an entirely idle core or a CPU with an idle SMT sibling is preferable for
-	// performance, even if it means slightly lower overall SMT utilization under load.
+	// the placement of tasks on a CPU if its SMT sibling is busy.
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
-	// Mode-specific IRQ balancing parameters
-	gModeIrqTargetFactor = 0.4f; // Slightly higher emphasis on IRQ load for LL
-	gModeMaxTargetCpuIrqLoad = 600;  // Slightly lower IRQ capacity per CPU for LL
+	// Set mode-specific IRQ balancing parameters for low latency mode.
+	// These values are chosen to be slightly different from global defaults if needed,
+	// or can be the same as global defaults (DEFAULT_IRQ_TARGET_FACTOR, DEFAULT_MAX_TARGET_CPU_IRQ_LOAD from scheduler.cpp)
+	// For low latency, we might want slightly different behavior than the absolute global default.
+	// Current values in the file (0.4f and 600) are retained.
+	gModeIrqTargetFactor = 0.4f;
+	gModeMaxTargetCpuIrqLoad = 600;
 
-	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD, SMT Factor: %.2f, IRQ Target Factor: %.2f, Max IRQ Load: %" B_PRId32 "\n",
+	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, BaseQuantumMult: %.2f, AgingMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
 		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 

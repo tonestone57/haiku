@@ -129,6 +129,16 @@ class ThreadData; // Forward declaration
 #define DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY 0.60f
 #define DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING 0.40f
 
+// IRQ Balancing Parameter Defaults for specific modes
+// Low Latency Mode IRQ Parameters (can reuse global defaults if appropriate)
+// These are defined in scheduler.cpp and used as initial values.
+// #define DEFAULT_IRQ_TARGET_FACTOR_LOW_LATENCY 0.3f (Example, if different)
+// #define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_LOW_LATENCY 700 (Example, if different)
+
+// Power Saving Mode IRQ Parameters
+#define DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING 0.5f
+#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING 500
+
 // Base time quanta for each MLFQ level (in microseconds)
 // Level 0 (highest priority) to NUM_MLFQ_LEVELS - 1 (lowest priority)
 static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {

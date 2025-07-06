@@ -7,7 +7,8 @@ UsePrivateHeaders kernel ; # For kernel-specific headers if PAL needs more
 # Default to slab, but allow override (e.g., from a build profile)
 # For testing, you can uncomment and set this locally:
 # HAIKU_KERNEL_ALLOCATOR ?= snmalloc ;
-HAIKU_KERNEL_ALLOCATOR ?= slab ;
+# HAIKU_KERNEL_ALLOCATOR ?= slab ; # Original default
+HAIKU_KERNEL_ALLOCATOR = snmalloc ; # Force snmalloc for kernel
 
 local allocatorObjects ;
 local allocatorDefines ;

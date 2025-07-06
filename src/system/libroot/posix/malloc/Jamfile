@@ -7,7 +7,8 @@ HaikuSubInclude debug ;
 # Default to 'openbsd', can be overridden by a build profile setting this variable.
 # For testing, you can uncomment and set this locally:
 # HAIKU_LIBROOT_ALLOCATOR ?= snmalloc ;
-HAIKU_LIBROOT_ALLOCATOR ?= openbsd ;
+# HAIKU_LIBROOT_ALLOCATOR ?= openbsd ; # Original default
+HAIKU_LIBROOT_ALLOCATOR = snmalloc ; # Force snmalloc for libroot
 
 local architectureObject ;
 for architectureObject in [ MultiArchSubDirSetup ] {
@@ -55,7 +56,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			#	$(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/pal/pal_haiku.cpp
 
 			MergeObject <$(architecture)>posix_malloc.o :
-				snmalloc_hooks.cpp
+				$(SUBDIR)/snmalloc_hooks.cpp
 				# Add other necessary snmalloc .cpp files here if any
 				# For example, if snmalloc's standard overrides are in .cc files:
 				# $(HAIKU_TOP)/BSD/snmalloc-main/src/snmalloc/override/malloc.cc

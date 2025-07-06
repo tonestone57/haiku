@@ -269,8 +269,334 @@ status_t intel_dp_aux_write_dpcd(intel_i915_device_info*d,intel_output_port_stat
 	return _intel_dp_aux_ch_xfer(d, p, true, off, bf, ln, &reply_type);
 }
 
-status_t intel_dp_start_link_train(intel_i915_device_info*d,intel_output_port_state*p,const intel_clock_params_t*c){return B_OK;}
-void intel_dp_stop_link_train(intel_i915_device_info*d,intel_output_port_state*p){}
+// --- DisplayPort Link Training Helper Functions (Stubs) ---
+
+static void
+intel_dp_set_link_train_pattern(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, uint8_t pattern)
+{
+	uint8_t dpcd_pattern = pattern;
+	TRACE("DDI: DP Link Train: Set pattern 0x%02x for port %d (AUX STUBBED)\n",
+		dpcd_pattern, port->logical_port_id);
+	// This will currently fail due to AUX stub
+	intel_dp_aux_write_dpcd(devInfo, port, DPCD_TRAINING_PATTERN_SET, &dpcd_pattern, 1);
+}
+
+static void
+intel_dp_set_lane_voltage_swing_pre_emphasis(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, uint8_t lane_idx, uint8_t vs_level, uint8_t pe_level)
+{
+	if (lane_idx >= 4) // Max 4 lanes
+		return;
+
+	uint8_t dpcd_lane_set_val = 0;
+	dpcd_lane_set_val |= (vs_level << DPCD_TRAINING_LANE_VOLTAGE_SWING_SHIFT) & DPCD_TRAINING_LANE_VOLTAGE_SWING_MASK;
+	dpcd_lane_set_val |= (pe_level << DPCD_TRAINING_LANE_PRE_EMPHASIS_SHIFT) & DPCD_TRAINING_LANE_PRE_EMPHASIS_MASK;
+	// MAX_SWING_REACHED and MAX_PRE_EMPHASIS_REACHED are read-only from sink, so not set here by source.
+
+	uint16_t dpcd_reg_addr;
+	switch (lane_idx) {
+		case 0: dpcd_reg_addr = DPCD_TRAINING_LANE0_SET; break;
+		case 1: dpcd_reg_addr = DPCD_TRAINING_LANE1_SET; break;
+		case 2: dpcd_reg_addr = DPCD_TRAINING_LANE2_SET; break;
+		case 3: dpcd_reg_addr = DPCD_TRAINING_LANE3_SET; break;
+		default: return; // Should not happen
+	}
+
+	TRACE("DDI: DP Link Train: Set VS %u PE %u for port %d, lane %u (AUX STUBBED)\n",
+		vs_level, pe_level, port->logical_port_id, lane_idx);
+	// This will currently fail
+	intel_dp_aux_write_dpcd(devInfo, port, dpcd_reg_addr, &dpcd_lane_set_val, 1);
+}
+
+static status_t
+intel_dp_get_lane_status(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, uint8_t lane_status_buffer[2])
+{
+	// lane_status_buffer[0] for LANE0_1_STATUS, lane_status_buffer[1] for LANE2_3_STATUS
+	memset(lane_status_buffer, 0, 2);
+	TRACE("DDI: DP Link Train: Get lane status for port %d (AUX STUBBED)\n", port->logical_port_id);
+	// These will currently fail
+	status_t status = intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE0_1_STATUS, &lane_status_buffer[0], 1);
+	if (status != B_OK && status != B_UNSUPPORTED) return status; // Propagate real errors if AUX wasn't just stubbed
+
+	if (port->dpcd_data.max_lane_count > 2) { // Only read for lanes 2,3 if they exist
+		status_t status2 = intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE2_3_STATUS, &lane_status_buffer[1], 1);
+		if (status2 != B_OK && status2 != B_UNSUPPORTED) return status2;
+	}
+	return status; // Return B_UNSUPPORTED if AUX is stubbed, or B_OK if it somehow worked.
+}
+
+static status_t
+intel_dp_get_adjust_request(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, uint8_t adjust_request_buffer[2])
+{
+	// adjust_request_buffer[0] for ADJUST_REQUEST_LANE0_1, [1] for ADJUST_REQUEST_LANE2_3
+	memset(adjust_request_buffer, 0, 2);
+	TRACE("DDI: DP Link Train: Get adjust request for port %d (AUX STUBBED)\n", port->logical_port_id);
+	// These will currently fail
+	status_t status = intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE0_1, &adjust_request_buffer[0], 1);
+	if (status != B_OK && status != B_UNSUPPORTED) return status;
+
+	if (port->dpcd_data.max_lane_count > 2) {
+		status_t status2 = intel_dp_aux_read_dpcd(devInfo, port, DPCD_ADJUST_REQUEST_LANE2_3, &adjust_request_buffer[1], 1);
+		if (status2 != B_OK && status2 != B_UNSUPPORTED) return status2;
+	}
+	return status;
+}
+
+static bool
+intel_dp_is_cr_done(const uint8_t lane_status_buffer[2], uint8_t lane_count)
+{
+	bool cr_done = true;
+	if (lane_count >= 1) cr_done &= ((lane_status_buffer[0] & DPCD_LANE0_CR_DONE) != 0);
+	if (lane_count >= 2) cr_done &= ((lane_status_buffer[0] & DPCD_LANE1_CR_DONE) != 0);
+	if (lane_count >= 3) cr_done &= ((lane_status_buffer[1] & DPCD_LANE2_CR_DONE) != 0);
+	if (lane_count >= 4) cr_done &= ((lane_status_buffer[1] & DPCD_LANE3_CR_DONE) != 0);
+	return cr_done;
+}
+
+static bool
+intel_dp_is_ce_done(const uint8_t lane_status_buffer[2], uint8_t lane_count)
+{
+	// Channel Equalization is done when CR_DONE, CHANNEL_EQ_DONE, and SYMBOL_LOCKED are all set for all lanes.
+	bool ce_done = true;
+	if (lane_count >= 1) ce_done &= ((lane_status_buffer[0] & (DPCD_LANE0_CR_DONE | DPCD_LANE0_CHANNEL_EQ_DONE | DPCD_LANE0_SYMBOL_LOCKED))
+	                                 == (DPCD_LANE0_CR_DONE | DPCD_LANE0_CHANNEL_EQ_DONE | DPCD_LANE0_SYMBOL_LOCKED));
+	if (lane_count >= 2) ce_done &= ((lane_status_buffer[0] & (DPCD_LANE1_CR_DONE | DPCD_LANE1_CHANNEL_EQ_DONE | DPCD_LANE1_SYMBOL_LOCKED))
+	                                 == (DPCD_LANE1_CR_DONE | DPCD_LANE1_CHANNEL_EQ_DONE | DPCD_LANE1_SYMBOL_LOCKED));
+	if (lane_count >= 3) ce_done &= ((lane_status_buffer[1] & (DPCD_LANE2_CR_DONE | DPCD_LANE2_CHANNEL_EQ_DONE | DPCD_LANE2_SYMBOL_LOCKED))
+	                                 == (DPCD_LANE2_CR_DONE | DPCD_LANE2_CHANNEL_EQ_DONE | DPCD_LANE2_SYMBOL_LOCKED));
+	if (lane_count >= 4) ce_done &= ((lane_status_buffer[1] & (DPCD_LANE3_CR_DONE | DPCD_LANE3_CHANNEL_EQ_DONE | DPCD_LANE3_SYMBOL_LOCKED))
+	                                 == (DPCD_LANE3_CR_DONE | DPCD_LANE3_CHANNEL_EQ_DONE | DPCD_LANE3_SYMBOL_LOCKED));
+	return ce_done;
+}
+
+static bool
+intel_dp_is_interlane_align_done(uint8_t align_status_byte)
+{
+	return (align_status_byte & DPCD_INTERLANE_ALIGN_DONE) != 0;
+}
+// --- End DP Link Training Helper Functions ---
+
+
+status_t
+intel_dp_start_link_train(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, const intel_clock_params_t* clocks)
+{
+	// NOTE: This function implements the logical flow of DisplayPort link training.
+	// However, all DisplayPort Sink Device (DPCD) accesses are performed via
+	// AUX channel read/write helper functions. Currently, the underlying
+	// _intel_dp_aux_ch_xfer function is a STUB because dedicated AUX hardware
+	// register definitions are missing from registers.h.
+	// Therefore, this link training function will not perform actual hardware
+	// link training and will fail, likely returning B_UNSUPPORTED.
+	// It serves as a structural placeholder for when AUX communication is fully implemented.
+
+	if (!devInfo || !port || !clocks)
+		return B_BAD_VALUE;
+
+	if (port->type != PRIV_OUTPUT_DP && port->type != PRIV_OUTPUT_EDP)
+		return B_BAD_TYPE;
+
+	TRACE("DDI: DP Link Train: START for port %d, Link Rate kHz: %u, Max Lane Count from DPCD: %u\n",
+		port->logical_port_id, clocks->dp_link_rate_khz, port->dpcd_data.max_lane_count);
+
+	// Determine link rate and lane count to train.
+	// This should ideally come from 'clocks' (derived from EDID/DisplayID common modes with sink caps)
+	// or be negotiated down from sink's max capabilities if source can't support sink's max.
+	// For this stub, we'll use the sink's max as an example, which might be too optimistic.
+	uint8_t link_bw_set = port->dpcd_data.max_link_rate;
+	uint8_t lane_count_set_val = port->dpcd_data.max_lane_count; // This is just the number, not the DPCD value yet
+
+	// Apply necessary flags to lane_count_set (e.g., enhanced framing)
+	if (port->dpcd_data.enhanced_framing_capable /* && source_supports_enhanced_framing */) {
+		lane_count_set_val |= DPCD_ENHANCED_FRAME_EN; // This is the correct macro from intel_ddi.h
+	}
+	// Note: port->dpcd_data.max_lane_count already has only the count bits.
+	// The DPCD_LANE_COUNT_SET register takes the raw count in its lower bits.
+	uint8_t num_lanes_to_train = port->dpcd_data.max_lane_count & DPCD_MAX_LANE_COUNT_MASK;
+	if (num_lanes_to_train == 0) { // Should not happen if DPCD was read, but as a safeguard
+		TRACE("DDI: DP Link Train: num_lanes_to_train is 0, defaulting to 1. DPCD read likely failed.\n");
+		num_lanes_to_train = 1;
+		lane_count_set_val = (lane_count_set_val & ~DPCD_MAX_LANE_COUNT_MASK) | 1;
+	}
+
+
+	TRACE("DDI: DP Link Train: Attempting to write LINK_BW_SET=0x%02x, LANE_COUNT_SET=0x%02x (training %u lanes) (AUX STUBBED)\n",
+		link_bw_set, lane_count_set_val, num_lanes_to_train);
+
+	status_t status = B_OK; // Default status, will be updated by AUX calls
+	status_t aux_status;
+
+	aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_LINK_BW_SET, &link_bw_set, 1);
+	if (aux_status != B_OK) status = aux_status; // Capture first error
+	if (status == B_UNSUPPORTED) TRACE("DP Link Train: AUX STUB - LINK_BW_SET not actually written.\n");
+	else if (status != B_OK) { TRACE("DP Link Train: Failed to write LINK_BW_SET. Error: %s\n", strerror(status)); return status; }
+
+
+	aux_status = intel_dp_aux_write_dpcd(devInfo, port, DPCD_LANE_COUNT_SET, &lane_count_set_val, 1);
+	if (aux_status != B_OK && status == B_OK) status = aux_status; // Capture first error
+	if (status == B_UNSUPPORTED) TRACE("DP Link Train: AUX STUB - LANE_COUNT_SET not actually written.\n");
+	else if (status != B_OK) { TRACE("DP Link Train: Failed to write LANE_COUNT_SET. Error: %s\n", strerror(status)); return status; }
+
+
+	// --- Clock Recovery (CR) Stage ---
+	TRACE("DDI: DP Link Train: Starting Clock Recovery for %u lanes.\n", num_lanes_to_train);
+	uint8_t current_vs_levels[4] = {DPCD_VOLTAGE_SWING_LEVEL_0, DPCD_VOLTAGE_SWING_LEVEL_0, DPCD_VOLTAGE_SWING_LEVEL_0, DPCD_VOLTAGE_SWING_LEVEL_0};
+	uint8_t current_pe_levels[4] = {DPCD_PRE_EMPHASIS_LEVEL_0, DPCD_PRE_EMPHASIS_LEVEL_0, DPCD_PRE_EMPHASIS_LEVEL_0, DPCD_PRE_EMPHASIS_LEVEL_0};
+	uint8_t lane_status_buf[2];
+	uint8_t adjust_req_buf[2];
+
+	uint8_t training_pattern = DPCD_TRAINING_PATTERN_1;
+	// TODO: Add logic for eDP fast training or TPS4 for HBR3
+	intel_dp_set_link_train_pattern(devInfo, port, training_pattern);
+
+	bool cr_all_lanes_done = false;
+	int cr_retries = 0;
+	const int MAX_CR_RETRIES = 5;
+
+	for (cr_retries = 0; cr_retries < MAX_CR_RETRIES; cr_retries++) {
+		for (uint8_t lane = 0; lane < num_lanes_to_train; lane++) {
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, lane,
+				current_vs_levels[lane], current_pe_levels[lane]);
+		}
+
+		snooze( (port->dpcd_data.training_aux_rd_interval & DPCD_TRAINING_AUX_RD_INTERVAL_MASK) * 100 + 100); // Min 100us, DP spec default 400us for CR
+
+		aux_status = intel_dp_get_lane_status(devInfo, port, lane_status_buf);
+		if (aux_status != B_OK && status == B_OK) status = aux_status;
+		if (status == B_UNSUPPORTED) { TRACE("DP Link Train: AUX STUB - CR: Could not get lane status.\n"); goto training_failed_stubbed_aux; }
+		if (status != B_OK) { TRACE("DP Link Train: CR: Error getting lane status: %s.\n", strerror(status)); goto training_failed; }
+
+		cr_all_lanes_done = intel_dp_is_cr_done(lane_status_buf, num_lanes_to_train);
+		if (cr_all_lanes_done) {
+			TRACE("DDI: DP Link Train: Clock Recovery DONE for all lanes (Retry %d).\n", cr_retries);
+			break;
+		}
+
+		aux_status = intel_dp_get_adjust_request(devInfo, port, adjust_req_buf);
+		if (aux_status != B_OK && status == B_OK) status = aux_status;
+		if (status == B_UNSUPPORTED) { TRACE("DP Link Train: AUX STUB - CR: Could not get adjust requests.\n"); goto training_failed_stubbed_aux; }
+		if (status != B_OK) { TRACE("DP Link Train: CR: Error getting adjust requests: %s.\n", strerror(status)); goto training_failed; }
+
+		uint8_t vs_req_l0 = (adjust_req_buf[0] >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3;
+		uint8_t pe_req_l0 = (adjust_req_buf[0] >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+		TRACE("DDI: DP Link Train: CR Retry %d. Sink requests VS=%u, PE=%u (Lane0).\n", cr_retries, vs_req_l0, pe_req_l0);
+		for (uint8_t lane = 0; lane < num_lanes_to_train; lane++) {
+			current_vs_levels[lane] = vs_req_l0;
+			current_pe_levels[lane] = pe_req_l0;
+		}
+		// TODO: Check MAX_VS_REACHED / MAX_PE_REACHED from lane_status_buf.
+	}
+
+	if (!cr_all_lanes_done) {
+		TRACE("DDI: DP Link Train: Clock Recovery FAILED after %d retries.\n", cr_retries);
+		goto training_failed;
+	}
+
+	// --- Channel Equalization (CE) Stage ---
+	TRACE("DDI: DP Link Train: Starting Channel Equalization for %u lanes.\n", num_lanes_to_train);
+	training_pattern = DPCD_TRAINING_PATTERN_2;
+	// TODO: Select TPS3/TPS4 if link uses HBR2/HBR3 and sink supports it.
+	intel_dp_set_link_train_pattern(devInfo, port, training_pattern);
+
+	bool ce_all_lanes_done = false;
+	int ce_retries = 0;
+	const int MAX_CE_RETRIES = 5;
+
+	for (ce_retries = 0; ce_retries < MAX_CE_RETRIES; ce_retries++) {
+		for (uint8_t lane = 0; lane < num_lanes_to_train; lane++) {
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, lane,
+				current_vs_levels[lane], current_pe_levels[lane]);
+		}
+		snooze( (port->dpcd_data.training_aux_rd_interval & DPCD_TRAINING_AUX_RD_INTERVAL_MASK) * 400 + 100); // Min 400us, DP spec default 4ms for CE with TPS2/3
+
+		aux_status = intel_dp_get_lane_status(devInfo, port, lane_status_buf);
+		if (aux_status != B_OK && status == B_OK) status = aux_status;
+		if (status == B_UNSUPPORTED) { TRACE("DP Link Train: AUX STUB - CE: Could not get lane status.\n"); goto training_failed_stubbed_aux; }
+		if (status != B_OK) { TRACE("DP Link Train: CE: Error getting lane status: %s.\n", strerror(status)); goto training_failed; }
+
+		ce_all_lanes_done = intel_dp_is_ce_done(lane_status_buf, num_lanes_to_train);
+		if (ce_all_lanes_done) {
+			uint8_t align_status_byte;
+			aux_status = intel_dp_aux_read_dpcd(devInfo, port, DPCD_LANE_ALIGN_STATUS_UPDATED, &align_status_byte, 1);
+			if (aux_status != B_OK && status == B_OK) status = aux_status;
+			if (status == B_UNSUPPORTED) { TRACE("DP Link Train: AUX STUB - CE: Could not get align status.\n"); /* Assume align OK for stub */ ce_all_lanes_done = true; break; }
+			if (status != B_OK) { TRACE("DP Link Train: CE: Error getting align status: %s.\n", strerror(status)); goto training_failed; }
+
+			if (intel_dp_is_interlane_align_done(align_status_byte)) {
+				TRACE("DDI: DP Link Train: Channel Equalization & Interlane Align DONE (Retry %d).\n", ce_retries);
+				break;
+			} else {
+				TRACE("DDI: DP Link Train: CE done, but Interlane Align NOT done (Align Status: 0x%02x). Retry %d\n", align_status_byte, ce_retries);
+				ce_all_lanes_done = false;
+			}
+		}
+		if (ce_all_lanes_done) break;
+
+		aux_status = intel_dp_get_adjust_request(devInfo, port, adjust_req_buf);
+		if (aux_status != B_OK && status == B_OK) status = aux_status;
+		if (status == B_UNSUPPORTED) { TRACE("DP Link Train: AUX STUB - CE: Could not get adjust requests.\n"); goto training_failed_stubbed_aux; }
+		if (status != B_OK) { TRACE("DP Link Train: CE: Error getting adjust requests: %s.\n", strerror(status)); goto training_failed; }
+
+		bool levels_changed_request = false;
+		for (uint8_t lane = 0; lane < num_lanes_to_train; lane++) {
+			// Simplified: apply lane 0's request to all.
+			uint8_t vs_req = (adjust_req_buf[0] >> DPCD_ADJUST_VOLTAGE_SWING_LANE0_SHIFT) & 0x3;
+			uint8_t pe_req = (adjust_req_buf[0] >> DPCD_ADJUST_PRE_EMPHASIS_LANE0_SHIFT) & 0x3;
+			if (current_vs_levels[lane] != vs_req) { current_vs_levels[lane] = vs_req; levels_changed_request = true; }
+			if (current_pe_levels[lane] != pe_req) { current_pe_levels[lane] = pe_req; levels_changed_request = true; }
+		}
+		TRACE("DDI: DP Link Train: CE Retry %d. Sink requests VS=%u, PE=%u (Lane0). Levels changed: %d\n", ce_retries, current_vs_levels[0], current_pe_levels[0], levels_changed_request);
+		if (!levels_changed_request && !ce_all_lanes_done) {
+			TRACE("DDI: DP Link Train: CE levels unchanged by sink but not done, failing CE stage.\n");
+			goto training_failed;
+		}
+		// TODO: Add checks for MAX_VS_REACHED / MAX_PE_REACHED.
+	}
+
+	if (!ce_all_lanes_done) {
+		TRACE("DDI: DP Link Train: Channel Equalization FAILED after %d retries.\n", ce_retries);
+		goto training_failed;
+	}
+
+training_successful:
+	intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_DISABLE);
+	TRACE("DDI: DP Link Train: SUCCESS for port %d.\n", port->logical_port_id);
+	return (status == B_UNSUPPORTED) ? B_UNSUPPORTED : B_OK;
+
+training_failed:
+	intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_DISABLE);
+	TRACE("DDI: DP Link Train: Overall FAILED for port %d. Last status: %s\n", port->logical_port_id, strerror(status));
+	return (status == B_OK) ? B_ERROR : status; // If status was B_OK but logic failed, return B_ERROR
+
+training_failed_stubbed_aux:
+	intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_DISABLE);
+	TRACE("DDI: DP Link Train: Overall FAILED for port %d due to AUX STUB.\n", port->logical_port_id);
+	return B_UNSUPPORTED;
+}
+void
+intel_dp_stop_link_train(intel_i915_device_info* devInfo, intel_output_port_state* port)
+{
+	if (!devInfo || !port)
+		return;
+
+	// This function should only be called for DP/eDP ports.
+	if (port->type != PRIV_OUTPUT_DP && port->type != PRIV_OUTPUT_EDP) {
+		TRACE("DDI: intel_dp_stop_link_train called for non-DP port type %d.\n", port->type);
+		return;
+	}
+
+	TRACE("DDI: DP Link Train: STOP for port %d. Disabling training pattern. (AUX STUBBED)\n",
+		port->logical_port_id);
+
+	// Call the helper function to set the training pattern to disable.
+	// The helper itself calls the (stubbed) intel_dp_aux_write_dpcd.
+	intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_DISABLE);
+	// No status is returned by intel_dp_set_link_train_pattern,
+	// errors/stub status are logged within that function and its AUX call.
+}
 status_t intel_ddi_port_enable(intel_i915_device_info*d,intel_output_port_state*p,enum pipe_id_priv pi,const display_mode*am,const intel_clock_params_t*c){return B_OK;}
 void intel_ddi_port_disable(intel_i915_device_info*d,intel_output_port_state*p){}
 

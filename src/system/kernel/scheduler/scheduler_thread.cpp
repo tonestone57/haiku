@@ -119,10 +119,6 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 
 ThreadData::ThreadData(Thread* thread)
 	:
-	fThread(thread),
-	fCore(NULL),
-	fTimeUsedInCurrentQuantum(0),
-	fCurrentEffectiveQuantum(0),
 	fStolenTime(0),
 	fQuantumStartWallTime(0),
 	fLastInterruptTime(0),
@@ -130,15 +126,19 @@ ThreadData::ThreadData(Thread* thread)
 	fWentSleepActive(0),
 	fEnqueued(false),
 	fReady(false),
+	fThread(thread),
 	fCurrentMlfqLevel(NUM_MLFQ_LEVELS - 1),
 	fTimeEnteredCurrentLevel(0),
 	fEffectivePriority(0),
-	fNeededLoad(0),
-	fLoadMeasurementEpoch(0),
+	fTimeUsedInCurrentQuantum(0),
+	fCurrentEffectiveQuantum(0),
 	fMeasureAvailableActiveTime(0),
 	fMeasureAvailableTime(0),
 	fLastMeasureAvailableTime(0),
-	fLastMigrationTime(0)
+	fNeededLoad(0),
+	fLoadMeasurementEpoch(0),
+	fLastMigrationTime(0),
+	fCore(NULL)
 {
 }
 

@@ -89,8 +89,9 @@ CPUEntry::CPUEntry()
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
 	fMeasureActiveTime(0),
-	fMeasureTime(0),
+	// Corrected order: fMlfqHighestNonEmptyLevel before fMeasureTime
 	fMlfqHighestNonEmptyLevel(-1),
+	fMeasureTime(0),
 	fUpdateLoadEvent(false)
 {
 	B_INITIALIZE_RW_SPINLOCK(&fSchedulerModeLock);
@@ -1224,8 +1225,7 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 	kprintf("%-7" B_PRId32 " ", package->fPackageID);
 	ReadSpinLocker lock(package->fCoreLock);
 
-	DoublyLinkedList<CoreEntry>::ConstIterator iterator
-		= package->fIdleCores.GetIterator();
+	DoublyLinkedList<CoreEntry>::ConstIterator iterator(&package->fIdleCores);
 	bool first = true;
 	while (iterator.HasNext()) {
 		CoreEntry* coreEntry = iterator.Next();
@@ -1297,8 +1297,7 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 {
 	kprintf("Idle packages (packages with at least one idle core):\n");
 	ReadSpinLocker globalLock(gIdlePackageLock);
-	IdlePackageList::ConstIterator idleIterator
-		= gIdlePackageList.GetIterator();
+	IdlePackageList::ConstIterator idleIterator(&gIdlePackageList);
 
 	if (idleIterator.HasNext()) {
 		kprintf("package idle_cores_list\n");

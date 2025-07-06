@@ -268,13 +268,14 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		// If this CPU is part of the designated consolidation core (sSmallTaskCore)
 		// and that core is very lightly loaded, give a further small boost to encourage
 		// task completion on this core.
-		// This requires access to sSmallTaskCore, which is in power_saving.cpp.
-		// For now, let's assume a simplified check: if the CPU load is extremely low
-		// in power saving mode, give an extra nudge.
-		// A more direct check of sSmallTaskCore would require passing it or making it more globally accessible.
-		// Let's use a proxy: very low CPU load on *this* CPU in power saving mode.
-		if (cpuLoad < 0.05f) { // CPU is almost completely idle
-			multiplier *= 1.2f; // Additional 20% boost to quantum
+		if (cpu->Core() == sSmallTaskCore && sSmallTaskCore != NULL
+			&& sSmallTaskCore->GetLoad() < kLowLoad) {
+			multiplier *= 1.1f; // Modest 10% boost if on a lightly loaded STC
+		} else if (cpuLoad < 0.05f) {
+			// Fallback: If not on STC or STC is more loaded,
+			// still give a boost if *this specific CPU* is almost idle.
+			// This helps very short tasks complete quickly if they land on an idle SMT thread.
+			multiplier *= 1.2f;
 		}
 	}
 

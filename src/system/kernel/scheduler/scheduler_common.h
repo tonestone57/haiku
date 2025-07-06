@@ -239,6 +239,9 @@ extern bool gTrackCoreLoad;
 extern bool gTrackCPULoad;
 extern float gKernelKDistFactor; // To be initialized, potentially by scheduler modes
 
+// Defined in power_saving.cpp, used by scheduler_thread.cpp for DTQ refinement
+extern CoreEntry* sSmallTaskCore;
+
 
 void init_debug_commands();
 

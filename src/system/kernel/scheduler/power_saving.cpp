@@ -414,9 +414,10 @@ power_saving_switch_to_mode()
 	// observable background I/O or processing task). Monitor progress and
 	// responsiveness of the background tasks.
 	// Potential Tuning: If significant starvation/sluggishness is observed,
-	// consider reducing this multiplier (e.g., to 1.5x). Any change requires
-	// careful validation of power vs. responsiveness trade-off.
-	gSchedulerAgingThresholdMultiplier = 2.0f;
+	// consider reducing this multiplier.
+	// Changed from 2.0f to 1.5f to improve responsiveness of lower-priority
+	// tasks, aiming for a better balance with power saving.
+	gSchedulerAgingThresholdMultiplier = 1.5f;
 
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 	sSmallTaskCore = NULL;

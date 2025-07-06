@@ -121,6 +121,17 @@ _EXPORT status_t kmalloc_init(void);
  */
 _EXPORT void* kmalloc_aligned(size_t alignment, size_t size, uint32 flags);
 
+// Standard C library allocation functions, also exported for kernel use
+// when snmalloc is the selected kernel allocator. These will wrap the
+// kmalloc/kfree implementations.
+_EXPORT void* malloc(size_t size);
+_EXPORT void  free(void* ptr);
+_EXPORT void* calloc(size_t nmemb, size_t size);
+_EXPORT void* realloc(void* ptr, size_t new_size);
+_EXPORT void* memalign(size_t alignment, size_t size);
+// valloc is typically page-aligned memalign
+_EXPORT void* valloc(size_t size);
+
 
 #ifdef __cplusplus
 }

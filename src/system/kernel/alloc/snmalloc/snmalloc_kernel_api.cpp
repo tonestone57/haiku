@@ -210,6 +210,57 @@ void* kmalloc_aligned(size_t alignment, size_t size, uint32 flags)
     return ptr;
 }
 
+// Standard C API wrappers, calling the k* variants
+// These ensure that kernel code calling malloc/free directly uses snmalloc when it's active.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void* malloc(size_t size)
+{
+    return kmalloc(size, KMALLOC_NORMAL);
+}
+
+void free(void* ptr)
+{
+    kfree(ptr);
+}
+
+void* calloc(size_t nmemb, size_t size)
+{
+    // kcalloc already handles KMALLOC_ZERO implicitly in its call to kmalloc
+    return kcalloc(nmemb, size, KMALLOC_NORMAL);
+}
+
+void* realloc(void* ptr, size_t new_size)
+{
+    return krealloc(ptr, new_size, KMALLOC_NORMAL);
+}
+
+void* memalign(size_t alignment, size_t size)
+{
+    // Check if alignment is a power of two, as kmalloc_aligned expects this.
+    // Standard memalign might be more lenient, but POSIX says it should be power of two.
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+        // Haiku's current kernel memalign (from heap.cpp) returns NULL for bad alignment.
+        return nullptr;
+    }
+    return kmalloc_aligned(alignment, size, KMALLOC_NORMAL);
+}
+
+void* valloc(size_t size)
+{
+    // valloc is page-aligned allocation.
+    // Need B_PAGE_SIZE from somewhere, typically <OS.h> or <vm_page.h>
+    // pal_haiku_kernel.h has `static constexpr size_t page_size = B_PAGE_SIZE;`
+    return kmalloc_aligned(snmalloc::PALHaikuKernel::page_size, size, KMALLOC_NORMAL);
+}
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
 
 #ifdef __cplusplus
 // Ensures C++ static initializers used by snmalloc (if any beyond PAL) are handled.

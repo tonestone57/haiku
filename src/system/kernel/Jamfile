@@ -103,8 +103,8 @@ KernelLd kernel_$(TARGET_ARCH) :
 	kernel_fs.o
 	kernel_messaging.o
 	kernel_posix.o
-	# kernel_slab.o will be replaced by KERNEL_ALLOCATOR_OBJECT
-	$(KERNEL_ALLOCATOR_OBJECT)
+	kernel_slab.o # Always include slab for object_cache_* API and early heap
+	$(KERNEL_USER_ALLOCATOR_MODULE_OBJECT) # Add snmalloc module if selected
 	kernel_util.o
 	kernel_vm.o
 
@@ -145,8 +145,8 @@ if $(HAIKU_ARCH) in x86_64 arm {
 		kernel_fs.o
 		kernel_messaging.o
 		kernel_posix.o
-		# kernel_slab.o will be replaced by KERNEL_ALLOCATOR_OBJECT
-		$(KERNEL_ALLOCATOR_OBJECT)
+		kernel_slab.o # Always include slab for object_cache_* API and early heap
+		$(KERNEL_USER_ALLOCATOR_MODULE_OBJECT) # Add snmalloc module if selected
 		kernel_util.o
 		kernel_vm.o
 
@@ -207,18 +207,25 @@ if $(TARGET_KERNEL_PLATFORM) {
 
 SubInclude HAIKU_TOP src system kernel alloc ;
 
-# Determine the kernel allocator object to use
 # HAIKU_KERNEL_ALLOCATOR is expected to be set by alloc/Jamfile (defaults to slab)
 # or by a build profile.
-local KERNEL_ALLOCATOR_OBJECT ;
+local KERNEL_USER_ALLOCATOR_MODULE_OBJECT ;
 local KERNEL_GLOBAL_CXX_DEFINES = $(SubDirC++Flags) ; # Get current global C++ flags
 
 if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
-	KERNEL_ALLOCATOR_OBJECT = kernel_allocator.o ;
-		# This is built by alloc/Jamfile and contains snmalloc
+	# snmalloc provides the general purpose allocator (kmalloc, malloc, etc.)
+	# kernel_allocator.o is built by alloc/Jamfile and contains snmalloc_kernel_api.o
+	KERNEL_USER_ALLOCATOR_MODULE_OBJECT = kernel_allocator.o ;
 	KERNEL_GLOBAL_CXX_DEFINES += -DKERNEL_ALLOCATOR_SNMALLOC ;
+	Echo Kernel general purpose allocator: snmalloc ;
 } else {
-	KERNEL_ALLOCATOR_OBJECT = kernel_slab.o ;
-		# This is built by slab/Jamfile
+	# Default general purpose allocator is implicitly part of kernel_slab.o or heap.o
+	# which are included below unconditionally for the slab API.
+	Echo Kernel general purpose allocator: default (from slab/heap) ;
 }
 SubDirC++Flags $(KERNEL_GLOBAL_CXX_DEFINES) ; # Apply updated global C++ flags
+
+# KERNEL_ALLOCATOR_OBJECT previously switched between slab and snmalloc.
+# Now, kernel_slab.o (providing object_cache_*) is always included.
+# KERNEL_USER_ALLOCATOR_MODULE_OBJECT is added if snmalloc is chosen to provide
+# malloc/kmalloc.

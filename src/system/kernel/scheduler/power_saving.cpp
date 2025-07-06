@@ -318,7 +318,30 @@ power_saving_switch_to_mode()
 {
 	gKernelKDistFactor = 0.5f; // Changed from 0.6f
 	gSchedulerBaseQuantumMultiplier = 1.5f;
+
+	// gSchedulerAgingThresholdMultiplier: Set to 2.0 for Power Saving mode.
+	// Rationale: Doubles the time a thread must wait in a lower-priority MLFQ
+	// queue before being promoted. This supports work consolidation by making
+	// the scheduler less eager to promote background or lower-priority tasks,
+	// potentially allowing consolidation cores to focus on primary tasks and
+	// other cores to remain idle longer.
+	// Concern & Analysis: While beneficial for pure power saving by reducing
+	// task switching and potential core waking due to promotions, a 2.0x multiplier
+	// can lead to significant delays for medium-low priority tasks if the
+	// consolidation core(s) are consistently busy with higher-priority work.
+	// For example, a task at B_LOW_PRIORITY (MLFQ level 8, base threshold 0.5s)
+	// would wait 1.0s before promotion consideration. If it needs to age up
+	// multiple levels, this delay accumulates. This might affect user experience
+	// if tasks like background file operations, data indexing, or less critical
+	// application helpers become overly sluggish.
+	// Testing: Test with mixed workloads (e.g., CPU-bound foreground task +
+	// observable background I/O or processing task). Monitor progress and
+	// responsiveness of the background tasks.
+	// Potential Tuning: If significant starvation/sluggishness is observed,
+	// consider reducing this multiplier (e.g., to 1.5x). Any change requires
+	// careful validation of power vs. responsiveness trade-off.
 	gSchedulerAgingThresholdMultiplier = 2.0f;
+
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 	sSmallTaskCore = NULL;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;

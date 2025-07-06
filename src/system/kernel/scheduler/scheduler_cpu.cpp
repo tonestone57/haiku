@@ -419,24 +419,57 @@ CPUEntry::_RequestPerformanceLevel(ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 
+	// This function interfaces with the cpufreq module to request performance
+	// level changes based on CPU load.
+	//
+	// Current Load Metric Choice: fInstantaneousLoad
+	// - `fInstantaneousLoad` is an EWMA of recent CPU activity, making it
+	//   responsive to current demands. This aims to quickly ramp up CPU
+	//   frequency when activity starts, benefiting interactive responsiveness.
+	//
+	// Potential Considerations/Alternatives:
+	// - Stability vs. Responsiveness: While responsive, `fInstantaneousLoad`
+	//   might lead to more frequent P-state transitions (flapping) if the
+	//   load is very bursty and the cpufreq governor reacts too quickly. This
+	//   can have a power and minor performance overhead due to transition latencies.
+	// - `CPUEntry::fLoad` (Historical Load): Using the longer-term `fLoad`
+	//   would result in more stable frequency requests but might be slower to
+	//   ramp up for sudden demanding tasks.
+	// - Combined Metric: A weighted average of `fInstantaneousLoad` and `fLoad`
+	//   could offer a balance, but adds complexity and tuning parameters.
+	// - Core-Level Load: On SMT systems, the load of the entire core (e.g.,
+	//   `fCore->GetInstantaneousLoad()`) might be a more holistic trigger, though
+	//   cpufreq scaling is often per-core or per-package anyway.
+	//
+	// The optimal choice depends heavily on the cpufreq governor's policies,
+	// hardware P-state transition costs, and typical workloads. Empirical
+	// testing (measuring responsiveness, power, and P-state transition counts)
+	// would be needed to definitively determine the best metric or if the
+	// current choice needs refinement for specific scenarios.
+
 	if (gCPU[fCPUNumber].disabled) {
 		decrease_cpu_performance(kCPUPerformanceScaleMax);
 		return;
 	}
 
+	// Using fInstantaneousLoad, scaled to kMaxLoad, as the basis for decision.
 	int32 loadToConsider = static_cast<int32>(this->GetInstantaneousLoad() * kMaxLoad);
 
 	ASSERT_PRINT(loadToConsider >= 0 && loadToConsider <= kMaxLoad, "load is out of range %"
 		B_PRId32, loadToConsider);
 
 	if (loadToConsider < kTargetLoad) {
+		// Load is below target, request a decrease in performance.
 		int32 delta = kTargetLoad - loadToConsider;
+		// Scale delta relative to the range [0, kTargetLoad]
 		delta = (delta * kCPUPerformanceScaleMax) / (kTargetLoad > 0 ? kTargetLoad : 1) ;
 		decrease_cpu_performance(delta);
 	} else {
+		// Load is at or above target, request an increase in performance.
 		int32 range = kMaxLoad - kTargetLoad;
-		if (range <=0) range = 1; // Avoid division by zero
+		if (range <=0) range = 1; // Avoid division by zero if kMaxLoad == kTargetLoad
 		int32 delta = loadToConsider - kTargetLoad;
+		// Scale delta relative to the range [kTargetLoad, kMaxLoad]
 		delta = (delta * kCPUPerformanceScaleMax) / range;
 		increase_cpu_performance(delta);
 	}

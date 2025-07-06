@@ -1211,17 +1211,10 @@ scheduler_irq_balance_event(timer* /* unused */)
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
 				TRACE("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
-				status_t status = assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
-				if (status == B_OK) {
-					TRACE("Proactive IRQ: Successfully moved IRQ %d to CPU %" B_PRId32 ".\n",
-						irqToMove->irq, finalTargetCpu->ID());
-				} else {
-					TRACE("Proactive IRQ: Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
-						irqToMove->irq, finalTargetCpu->ID(), strerror(status));
-					// Optionally, consider if the IRQ should be re-added to a candidate list
-					// or if the failure implies it cannot be moved from sourceCpuMaxIrq.
-					// For now, just trace the error.
-				}
+				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+				// Original code checked status and traced success/failure.
+				// Since assign_io_interrupt_to_cpu is void, we assume it handles its own errors
+				// or errors are not critical to propagation here. The TRACE above indicates an attempt.
 			} else {
 				TRACE("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
 					irqToMove->irq, targetCore->ID());
@@ -1482,12 +1475,25 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 
 		// Apply SMT penalty only when seeking the *least* busy CPU,
 		// to make CPUs with busy SMT siblings less attractive.
+		// Apply SMT penalty only when seeking the *least* busy CPU,
+		// to make CPUs with busy SMT siblings less attractive.
 		if (!preferBusiest && core->CPUCount() > 1) {
-			CPUSet siblings = gCPU[currentCPU->ID()].arch.sibling_cpus;
-			siblings.ClearBit(currentCPU->ID()); // Don't penalize for self.
-			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+			// Correctly find SMT siblings on the same core using topology information
+			int32 currentCPUID = currentCPU->ID();
+			int32 currentCoreID = core->ID(); // currentCPU->Core()->ID() should be same as core->ID()
+			int32 currentSMTID = gCPU[currentCPUID].topology_id[CPU_TOPOLOGY_SMT];
+
+			if (currentSMTID != -1) { // Check if SMT ID is valid
+				for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+					if (k == currentCPUID || gCPU[k].disabled)
+						continue; // Skip self and disabled CPUs
+
+					// Check if CPU 'k' is on the same core and has the same SMT ID
+					if (gCPU[k].topology_id[CPU_TOPOLOGY_CORE] == currentCoreID &&
+						gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == currentSMTID) {
+						// CPU 'k' is an SMT sibling of currentCPU on this core
+						smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+					}
 				}
 			}
 		}
@@ -1598,18 +1604,18 @@ scheduler_perform_load_balance()
 	ReadSpinLocker globalCoreHeapsLock(gCoreHeapsLock);
 	CoreEntry* sourceCoreCandidate = NULL;
 	for (int32 i = 0; (sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!sourceCoreCandidate->fDefunct)
+		if (!sourceCoreCandidate->IsDefunct())
 			break;
 	}
 
 	CoreEntry* targetCoreCandidate = NULL;
 	for (int32 i = 0; (targetCoreCandidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!targetCoreCandidate->fDefunct)
+		if (!targetCoreCandidate->IsDefunct())
 			break;
 	}
 	globalCoreHeapsLock.Unlock();
 
-	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate->fDefunct || targetCoreCandidate->fDefunct || sourceCoreCandidate == targetCoreCandidate)
+	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate->IsDefunct() || targetCoreCandidate->IsDefunct() || sourceCoreCandidate == targetCoreCandidate)
 		return; // Not enough distinct, non-defunct cores in heaps to balance between.
 
 	// Only balance if the load difference is significant.

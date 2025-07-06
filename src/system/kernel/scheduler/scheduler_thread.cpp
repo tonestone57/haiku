@@ -5,6 +5,7 @@
  */
 
 #include "scheduler_thread.h"
+#include <util/Random.h> // For get_random<T>()
 
 
 using namespace Scheduler;

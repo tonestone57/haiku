@@ -117,7 +117,7 @@ private:
 						rw_spinlock 	fSchedulerModeLock;
 
 						ThreadRunQueue	fMlfq[NUM_MLFQ_LEVELS];
-						bool			fUpdateLoadEvent;
+						// bool			fUpdateLoadEvent; // Moved down
 						int32			fMlfqHighestNonEmptyLevel;
 						spinlock		fQueueLock;
 
@@ -134,6 +134,7 @@ private:
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
+						bool			fUpdateLoadEvent; // Moved here
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
@@ -280,11 +281,24 @@ private:
 						DoublyLinkedList<CoreEntry>	fIdleCores;
 						int32				fIdleCoreCount;
 						int32				fCoreCount;
-						rw_spinlock			fCoreLock;
+						mutable rw_spinlock	fCoreLock;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
 typedef DoublyLinkedList<PackageEntry> IdlePackageList;
+
+
+inline CoreEntry*
+PackageEntry::GetIdleCore(int32 index /* = 0 */) const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ReadSpinLocker lock(fCoreLock); // fCoreLock is mutable
+	CoreEntry* element = fIdleCores.Last();
+	for (int32 i = 0; element != NULL && i < index; i++)
+		element = fIdleCores.GetPrevious(element);
+	return element;
+}
+
 
 extern CPUEntry* gCPUEntries;
 

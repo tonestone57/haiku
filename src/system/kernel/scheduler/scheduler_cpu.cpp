@@ -234,12 +234,27 @@ ThreadData*
 CPUEntry::PeekIdleThread() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	Thread* idle = gCPU[fCPUNumber].arch.idle_thread;
-	if (idle != NULL && idle->scheduler_data != NULL) {
-		return idle->scheduler_data;
+	// The idle thread for this CPU is expected to be in the lowest MLFQ level.
+	// This function is typically called when the run queue lock for this CPU
+	// is already held, or at points where concurrent modification is not expected.
+	ThreadData* idleThreadData = fMlfq[NUM_MLFQ_LEVELS - 1].PeekMaximum();
+
+#if KDEBUG
+	if (idleThreadData == NULL) {
+		// This should not happen in a correctly initialized and running system.
+		// An idle thread should always be present in the lowest queue for each active CPUEntry.
+		panic("CPUEntry::PeekIdleThread: CPU %" B_PRId32 " has no thread in its idle queue (MLFQ level %d)!",
+			fCPUNumber, NUM_MLFQ_LEVELS - 1);
+	} else if (!idleThreadData->IsIdle()) {
+		// This assertion checks if the thread found is indeed marked as an idle thread (by priority).
+		// It's possible other very low-priority, non-idle threads could end up here,
+		// but for "PeekIdleThread", we expect the designated idle thread.
+		panic("CPUEntry::PeekIdleThread: Thread %" B_PRId32 " (prio %" B_PRId32 ") in idle queue of CPU %" B_PRId32 " is not an idle thread!",
+			idleThreadData->GetThread()->id, idleThreadData->GetThread()->priority, fCPUNumber);
 	}
-	panic("PeekIdleThread: Idle thread for CPU %" B_PRId32 " not found.", fCPUNumber);
-	return NULL;
+#endif
+
+	return idleThreadData;
 }
 
 
@@ -790,8 +805,18 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	// Also, fCPUHeap.Remove(cpu) is an error if cpu is not root.
 	// This needs careful review of how CPUs are removed from fCPUHeap.
 	// For now, correcting the IsLinked check. The Remove will be handled separately.
-	if (cpu->GetHeapLink()->fIndex != -1) // Check if it's still in the heap.
-		fCPUHeap.Remove(cpu); // This will be an error if Remove is not available or cpu is not root
+	if (cpu->GetHeapLink()->fIndex != -1) { // Check if it's still in the heap.
+		// Assuming 'cpu' has been set to B_IDLE_PRIORITY and is thus the root.
+		if (fCPUHeap.PeekRoot() == cpu) {
+			fCPUHeap.RemoveRoot();
+		} else {
+			// If cpu is not the root, RemoveRoot() is incorrect.
+			// This indicates a logic error or that CPUPriorityHeap needs a Remove(element) method.
+			// For now, this will likely lead to runtime issues if this path is hit.
+			// A proper fix might involve ensuring 'cpu' is always root or restoring/adding Remove(element).
+			panic("CoreEntry::RemoveCPU: CPU %" B_PRId32 " is in heap but not root. Cannot RemoveRoot().", cpu->ID());
+		}
+	}
 
 	fCPUSet.ClearBit(cpu->ID());
 	fCPUCount--;
@@ -1029,7 +1054,7 @@ CoreEntry::_UnassignThread(Thread* thread, void* data)
 	CoreEntry* core = static_cast<CoreEntry*>(data);
 	ThreadData* threadData = thread->scheduler_data;
 	if (threadData != NULL && threadData->Core() == core && thread->pinned_to_cpu == 0)
-		threadData->UnassignCore(thread_is_running(thread));
+		threadData->UnassignCore(thread->state == B_THREAD_RUNNING);
 }
 
 
@@ -1095,17 +1120,7 @@ PackageEntry::Init(int32 id)
 }
 
 
-CoreEntry*
-PackageEntry::GetIdleCore(int32 index) const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(fCoreLock);
-	CoreEntry* element = fIdleCores.Last();
-	for (int32 i = 0; element != NULL && i < index; i++)
-		element = fIdleCores.GetPrevious(element);
-	return element;
-}
-
+// Definition moved to scheduler_cpu.h as it's an inline function.
 
 void
 PackageEntry::AddIdleCore(CoreEntry* core)
@@ -1210,7 +1225,7 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 	ReadSpinLocker lock(package->fCoreLock);
 
 	DoublyLinkedList<CoreEntry>::ConstIterator iterator
-		= package->fIdleCores.GetConstIterator();
+		= package->fIdleCores.ConstIterator();
 	bool first = true;
 	while (iterator.HasNext()) {
 		CoreEntry* coreEntry = iterator.Next();
@@ -1283,7 +1298,7 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 	kprintf("Idle packages (packages with at least one idle core):\n");
 	ReadSpinLocker globalLock(gIdlePackageLock);
 	IdlePackageList::ConstIterator idleIterator
-		= gIdlePackageList.GetConstIterator();
+		= gIdlePackageList.ConstIterator();
 
 	if (idleIterator.HasNext()) {
 		kprintf("package idle_cores_list\n");
@@ -1337,11 +1352,22 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
 		float threadInstantLoad = currentCPU->GetInstantaneousLoad();
 		float smtPenalty = 0.0f;
 		if (targetCore->CPUCount() > 1) { // Apply SMT penalty if choosing among SMT siblings
-			CPUSet siblings = gCPU[currentCPU->ID()].arch.sibling_cpus;
-			siblings.ClearBit(currentCPU->ID());
-			for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-				if (siblings.GetBit(k) && !gCPU[k].disabled) {
-					smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * smtConflictFactor;
+			// Correctly find SMT siblings on the same core using topology information
+			int32 currentCPUID = currentCPU->ID();
+			int32 currentCoreID = targetCore->ID(); // Should be currentCPU->Core()->ID()
+			int32 currentSMTID = gCPU[currentCPUID].topology_id[CPU_TOPOLOGY_SMT];
+
+			if (currentSMTID != -1) { // Check if SMT ID is valid (i.e., CPU is part of an SMT group)
+				for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+					if (k == currentCPUID || gCPU[k].disabled)
+						continue; // Skip self and disabled CPUs
+
+					// Check if CPU 'k' is on the same core and has the same SMT ID
+					if (gCPU[k].topology_id[CPU_TOPOLOGY_CORE] == currentCoreID &&
+						gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == currentSMTID) {
+						// CPU 'k' is an SMT sibling of currentCPU on the targetCore
+						smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * smtConflictFactor;
+					}
 				}
 			}
 		}

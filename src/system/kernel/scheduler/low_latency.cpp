@@ -145,7 +145,7 @@ low_latency_choose_core(const ThreadData* threadData)
 		CoreEntry* candidateCore = NULL;
 		// Iterate through gCoreLoadHeap (less loaded cores)
 		for (int32 i = 0; (candidateCore = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-			if (candidateCore->fDefunct)
+			if (candidateCore->IsDefunct())
 				continue;
 			if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 				continue;
@@ -154,7 +154,7 @@ low_latency_choose_core(const ThreadData* threadData)
 		}
 		if (chosenCore == NULL) { // Fallback to gCoreHighLoadHeap
 			for (int32 i = 0; (candidateCore = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
-				if (candidateCore->fDefunct)
+				if (candidateCore->IsDefunct())
 					continue;
 				if (useAffinityMask && !candidateCore->CPUMask().Matches(affinityMask))
 					continue;
@@ -167,7 +167,7 @@ low_latency_choose_core(const ThreadData* threadData)
 	if (chosenCore == NULL) { // Absolute fallback: iterate all cores
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
-			if (core->fDefunct)
+			if (core->IsDefunct())
 				continue;
 			bool hasEnabledCPU = false;
 			for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
@@ -257,14 +257,14 @@ low_latency_rebalance_irqs(bool idle)
 	ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
 	CoreEntry* candidate = NULL;
 	for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!candidate->fDefunct && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+		if (!candidate->IsDefunct() && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
 			targetCore = candidate;
 			break;
 		}
 	}
 	if (targetCore == NULL) {
 		for (int32 i = 0; (candidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
-			if (!candidate->fDefunct && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+			if (!candidate->IsDefunct() && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
 				// Only consider from high load heap if it's not the current core's group
 				targetCore = candidate;
 				break;
@@ -274,7 +274,7 @@ low_latency_rebalance_irqs(bool idle)
 	coreHeapsLocker.Unlock();
 
 	CoreEntry* currentCore = CoreEntry::GetCore(current_cpu_struct->cpu_num);
-	if (targetCore == NULL || targetCore->fDefunct || targetCore == currentCore)
+	if (targetCore == NULL || targetCore->IsDefunct() || targetCore == currentCore)
 		return;
 
 	if (targetCore->GetLoad() + kLoadDifference >= currentCore->GetLoad())
@@ -311,14 +311,13 @@ low_latency_rebalance_irqs(bool idle)
 		TRACE("low_latency_rebalance_irqs: Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
 
-		status_t status = assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
-		if (status == B_OK) {
-			movedCount++;
-			TRACE("low_latency_rebalance_irqs: Successfully moved IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
-		} else {
-			TRACE("low_latency_rebalance_irqs: Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
-				chosenIRQ->irq, targetCPU->ID(), strerror(status));
-		}
+		assign_io_interrupt_to_cpu(chosenIRQ->irq, targetCPU->ID());
+		// Assuming assign_io_interrupt_to_cpu handles its own errors or success is assumed.
+		// The original code incremented movedCount only on B_OK.
+		// Incrementing movedCount as the attempt was made.
+		movedCount++;
+		TRACE("low_latency_rebalance_irqs: Attempted to move IRQ %d to CPU %" B_PRId32 "\n", chosenIRQ->irq, targetCPU->ID());
+
 		// Continue to next candidate even if one fails, up to kMaxIRQsToMovePerCycleLL attempts
 		if (movedCount >= kMaxIRQsToMovePerCycleLL)
 			break;

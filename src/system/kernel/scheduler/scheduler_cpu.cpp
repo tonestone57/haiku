@@ -84,9 +84,9 @@ ThreadRunQueue::Dump() const
 CPUEntry::CPUEntry()
 	:
 	fLoad(0),
-	fInstantaneousLoad(0.0f),
-	// Corrected order: fMlfqHighestNonEmptyLevel before fInstLoadLastUpdateTimeSnapshot
+	// Corrected order: fMlfqHighestNonEmptyLevel before fInstantaneousLoad
 	fMlfqHighestNonEmptyLevel(-1),
+	fInstantaneousLoad(0.0f),
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),

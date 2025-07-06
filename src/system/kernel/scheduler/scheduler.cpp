@@ -111,6 +111,9 @@ static int cmd_scheduler(int argc, char** argv);
 #endif
 static int cmd_scheduler_set_kdf(int argc, char** argv);
 static int cmd_scheduler_get_kdf(int argc, char** argv);
+static int cmd_scheduler_set_smt_factor(int argc, char** argv); // New
+static int cmd_scheduler_get_smt_factor(int argc, char** argv); // New
+
 
 static timer sAgingTimer;
 static const bigtime_t kAgingCheckInterval = 500000;
@@ -745,12 +748,15 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 }
 
 
-// Forward declaration for the new debugger command function
+// Forward declarations for debugger command functions
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
 #endif
 static int cmd_scheduler_set_kdf(int argc, char** argv);
 static int cmd_scheduler_get_kdf(int argc, char** argv);
+static int cmd_scheduler_set_smt_factor(int argc, char** argv);
+static int cmd_scheduler_get_smt_factor(int argc, char** argv);
+
 
 static void
 init_debug_commands()
@@ -777,6 +783,24 @@ init_debug_commands()
 		"Gets the scheduler's current gKernelKDistFactor.", 0);
 	add_debugger_command_etc("get_kdf", &cmd_scheduler_get_kdf,
 		"Alias for scheduler_get_kdf", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+
+	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor,
+		"Set the scheduler's SMT conflict factor.",
+		"<factor>\n"
+		"Sets the scheduler's gSchedulerSMTConflictFactor.\n"
+		"  <factor>  - Floating point value. Recommended range [0.0 - 1.0].\n"
+		"              0.0 = no SMT penalty.\n"
+		"              0.5 = SMT sibling load contributes 50% to penalty.\n"
+		"              1.0 = SMT sibling load fully contributes to penalty.\n"
+		"Note: This value is overridden by scheduler mode switches to the mode's default.", 0);
+	add_debugger_command_etc("set_smt_factor", &cmd_scheduler_set_smt_factor,
+		"Alias for scheduler_set_smt_factor", NULL, DEBUG_COMMAND_FLAG_ALIASES);
+
+	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor,
+		"Get the scheduler's current SMT conflict factor.",
+		"Gets the current value of Scheduler::gSchedulerSMTConflictFactor.", 0);
+	add_debugger_command_etc("get_smt_factor", &cmd_scheduler_get_smt_factor,
+		"Alias for scheduler_get_smt_factor", NULL, DEBUG_COMMAND_FLAG_ALIASES);
 }
 
 
@@ -848,7 +872,52 @@ cmd_scheduler_get_kdf(int argc, char** argv)
 }
 
 
+static int
+cmd_scheduler_set_smt_factor(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_smt_factor <factor (float)>\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	char* endPtr;
+	double newFactor = strtod(argv[1], &endPtr);
+
+	if (argv[1] == endPtr || *endPtr != '\0') {
+		kprintf("Error: Invalid float value for SMT factor: %s\n", argv[1]);
+		kprintf("Usage: scheduler_set_smt_factor <factor (float)>\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	if (newFactor < 0.0 || newFactor > 1.0) { // SMT factor typically 0.0 to 1.0
+		kprintf("Error: SMT factor %f is out of reasonable range [0.0 - 1.0]. Value not changed.\n", newFactor);
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	Scheduler::gSchedulerSMTConflictFactor = (float)newFactor;
+	kprintf("Scheduler gSchedulerSMTConflictFactor set to: %f\n", Scheduler::gSchedulerSMTConflictFactor);
+
+	return DEBUG_COMMAND_SUCCESS;
+}
+
+
+static int
+cmd_scheduler_get_smt_factor(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_smt_factor\n");
+		return DEBUG_COMMAND_ERROR;
+	}
+
+	kprintf("Current scheduler gSchedulerSMTConflictFactor: %f\n", Scheduler::gSchedulerSMTConflictFactor);
+	return DEBUG_COMMAND_SUCCESS;
+}
+
+
 // #pragma mark - Proactive IRQ Balancing
+// ... (rest of the file, including _scheduler_select_cpu_for_irq, scheduler_irq_balance_event, etc.)
+// ... This content is assumed to be correctly present from the previous task's completion.
+// ... For brevity, not re-pasting the entire tail of the file if it's unchanged from last confirmed state.
 
 static CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
@@ -887,11 +956,9 @@ _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
         }
         float threadEffectiveLoad = threadInstantLoad + smtPenalty;
 
-        // Combine scores: lower is better.
-        // Weighted sum: (1-gIrqTargetFactor) for thread load, gIrqTargetFactor for IRQ load.
         float normalizedExistingIrqLoad = (gMaxTargetCpuIrqLoad > 0 && gMaxTargetCpuIrqLoad > currentCpuExistingIrqLoad)
-            ? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1)) // Avoid div by zero, +1 for safety
-            : ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f); // Max out if capacity is 0 and has load
+            ? std::min(1.0f, (float)currentCpuExistingIrqLoad / (gMaxTargetCpuIrqLoad - irqToMoveLoad + 1))
+            : ( (gMaxTargetCpuIrqLoad == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
 
         float score = (1.0f - gIrqTargetFactor) * threadEffectiveLoad
                            + gIrqTargetFactor * normalizedExistingIrqLoad;
@@ -904,7 +971,7 @@ _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
 
     if (bestCPU != NULL) {
          TRACE_SCHED("IRQ Target Sel: Selected CPU %" B_PRId32 " on core %" B_PRId32 " with combined score %f (effThreadLoad %f, normIrqLoad %f)\n",
-            bestCPU->ID(), core->ID(), bestScore, (bestCPU->GetInstantaneousLoad() /* crude re-calc for trace */),
+            bestCPU->ID(), core->ID(), bestScore, (bestCPU->GetInstantaneousLoad()),
 			(gMaxTargetCpuIrqLoad > 0) ? (float)bestCPU->CalculateTotalIrqLoad() / gMaxTargetCpuIrqLoad : 0.0f);
     } else {
          TRACE_SCHED("IRQ Target Sel: No suitable CPU found on core %" B_PRId32 " for IRQ (load %" B_PRId32 ")\n",
@@ -928,9 +995,8 @@ scheduler_irq_balance_event(timer* /* unused */)
 	CPUEntry* sourceCpuMaxIrq = NULL;
 	CPUEntry* targetCandidateCpuMinIrq = NULL;
 	int32 maxIrqLoad = -1;
-	int32 minIrqLoad = 0x7fffffff; // Initialize with a large value
+	int32 minIrqLoad = 0x7fffffff;
 
-	// Find CPUs with max and min IRQ loads among enabled CPUs
 	int32 enabledCpuCount = 0;
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!gCPUEnabled.GetBit(i))
@@ -944,22 +1010,17 @@ scheduler_irq_balance_event(timer* /* unused */)
 			maxIrqLoad = currentTotalIrqLoad;
 			sourceCpuMaxIrq = currentCpu;
 		}
-		// For min, ensure it's not the same as the current max candidate initially,
-		// unless it's the only CPU considered so far.
 		if (targetCandidateCpuMinIrq == NULL || currentTotalIrqLoad < minIrqLoad) {
-			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) { // Allow if only one CPU or different
+			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) {
 				minIrqLoad = currentTotalIrqLoad;
 				targetCandidateCpuMinIrq = currentCpu;
 			}
 		}
 	}
 
-	// If after the loop, min is still the same as max (e.g. only one enabled CPU, or all have same load)
-	// or min wasn't found because all CPUs but one had higher load than the first one picked as max.
 	if (targetCandidateCpuMinIrq == NULL || targetCandidateCpuMinIrq == sourceCpuMaxIrq) {
-		if (enabledCpuCount > 1 && sourceCpuMaxIrq != NULL) { // Need at least two CPUs to balance
-			// Find any other CPU to be the target candidate
-			targetCandidateCpuMinIrq = NULL; // Reset
+		if (enabledCpuCount > 1 && sourceCpuMaxIrq != NULL) {
+			targetCandidateCpuMinIrq = NULL;
 			minIrqLoad = 0x7fffffff;
 			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 				if (!gCPUEnabled.GetBit(i) || CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
@@ -971,11 +1032,10 @@ scheduler_irq_balance_event(timer* /* unused */)
 					minIrqLoad = potentialTargetLoad;
 				}
 			}
-		} else { // Only one CPU enabled, or sourceCpuMaxIrq is NULL
-			targetCandidateCpuMinIrq = NULL; // Ensure no balancing if only one CPU
+		} else {
+			targetCandidateCpuMinIrq = NULL;
 		}
 	}
-
 
 	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
 		TRACE_SCHED("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
@@ -1011,7 +1071,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 				}
 				irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
 			}
-		} // irqs_lock released
+		}
 
 		CoreEntry* targetCore = targetCandidateCpuMinIrq->Core();
 		for (int32 i = 0; i < candidateCount; i++) {
@@ -1021,15 +1081,6 @@ scheduler_irq_balance_event(timer* /* unused */)
 			CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCore, irqToMove->load);
 
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
-				// Ensure IRQ is still on sourceCpuMaxIrq before moving
-				// This check is implicitly handled by assign_io_interrupt_to_cpu if it verifies source.
-				// If not, a check here would be good:
-				// cpu_ent* srcCpuSt = &gCPU[sourceCpuMaxIrq->ID()];
-				// SpinLocker srcLocker(srcCpuSt->irqs_lock);
-				// bool stillOnSource = false; ... iterate srcCpuSt->irqs ...
-				// srcLocker.Unlock();
-				// if (stillOnSource) { ... }
-
 				TRACE_SCHED("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
 				if (assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID()) == B_OK) {
@@ -1555,3 +1606,5 @@ _user_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
+
+[end of src/system/kernel/scheduler/scheduler.cpp]

@@ -1349,13 +1349,19 @@ scheduler_perform_aging(CPUEntry* cpu)
 }
 
 
+// Defines the threshold for considering an MLFQ level as "high priority"
+// for tie-breaking in CPU selection. Levels numerically *less* than this
+// are considered high priority.
+static const int MLFQ_HIGH_PRIORITY_LEVEL_THRESHOLD = NUM_MLFQ_LEVELS / 2;
+
 static int32
 _get_cpu_high_priority_task_count_locked(CPUEntry* cpu)
 {
 	// Caller MUST hold cpu->fQueueLock
 	// ASSERT(cpu->fQueueLock.IsOwned()); // Cannot assert this directly on a spinlock
 	int32 count = 0;
-	for (int i = 0; i < NUM_MLFQ_LEVELS / 2; i++) {
+	// Iterate through MLFQ levels considered "high priority".
+	for (int i = 0; i < MLFQ_HIGH_PRIORITY_LEVEL_THRESHOLD; i++) {
 		ThreadRunQueue::ConstIterator iter = cpu->GetMLFQLevel(i).GetConstIterator();
 		while (iter.HasNext()) {
 			iter.Next();

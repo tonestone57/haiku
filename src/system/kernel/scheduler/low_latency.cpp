@@ -109,7 +109,11 @@ low_latency_choose_core(const ThreadData* threadData)
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(threadData != NULL);
 
-	PackageEntry* package = gIdlePackageList.Last();
+	PackageEntry* package = NULL;
+	{
+		ReadSpinLocker globalIdlePackageListLocker(gIdlePackageLock);
+		package = gIdlePackageList.Last();
+	}
 	CoreEntry* chosenCore = NULL;
 
 	CPUSet affinityMask = threadData->GetCPUMask();

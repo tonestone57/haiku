@@ -129,6 +129,198 @@ __heap_terminate_after()
 {
 }
 
+
+// --- mspace API Stubs ---
+// The following functions provide stubs for the dlmalloc-style mspace API.
+// snmalloc does not have a concept of isolated mspaces. These stubs redirect
+// to the global snmalloc allocator, meaning mspace isolation is NOT provided.
+// They are for API compatibility if older code still uses these interfaces.
+
+#include <stdio.h> // For dprintf (conditionally)
+#include <stdlib.h> // For malloc, free etc. (which snmalloc will override)
+// For aligned_alloc and malloc_usable_size, <malloc.h> is often the provider
+// on POSIX systems. If snmalloc's overrides ensure these are declared through
+// stdlib.h or its own headers, then <malloc.h> might not be strictly needed.
+// Let's include it to be safe for now for these specific functions.
+#include <malloc.h>
+
+
+extern "C" {
+
+typedef void* mspace;
+
+/**
+ * @brief Creates a new memory allocation space (mspace).
+ * Stub implementation for snmalloc. Ignores parameters as snmalloc uses a global heap.
+ * @param capacity Initial capacity (ignored).
+ * @param locked Locking mode (ignored).
+ * @return A dummy non-NULL mspace handle on supposed success, always (mspace)1.
+ */
+mspace create_mspace(size_t capacity, int locked)
+{
+	(void)capacity; // Ignored
+	(void)locked;   // Ignored
+
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: create_mspace(capacity: %lu, locked: %d) called. Returning dummy mspace handle. Mspace isolation not provided.\n", capacity, locked);
+#endif
+	// Return a non-NULL dummy handle. Any non-NULL value will do,
+	// as it's not actually used by the other mspace_* stubs.
+	return (mspace)1;
+}
+
+/**
+ * @brief Destroys an mspace.
+ * Stub implementation for snmalloc. This is a no-op.
+ * @param msp The mspace handle (ignored).
+ * @return Always 0 (success).
+ */
+size_t destroy_mspace(mspace msp)
+{
+	(void)msp; // Ignored
+
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: destroy_mspace(msp: %p) called. No-op.\n", msp);
+#endif
+	// dlmalloc's destroy_mspace returns 0 on success, or the number of blocks still allocated.
+	// As this is a stub for a global allocator, returning 0 is the simplest "success".
+	return 0;
+}
+
+/**
+ * @brief Allocates memory from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global malloc.
+ * @param msp The mspace handle (ignored).
+ * @param bytes Number of bytes to allocate.
+ * @return Pointer to allocated memory, or NULL on failure.
+ */
+void* mspace_malloc(mspace msp, size_t bytes)
+{
+	(void)msp; // Ignored
+	return malloc(bytes);
+}
+
+/**
+ * @brief Frees memory allocated from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global free.
+ * @param msp The mspace handle (ignored).
+ * @param mem Pointer to the memory to free.
+ */
+void mspace_free(mspace msp, void* mem)
+{
+	(void)msp; // Ignored
+	free(mem);
+}
+
+/**
+ * @brief Allocates and zero-initializes memory from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global calloc.
+ * @param msp The mspace handle (ignored).
+ * @param n_elements Number of elements.
+ * @param elem_size Size of each element.
+ * @return Pointer to allocated and zeroed memory, or NULL on failure.
+ */
+void* mspace_calloc(mspace msp, size_t n_elements, size_t elem_size)
+{
+	(void)msp; // Ignored
+	return calloc(n_elements, elem_size);
+}
+
+/**
+ * @brief Reallocates memory from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global realloc.
+ * @param msp The mspace handle (ignored).
+ * @param mem Pointer to the previously allocated memory.
+ * @param newsize New size in bytes.
+ * @return Pointer to reallocated memory, or NULL on failure.
+ */
+void* mspace_realloc(mspace msp, void* mem, size_t newsize)
+{
+	(void)msp; // Ignored
+	return realloc(mem, newsize);
+}
+
+/**
+ * @brief Allocates aligned memory from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global aligned_alloc.
+ * @param msp The mspace handle (ignored).
+ * @param alignment Alignment constraint.
+ * @param size Number of bytes to allocate.
+ * @return Pointer to allocated aligned memory, or NULL on failure.
+ */
+void* mspace_memalign(mspace msp, size_t alignment, size_t size)
+{
+	(void)msp; // Ignored
+	// aligned_alloc is the C11 standard. memalign is a common POSIX name for it.
+	// snmalloc typically provides aligned_alloc.
+	return aligned_alloc(alignment, size);
+}
+
+/**
+ * @brief Gets the usable size of an allocation from an mspace.
+ * Stub implementation for snmalloc. Ignores mspace and uses global malloc_usable_size.
+ * @param msp The mspace handle (ignored).
+ * @param mem Pointer to the allocated memory.
+ * @return Usable size of the allocation.
+ */
+size_t mspace_usable_size(mspace msp, void* mem)
+{
+	(void)msp; // Ignored
+	return malloc_usable_size(mem);
+}
+
+// These _b* internal functions were likely BeOS R5 specific variants or internals.
+// Stubbing them to global malloc/free for basic API compatibility.
+void* _bmalloc_internal(mspace msp, size_t bytes)
+{
+	(void)msp; // Ignored
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: _bmalloc_internal(msp: %p, bytes: %lu) called. Redirecting to malloc().\n", msp, bytes);
+#endif
+	return malloc(bytes);
+}
+
+void _bfree_internal(mspace msp, void* ptr)
+{
+	(void)msp; // Ignored
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: _bfree_internal(msp: %p, ptr: %p) called. Redirecting to free().\n", msp, ptr);
+#endif
+	free(ptr);
+}
+
+// This function likely controlled dlmalloc's internal debug level.
+// snmalloc has its own debugging mechanisms, often compile-time.
+int mspace_set_debug_level(int level)
+{
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: mspace_set_debug_level(level: %d) called. No-op for snmalloc.\n", level);
+#endif
+	(void)level;
+	return 0; // Return 0, indicating no specific dlmalloc debug level is active.
+}
+
+// This function was likely for dlmalloc's internal heap analysis.
+void mspace_analyze(mspace msp)
+{
+	(void)msp; // Ignored
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: mspace_analyze(msp: %p) called. No-op for snmalloc.\n", msp);
+#endif
+	// No operation.
+}
+
+// For dlmalloc, this checked if a specific mspace had no allocations.
+// The global snmalloc heap is unlikely to be "empty" in this sense.
+int mspace_is_empty(mspace msp)
+{
+	(void)msp; // Ignored
+#ifdef DEBUG_SNMALLOC_HOOKS
+	dprintf("snmalloc_hooks: mspace_is_empty(msp: %p) called. Returning 0 (false).\n", msp);
+#endif
+	return 0; // False, global heap is likely not empty.
+}
+
 // Standard C library allocation functions that might not be in snmalloc's
 // primary override set but could be expected by some POSIX/Haiku code.
 // snmalloc's `override/malloc.cc` and `override/malloc-extensions.cc` should

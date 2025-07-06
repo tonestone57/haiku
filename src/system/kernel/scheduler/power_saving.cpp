@@ -28,9 +28,67 @@ const int32 kConsolidationScoreHysteresisMargin = kMaxLoad / 10; // Only switch 
 const int32 kMaxIRQsToMovePerCyclePS = 2; // PS for Power Saving
 
 
+// sSmallTaskCore:
+// Represents the globally preferred "consolidation core" in Power Saving mode.
+// The scheduler attempts to direct new, light tasks to this core to allow
+// other cores to remain idle longer, thus saving power.
+//
+// Lifecycle and Management:
+// - Designation: It's primarily designated by
+//   `power_saving_designate_consolidation_core` when `power_saving_choose_core`
+//   needs to find a suitable core for a thread and the current `sSmallTaskCore`
+//   is NULL, invalid (e.g., CPUs disabled), or doesn't match thread affinity.
+// - Stickiness: The designation includes hysteresis to prevent rapid flapping
+//   between cores if multiple cores have similar suitability scores.
+// - Invalidation:
+//   - Can become NULL if its CPUs are disabled (checked in
+//     `power_saving_set_cpu_enabled` and
+//     `power_saving_get_consolidation_target_core`).
+//   - `power_saving_get_consolidation_target_core` will also treat it as
+//     unsuitable for new placements (effectively a temporary invalidation) if its
+//     load becomes too high ( > kVeryHighLoad ), even if it remains the
+//     global `sSmallTaskCore`.
+// - Re-designation: Currently reactive. If `sSmallTaskCore` is NULL or
+//   unsuitable for a given placement, `power_saving_choose_core` will call
+//   `power_saving_designate_consolidation_core` to find and potentially set a
+//   new global `sSmallTaskCore`.
+// - Future Consideration: A proactive, infrequent, low-priority periodic check
+//   (e.g., via the load balance timer when in PS mode) could be considered if
+//   `sSmallTaskCore` is NULL but the system has some activity, to see if one
+//   should be designated. This is not currently implemented.
+//
+// The pointer itself is managed using atomic operations (`atomic_pointer_test_and_set`)
+// to handle concurrent attempts to update it from different CPUs/threads calling
+// `power_saving_designate_consolidation_core`.
+
 static CoreEntry*
 power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 {
+	// This function selects and potentially updates the global `sSmallTaskCore`.
+	// Goal: Choose a single core to consolidate work onto, to save power.
+	//
+	// Method:
+	// 1. Respects optional `affinityMaskPtr` for thread-specific calls.
+	// 2. Validates current global `sSmallTaskCore` against affinity and CPU status.
+	// 3. Scores all valid cores based on:
+	//    - Strongest preference: Truly idle cores.
+	//    - Next preference: Very lightly loaded cores.
+	//    - Next: Active but not heavily loaded cores.
+	//    - Base: Other cores (load-based).
+	// 4. Applies a hysteresis bonus (`kConsolidationScoreHysteresisMargin`) to the
+	//    current `sSmallTaskCore` (if valid for context) to make it "sticky" and
+	//    prevent rapid switching if another core is only marginally "better".
+	// 5. Decision to update global `sSmallTaskCore`:
+	//    - If current global is best for context, stick with it.
+	//    - If another core is significantly better (score exceeds current's score
+	//      plus hysteresis), attempt to update global `sSmallTaskCore` using
+	//      `atomic_pointer_test_and_set` to handle concurrency.
+	//    - If no current global or it's unsuitable for context, best candidate
+	//      for context attempts to become the new global `sSmallTaskCore`.
+	// 6. Race handling: If `atomic_pointer_test_and_set` indicates another thread
+	//    changed `sSmallTaskCore` during this function's execution, the logic
+	//    re-evaluates using the new global value against the current context's needs.
+
 	SCHEDULER_ENTER_FUNCTION();
 	CPUSet affinityMask;
 	if (affinityMaskPtr != NULL)

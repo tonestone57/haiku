@@ -200,6 +200,9 @@ public:
 
 	static inline		CoreEntry*		GetCore(int32 cpu);
 
+	// Public getter for fDefunct
+	inline				bool			IsDefunct() const { return fDefunct; }
+
 private:
 						void			_UpdateLoad(bool forceUpdate = false);
 

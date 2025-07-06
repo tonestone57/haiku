@@ -23,7 +23,7 @@ using namespace Scheduler;
 
 //const bigtime_t kPowerSavingCacheExpire = 100000;
 const bigtime_t kPowerSavingCacheExpire = 250000; // 250ms (New Value)
-static CoreEntry* sSmallTaskCore = NULL;
+CoreEntry* Scheduler::sSmallTaskCore = NULL; // Define the global variable
 const int32 kConsolidationScoreHysteresisMargin = kMaxLoad / 10; // Only switch if new core is 10% of MaxLoad better
 const int32 kMaxIRQsToMovePerCyclePS = 2; // PS for Power Saving
 
@@ -64,80 +64,19 @@ const int32 kMaxIRQsToMovePerCyclePS = 2; // PS for Power Saving
 static CoreEntry*
 power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 {
-	// This function selects and potentially updates the global `sSmallTaskCore` (STC).
-	// Its primary goal is to choose a single core for consolidating work to save power.
-	//
-	// The selection process involves:
-	// 1. Initialization:
-	//    - Respects an optional `affinityMaskPtr` for thread-specific placement constraints.
-	//    - Captures the current global `sSmallTaskCore` value.
-	//
-	// 2. Validation of Current Global STC:
-	//    - Checks if `currentGlobalSTC` is non-NULL.
-	//    - If `affinityMaskPtr` is provided, ensures `currentGlobalSTC`'s CPUs match the mask.
-	//    - Verifies that `currentGlobalSTC` still has at least one enabled CPU.
-	//    - If invalid (e.g., no enabled CPUs), `currentGlobalSTC` is nulled locally,
-	//      and an attempt is made to atomically nullify the global `sSmallTaskCore`
-	//      if this instance was the one to detect invalidity.
-	//
-	// 3. Scoring Potential Cores:
-	//    - Iterates through all available `gCoreEntries`.
-	//    - Skips cores that don't match `affinityMaskPtr` (if provided).
-	//    - Skips cores with no enabled CPUs.
-	//    - Calculates a 'score' for each valid core:
-	//        - Highest score: Truly idle cores (zero active time, zero load).
-	//        - High score: Very lightly loaded cores (load < kLowLoad), score decreases with load.
-	//        - Medium score: Active but not heavily loaded cores (load < kHighLoad), score decreases with load.
-	//        - Low score: Other cores (e.g., busy, or idle with some residual reported load), score decreases with load.
-	//    - Hysteresis Boost: If a core being scored is the `currentGlobalSTC` (and is valid
-	//      for the current context/affinity), its score is boosted by
-	//      `kConsolidationScoreHysteresisMargin`. This makes the current STC "sticky"
-	//      and prevents rapid switching if another core is only marginally better.
-	//    - The core with the highest score (`bestAffinityCandidate`) is tracked.
-	//
-	// 4. Decision Logic for Returning/Updating STC:
-	//    - If no suitable `bestAffinityCandidate` is found (e.g., due to affinity constraints
-	//      or no enabled cores), returns NULL.
-	//    - Case A: `currentGlobalSTC` is valid for the context and is also the `bestAffinityCandidate`.
-	//      -> Returns `currentGlobalSTC` (no change needed).
-	//    - Case B: `currentGlobalSTC` is valid for the context, but `bestAffinityCandidate` has a higher score.
-	//      -> Compare `bestAffinityCandidateScore` with `currentGlobalSTCScore` (recalculated *without* its
-	//         own hysteresis boost for a fair comparison).
-	//      -> If `bestAffinityCandidateScore` is significantly greater (i.e., > `currentGlobalSTCScore` + `kConsolidationScoreHysteresisMargin`),
-	//         an attempt is made to atomically update the global `sSmallTaskCore` to `bestAffinityCandidate`
-	//         using `atomic_pointer_test_and_set`.
-	//         - If atomic update succeeds: `bestAffinityCandidate` becomes the new STC and is returned.
-	//         - If atomic update fails (race condition, another CPU changed `sSmallTaskCore`):
-	//           The newly set global STC is re-read. If it matches the current affinity requirements,
-	//           it's returned. Otherwise, `bestAffinityCandidate` (best for *this* call's affinity) is returned.
-	//      -> If `bestAffinityCandidate` is not significantly better, `currentGlobalSTC` is returned (stickiness wins).
-	//    - Case C: No `currentGlobalSTC` was valid for the context at the start (or it was NULL).
-	//      -> `bestAffinityCandidate` (if found) attempts to become the new global `sSmallTaskCore` via
-	//         `atomic_pointer_test_and_set`.
-	//         - If atomic update succeeds: `bestAffinityCandidate` is returned.
-	//         - If atomic update fails: Similar to Case B, check if the new global STC (set by another CPU)
-	//           is suitable for current affinity; otherwise, return `bestAffinityCandidate`.
-	//
-	// This multi-stage process aims to find the best core for consolidation while respecting
-	// affinity, ensuring core viability, preventing rapid STC changes (hysteresis), and
-	// handling concurrent updates to the global `sSmallTaskCore` variable.
-
 	SCHEDULER_ENTER_FUNCTION();
 
-	// --- Step 1: Initialization and Parameter Handling ---
 	CPUSet affinityMask;
 	if (affinityMaskPtr != NULL)
 		affinityMask = *affinityMaskPtr;
 	const bool useAffinityMask = !affinityMask.IsEmpty();
 
-	CoreEntry* currentGlobalSTC = sSmallTaskCore; // Capture current global sSmallTaskCore
+	CoreEntry* currentGlobalSTC = Scheduler::sSmallTaskCore;
 
-	// --- Step 2: Validation of Current Global STC ---
-	// Check if currentGlobalSTC is valid and suitable for the given affinity (if any).
 	if (currentGlobalSTC != NULL) {
 		bool isValidForAffinity = !useAffinityMask || currentGlobalSTC->CPUMask().Matches(affinityMask);
 		bool hasEnabledCPU = false;
-		if (isValidForAffinity) { // Only check CPUs if affinity matches or no affinity specified
+		if (isValidForAffinity) {
 			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 				if (currentGlobalSTC->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
 					hasEnabledCPU = true;
@@ -147,36 +86,26 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 		}
 
 		if (!isValidForAffinity || !hasEnabledCPU) {
-			// Current global STC is unsuitable for this specific call due to affinity mismatch,
-			// or it has no enabled CPUs (globally unsuitable).
 			if (!hasEnabledCPU && isValidForAffinity) {
-				// If it was globally unsuitable (no enabled CPUs), attempt to clear the global pointer.
-				// This TAS ensures we only nullify it if it hasn't been changed by another CPU already.
-				if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentGlobalSTC) == currentGlobalSTC) {
+				if (atomic_pointer_test_and_set(&Scheduler::sSmallTaskCore, (CoreEntry*)NULL, currentGlobalSTC) == currentGlobalSTC) {
 					dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated (no enabled CPUs).\n", currentGlobalSTC->ID());
 				}
 			}
-			// Regardless of global update, for this call, currentGlobalSTC is considered NULL.
 			currentGlobalSTC = NULL;
 		}
 	}
 
-	// --- Step 3: Scoring Potential Cores ---
 	CoreEntry* bestAffinityCandidate = NULL;
-	int32 bestAffinityCandidateScore = -1; // Lower scores are less preferable.
+	int32 bestAffinityCandidateScore = -1;
 
 	for (int32 i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[i];
 
-		// Skip defunct cores
-		if (core->fDefunct)
+		if (core->IsDefunct()) // Use getter
 			continue;
-
-		// Skip if core doesn't match affinity mask
 		if (useAffinityMask && !core->CPUMask().Matches(affinityMask))
 			continue;
 
-		// Skip if core has no enabled CPUs
 		bool hasEnabledCPUOnThisCore = false;
 		for (int32 j = 0; j < smp_get_num_cpus(); j++) {
 			if (core->CPUMask().GetBit(j) && gCPUEnabled.GetBit(j)) {
@@ -187,59 +116,43 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 		if (!hasEnabledCPUOnThisCore)
 			continue;
 
-		// Calculate score for the current core
 		int32 currentCoreLoad = core->GetLoad();
 		int32 score = 0;
 		if (core->GetActiveTime() == 0 && currentCoreLoad == 0) {
-			score = kMaxLoad * 2; // Strongest preference: truly idle
+			score = kMaxLoad * 2;
 		} else if (currentCoreLoad < kLowLoad) {
-			score = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - currentCoreLoad); // Next: very lightly loaded
+			score = kMaxLoad + (kMaxLoad / 2) + (kLowLoad - currentCoreLoad);
 		} else if (core->GetActiveTime() > 0 && currentCoreLoad < kHighLoad) {
-			score = kMaxLoad + (kHighLoad - currentCoreLoad); // Next: active and not heavily loaded
+			score = kMaxLoad + (kHighLoad - currentCoreLoad);
 		} else {
-			score = kMaxLoad - currentCoreLoad; // Base: other (higher load is lower score)
+			score = kMaxLoad - currentCoreLoad;
 		}
 
-		// Apply hysteresis boost if this core is the current (and still valid) global STC
 		if (core == currentGlobalSTC && currentGlobalSTC != NULL) {
 			score += kConsolidationScoreHysteresisMargin;
 		}
 
-		// Update best candidate if current core is better
 		if (bestAffinityCandidate == NULL || score > bestAffinityCandidateScore) {
 			bestAffinityCandidateScore = score;
 			bestAffinityCandidate = core;
 		}
 	}
 
-	// --- Step 4: Decision Logic ---
 	if (bestAffinityCandidate == NULL) {
 		TRACE("PS designate_consolidation_core: No suitable candidate found (affinity/enabled check failed for all).\n");
-		return NULL; // No core matches affinity or no cores enabled.
+		return NULL;
 	}
 
 	if (affinityMaskPtr != NULL) {
-		// This call was for a specific thread's affinity requirements.
-		// Return the best core that matches this affinity, but DO NOT change the global sSmallTaskCore.
-		// The global sSmallTaskCore should only be changed by general maintenance calls
-		// (i.e., when affinityMaskPtr is NULL).
 		TRACE("PS designate_consolidation_core: Affinity call. Returning best core %" B_PRId32 " for this specific affinity. Global STC not changed by this call.\n", bestAffinityCandidate->ID());
 		return bestAffinityCandidate;
 	} else {
-		// This call is for general global STC designation or update (affinityMaskPtr was NULL).
-		// Proceed with logic to potentially update global sSmallTaskCore.
-
-		// Case A: Current global STC (currentGlobalSTC was from sSmallTaskCore at function start,
-		// potentially locally nulled if it was invalid) is valid and is also the best candidate found.
 		if (currentGlobalSTC == bestAffinityCandidate && currentGlobalSTC != NULL) {
 			TRACE("PS designate_consolidation_core: Global STC. Sticking with current sSmallTaskCore %" B_PRId32 " (score %" B_PRId32 ").\n", currentGlobalSTC->ID(), bestAffinityCandidateScore);
 			return currentGlobalSTC;
 		}
 
-		// Case B: Current global STC was valid, but a different candidate is better.
-		// Only switch if the new candidate is *significantly* better.
 		if (currentGlobalSTC != NULL) {
-			// Recalculate currentGlobalSTC's score *without* its own hysteresis boost for fair comparison.
 			int32 currentGlobalSTCBaseScore = 0;
 			int32 load = currentGlobalSTC->GetLoad();
 			if (currentGlobalSTC->GetActiveTime() == 0 && load == 0) { currentGlobalSTCBaseScore = kMaxLoad * 2; }
@@ -248,18 +161,14 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 			else { currentGlobalSTCBaseScore = kMaxLoad - load; }
 
 			if (bestAffinityCandidateScore > currentGlobalSTCBaseScore + kConsolidationScoreHysteresisMargin) {
-				// bestAffinityCandidate is significantly better. Attempt to set it as the new global STC.
-				if (atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC) == currentGlobalSTC) {
+				if (atomic_pointer_test_and_set(&Scheduler::sSmallTaskCore, bestAffinityCandidate, currentGlobalSTC) == currentGlobalSTC) {
 					dprintf("scheduler: Power Saving - Global sSmallTaskCore designated to core %" B_PRId32 " (was %" B_PRId32 ", score %" B_PRId32 " vs %" B_PRId32 ").\n",
 						bestAffinityCandidate->ID(), currentGlobalSTC->ID(), bestAffinityCandidateScore, currentGlobalSTCBaseScore);
 					return bestAffinityCandidate;
 				} else {
-					// Race condition: sSmallTaskCore was changed by another CPU.
-					// Return the new global STC (it's a general call, so the latest global is relevant).
-					// Ensure the raced STC is valid before returning.
-					CoreEntry* newGlobalSTCFromRace = sSmallTaskCore;
+					CoreEntry* newGlobalSTCFromRace = Scheduler::sSmallTaskCore;
 					TRACE("PS designate_consolidation_core: Global STC. Race detected trying to set STC. New global is %" B_PRId32 ".\n", newGlobalSTCFromRace ? newGlobalSTCFromRace->ID() : -1);
-					if (newGlobalSTCFromRace != NULL && !newGlobalSTCFromRace->fDefunct) {
+					if (newGlobalSTCFromRace != NULL && !newGlobalSTCFromRace->IsDefunct()) { // Use getter
 						bool hasEnabledCPU = false;
 						for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 							if (newGlobalSTCFromRace->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
@@ -269,29 +178,23 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 						}
 						if (hasEnabledCPU) return newGlobalSTCFromRace;
 					}
-					// If raced STC is invalid, return what we found as best general candidate,
-					// but don't try to set global STC again in this path to avoid TAS loops.
 					return bestAffinityCandidate;
 				}
 			} else {
-				// Not significantly better, stick with currentGlobalSTC.
 				TRACE("PS designate_consolidation_core: Global STC. bestAffinityCandidate %" B_PRId32 " (score %" B_PRId32 ") not significantly better than current STC %" B_PRId32 " (base score %" B_PRId32 "). Sticking.\n",
 					bestAffinityCandidate->ID(), bestAffinityCandidateScore, currentGlobalSTC->ID(), currentGlobalSTCBaseScore);
 				return currentGlobalSTC;
 			}
 		} else {
-			// Case C: No currentGlobalSTC was valid initially for general purpose (it was NULL or failed validation).
-			// Attempt to set our bestAffinityCandidate as the new global STC.
-			CoreEntry* previousGlobalValueForTAS = sSmallTaskCore; // Re-read sSmallTaskCore for the TAS 'expected' value
-			if (atomic_pointer_test_and_set(&sSmallTaskCore, bestAffinityCandidate, previousGlobalValueForTAS) == previousGlobalValueForTAS) {
+			CoreEntry* previousGlobalValueForTAS = Scheduler::sSmallTaskCore;
+			if (atomic_pointer_test_and_set(&Scheduler::sSmallTaskCore, bestAffinityCandidate, previousGlobalValueForTAS) == previousGlobalValueForTAS) {
 				dprintf("scheduler: Power Saving - Global sSmallTaskCore newly designated to core %" B_PRId32 " (score %" B_PRId32 "). Previous value for TAS was %s.\n",
 					bestAffinityCandidate->ID(), bestAffinityCandidateScore, previousGlobalValueForTAS ? "valid" : "NULL/invalid");
 				return bestAffinityCandidate;
 			} else {
-				// Race condition. Return the new global STC if valid.
-				CoreEntry* newGlobalSTCFromRace = sSmallTaskCore;
+				CoreEntry* newGlobalSTCFromRace = Scheduler::sSmallTaskCore;
 				TRACE("PS designate_consolidation_core: Global STC. Race detected trying to set new STC. New global is %" B_PRId32 ".\n", newGlobalSTCFromRace ? newGlobalSTCFromRace->ID() : -1);
-				if (newGlobalSTCFromRace != NULL && !newGlobalSTCFromRace->fDefunct) {
+				if (newGlobalSTCFromRace != NULL && !newGlobalSTCFromRace->IsDefunct()) { // Use getter
 					bool hasEnabledCPU = false;
 					for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 						if (newGlobalSTCFromRace->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
@@ -301,7 +204,6 @@ power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 					}
 					if (hasEnabledCPU) return newGlobalSTCFromRace;
 				}
-				// If raced STC is invalid, return our best general candidate.
 				return bestAffinityCandidate;
 			}
 		}
@@ -312,7 +214,7 @@ static CoreEntry*
 power_saving_get_consolidation_target_core(const ThreadData* threadToPlace)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	CoreEntry* currentSTC = sSmallTaskCore; // Read once
+	CoreEntry* currentSTC = Scheduler::sSmallTaskCore;
 
 	if (currentSTC != NULL) {
 		CPUSet affinityMask;
@@ -330,17 +232,15 @@ power_saving_get_consolidation_target_core(const ThreadData* threadToPlace)
 			}
 		}
 		if (!hasEnabledCPU) {
-			// Attempt to clear it if it was indeed this invalid core
-			if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentSTC) == currentSTC) {
+			if (atomic_pointer_test_and_set(&Scheduler::sSmallTaskCore, (CoreEntry*)NULL, currentSTC) == currentSTC) {
 				dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " invalidated by get_consolidation_target_core (no enabled CPUs).\n", currentSTC->ID());
 			}
 			return NULL;
 		}
 
-		// Proposal 4: Softer invalidation if load is too high
-		if (currentSTC->GetLoad() > kVeryHighLoad) { // Or kHighLoad, tunable
+		if (currentSTC->GetLoad() > kVeryHighLoad) {
 			dprintf("scheduler: Power Saving - sSmallTaskCore %" B_PRId32 " too loaded (%" B_PRId32 "), not using for this placement.\n", currentSTC->ID(), currentSTC->GetLoad());
-			return NULL; // Don't use it if it's currently too busy
+			return NULL;
 		}
 
 		return currentSTC;
@@ -354,55 +254,24 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	// thread_load_estimate is threadData->GetLoad() (i.e., fNeededLoad from ThreadData).
-	// For newly created threads that don't inherit fNeededLoad from a parent,
-	// this defaults to kMaxLoad / 10 (10% of max load) - see ThreadData::Init().
-	//
-	// Impact of this initial estimate on core waking:
-	// - If many lightweight new threads are created: The 10% estimate per thread
-	//   might collectively make the consolidationTarget appear to fill up faster
-	//   than it would if their true (lower) load was known. This could lead to
-	//   this function returning 'true' (deciding to wake 'core') sooner than
-	//   strictly necessary if the consolidationTarget could have handled them.
-	// - If a CPU-intensive new thread is created: The 10% estimate significantly
-	//   under-represents its true demand. If consolidationTarget is, e.g., 70% busy
-	//   and kVeryHighLoad is 85%, adding 10% keeps it < 85%. This function might
-	//   return 'false', preventing 'core' from waking and forcing the heavy thread
-	//   onto an already busy consolidationTarget, impacting performance until its
-	//   fNeededLoad adapts upwards.
-	// The 10% default is a general heuristic. fNeededLoad adapts over time, so
-	// this primarily affects the first few placement/waking decisions for a new thread.
-
 	if (core->GetLoad() > 0 || core->GetActiveTime() > 0) {
-		// The core is already active (has some load or has been active recently),
-		// so no "waking" is needed in a power sense. It's okay to use it.
 		return true;
 	}
 
-	CoreEntry* consolidationTarget = sSmallTaskCore;
+	CoreEntry* consolidationTarget = Scheduler::sSmallTaskCore;
 
 	if (consolidationTarget != NULL && consolidationTarget != core) {
-		// A different core is designated for consolidation.
-		// If that consolidation core has capacity for this thread's estimated load
-		// (sum of current load and new thread's estimate) without exceeding
-		// kVeryHighLoad, prefer using it instead of waking `core`.
 		if (consolidationTarget->GetLoad() + thread_load_estimate < kVeryHighLoad) {
 			return false;
 		}
 	} else if (consolidationTarget == core) {
-		// The core being considered for waking *is* the consolidation target.
-		// It's okay to wake it, as it's the preferred place for tasks.
 		return true;
 	}
 
-	// No suitable consolidation target (or it's full / this is it but it's idle).
-	// Check other active cores before deciding to wake this idle `core`.
 	int32 activeCoreCount = 0;
 	int32 overloadedActiveCoreCount = 0;
 	for(int32 i=0; i < gCoreCount; ++i) {
-		// Skip the core we are asking about, if it's idle.
 		if (&gCoreEntries[i] == core) continue;
-
 		if (gCoreEntries[i].GetLoad() > 0) {
 			activeCoreCount++;
 			if (gCoreEntries[i].GetLoad() > kHighLoad) {
@@ -424,46 +293,12 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 static void
 power_saving_switch_to_mode()
 {
-	gKernelKDistFactor = 0.5f; // Changed from 0.6f
+	gKernelKDistFactor = 0.5f;
 	gSchedulerBaseQuantumMultiplier = 1.5f;
-
-	// gSchedulerAgingThresholdMultiplier: Set to 2.0 for Power Saving mode.
-	// Rationale: Doubles the time a thread must wait in a lower-priority MLFQ
-	// queue before being promoted. This supports work consolidation by making
-	// the scheduler less eager to promote background or lower-priority tasks,
-	// potentially allowing consolidation cores to focus on primary tasks and
-	// other cores to remain idle longer.
-	// Concern & Analysis: While beneficial for pure power saving by reducing
-	// task switching and potential core waking due to promotions, a 2.0x multiplier
-	// can lead to significant delays for medium-low priority tasks if the
-	// consolidation core(s) are consistently busy with higher-priority work.
-	// For example, a task at B_LOW_PRIORITY (MLFQ level 8, base threshold 0.5s)
-	// would wait 1.0s before promotion consideration. If it needs to age up
-	// multiple levels, this delay accumulates. This might affect user experience
-	// if tasks like background file operations, data indexing, or less critical
-	// application helpers become overly sluggish.
-	// Testing: Test with mixed workloads (e.g., CPU-bound foreground task +
-	// observable background I/O or processing task). Monitor progress and
-	// responsiveness of the background tasks.
-	// Potential Tuning: If significant starvation/sluggishness is observed,
-	// consider reducing this multiplier.
-	// Changed from 2.0f to 1.5f to improve responsiveness of lower-priority
-	// tasks, aiming for a better balance with power saving.
 	gSchedulerAgingThresholdMultiplier = 1.5f;
-
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
-	sSmallTaskCore = NULL;
-
-	// gSchedulerSMTConflictFactor: Set to a lower value (0.40f) for Power Saving.
-	// Rationale: Makes the scheduler more tolerant of placing tasks on SMT
-	// siblings, even if one is active. This supports the goal of consolidating
-	// work onto fewer physical cores by better utilizing the logical processors
-	// of an already active core before considering waking an entirely new core.
-	// This can save power if the SMT sharing is reasonably efficient for the
-	// running tasks.
+	Scheduler::sSmallTaskCore = NULL;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
-
-	// Set mode-specific IRQ balancing parameters for power saving mode.
 	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
 	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
@@ -475,27 +310,26 @@ power_saving_switch_to_mode()
 static void
 power_saving_set_cpu_enabled(int32 cpuID, bool enabled)
 {
-	if (!enabled && sSmallTaskCore != NULL && sSmallTaskCore->CPUMask().GetBit(cpuID)) {
+	CoreEntry* stcBeforeCheck = Scheduler::sSmallTaskCore;
+
+	if (!enabled && stcBeforeCheck != NULL && stcBeforeCheck->CPUMask().GetBit(cpuID)) {
 		CPUEntry* cpuEntry = CPUEntry::GetCPU(cpuID);
-		if (cpuEntry->Core() == sSmallTaskCore) {
+		if (cpuEntry->Core() == stcBeforeCheck) {
 			bool smallTaskCoreStillViable = false;
 			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-				if (i == cpuID) continue;
-				if (sSmallTaskCore->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
+				if (i == cpuID)
+					continue;
+				if (stcBeforeCheck->CPUMask().GetBit(i) && gCPUEnabled.GetBit(i)) {
 					smallTaskCoreStillViable = true;
 					break;
 				}
 			}
+
 			if (!smallTaskCoreStillViable) {
-				// The STC is about to become unviable. Attempt to atomically set it to NULL.
-				// We use currentSTC (the value of sSmallTaskCore when we entered this block)
-				// as the expected value for the atomic_pointer_test_and_set.
-				if (atomic_pointer_test_and_set(&sSmallTaskCore, (CoreEntry*)NULL, currentSTC) == currentSTC) {
-					dprintf("scheduler: Power Saving - sSmallTaskCore (core %" B_PRId32 ") atomically invalidated due to CPU %" B_PRId32 " disable (was last enabled CPU on STC).\n", currentSTC->ID(), cpuID);
+				if (atomic_pointer_test_and_set(&Scheduler::sSmallTaskCore, (CoreEntry*)NULL, stcBeforeCheck) == stcBeforeCheck) {
+					dprintf("scheduler: Power Saving - sSmallTaskCore (core %" B_PRId32 ") atomically invalidated due to CPU %" B_PRId32 " disable (was last enabled CPU on STC).\n", stcBeforeCheck->ID(), cpuID);
 				} else {
-					// sSmallTaskCore was changed by another CPU between our initial read
-					// and the TAS. The new STC (or NULL) is now someone else's responsibility.
-					dprintf("scheduler: Power Saving - STC changed during invalidation attempt for core %" B_PRId32 " (CPU %" B_PRId32 " disable).\n", currentSTC->ID(), cpuID);
+					dprintf("scheduler: Power Saving - STC changed during invalidation attempt for core %" B_PRId32 " (CPU %" B_PRId32 " disable).\n", stcBeforeCheck->ID(), cpuID);
 				}
 			}
 		}
@@ -507,32 +341,9 @@ static bool
 power_saving_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// Determines if a thread's cache affinity for its previous core has likely expired.
-	// In Power Saving mode, we are more lenient about cache expiry to promote
-	// thread "stickiness" to a core, aiding work consolidation.
-
 	if (threadData == NULL || threadData->WentSleep() == 0) {
-		// Thread is new or never ran/slept, so no existing cache affinity.
 		return true;
 	}
-
-	// kPowerSavingCacheExpire (e.g., 250ms): A relatively long duration.
-	// This heuristic uses simple wall-clock time since the thread last went to sleep.
-	// Rationale:
-	// - Simplicity: Avoids more complex tracking of core activity for this decision.
-	// - Stickiness: A longer expiry time makes it more likely the scheduler will
-	//   consider the cache "warm," preferring to place the thread on its previous
-	//   core. This helps consolidate work on fewer cores.
-	// - Overriding Logic: Even if this heuristic deems cache "warm" for a non-STC core,
-	//   the `power_saving_choose_core` logic will still strongly prefer the
-	//   Small Task Core (STC) if it has capacity. This `has_cache_expired` check
-	//   mainly influences decisions when the STC is not an option or when comparing
-	//   multiple non-STC cores.
-	// - Trade-off: May sometimes incorrectly assume cache is warm if the previous
-	//   core was very busy during the thread's sleep. However, the 250ms is chosen
-	//   as a balance point. L3 cache might retain some useful data over this period.
-	//   Future tuning could evaluate a shorter duration or incorporating some activity metric
-	//   if power/performance analysis indicates a need.
 	return system_time() - threadData->WentSleep() > kPowerSavingCacheExpire;
 }
 
@@ -543,36 +354,23 @@ power_saving_choose_core(const ThreadData* threadData)
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(threadData != NULL);
 	CoreEntry* chosenCore = NULL;
-	CPUSet affinityMask = threadData->GetCPUMask(); // Thread's specific affinity
+	CPUSet affinityMask = threadData->GetCPUMask();
 	const bool useThreadAffinity = !affinityMask.IsEmpty();
 	int32 threadLoad = threadData->GetLoad();
 
-	// 1. Check if the current global STC is suitable for this thread
 	chosenCore = power_saving_get_consolidation_target_core(threadData);
 	if (chosenCore != NULL) {
-		// Current STC exists, is valid, and matches thread's affinity (if any).
-		// Now check if it has capacity for this thread.
 		int32 cpuCountOnSTC = chosenCore->CPUCount();
-		// Note: threadLoad is total load, core load is average per CPU.
-		// For capacity check, consider adding thread's load to one CPU on the core.
-		// A more precise check might involve finding the least loaded CPU on STC.
-		// For simplicity, using average core load + per-CPU portion of thread load.
 		if (cpuCountOnSTC > 0 && (chosenCore->GetLoad() + (threadLoad / cpuCountOnSTC)) > kVeryHighLoad) {
-			chosenCore = NULL; // STC is too full for this thread
+			chosenCore = NULL;
 		}
-		// If chosenCore is still non-NULL here, it's a good candidate.
 	}
 
-	// 2. If current STC is not suitable (NULL, invalid, no affinity match, or too full)
 	if (chosenCore == NULL) {
-		// 2a. Try to designate/confirm a global STC without specific thread affinity.
-		// This call can change global sSmallTaskCore.
 		CoreEntry* potentialGlobalSTC = power_saving_designate_consolidation_core(NULL);
 
-		if (potentialGlobalSTC != NULL && !potentialGlobalSTC->fDefunct
+		if (potentialGlobalSTC != NULL && !potentialGlobalSTC->IsDefunct() // Use getter
 			&& (!useThreadAffinity || potentialGlobalSTC->CPUMask().Matches(affinityMask))) {
-			// A global STC (either existing and re-validated, or newly designated) is available
-			// and matches the current thread's affinity (if any). Check its capacity.
 			int32 cpuCountOnPotentialSTC = potentialGlobalSTC->CPUCount();
 			if (cpuCountOnPotentialSTC > 0
 				&& (potentialGlobalSTC->GetLoad() + (threadLoad / cpuCountOnPotentialSTC)) <= kHighLoad) {
@@ -580,33 +378,26 @@ power_saving_choose_core(const ThreadData* threadData)
 			}
 		}
 
-		// 2c. If global STC path didn't yield a suitable core (e.g. global STC doesn't match affinity,
-		// or no global STC could be set, or it's too full for this thread).
-		// Now, find the best core for *this thread's specific affinity*,
-		// knowing this call won't change the global STC.
 		if (chosenCore == NULL && useThreadAffinity) {
 			CoreEntry* bestAffinityOnlyCore = power_saving_designate_consolidation_core(&affinityMask);
-			if (bestAffinityOnlyCore != NULL && !bestAffinityOnlyCore->fDefunct) {
+			if (bestAffinityOnlyCore != NULL && !bestAffinityOnlyCore->IsDefunct()) { // Use getter
 				int32 cpuCountOnAffinityCore = bestAffinityOnlyCore->CPUCount();
 				if (cpuCountOnAffinityCore > 0
 					&& (bestAffinityOnlyCore->GetLoad() + (threadLoad / cpuCountOnAffinityCore)) <= kHighLoad) {
-					// This affinity-specific core is suitable and has capacity.
-					// It might or might not be the global STC.
 					chosenCore = bestAffinityOnlyCore;
 				}
 			}
 		}
 	}
 
-	// 3. Fallback logic if no STC-related core was chosen
 	if (chosenCore == NULL) {
 		CoreEntry* leastLoadedActive = NULL;
 		int32 minLoad = 0x7fffffff;
 		for (int32 i = 0; i < gCoreCount; i++) {
 			CoreEntry* core = &gCoreEntries[i];
-			if (core->fDefunct)
+			if (core->IsDefunct()) // Use getter
 				continue;
-			if ((core->GetLoad() > 0 || core->GetActiveTime() > 0) && // Check it's active
+			if ((core->GetLoad() > 0 || core->GetActiveTime() > 0) &&
 				(!affinityMask.IsEmpty() ? core->CPUMask().Matches(affinityMask) : true)) {
 				int32 cpuCountOnCore = core->CPUCount();
 				if (cpuCountOnCore > 0 && (core->GetLoad() + (threadData->GetLoad() / cpuCountOnCore) < kVeryHighLoad )) {
@@ -643,12 +434,10 @@ power_saving_choose_core(const ThreadData* threadData)
 		}
 	}
 
-	// Absolute fallback: if still no core, pick any enabled, affinity-matching core.
-	// This might override should_wake_core_for_load if it's too restrictive and no core is found.
 	if (chosenCore == NULL) {
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
-			if (core->fDefunct)
+			if (core->IsDefunct()) // Use getter
 				continue;
 			bool hasEnabledCPU = false;
 			for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
@@ -672,10 +461,6 @@ power_saving_choose_core(const ThreadData* threadData)
 }
 
 
-// Helper _select_cpu_for_irq_on_core_ps has been removed.
-// Its logic is now part of the unified Scheduler::SelectTargetCPUForIRQ.
-
-
 static void
 power_saving_rebalance_irqs(bool idle)
 {
@@ -687,8 +472,6 @@ power_saving_rebalance_irqs(bool idle)
 	CoreEntry* consolidationCore = power_saving_get_consolidation_target_core(NULL);
 
 	if (idle && consolidationCore != NULL && currentCore != consolidationCore) {
-		// This is the "packing" case - move ALL IRQs from the current idling core
-		// to the designated consolidationCore, if suitable CPUs are found there.
 		SpinLocker irqLocker(current_cpu_struct->irqs_lock);
 		irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
 		irq_assignment* nextIRQ = irq;
@@ -697,9 +480,6 @@ power_saving_rebalance_irqs(bool idle)
 			irq = nextIRQ;
 			nextIRQ = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 
-			// Select target CPU on the consolidation core for this specific IRQ.
-			// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
-			// and gSchedulerSMTConflictFactor.
 			CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
 				irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor,
 				gModeMaxTargetCpuIrqLoad);
@@ -717,11 +497,9 @@ power_saving_rebalance_irqs(bool idle)
 					consolidationCore->ID(), irq->irq, current_cpu_struct->cpu_num);
 			}
 		}
-		// irqLocker automatically releases here
 		return;
 	}
 
-	// General rebalancing path (if not packing, or if currentCore is the consolidationCore)
 	irq_assignment* candidateIRQs[kMaxIRQsToMovePerCyclePS];
 	int32 candidateCount = 0;
 	int32 totalLoadOnThisCPU = 0;
@@ -752,14 +530,14 @@ power_saving_rebalance_irqs(bool idle)
 	if (candidateCount == 0 || totalLoadOnThisCPU < kLowLoad) return;
 
 	CoreEntry* targetCoreForIRQs = NULL;
-	if (consolidationCore != NULL && !consolidationCore->fDefunct && consolidationCore != currentCore &&
+	if (consolidationCore != NULL && !consolidationCore->IsDefunct() && consolidationCore != currentCore && // Use getter
 		consolidationCore->GetLoad() < currentCore->GetLoad() - kLoadDifference) {
 		targetCoreForIRQs = consolidationCore;
 	} else {
 		ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
 		CoreEntry* candidate = NULL;
 		for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-			if (!candidate->fDefunct && candidate != currentCore) {
+			if (!candidate->IsDefunct() && candidate != currentCore) { // Use getter
 				targetCoreForIRQs = candidate;
 				break;
 			}
@@ -767,7 +545,7 @@ power_saving_rebalance_irqs(bool idle)
 		coreHeapsLocker.Unlock();
 	}
 
-	if (targetCoreForIRQs == NULL || targetCoreForIRQs->fDefunct || targetCoreForIRQs == currentCore) return;
+	if (targetCoreForIRQs == NULL || targetCoreForIRQs->IsDefunct() || targetCoreForIRQs == currentCore) return; // Use getter
 	if (targetCoreForIRQs->GetLoad() + kLoadDifference >= currentCore->GetLoad()) return;
 
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs,
@@ -784,7 +562,6 @@ power_saving_rebalance_irqs(bool idle)
 		irq_assignment* chosenIRQ = candidateIRQs[i];
 		if (chosenIRQ == NULL) continue;
 
-		// Re-select target CPU for each IRQ or check capacity.
 		if (i > 0) {
 			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->load,
 				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
@@ -793,7 +570,6 @@ power_saving_rebalance_irqs(bool idle)
 				break;
 			}
 		}
-
 
 		TRACE("power_saving_rebalance_irqs (general): Attempting to move IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 			chosenIRQ->irq, chosenIRQ->load, current_cpu_struct->cpu_num, targetCPU->ID());
@@ -806,7 +582,6 @@ power_saving_rebalance_irqs(bool idle)
 			TRACE("power_saving_rebalance_irqs (general): Failed to move IRQ %d to CPU %" B_PRId32 ", status: %s\n",
 				chosenIRQ->irq, targetCPU->ID(), strerror(status));
 		}
-		// Continue to next candidate even if one fails, up to kMaxIRQsToMovePerCyclePS attempts
 		if (movedCount >= kMaxIRQsToMovePerCyclePS)
 			break;
 	}

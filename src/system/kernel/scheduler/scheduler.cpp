@@ -919,22 +919,22 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 // ... This content is assumed to be correctly present from the previous task's completion.
 // ... For brevity, not re-pasting the entire tail of the file if it's unchanged from last confirmed state.
 
-// gIrqTargetFactor: Defines the trade-off in IRQ placement decisions.
+// gModeIrqTargetFactor: Defines the trade-off in IRQ placement decisions.
 // A higher value prioritizes placing IRQs on CPUs with less existing IRQ load,
 // while a lower value prioritizes CPUs with less thread execution load.
-// Default is 0.3, meaning thread load is more heavily weighted (70%).
-// Empirically derived good starting point.
-float gIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR; // Default 0.3f
+// Initialized to a global default, then overridden by scheduler mode activation.
+// See scheduler_common.h and mode-specific files (low_latency.cpp, power_saving.cpp).
+float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR; // Default 0.3f
 
-// gMaxTargetCpuIrqLoad: The maximum acceptable cumulative IRQ "load units"
+// gModeMaxTargetCpuIrqLoad: The maximum acceptable cumulative IRQ "load units"
 // for a CPU before it's generally considered too saturated for more IRQs.
 // An IRQ's "load unit" typically increments with its 'cost' (usually 1) per interrupt event.
 // This acts as a capacity limit in IRQ placement scoring.
-// Default is 700. Empirically derived.
-int32 gMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD; // Default 700
+// Initialized to a global default, then overridden by scheduler mode activation.
+int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD; // Default 700
 
 // gHighAbsoluteIrqThreshold: For proactive balancing, a source CPU's total IRQ load
-// must exceed this value to be considered for offloading IRQs.
+// must exceed this value to be considered for offloading IRQs. (Still global)
 // Default is 1000.
 int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 
@@ -953,10 +953,10 @@ static CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
 {
 	// This function is called by the proactive IRQ balancer.
-	// It uses the global gIrqTargetFactor and gMaxTargetCpuIrqLoad.
-	// The gSchedulerSMTConflictFactor is mode-dependent and reflects the current scheduler mode.
-	return SelectTargetCPUForIRQ(core, irqToMoveLoad, gIrqTargetFactor,
-		gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+	// It now uses the mode-specific gModeIrqTargetFactor and gModeMaxTargetCpuIrqLoad.
+	// The gSchedulerSMTConflictFactor is already mode-dependent.
+	return SelectTargetCPUForIRQ(core, irqToMoveLoad, gModeIrqTargetFactor,
+		gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 

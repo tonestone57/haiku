@@ -190,6 +190,11 @@ enum SchedulerLoadBalancePolicy {
 	SCHED_LOAD_BALANCE_CONSOLIDATE
 };
 extern SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy;
+
+// Mode-specific IRQ balancing parameters.
+// Initialized with global defaults, then overridden by scheduler mode switch.
+extern float gModeIrqTargetFactor;
+extern int32 gModeMaxTargetCpuIrqLoad;
 // --- End Mode-Settable Global Parameters ---
 
 

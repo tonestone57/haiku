@@ -346,8 +346,12 @@ power_saving_switch_to_mode()
 	sSmallTaskCore = NULL;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
-	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: CONSOLIDATE, SMT Factor: %.2f\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor);
+	// Mode-specific IRQ balancing parameters
+	gModeIrqTargetFactor = 0.2f; // Higher emphasis on thread load for consolidation
+	gModeMaxTargetCpuIrqLoad = 800;  // Allow more IRQ load on consolidation CPUs
+
+	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: CONSOLIDATE, SMT Factor: %.2f, IRQ Target Factor: %.2f, Max IRQ Load: %" B_PRId32 "\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 
@@ -524,14 +528,13 @@ power_saving_rebalance_irqs(bool idle)
 		irq_assignment* irq = (irq_assignment*)list_get_first_item(&current_cpu_struct->irqs);
 
 		// Select target CPU on the consolidation core using the unified function.
-		// Pass gIrqTargetFactor (global) and gSchedulerSMTConflictFactor (mode-specific for PS).
-		// gMaxTargetCpuIrqLoad is also global.
-		// TODO: Consider making gIrqTargetFactor and gMaxTargetCpuIrqLoad mode-specific if needed.
+		// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
+		// and gSchedulerSMTConflictFactor (already mode-specific for PS).
 		CPUEntry* targetCPUonConsolidationCore = SelectTargetCPUForIRQ(consolidationCore,
 			0, /* Pass 0 for irqLoadToMove when selecting best CPU on core generally */
-			gIrqTargetFactor,
+			gModeIrqTargetFactor,
 			gSchedulerSMTConflictFactor,
-			gMaxTargetCpuIrqLoad);
+			gModeMaxTargetCpuIrqLoad);
 
 		if (targetCPUonConsolidationCore != NULL) {
 			irq_assignment* nextIRQ = irq;
@@ -541,7 +544,7 @@ power_saving_rebalance_irqs(bool idle)
 
 				// Re-evaluate target CPU for this specific IRQ to ensure capacity.
 				CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
-					irq->load, gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+					irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 
 				if (specificTargetCPU != NULL) {
 					TRACE_SCHED("power_saving_rebalance_irqs (pack): Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
@@ -607,9 +610,9 @@ power_saving_rebalance_irqs(bool idle)
 
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs,
 		candidateIRQs[0]->load,
-		gIrqTargetFactor,
+		gModeIrqTargetFactor,
 		gSchedulerSMTConflictFactor,
-		gMaxTargetCpuIrqLoad);
+		gModeMaxTargetCpuIrqLoad);
 
 	if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num)
 		return;
@@ -622,7 +625,7 @@ power_saving_rebalance_irqs(bool idle)
 		// Re-select target CPU for each IRQ or check capacity.
 		if (i > 0) {
 			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->load,
-				gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
 				TRACE_SCHED("PS IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;

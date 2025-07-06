@@ -35,8 +35,12 @@ low_latency_switch_to_mode()
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
-	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD, SMT Factor: %.2f\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor);
+	// Mode-specific IRQ balancing parameters
+	gModeIrqTargetFactor = 0.4f; // Slightly higher emphasis on IRQ load for LL
+	gModeMaxTargetCpuIrqLoad = 600;  // Slightly lower IRQ capacity per CPU for LL
+
+	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, Quantum Multiplier: %.2f, Aging Multiplier: %.2f, LB Policy: SPREAD, SMT Factor: %.2f, IRQ Target Factor: %.2f, Max IRQ Load: %" B_PRId32 "\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 
@@ -263,14 +267,13 @@ low_latency_rebalance_irqs(bool idle)
 		return;
 
 	// Use the unified Scheduler::SelectTargetCPUForIRQ function.
-	// Pass gIrqTargetFactor (global) and gSchedulerSMTConflictFactor (mode-specific for LL).
-	// gMaxTargetCpuIrqLoad is also global.
-	// TODO: Consider making gIrqTargetFactor and gMaxTargetCpuIrqLoad mode-specific if needed.
+	// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
+	// and gSchedulerSMTConflictFactor (already mode-specific for LL).
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCore,
 		candidateIRQs[0]->load, /* load of the heaviest IRQ to move */
-		gIrqTargetFactor,
+		gModeIrqTargetFactor,
 		gSchedulerSMTConflictFactor,
-		gMaxTargetCpuIrqLoad);
+		gModeMaxTargetCpuIrqLoad);
 
 	if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num)
 		return;
@@ -280,12 +283,10 @@ low_latency_rebalance_irqs(bool idle)
 		irq_assignment* chosenIRQ = candidateIRQs[i];
 		if (chosenIRQ == NULL) continue;
 
-		// If moving multiple, re-evaluate targetCPU for subsequent IRQs or check capacity.
-		// For now, this simplified batch moves to the same initially chosen targetCPU.
-		// Re-select target CPU for each IRQ for better precision, or check capacity:
+		// Re-select target CPU for each IRQ for better precision if moving multiple.
 		if (i > 0) {
 			targetCPU = SelectTargetCPUForIRQ(targetCore, chosenIRQ->load,
-				gIrqTargetFactor, gSchedulerSMTConflictFactor, gMaxTargetCpuIrqLoad);
+				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
 				TRACE_SCHED("LL IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);
 				break;

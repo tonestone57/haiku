@@ -319,11 +319,20 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	uint16_t backlight_pwm_freq_hz;    // PWM frequency from VBT
 	bool     lvds_border_enabled;      // For panel fitter border
 	// DPCD-derived properties (for DP/eDP ports)
-	uint8_t  dpcd_revision;
-	uint8_t  dp_max_link_rate; // Value from DPCD_MAX_LINK_RATE (e.g., 0x06, 0x0A, 0x14)
-	uint8_t  dp_max_lane_count; // Max lanes from DPCD_MAX_LANE_COUNT (lower 5 bits)
-	bool     dp_tps3_supported; // From DPCD_MAX_LANE_COUNT bit 6
-	bool     dp_enhanced_framing_capable; // From DPCD_MAX_LANE_COUNT bit 7
+	struct {
+		uint8_t revision;                       // DPCD_DPCD_REV (0x000)
+		uint8_t max_link_rate;                  // DPCD_MAX_LINK_RATE (0x001)
+		uint8_t max_lane_count;                 // DPCD_MAX_LANE_COUNT (0x002) (lower 5 bits)
+		bool    tps3_supported;                 // DPCD_MAX_LANE_COUNT (0x002) (bit 6)
+		bool    enhanced_framing_capable;       // DPCD_MAX_LANE_COUNT (0x002) (bit 7)
+		uint8_t max_downspread;                 // DPCD_MAX_DOWNSPREAD (0x003) (bit 0: 0.5% downspread support)
+		bool    main_link_channel_coding_set_capable; // DPCD_MAIN_LINK_CHANNEL_CODING_SET (0x008) (bit 0: ANSI 8B/10B) - Gen specific
+		uint8_t sink_count;                     // DPCD_SINK_COUNT (0x200) (lower 6 bits)
+		bool    cp_ready;                       // DPCD_SINK_COUNT (0x200) (bit 6: CP_READY / HDCP)
+		uint8_t training_aux_rd_interval;       // DPCD_TRAINING_AUX_RD_INTERVAL (0x00E)
+		// Add more fields as needed, e.g., for eDP specific features, downstream port info
+		uint8_t raw_receiver_cap[16];           // Store the first 16 bytes of DPCD for reference
+	} dpcd_data;
 	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
 	enum pipe_id_priv current_pipe_assignment; // Which pipe is this port currently configured for
 } intel_output_port_state;

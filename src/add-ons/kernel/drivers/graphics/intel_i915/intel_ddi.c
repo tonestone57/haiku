@@ -129,7 +129,97 @@ static void intel_ddi_send_avi_infoframe(intel_i915_device_info* devInfo, intel_
 	intel_i915_write32(devInfo,dip_ctl_reg,dip_ctl); TRACE("DDI: Sent AVI InfoFrame. DIP_CTL(0x%x)=0x%x\n",dip_ctl_reg,dip_ctl);
 }
 
-status_t intel_ddi_init_port(intel_i915_device_info*d, intel_output_port_state*p){return B_OK;}
+// Minimum DPCD receiver capability size (DP 1.2 spec, up to SINK_COUNT)
+#define DPCD_RECEIVER_CAP_SIZE          0x0F // Size up to SINK_COUNT for basic parsing
+                                             // Some drivers read 16 bytes (0x00-0x0F).
+
+static status_t
+intel_dp_parse_dpcd_data(intel_i915_device_info* devInfo,
+	intel_output_port_state* port, const uint8_t* raw_dpcd_buffer, size_t buffer_size)
+{
+	if (port == NULL || raw_dpcd_buffer == NULL || buffer_size < DPCD_RECEIVER_CAP_SIZE) {
+		TRACE("DDI: DPCD parse: Invalid arguments or buffer too small (size %lu, need %u).\n",
+			buffer_size, DPCD_RECEIVER_CAP_SIZE);
+		return B_BAD_VALUE;
+	}
+
+	memset(&port->dpcd_data, 0, sizeof(port->dpcd_data));
+	memcpy(port->dpcd_data.raw_receiver_cap, raw_dpcd_buffer,
+		min_c(buffer_size, sizeof(port->dpcd_data.raw_receiver_cap)));
+
+	port->dpcd_data.revision = raw_dpcd_buffer[DPCD_DPCD_REV];
+	port->dpcd_data.max_link_rate = raw_dpcd_buffer[DPCD_MAX_LINK_RATE];
+	port->dpcd_data.max_lane_count = raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_MAX_LANE_COUNT_MASK;
+	port->dpcd_data.tps3_supported = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_TPS3_SUPPORTED) != 0;
+	port->dpcd_data.enhanced_framing_capable = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_ENHANCED_FRAME_CAP) != 0;
+
+	if (buffer_size > DPCD_MAX_DOWNSPREAD) // Ensure buffer is large enough for this field
+		port->dpcd_data.max_downspread = raw_dpcd_buffer[DPCD_MAX_DOWNSPREAD] & 0x01; // Bit 0 indicates 0.5% support
+
+	// MAIN_LINK_CHANNEL_CODING_SET is at 0x008 - this was named MAIN_LINK_CHANNEL_CODING in ddi.h
+	if (buffer_size > DPCD_MAIN_LINK_CHANNEL_CODING)
+		port->dpcd_data.main_link_channel_coding_set_capable = (raw_dpcd_buffer[DPCD_MAIN_LINK_CHANNEL_CODING] & 0x01) != 0; // Bit 0 for 8b/10b
+
+	if (buffer_size > DPCD_TRAINING_AUX_RD_INTERVAL) {
+		uint8_t val = raw_dpcd_buffer[DPCD_TRAINING_AUX_RD_INTERVAL];
+		if ((val & DPCD_TRAINING_AUX_RD_INTERVAL_MASK) == 0) {
+			// Value 0 means 400us if unit bit is 0, or 4ms if unit bit is 1.
+			// We need to store it in a way that link training can use it.
+			// For now, just store raw, link training can interpret.
+			port->dpcd_data.training_aux_rd_interval = val;
+		} else {
+			port->dpcd_data.training_aux_rd_interval = val & DPCD_TRAINING_AUX_RD_INTERVAL_MASK;
+			// Note: Linux driver converts this to a microsecond value.
+		}
+	}
+
+	// SINK_COUNT is at 0x200, which is beyond typical initial DPCD_RECEIVER_CAP_SIZE read.
+	// This field would be read separately if needed, or if a larger initial read is performed.
+	// For now, we assume it's not in the initial raw_dpcd_buffer passed here.
+	// port->dpcd_data.sink_count = raw_dpcd_buffer[DPCD_SINK_COUNT] & 0x3F;
+	// port->dpcd_data.cp_ready = (raw_dpcd_buffer[DPCD_SINK_COUNT] & (1 << 6)) != 0;
+
+	TRACE("DDI: Parsed DPCD: Rev 0x%02x, MaxLinkRate 0x%02x, MaxLanes %u (TPS3 %d, EnhFR %d), MaxSpread %d, 8b10b %d, AuxInterval 0x%02x\n",
+		port->dpcd_data.revision, port->dpcd_data.max_link_rate, port->dpcd_data.max_lane_count,
+		port->dpcd_data.tps3_supported, port->dpcd_data.enhanced_framing_capable,
+		port->dpcd_data.max_downspread, port->dpcd_data.main_link_channel_coding_set_capable,
+		port->dpcd_data.training_aux_rd_interval);
+
+	return B_OK;
+}
+
+
+status_t
+intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* port)
+{
+	if (port == NULL || devInfo == NULL)
+		return B_BAD_VALUE;
+
+	// Only proceed if this is a DisplayPort or eDP output
+	if (port->type != PRIV_OUTPUT_DP && port->type != PRIV_OUTPUT_EDP) {
+		TRACE("DDI: intel_ddi_init_port called for non-DP/eDP port type %d. Skipping DPCD read.\n", port->type);
+		return B_OK;
+	}
+
+	TRACE("DDI: Initializing port %d (DP/eDP) - attempting to read DPCD capabilities.\n", port->logical_port_id);
+
+	uint8_t dpcd_caps[DPCD_RECEIVER_CAP_SIZE]; // Read up to the standard receiver capability size
+	status_t status = intel_dp_aux_read_dpcd(devInfo, port, 0x000, dpcd_caps, sizeof(dpcd_caps));
+
+	if (status == B_OK) {
+		TRACE("DDI: Successfully read initial DPCD data for port %d.\n", port->logical_port_id);
+		intel_dp_parse_dpcd_data(devInfo, port, dpcd_caps, sizeof(dpcd_caps));
+	} else {
+		TRACE("DDI: Failed to read DPCD capabilities for port %d. Error: %s (AUX stubbed: %s).\n",
+			port->logical_port_id, strerror(status), (status == B_UNSUPPORTED) ? "yes" : "no");
+		// Do not treat as fatal error for now, as AUX path is known to be incomplete.
+		// The port->dpcd_data structure will remain zeroed.
+	}
+
+	// Further DDI port initialization (e.g., specific to HDMI, DVI if this function were generic)
+	// would go here. For now, it's primarily for DPCD.
+	return B_OK;
+}
 
 static status_t
 _intel_dp_aux_ch_xfer(intel_i915_device_info* devInfo, intel_output_port_state* port,

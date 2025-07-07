@@ -1226,10 +1226,7 @@ PackageEntry::UpdateLoad()
 	// atomic_set(&fLoad, newPackageLoad); // Will be set as part of heap logic
 
 	// --- Heap Management Logic (mirroring CoreEntry::_UpdateLoad) ---
-	// This assumes kPackageHighLoadThresholdPercent will be defined later.
-	// For now, using kHighLoad (core threshold) as a placeholder for package threshold.
-	// This should be replaced with an actual package-specific threshold.
-	const int32 packageHighLoadThreshold = kHighLoad; // PLACEHOLDER
+	const int32 packageHighLoadThreshold = kMaxLoad * kPackageHighLoadThresholdPercent / 100;
 
 	int32 previousLoadValue;
 	bool wasHighLoadBeforeUpdate;
@@ -1292,6 +1289,102 @@ PackageEntry::UpdateLoad()
 		gPackageLoadHeap.Insert(this, fLoad);
 	}
 	// packageHeapsLocker unlocks automatically
+}
+
+
+CoreEntry*
+PackageEntry::GetMostLoadedActiveCore() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	CoreEntry* mostLoadedCore = NULL;
+	int32 highestLoad = -1;
+
+	// Iterate all global cores and check if they belong to this package
+	for (int32 i = 0; i < gCoreCount; ++i) {
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->Package() == this && !core->IsDefunct()) {
+			// Check if this core has any enabled CPUs to be considered "active" for balancing
+			bool hasEnabledCPUs = false;
+			CPUSet coreCPUs = core->CPUMask();
+			for (int32 j = 0; j < smp_get_num_cpus(); ++j) {
+				if (coreCPUs.GetBit(j) && gCPUEnabled.GetBit(j)) {
+					hasEnabledCPUs = true;
+					break;
+				}
+			}
+			if (!hasEnabledCPUs)
+				continue;
+
+			if (mostLoadedCore == NULL || core->GetLoad() > highestLoad) {
+				highestLoad = core->GetLoad();
+				mostLoadedCore = core;
+			}
+		}
+	}
+	return mostLoadedCore;
+}
+
+
+CoreEntry*
+PackageEntry::GetLeastLoadedActiveCore() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	CoreEntry* leastLoadedCore = NULL;
+	int32 lowestLoad = kMaxLoad + 1; // Initialize higher than max possible load
+
+	for (int32 i = 0; i < gCoreCount; ++i) {
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->Package() == this && !core->IsDefunct()) {
+			bool hasEnabledCPUs = false;
+			CPUSet coreCPUs = core->CPUMask();
+			for (int32 j = 0; j < smp_get_num_cpus(); ++j) {
+				if (coreCPUs.GetBit(j) && gCPUEnabled.GetBit(j)) {
+					hasEnabledCPUs = true;
+					break;
+				}
+			}
+			if (!hasEnabledCPUs)
+				continue;
+
+			// For finding a target, we prefer an already active core if possible,
+			// but any non-defunct core with enabled CPUs is a candidate.
+			// The "activeness" can be refined by checking core->GetLoad() > 0 or core->GetActiveTime() > 0
+			// if we want to differentiate between idle-but-enabled and active-and-enabled.
+			// For now, any core with enabled CPUs is considered.
+			if (leastLoadedCore == NULL || core->GetLoad() < lowestLoad) {
+				lowestLoad = core->GetLoad();
+				leastLoadedCore = core;
+			}
+		}
+	}
+	return leastLoadedCore;
+}
+
+
+bool
+PackageEntry::IsDefunct() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	// A package is defunct if it has no configured (and enabled) cores.
+	// fCoreCount stores the number of cores *ever* associated with this package.
+	if (fCoreCount == 0)
+		return true;
+
+	int32 activeCoresInPackage = 0;
+	for (int32 i = 0; i < gCoreCount; ++i) {
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->Package() == this && !core->IsDefunct()) {
+			// Further check if the core actually has any enabled CPUs
+			CPUSet coreCPUs = core->CPUMask();
+			for (int32 j = 0; j < smp_get_num_cpus(); ++j) {
+				if (coreCPUs.GetBit(j) && gCPUEnabled.GetBit(j)) {
+					activeCoresInPackage++;
+					break; // Found an enabled CPU on this core
+				}
+			}
+		}
+	}
+	return activeCoresInPackage == 0;
 }
 
 

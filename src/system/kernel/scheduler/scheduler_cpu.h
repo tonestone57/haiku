@@ -273,6 +273,12 @@ public:
 						// Method to update the package's load metric
 						void				UpdateLoad();
 
+						// Helper methods for package-level balancing
+						CoreEntry*			GetMostLoadedActiveCore() const;
+						CoreEntry*			GetLeastLoadedActiveCore() const;
+						bool				IsDefunct() const;
+
+
 private:
 						int32				fPackageID;
 						int32				fLoad;		// Average load of active cores in this package

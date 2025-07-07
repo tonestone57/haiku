@@ -252,6 +252,12 @@ const int32 kIntraPackageMigrationCostPercent = 5;  // Cost for migrating within
 const int32 kInterPackageMigrationCostPercent = 10; // Cost for migrating between different packages
 // --- End Constants for Migration Cost Awareness ---
 
+// --- Constants for Package-Level Load Balancing ---
+const bigtime_t kPackageLoadBalanceCheckInterval = 500000; // 0.5 seconds
+const int32 kPackageLoadDifferencePercent = 25; // 25% load difference to trigger inter-package balancing
+const int32 kPackageHighLoadThresholdPercent = 65; // Load threshold for a package to be in gPackageHighLoadHeap
+// --- End Constants for Package-Level Load Balancing ---
+
 const int kLowLoad = kMaxLoad * 20 / 100;
 const int kTargetLoad = kMaxLoad * 55 / 100;
 const int kHighLoad = kMaxLoad * 70 / 100;

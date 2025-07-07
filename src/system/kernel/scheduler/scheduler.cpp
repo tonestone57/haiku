@@ -138,6 +138,11 @@ static int32 scheduler_load_balance_event(timer* unused);
 // Proactive IRQ balancing
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
+
+// Package-level load balancing
+static timer sPackageLoadBalanceTimer;
+static int32 scheduler_package_load_balance_event(timer* unused);
+
 static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad);
 
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
@@ -1012,6 +1017,91 @@ get_migration_cost(CoreEntry* sourceCore, CoreEntry* targetCore)
 
 
 static void
+scheduler_perform_package_load_balance()
+{
+	SCHEDULER_ENTER_FUNCTION();
+
+	if (gPackageCount < 2 || !sSchedulerEnabled || gSingleCore) {
+		// No inter-package balancing if less than 2 packages, scheduler disabled, or single core system
+		return;
+	}
+
+	// Candidate Selection
+	PackageEntry* sourcePackageCandidate = NULL;
+	PackageEntry* targetPackageCandidate = NULL;
+
+	{ // Scope for gPackageHeapsLock
+		ReadSpinLocker packageHeapsLocker(gPackageHeapsLock);
+		// Peek most loaded package (from high load heap, or overall if high load heap is empty)
+		sourcePackageCandidate = gPackageHighLoadHeap.PeekMaximum();
+		if (sourcePackageCandidate == NULL) // If high load heap is empty, try normal load heap
+			sourcePackageCandidate = gPackageLoadHeap.PeekMaximum();
+
+		// Peek least loaded package
+		targetPackageCandidate = gPackageLoadHeap.PeekMinimum();
+		if (targetPackageCandidate == NULL) // If load heap is empty, try high load heap (unlikely scenario)
+			targetPackageCandidate = gPackageHighLoadHeap.PeekMinimum();
+	} // packageHeapsLocker released
+
+	if (sourcePackageCandidate == NULL || targetPackageCandidate == NULL
+		|| sourcePackageCandidate == targetPackageCandidate
+		|| sourcePackageCandidate->IsDefunct() || targetPackageCandidate->IsDefunct()) {
+		TRACE_SCHEDULER("PkgLoadBalance: No suitable distinct source/target packages found or one is defunct.\n");
+		return;
+	}
+
+	// Imbalance Check
+	int32 effectivePackageLoadDiff = kMaxLoad * kPackageLoadDifferencePercent / 100;
+	// Note: Package migration cost is implicitly higher because this runs less frequently
+	// and aims for larger imbalances. No explicit package-level migration_cost variable added here yet.
+	if (sourcePackageCandidate->GetLoad() <= targetPackageCandidate->GetLoad() + effectivePackageLoadDiff) {
+		TRACE_SCHEDULER("PkgLoadBalance: No significant imbalance between Pkg %" B_PRId32 "(Ld %" B_PRId32 ") and Pkg %" B_PRId32 "(Ld %" B_PRId32 "). DiffThreshold %" B_PRId32 "\n",
+			sourcePackageCandidate->PackageID(), sourcePackageCandidate->GetLoad(),
+			targetPackageCandidate->PackageID(), targetPackageCandidate->GetLoad(),
+			effectivePackageLoadDiff);
+		return;
+	}
+
+	TRACE_SCHEDULER("PkgLoadBalance: Potential imbalance between Pkg %" B_PRId32 "(Ld %" B_PRId32 ") and Pkg %" B_PRId32 "(Ld %" B_PRId32 "). DiffThreshold %" B_PRId32 "\n",
+		sourcePackageCandidate->PackageID(), sourcePackageCandidate->GetLoad(),
+		targetPackageCandidate->PackageID(), targetPackageCandidate->GetLoad(),
+		effectivePackageLoadDiff);
+
+	// Thread Migration Strategy
+	CoreEntry* sourceCore = sourcePackageCandidate->GetMostLoadedActiveCore();
+	CoreEntry* targetCore = targetPackageCandidate->GetLeastLoadedActiveCore();
+
+	if (sourceCore == NULL || targetCore == NULL || sourceCore == targetCore) {
+		TRACE_SCHEDULER("PkgLoadBalance: Could not find suitable distinct source/target cores within packages PkgS %" B_PRId32 ", PkgT %" B_PRId32 "\n",
+			sourcePackageCandidate->PackageID(), targetPackageCandidate->PackageID());
+		return;
+	}
+
+	CPUEntry* sourceCPU = _scheduler_select_cpu_on_core(sourceCore, true /* prefer busiest */, NULL);
+	if (sourceCPU == NULL) {
+		TRACE_SCHEDULER("PkgLoadBalance: Could not find source CPU on sourceCore %" B_PRId32 "\n", sourceCore->ID());
+		return;
+	}
+
+	bigtime_t now = system_time();
+	if (_migrate_one_thread_between_cores(sourceCore, targetCore, sourceCPU, now)) {
+		TRACE_SCHEDULER("PkgLoadBalance: Successfully initiated migration from Pkg %" B_PRId32 "(C%" B_PRId32 ") to Pkg %" B_PRId32 "(C%" B_PRId32 ")\n",
+			sourcePackageCandidate->PackageID(), sourceCore->ID(),
+			targetPackageCandidate->PackageID(), targetCore->ID());
+		// Optionally, trigger load updates for involved packages/cores sooner rather than later
+		// sourceCore->Package()->UpdateLoad(); // This might be too aggressive / cause lock issues
+		// targetCore->Package()->UpdateLoad();
+		// sourceCore->_UpdateLoad(true);
+		// targetCore->_UpdateLoad(true);
+	} else {
+		TRACE_SCHEDULER("PkgLoadBalance: Failed to migrate thread from Pkg %" B_PRId32 "(C%" B_PRId32 ") to Pkg %" B_PRId32 "(C%" B_PRId32 ")\n",
+			sourcePackageCandidate->PackageID(), sourceCore->ID(),
+			targetPackageCandidate->PackageID(), targetCore->ID());
+	}
+}
+
+
+static void
 scheduler_perform_load_balance()
 {
 	// This function is periodically called to attempt to balance thread load
@@ -1209,76 +1299,93 @@ scheduler_perform_load_balance()
 	int originalLevel = -1; // MLFQ level of the thread to move.
 	bigtime_t now = system_time();
 
+	// The actual migration logic is now in _migrate_one_thread_between_cores
+	_migrate_one_thread_between_cores(sourceCoreCandidate, finalTargetCore, sourceCPU, now);
+}
+
+
+static bool
+_migrate_one_thread_between_cores(CoreEntry* sourceCore, CoreEntry* targetCore,
+	CPUEntry* initialSourceCPU, bigtime_t now)
+{
+	SCHEDULER_ENTER_FUNCTION();
+
+	if (sourceCore == NULL || targetCore == NULL || sourceCore == targetCore || initialSourceCPU == NULL)
+		return false;
+
+	ASSERT(initialSourceCPU->Core() == sourceCore);
+
+	ThreadData* threadToMove = NULL;
+	int originalLevel = -1;
+	CPUEntry* sourceCPU = initialSourceCPU; // Start with the provided busiest CPU on sourceCore
+	CPUEntry* targetCPU = NULL;
+
 	sourceCPU->LockRunQueue();
 	// Find a suitable thread to migrate from the source CPU's run queues.
-	// Iterate from higher to lower priority MLFQ levels (excluding idle level).
-	for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) {
+	for (int level = 0; level < NUM_MLFQ_LEVELS - 1; level++) { // excluding idle level
 		ThreadRunQueue::ConstIterator iter = sourceCPU->GetMLFQLevel(level).GetConstIterator();
 		while(iter.HasNext()){
 			ThreadData* candidate = iter.Next();
-			// Don't migrate idle threads or the currently running thread on sourceCPU.
 			if (candidate->IsIdle() || candidate->GetThread() == gCPU[sourceCPU->ID()].running_thread)
 				continue;
-			// Don't migrate pinned threads.
 			if (candidate->GetThread()->pinned_to_cpu != 0)
 				continue;
 
-			// Select the least busy CPU on the final target core for this candidate thread.
-			targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
-			if (targetCPU == NULL || targetCPU == sourceCPU) { // No suitable target CPU or it's the same.
-				targetCPU = NULL;
+			// Select the least busy CPU on the targetCore for this candidate thread.
+			targetCPU = _scheduler_select_cpu_on_core(targetCore, false, candidate);
+			if (targetCPU == NULL) { // No suitable CPU on targetCore for this candidate
 				continue;
 			}
+			// It's possible targetCPU is on sourceCore if targetCore == sourceCore (intra-package balancing using this helper)
+			// but for inter-package, targetCPU must not be sourceCPU.
+			// The check targetCPU == sourceCPU is mostly relevant if sourceCore == targetCore.
+			// If sourceCore != targetCore, then targetCPU cannot be sourceCPU.
 
 			bigtime_t minMigrationInterval = kBaseMinTimeBetweenMigrations;
 			if (gCoreCount > kHighCoreCountThreshold) {
 				minMigrationInterval = kHighCoreMinTimeBetweenMigrations;
 			}
-
-			// Avoid migrating a thread too frequently.
 			if (now - candidate->LastMigrationTime() < minMigrationInterval)
 				continue;
 
 			threadToMove = candidate;
 			originalLevel = level;
-			break; // Found a candidate.
+			break;
 		}
 		if (threadToMove != NULL) break;
 	}
 
 	if (threadToMove == NULL) {
 		sourceCPU->UnlockRunQueue();
-		TRACE("LoadBalance: No suitable thread found to migrate from CPU %" B_PRId32 "\n", sourceCPU->ID());
-		return;
+		TRACE("MigrateBetweenCores: No suitable thread on srcCPU %" B_PRId32 "(Core %" B_PRId32 ") for targetCore %" B_PRId32 "\n",
+			sourceCPU->ID(), sourceCore->ID(), targetCore->ID());
+		return false;
 	}
 
-	// Remove the chosen thread from the source CPU's run queue.
 	sourceCPU->RemoveFromQueue(threadToMove, originalLevel);
 	threadToMove->MarkDequeued();
 	sourceCPU->UnlockRunQueue();
 
-	TRACE("LoadBalance: Migrating thread %" B_PRId32 " (level %d) from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
-		threadToMove->GetThread()->id, originalLevel, sourceCPU->ID(), sourceCoreCandidate->ID(), targetCPU->ID(), finalTargetCore->ID());
+	TRACE("MigrateBetweenCores: Migrating T:%" B_PRId32 "(L%d) from CPU %" B_PRId32 "(C%" B_PRId32 ") to CPU %" B_PRId32 "(C%" B_PRId32 ")\n",
+		threadToMove->GetThread()->id, originalLevel,
+		sourceCPU->ID(), sourceCore->ID(),
+		targetCPU->ID(), targetCore->ID());
 
-	// Update thread's core/CPU association.
 	if (threadToMove->Core() != NULL)
-		threadToMove->UnassignCore(false); // Unassign from old core if it was homed.
+		threadToMove->UnassignCore(false);
 
-	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()]; // Set for potential cache affinity.
-	// ChooseCoreAndCPU will re-assign fCore and add its load to the new core.
-	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU);
-	ASSERT(threadToMove->Core() == finalTargetCore);
+	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
+	threadToMove->ChooseCoreAndCPU(targetCore, targetCPU); // Should mostly confirm targetCore/CPU
+	ASSERT(threadToMove->Core() == targetCore);
+	ASSERT(targetCPU->Core() == targetCore); // Ensure chosen targetCPU is on targetCore
 
-	// Add thread to the target CPU's run queue.
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove, threadToMove->CurrentMLFQLevel(), false /* add to back */);
+	targetCPU->AddThread(threadToMove, threadToMove->CurrentMLFQLevel(), false);
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(now);
-	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID())); // Trace event.
+	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
 
-	// If the migrated thread is higher priority than what's on the target CPU,
-	// trigger a reschedule on the target CPU.
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
 	if (currentOnTarget == NULL || thread_is_idle_thread(currentOnTarget) ||
@@ -1289,6 +1396,7 @@ scheduler_perform_load_balance()
 			smp_send_ici(targetCPU->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
 	}
+	return true;
 }
 
 

@@ -57,7 +57,11 @@ struct i915_ppgtt {
 	enum intel_ppgtt_type type;
 	uint8_t ppgtt_size_bits;
 
-	struct list allocated_pts_list; // List of i915_ppgtt_pt_bo
+	// For 2-level PPGTT (Gen7-like), cache of PT BO trackers indexed by PDE index.
+	// Size assumes a 4KB PD with 64-bit PDEs (512 entries).
+	// For multi-level PPGTTs (Gen8+), this direct cache is insufficient for all levels.
+	struct i915_ppgtt_pt_bo* pt_cache[512];
+	struct list allocated_pts_list; // Master list of all allocated PT/intermediate PD BOs for cleanup.
 
 	mutex lock;
 	uint32_t refcount;
@@ -84,10 +88,19 @@ void _i915_ppgtt_destroy(struct i915_ppgtt* ppgtt);
 void i915_ppgtt_get(struct i915_ppgtt* ppgtt);
 void i915_ppgtt_put(struct i915_ppgtt* ppgtt);
 
+// Abstracted cache types for PPGTT PTEs
+// These will be translated to hardware-specific bits/MOCS entries by the mapping function.
+enum i915_ppgtt_cache_type {
+	PPGTT_CACHE_DEFAULT = 0,    // Driver/hardware default (likely WB L3/LLC)
+	PPGTT_CACHE_UNCACHED,       // Uncached by GPU
+	PPGTT_CACHE_WC,             // Write-Combining (by GPU)
+	PPGTT_CACHE_WB              // Write-Back (cached by GPU L3/LLC)
+};
+
 status_t i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 	struct intel_i915_gem_object* obj,
 	uint64_t gpu_va,
-	uint32_t pte_caching_bits, // Abstracted: e.g., MOCS index or specific cache bits
+	enum i915_ppgtt_cache_type cache_type,
 	uint32_t pte_flags);      // e.g., PPGTT_PTE_WRITABLE
 
 status_t i915_ppgtt_unmap_range(struct i915_ppgtt* ppgtt,
@@ -101,7 +114,8 @@ void i915_ppgtt_clear_range(struct i915_ppgtt* ppgtt,
 	bool flush_tlb); // Whether to issue a TLB flush after clearing
 
 // TODO: Add TLB invalidation functions if needed, e.g.,
-// void i915_ppgtt_invalidate_tlbs(struct i915_ppgtt* ppgtt);
-// void intel_i915_invalidate_gtt_tlbs(intel_i915_device_info* devInfo); (Global GTT TLB)
+// void i915_ppgtt_invalidate_tlbs(struct i915_ppgtt* ppgtt); // More specific context TLB flush
+void intel_i915_ppgtt_do_tlb_invalidate(struct i915_ppgtt* ppgtt); // General TLB invalidation for a PPGTT
+
 
 #endif /* _I915_PPGTT_H_ */

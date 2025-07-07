@@ -10,6 +10,7 @@
 #include "gem_object.h" // For intel_i915_gem_object_create etc.
 #include "intel_i915_priv.h" // For TRACE and other device info
 #include "registers.h"    // For GTT_TLB_INV_CR_REG etc. (conceptual)
+#include "gtt.h"          // For intel_i915_gtt_flush
 
 #include <stdlib.h> // For malloc, free
 #include <string.h> // For memset
@@ -44,6 +45,7 @@ i915_ppgtt_create(intel_i915_device_info* devInfo,
 	ppgtt->refcount = 1; // Initial reference for the creator
 	mutex_init_etc(&ppgtt->lock, "i915 PPGTT lock", MUTEX_FLAG_CLONE_NAME);
 	list_init_etc(&ppgtt->allocated_pts_list, offsetof(struct i915_ppgtt_pt_bo, link));
+	memset(ppgtt->pt_cache, 0, sizeof(ppgtt->pt_cache)); // Initialize pt_cache
 
 	status_t status;
 	uint32_t pd_bo_flags = I915_BO_ALLOC_CPU_CLEAR;
@@ -51,11 +53,11 @@ i915_ppgtt_create(intel_i915_device_info* devInfo,
 	size_t pd_size = 0;
 
 	if (type == INTEL_PPGTT_FULL) {
-		pd_size = B_PAGE_SIZE; // Assume one page for top-level (PD or PDPT)
+		pd_size = B_PAGE_SIZE;
 		if (size_bits != 31 && size_bits != 32 && size_bits != 48) {
 			TRACE("PPGTT: Unsupported ppgtt_size_bits %u for Full PPGTT. Defaulting to 31.
 ", size_bits);
-			ppgtt->ppgtt_size_bits = 31; // Adjust internal state
+			ppgtt->ppgtt_size_bits = 31;
 		}
 	} else if (type == INTEL_PPGTT_ALIASING) {
 		TRACE("PPGTT: Aliasing PPGTT type. No separate PD BO allocated by ppgtt_create.
@@ -72,7 +74,7 @@ i915_ppgtt_create(intel_i915_device_info* devInfo,
 		return B_BAD_VALUE;
 	}
 
-	if (pd_size == 0) { // Should only happen if aliasing and we missed the return
+	if (pd_size == 0) {
 		mutex_destroy(&ppgtt->lock);
 		free(ppgtt);
 		return B_ERROR;
@@ -126,6 +128,8 @@ _i915_ppgtt_destroy(struct i915_ppgtt* ppgtt)
 		}
 		free(pt_bo_info);
 	}
+	memset(ppgtt->pt_cache, 0, sizeof(ppgtt->pt_cache));
+
 
 	if (ppgtt->pd_bo) {
 		intel_i915_gem_object_put(ppgtt->pd_bo);
@@ -156,17 +160,17 @@ status_t
 i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 	struct intel_i915_gem_object* obj,
 	uint64_t gpu_va,
-	uint32_t pte_caching_bits, // Abstracted: e.g., MOCS index or specific cache bits
-	uint32_t pte_flags)      // e.g., PPGTT_PTE_WRITABLE
+	enum i915_ppgtt_cache_type cache_type,
+	uint32_t pte_flags)
 {
-	// TRACE("PPGTT: Map object (area %" B_PRId32 ") to GPU VA 0x%llx in ppgtt %p
-",
-	//	obj ? obj->backing_store_area : -1, gpu_va, ppgtt); // Verbose
 	if (ppgtt == NULL || obj == NULL || obj->phys_pages_list == NULL)
 		return B_BAD_VALUE;
 
 	intel_i915_device_info* devInfo = ppgtt->dev_priv;
 	status_t status = B_OK;
+	uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+	uint32_t actual_pte_caching_bits = 0;
+	bool ptes_changed = false;
 
 	if (gpu_va & (B_PAGE_SIZE - 1)) {
 		TRACE("PPGTT Map: GPU VA 0x%llx not page-aligned.
@@ -174,11 +178,9 @@ i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 		return B_BAD_VALUE;
 	}
 	if (obj->num_phys_pages == 0) {
-		return B_OK; // Mapping zero pages is a no-op.
+		return B_OK;
 	}
 
-	// This implementation focuses on Gen7-like 2-level full PPGTT (31/32-bit)
-	// where ppgtt->pd_bo is the single Page Directory.
 	if (ppgtt->type != INTEL_PPGTT_FULL || !(ppgtt->ppgtt_size_bits == 31 || ppgtt->ppgtt_size_bits == 32)) {
 		TRACE("PPGTT Map: Unsupported PPGTT type (%d) or size (%u bits) for current map implementation.
 ",
@@ -191,17 +193,35 @@ i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 		return B_NO_INIT;
 	}
 
+	if (gen == 7) {
+		switch (cache_type) {
+			case PPGTT_CACHE_UNCACHED: actual_pte_caching_bits = GTT_PTE_CACHE_UC_GEN7; break;
+			case PPGTT_CACHE_WC:       actual_pte_caching_bits = GTT_PTE_CACHE_WC_GEN7; break;
+			case PPGTT_CACHE_WB:
+			case PPGTT_CACHE_DEFAULT:  actual_pte_caching_bits = GTT_PTE_CACHE_WB_GEN7; break;
+		}
+	} else if (gen >= 8) {
+		TRACE("PPGTT Map: Gen %u MOCS lookup for PTE caching is STUBBED. Using default (WB-like).
+", gen);
+		switch (cache_type) { // Placeholder, needs MOCS indices
+			case PPGTT_CACHE_UNCACHED: actual_pte_caching_bits = GTT_PTE_CACHE_UC_GEN7; break;
+			case PPGTT_CACHE_WC:       actual_pte_caching_bits = GTT_PTE_CACHE_WC_GEN7; break;
+			case PPGTT_CACHE_WB:
+			case PPGTT_CACHE_DEFAULT:  actual_pte_caching_bits = GTT_PTE_CACHE_WB_GEN7; break;
+		}
+	} else {
+		actual_pte_caching_bits = 0;
+	}
+
 	mutex_lock(&ppgtt->lock);
 
 	for (uint32_t page_idx = 0; page_idx < obj->num_phys_pages; page_idx++) {
 		uint64_t current_gpu_va = gpu_va + (page_idx * B_PAGE_SIZE);
 		phys_addr_t page_phys_addr = obj->phys_pages_list[page_idx];
+		uint32_t pde_index = (current_gpu_va >> 22) & 0x1FF;
 
-		// Calculate indices for 2-level page table (PD -> PT) assuming 4KB pages.
-		// GPU VA: | PDE Index (9 bits for 1GB PD) | PTE Index (10 bits) | Page Offset (12 bits) |
-		uint32_t pde_index = (current_gpu_va >> 22) & 0x1FF; // Top 9 bits for a 1GB PD (512 entries)
-		if (pde_index >= (B_PAGE_SIZE / sizeof(uint64_t))) { // Check against actual PD size
-			TRACE("PPGTT Map: GPU VA 0x%llx (PDE index %u) out of range for single page directory.
+		if (pde_index >= (B_PAGE_SIZE / sizeof(uint64_t))) {
+			TRACE("PPGTT Map: GPU VA 0x%llx (PDE index %u) out of 1GB range for single PD.
 ",
 				current_gpu_va, pde_index);
 			status = B_BAD_ADDRESS;
@@ -211,9 +231,17 @@ i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 		uint64_t* pde_ptr = &ppgtt->pd_cpu_addr[pde_index];
 		struct intel_i915_gem_object* pt_bo = NULL;
 		uint64_t* pt_cpu_addr = NULL;
+		struct i915_ppgtt_pt_bo* pt_tracker = ppgtt->pt_cache[pde_index];
 
-		if (!(*pde_ptr & PPGTT_PDE_PRESENT)) {
-			// Page Directory Entry not present, need to allocate a Page Table BO.
+		if (pt_tracker == NULL || !(*pde_ptr & PPGTT_PDE_PRESENT) ||
+			(pt_tracker->bo->phys_pages_list[0] & PPGTT_PDE_ADDR_MASK) != (*pde_ptr & PPGTT_PDE_ADDR_MASK) ) {
+
+			if (pt_tracker != NULL && (*pde_ptr & PPGTT_PDE_PRESENT)) {
+				TRACE("PPGTT Map: ERROR - pt_cache for PDE idx %u is inconsistent with PDE content!
+", pde_index);
+				ppgtt->pt_cache[pde_index] = NULL;
+			}
+
 			status = intel_i915_gem_object_create(devInfo, B_PAGE_SIZE,
 				I915_BO_ALLOC_CPU_CLEAR, 0,0,0, &pt_bo);
 			if (status != B_OK) {
@@ -229,54 +257,45 @@ i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
 				break;
 			}
 
-			struct i915_ppgtt_pt_bo* pt_tracker = (struct i915_ppgtt_pt_bo*)malloc(sizeof(*pt_tracker));
+			pt_tracker = (struct i915_ppgtt_pt_bo*)malloc(sizeof(*pt_tracker));
 			if (!pt_tracker) {
 				intel_i915_gem_object_put(pt_bo);
 				status = B_NO_MEMORY; break;
 			}
-			pt_tracker->bo = pt_bo; // pt_bo ref now owned by pt_tracker
+			pt_tracker->bo = pt_bo;
 			pt_tracker->gpu_addr_base = current_gpu_va & ~((1ULL << 22) - 1);
-			pt_tracker->level = 0; // PT level
+			pt_tracker->level = 0;
 			list_add_item_to_tail(&ppgtt->allocated_pts_list, &pt_tracker->link);
+			ppgtt->pt_cache[pde_index] = pt_tracker;
 
 			if (pt_bo->num_phys_pages == 0 || pt_bo->phys_pages_list == NULL) {
 				status = B_ERROR; break;
 			}
 			*pde_ptr = (pt_bo->phys_pages_list[0] & PPGTT_PDE_ADDR_MASK) | PPGTT_PDE_PRESENT | PPGTT_PDE_WRITABLE;
+			ptes_changed = true;
 		} else {
-			// PDE is present, find existing Page Table BO.
-			uint64_t pt_phys_addr = (*pde_ptr & PPGTT_PDE_ADDR_MASK);
-			struct i915_ppgtt_pt_bo* pt_entry_iter;
-			bool found_pt_bo = false;
-			list_for_every_entry(&ppgtt->allocated_pts_list, pt_entry_iter, struct i915_ppgtt_pt_bo, link) {
-				if (pt_entry_iter->bo && pt_entry_iter->bo->num_phys_pages > 0 &&
-				    (pt_entry_iter->bo->phys_pages_list[0] & PPGTT_PDE_ADDR_MASK) == pt_phys_addr) {
-					pt_bo = pt_entry_iter->bo;
-					pt_cpu_addr = (uint64_t*)pt_bo->kernel_virtual_address;
-					if (pt_cpu_addr == NULL) status = B_ERROR;
-					found_pt_bo = true;
-					break;
-				}
-			}
-			if (!found_pt_bo || status != B_OK) {
-				TRACE("PPGTT Map: Could not find/map existing PT BO for PDE idx %u (phys 0x%llx).
-", pde_index, pt_phys_addr);
-				if (status == B_OK) status = B_ENTRY_NOT_FOUND;
-				break;
+			pt_bo = pt_tracker->bo;
+			pt_cpu_addr = (uint64_t*)pt_bo->kernel_virtual_address;
+			if (pt_cpu_addr == NULL) {
+				TRACE("PPGTT Map: Cached PT BO %p for PDE idx %u has no CPU mapping!
+", pt_bo, pde_index);
+				status = B_ERROR; break;
 			}
 		}
 
-		uint32_t pte_index = (current_gpu_va >> 12) & 0x3FF; // 10 bits for PTE index
+		uint32_t pte_index = (current_gpu_va >> 12) & 0x3FF;
 		uint64_t* pte_ptr = &pt_cpu_addr[pte_index];
-		*pte_ptr = (page_phys_addr & PPGTT_PTE_ADDR_MASK) | pte_flags | pte_caching_bits | PPGTT_PTE_PRESENT;
+		uint64_t new_pte_val = (page_phys_addr & PPGTT_PTE_ADDR_MASK) | pte_flags | actual_pte_caching_bits | PPGTT_PTE_PRESENT;
+		if (*pte_ptr != new_pte_val) {
+			*pte_ptr = new_pte_val;
+			ptes_changed = true;
+		}
 	}
 
 	mutex_unlock(&ppgtt->lock);
 
-	if (status == B_OK) {
-		// TODO: TLB invalidation. This is complex and context/gen specific.
-		// For now, assume context switch or explicit flush command handles it.
-		// i915_ppgtt_clear_range(ppgtt, gpu_va, obj->num_phys_pages, true); // Example
+	if (status == B_OK && ptes_changed) {
+		intel_i915_ppgtt_do_tlb_invalidate(ppgtt);
 	}
 	return status;
 }
@@ -286,9 +305,6 @@ i915_ppgtt_unmap_range(struct i915_ppgtt* ppgtt,
 	uint64_t gpu_va,
 	size_t num_pages)
 {
-	// TRACE("PPGTT: Unmap range GPU VA 0x%llx, num_pages %lu in ppgtt %p (STUBBED)
-",
-	//	gpu_va, num_pages, ppgtt); // Can be verbose
 	if (ppgtt == NULL)
 		return B_BAD_VALUE;
 
@@ -302,16 +318,20 @@ i915_ppgtt_clear_range(struct i915_ppgtt* ppgtt,
 	size_t num_pages,
 	bool flush_tlb)
 {
-	// TRACE("PPGTT: Clear range GPU VA 0x%llx, num_pages %lu, flush %d in ppgtt %p (STUBBED)
-",
-	//	gpu_va, num_pages, flush_tlb, ppgtt); // Can be verbose
 	if (ppgtt == NULL || ppgtt->dev_priv == NULL || num_pages == 0 || ppgtt->pd_cpu_addr == NULL)
 		return;
 
 	intel_i915_device_info* devInfo = ppgtt->dev_priv;
 	uint64_t scratch_pte_val = devInfo->scratch_page_phys_addr | PPGTT_PTE_PRESENT;
-	// TODO: Add appropriate caching bits for scratch PTE (e.g., UC)
-	// scratch_pte_val |= GTT_PTE_CACHE_UC_GEN7; // If PPGTT PTEs use same cache bits
+	uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+	bool ptes_actually_changed = false;
+
+	if (gen == 7) {
+		scratch_pte_val |= GTT_PTE_CACHE_UC_GEN7;
+	} else if (gen >= 8) {
+		// TODO: Use appropriate MOCS index for UC when MOCS is implemented for scratch page.
+		scratch_pte_val |= GTT_PTE_CACHE_UC_GEN7; // Placeholder
+	}
 
 	mutex_lock(&ppgtt->lock);
 
@@ -322,36 +342,71 @@ i915_ppgtt_clear_range(struct i915_ppgtt* ppgtt,
 		if (pde_index >= (B_PAGE_SIZE / sizeof(uint64_t))) continue;
 
 		uint64_t* pde_ptr = &ppgtt->pd_cpu_addr[pde_index];
-		if (!(*pde_ptr & PPGTT_PDE_PRESENT)) continue; // No Page Table here
+		if (!(*pde_ptr & PPGTT_PDE_PRESENT)) continue;
 
-		uint64_t pt_phys_addr = (*pde_ptr & PPGTT_PDE_ADDR_MASK);
+		struct i915_ppgtt_pt_bo* pt_tracker = ppgtt->pt_cache[pde_index];
 		uint64_t* pt_cpu_addr = NULL;
 
-		struct i915_ppgtt_pt_bo* pt_entry_iter;
-		bool found_pt_bo = false;
-		list_for_every_entry(&ppgtt->allocated_pts_list, pt_entry_iter, struct i915_ppgtt_pt_bo, link) {
-			if (pt_entry_iter->bo && pt_entry_iter->bo->num_phys_pages > 0 &&
-				(pt_entry_iter->bo->phys_pages_list[0] & PPGTT_PDE_ADDR_MASK) == pt_phys_addr) {
-				pt_cpu_addr = (uint64_t*)pt_entry_iter->bo->kernel_virtual_address;
-				found_pt_bo = true;
-				break;
-			}
+		if (pt_tracker != NULL && pt_tracker->bo != NULL &&
+			(pt_tracker->bo->phys_pages_list[0] & PPGTT_PDE_ADDR_MASK) == (*pde_ptr & PPGTT_PDE_ADDR_MASK)) {
+			pt_cpu_addr = (uint64_t*)pt_tracker->bo->kernel_virtual_address;
+		} else {
+			TRACE("PPGTT Clear: pt_cache miss/inconsistency for PDE idx %u. PDE has 0x%llx.
+",
+				pde_index, (long long unsigned int)*pde_ptr);
+			continue;
 		}
-		if (!found_pt_bo || pt_cpu_addr == NULL) continue;
+
+		if (pt_cpu_addr == NULL) continue;
 
 		uint32_t pte_index = (current_gpu_va >> 12) & 0x3FF;
 		uint64_t* pte_ptr = &pt_cpu_addr[pte_index];
-		*pte_ptr = scratch_pte_val;
+		if (*pte_ptr != scratch_pte_val) { // Check if it's not already pointing to scratch
+			*pte_ptr = scratch_pte_val;
+			ptes_actually_changed = true;
+		}
 	}
 	mutex_unlock(&ppgtt->lock);
 
-	if (flush_tlb) {
-		// TODO: Implement actual TLB invalidation for the specific context/PPGTT.
-		// This is hardware-specific. For Gen7+, might involve specific MI commands
-		// or register writes (e.g., invalidating context ID caches or specific TLB entries).
-		// A global GTT flush might be too broad but could be a fallback.
-		// Example: intel_i915_write32(devInfo, GEN7_TLB_INV_REG, GEN7_TLB_INV_BIT);
-		TRACE("PPGTT: TLB flush requested for ppgtt %p (STUBBED - needs actual HW commands)
-", ppgtt);
+	if (flush_tlb && ptes_actually_changed) {
+		intel_i915_ppgtt_do_tlb_invalidate(ppgtt);
 	}
+}
+
+void
+intel_i915_ppgtt_do_tlb_invalidate(struct i915_ppgtt* ppgtt)
+{
+	if (ppgtt == NULL || ppgtt->dev_priv == NULL)
+		return;
+
+	intel_i915_device_info* devInfo = ppgtt->dev_priv;
+	uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+
+	// TRACE("PPGTT: Performing TLB Invalidation for ppgtt %p (Gen %u)
+", ppgtt, gen); // Verbose
+
+	// This is a placeholder / simplification.
+	// Proper TLB invalidation is complex and highly generation-specific.
+	// It might involve:
+	// - Specific MI commands (like MI_FLUSH_DW with TLB invalidate bits) on relevant engines.
+	// - Context-specific invalidation (e.g. if a context ID is associated with TLB entries).
+	// - Invalidating specific TLB levels (e.g., render TLB, VF TLB).
+	// - For Gen8+, specific PIPE_CONTROL post-sync ops or dedicated TLB inv registers.
+
+	// As a broad (and potentially performance-impacting or not fully sufficient) measure,
+	// we can try a global GTT flush, which rewrites PGTBL_CTL.
+	// This is known to flush GGTT TLBs; its effect on PPGTT TLBs needs PRM verification per-gen.
+	// This should only be done if changes were made to *this* PPGTT that might affect current HW state.
+	// A context switch (MI_SET_CONTEXT) often implies TLB invalidation for the new context's AS.
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+	if (fw_status == B_OK) {
+		intel_i915_gtt_flush(devInfo); // This rewrites PGTBL_CTL
+		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+		// TRACE("PPGTT: Performed global GTT flush as a placeholder for PPGTT TLB invalidation.
+");
+	} else {
+		TRACE("PPGTT: Failed to acquire forcewake for TLB invalidation.
+");
+	}
+	// TODO: Replace with generation-specific, context-aware TLB invalidation.
 }

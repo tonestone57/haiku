@@ -234,8 +234,10 @@ intel_i915_configure_pipe_timings(intel_i915_device_info* devInfo,
 	if (devInfo == NULL || mode == NULL || trans >= PRIV_MAX_TRANSCODERS)
 		return B_BAD_VALUE;
 
-	TRACE("DISPLAY: STUB intel_i915_configure_pipe_timings for transcoder %d\n", trans);
-	TRACE("  Mode: %dx%d, Clock: %u kHz\n", mode->timing.h_display, mode->timing.v_display, mode->timing.pixel_clock);
+	// TRACE("DISPLAY: STUB intel_i915_configure_pipe_timings for transcoder %d
+", trans);
+	// TRACE("  Mode: %dx%d, Clock: %u kHz
+", mode->timing.h_display, mode->timing.v_display, mode->timing.pixel_clock);
 	// TODO: Implement actual register programming for HTOTAL, HBLANK, HSYNC, VTOTAL, VBLANK, VSYNC for the given transcoder.
 	// Example: intel_i915_write32(devInfo, HTOTAL_A_REG(trans), ...);
 	// Caller must hold forcewake.
@@ -249,7 +251,8 @@ intel_i915_configure_pipe_source_size(intel_i915_device_info* devInfo, enum pipe
 	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
 		return B_BAD_VALUE;
 
-	TRACE("DISPLAY: STUB intel_i915_configure_pipe_source_size for pipe %d: %ux%u\n", pipe, width, height);
+	// TRACE("DISPLAY: STUB intel_i915_configure_pipe_source_size for pipe %d: %ux%u
+", pipe, width, height);
 	// TODO: Implement actual register programming for PIPESRC(pipe)
 	// Example: intel_i915_write32(devInfo, PIPESRC_REG(pipe), ((height - 1) << 16) | (width - 1));
 	// Caller must hold forcewake.
@@ -263,7 +266,8 @@ intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum trans
 	if (devInfo == NULL || mode == NULL || trans >= PRIV_MAX_TRANSCODERS)
 		return B_BAD_VALUE;
 
-	TRACE("DISPLAY: STUB intel_i915_configure_transcoder_pipe for transcoder %d, bpp_total %u\n", trans, bpp_total);
+	// TRACE("DISPLAY: STUB intel_i915_configure_transcoder_pipe for transcoder %d, bpp_total %u
+", trans, bpp_total);
 	// TODO: Implement actual register programming for TRANSCONF(trans)
 	// - Set transcoder mode (progressive/interlaced)
 	// - Set BPC for FDI if applicable
@@ -273,20 +277,78 @@ intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum trans
 
 status_t
 intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
-	uint32 gtt_page_offset, uint16 width, uint16 height, uint16 stride_bytes, color_space format)
+	uint32 gtt_page_offset, uint16 width, uint16 height, uint16 stride_bytes,
+	color_space format, enum i915_tiling_mode tiling_mode)
 {
-	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES) {
+		TRACE("DISPLAY ERROR: configure_primary_plane: Invalid devInfo or pipe (%d).\n", pipe);
 		return B_BAD_VALUE;
+	}
+	if (width == 0 || height == 0 || stride_bytes == 0) {
+		TRACE("DISPLAY ERROR: configure_primary_plane: Invalid dimensions/stride (w:%u h:%u s:%u) for pipe %d.\n",
+			width, height, stride_bytes, pipe);
+		return B_BAD_VALUE;
+	}
 
-	TRACE("DISPLAY: STUB intel_i915_configure_primary_plane for pipe %d\n", pipe);
-	TRACE("  GTT Page Offset: %u, Size: %ux%u, Stride: %u bytes, Format: 0x%x\n",
-		gtt_page_offset, width, height, stride_bytes, format);
-	// TODO: Implement actual register programming for:
-	// - DSPCNTR (pixel format, tiling)
-	// - DSPADDR (surface base address)
-	// - DSPSTRIDE (stride)
-	// - DSPSIZE (plane size)
-	// Caller must hold forcewake.
+	// This function assumes the caller holds the necessary forcewake domains
+	// (typically FW_DOMAIN_RENDER or FW_DOMAIN_ALL for display register access)
+	// and that the plane has been disabled prior to calling if critical parameters
+	// like pixel format or tiling are changing.
+
+	uint32_t current_dspcntr_val = intel_i915_read32(devInfo, DSPCNTR(pipe));
+	uint32_t new_dspcntr_val = current_dspcntr_val;
+
+	// Clear relevant fields: pixel format, tiling mode, and gamma.
+	// The plane enable bit (DISPPLANE_ENABLE) is controlled by intel_i915_plane_enable().
+	new_dspcntr_val &= ~(DISPPLANE_PIXFORMAT_MASK | DISPPLANE_TILED_X | DISPPLANE_GAMMA_ENABLE);
+
+	// Set new pixel format.
+	new_dspcntr_val |= get_dspcntr_format_bits(format); // Helper function determines format bits.
+
+	// Set tiling mode.
+	// Currently, only X-tiling is explicitly handled for primary scanout.
+	// Y-tiling for primary planes is less common and might require different register bits
+	// or have stricter alignment/stride requirements on some hardware generations.
+	if (tiling_mode == I915_TILING_X) {
+		new_dspcntr_val |= DISPPLANE_TILED_X;
+	} else if (tiling_mode == I915_TILING_Y) {
+		// TODO: Add support for Y-tiling if necessary. This might involve different
+		// DISPPLANE_TILED_Y bits or additional setup. For now, Y-tiled primary
+		// planes will be treated as linear by this configuration.
+		TRACE("DISPLAY: configure_primary_plane: Y-tiling for pipe %d primary plane not explicitly handled, may use linear path.\n", pipe);
+	}
+
+	// Enable Gamma correction (standard for display planes).
+	new_dspcntr_val |= DISPPLANE_GAMMA_ENABLE;
+
+	// Disable trickle feed for cursor (recommended for Gen4+ for better performance/behavior).
+	if (INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id) >= 4) {
+		new_dspcntr_val |= DISPPLANE_TRICKLE_FEED_DISABLE;
+	}
+
+	// Write the new control value.
+	// The plane should ideally be disabled by the caller before these critical changes.
+	intel_i915_write32(devInfo, DSPCNTR(pipe), new_dspcntr_val);
+
+	// Program the stride (bytes per row).
+	intel_i915_write32(devInfo, DSPSTRIDE(pipe), stride_bytes);
+
+	// Program the plane size (width-1, height-1).
+	intel_i915_write32(devInfo, DSPSIZE(pipe), ((uint32_t)(height - 1) << 16) | (width - 1));
+
+	// Program the surface base address (GTT offset in bytes).
+	// DSPADDR and DSPSURF are often the same register or aliased for the primary plane.
+	intel_i915_write32(devInfo, DSPADDR(pipe), gtt_page_offset * B_PAGE_SIZE);
+
+	// Program the display plane offset (typically (0,0) for full surface scanout).
+	// DSPOFFSET handles panning within the larger surface if DSPSIZE is smaller than surface dimensions.
+	intel_i915_write32(devInfo, DSPOFFSET(pipe), 0); // Default to no offset
+
+	// TRACE("DISPLAY: Configured Primary Plane Pipe %d: Format 0x%x, Tiling %d, Stride %u, Size %ux%u, GTT Offset 0x%lx\n",
+	//	pipe, (unsigned int)((new_dspcntr_val & DISPPLANE_PIXFORMAT_MASK) >> DISPPLANE_PIXFORMAT_SHIFT),
+	//	(new_dspcntr_val & DISPPLANE_TILED_X) ? 1 : 0,
+	//	stride_bytes, width, height, (uint32_t)gtt_page_offset * B_PAGE_SIZE); // Verbose
+
 	return B_OK;
 }
 

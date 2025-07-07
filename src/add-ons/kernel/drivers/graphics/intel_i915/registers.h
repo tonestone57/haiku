@@ -8,13 +8,16 @@
 #ifndef INTEL_I915_REGISTERS_H
 #define INTEL_I915_REGISTERS_H
 
-// --- Pipe & Transcoder Registers ---
+// --- Pipe & Transcoder & Plane Registers ---
+// Note: Register offsets are often relative to Pipe Base or Transcoder Base.
+// The _PIPE(pipe) macro helps resolve this.
 #define _PIPE_A_BASE			0x70000
 #define _PIPE_B_BASE			0x71000
-#define _PIPE_C_BASE			0x72000
-#define _TRANSCODER_EDP_BASE	0x7F000 // Example, check PRM for actual EDP transcoder base if different
+#define _PIPE_C_BASE			0x72000 // HSW+ may have different base for Pipe C if it exists
+// For Gen7 (IVB/HSW), primary planes are tied to pipes A, B, C.
+// Sprite planes have different register blocks.
 
-// TRANSCONF is used for Transcoder Configuration (e.g., 0x70008 for Pipe A's transcoder)
+// Transcoder Configuration (e.g., TRANSCONF_A at 0x70008)
 #define TRANSCONF(pipe)			(_PIPE(pipe) + 0x0008)
 	#define TRANSCONF_ENABLE				(1U << 31)
 	#define TRANSCONF_STATE_ENABLE_IVB		(1U << 30) // Read-only status on HSW, R/W on IVB
@@ -46,8 +49,39 @@
 	#define TRANSCONF_FRAME_START_DELAY_SHIFT	16
 	#define TRANSCONF_MSA_TIMING_DELAY_MASK		(3U << 14) // HSW: Bits 15:14
 
-#define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
-#define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE :                            ((trans) == 1 ? _PIPE_B_BASE :                            ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
+#define _PIPE(pipe) ((pipe) == PRIV_PIPE_A ? _PIPE_A_BASE : ((pipe) == PRIV_PIPE_B ? _PIPE_B_BASE : _PIPE_C_BASE))
+#define _TRANSCODER(trans) ((trans) == PRIV_TRANSCODER_A ? _PIPE_A_BASE :                            ((trans) == PRIV_TRANSCODER_B ? _PIPE_B_BASE :                            ((trans) == PRIV_TRANSCODER_C ? _PIPE_C_BASE : 0x0 ))) // EDP transcoder needs specific base if used for planes
+
+// --- Primary Plane Registers (Gen7: IVB/HSW, also similar for Gen8/9 primary plane A/B) ---
+// These are relative to the pipe base. Plane 0 is primary, Plane 1 is sprite.
+// For simplicity, using DSP for primary plane registers as per older Haiku conventions.
+// Newer PRMs might use PLANE_CTL, PLANE_SURF, etc.
+#define DSPCNTR(pipe)			(_PIPE(pipe) + 0x0070)	// Display Plane Control (Primary Plane)
+	#define DISPPLANE_ENABLE			(1U << 31)
+	#define DISPPLANE_GAMMA_ENABLE		(1U << 30)
+	#define DISPPLANE_PIXFORMAT_MASK	(0xFU << 24)
+	#define DISPPLANE_PIXFORMAT_SHIFT	24
+		// Values for DISPPLANE_PIXFORMAT (Gen specific, these are common for Gen4-9)
+		#define DISPPLANE_BGRX555		(0x0U << DISPPLANE_PIXFORMAT_SHIFT) // 15bpp
+		#define DISPPLANE_BGRX565		(0x1U << DISPPLANE_PIXFORMAT_SHIFT) // 16bpp
+		#define DISPPLANE_BGRX888		(0x2U << DISPPLANE_PIXFORMAT_SHIFT) // 24bpp (XRGB)
+		#define DISPPLANE_BGRA8888		(0xAU << DISPPLANE_PIXFORMAT_SHIFT) // 32bpp (ARGB)
+		#define DISPPLANE_BGRX101010	(0x4U << DISPPLANE_PIXFORMAT_SHIFT) // 30bpp
+		// Add more as needed, e.g., YUV formats for overlays/sprites
+	#define DISPPLANE_STEREO_ENABLE_IVB	(1U << 21) // IVB+
+	#define DISPPLANE_TILED_X			(1U << 10) // For Gen6+ X-Tiling
+	#define DISPPLANE_TRICKLE_FEED_DISABLE (1U << 14) // Gen4+
+
+#define DSPSTRIDE(pipe)			(_PIPE(pipe) + 0x0078)	// Display Plane Stride (Primary Plane)
+
+#define DSPSURF(pipe)			(_PIPE(pipe) + 0x009C)	// Display Plane Surface Base Address (Primary Plane)
+#define DSPADDR(pipe)			DSPSURF(pipe)          // Common alias
+
+#define DSPSIZE(pipe)			(_PIPE(pipe) + 0x0074)	// Display Plane Size (Primary Plane)
+	// DSPSIZE: ((height - 1) << 16) | (width - 1)
+
+#define DSPOFFSET(pipe)			(_PIPE(pipe) + 0x007C) // Display Plane Offset (Primary Plane)
+	// DSPOFFSET: ((y_offset) << 16) | (x_offset)
 
 
 // --- Interrupt Registers ---

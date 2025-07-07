@@ -601,63 +601,47 @@ switch_thread(Thread* fromThread, Thread* toThread)
 }
 
 
-// Work-Stealing Implementation (Phase 1 - Basic)
+// Helper function for topology-aware work-stealing
 static ThreadData*
-scheduler_try_work_steal(CPUEntry* thiefCPU)
+_attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 {
-	SCHEDULER_ENTER_FUNCTION();
+	CPUEntry* victimCPUEntry = CPUEntry::GetCPU(victimCpuID);
+
+	// Basic viability checks for the victim CPU
+	if (gCPU[victimCpuID].disabled || victimCPUEntry == NULL)
+		return NULL;
+	if (system_time() < victimCPUEntry->fLastTimeTaskStolenFrom + kVictimStealCooldownPeriod)
+		return NULL;
+	if (victimCPUEntry->GetTotalThreadCount() <= 0)
+		return NULL;
+
+	TRACE_SCHED("WorkSteal: Thief CPU %" B_PRId32 " probing victim CPU %" B_PRId32 "\n", thiefCPU->ID(), victimCpuID);
+
 	ThreadData* stolenTask = NULL;
-	int32 numCPUs = smp_get_num_cpus();
-	int32 currentThiefCpuID = thiefCPU->ID();
+	victimCPUEntry->LockRunQueue();
+	EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
 
-	int32 startVictimIndex = get_random<int32>() % numCPUs;
-
-	for (int32 iter = 0; iter < numCPUs; iter++) {
-		int32 victimCpuID = (startVictimIndex + iter) % numCPUs;
-
-		if (victimCpuID == currentThiefCpuID)
-			continue;
-
-		if (gCPU[victimCpuID].disabled)
-			continue;
-
-		CPUEntry* victimCPUEntry = CPUEntry::GetCPU(victimCpuID);
-		if (victimCPUEntry == NULL)
-			continue;
-
-		if (system_time() < victimCPUEntry->fLastTimeTaskStolenFrom + kVictimStealCooldownPeriod)
-			continue;
-
-		if (victimCPUEntry->GetTotalThreadCount() <= 0)
-			continue;
-
-		TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " considering victim CPU %" B_PRId32 "\n", currentThiefCpuID, victimCpuID);
-
-		victimCPUEntry->LockRunQueue();
-		EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
-
-		if (victimQueue.IsEmpty()) {
-			victimCPUEntry->UnlockRunQueue();
-			continue;
-		}
-
+	if (!victimQueue.IsEmpty()) {
+		// Phase 1 steal logic: check the top candidate.
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
-
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool canRunOnThief = true;
 			struct thread* candThread = candidateTask->GetThread();
 
+			// 1. Check CPU pinning (pinned_to_cpu is 1-based for cpu_num)
 			if (candThread->pinned_to_cpu != 0) {
-				if ((candThread->pinned_to_cpu - 1) != currentThiefCpuID) {
+				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
 					canRunOnThief = false;
 				}
 			}
+			// 2. Check CPU affinity mask
 			if (canRunOnThief && !candidateTask->GetCPUMask().IsEmpty()) {
-				if (!candidateTask->GetCPUMask().GetBit(currentThiefCpuID)) {
+				if (!candidateTask->GetCPUMask().GetBit(thiefCPU->ID())) {
 					canRunOnThief = false;
 				}
 			}
 
+			// 3. Check if sufficiently starved (positive lag)
 			bool isStarved = candidateTask->Lag() > kMinimumLagToSteal;
 
 			if (canRunOnThief && isStarved) {
@@ -668,21 +652,93 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
 				victimCPUEntry->_UpdateMinVirtualRuntime();
 
 				TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " STOLE thread %" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "\n",
-					currentThiefCpuID, stolenTask->GetThread()->id, stolenTask->Lag(), victimCpuID);
+					thiefCPU->ID(), stolenTask->GetThread()->id, stolenTask->Lag(), victimCpuID);
 			}
 		}
-		victimCPUEntry->UnlockRunQueue();
-
-		if (stolenTask != NULL) {
-			stolenTask->MarkDequeued();
-			stolenTask->SetLastMigrationTime(system_time());
-			if (stolenTask->Core() != NULL)
-				stolenTask->UnassignCore(false);
-			return stolenTask;
-		}
 	}
+	victimCPUEntry->UnlockRunQueue();
 
-	TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " found no task to steal after checking all CPUs.\n", currentThiefCpuID);
+	if (stolenTask != NULL) {
+		stolenTask->MarkDequeued();
+		stolenTask->SetLastMigrationTime(system_time());
+		if (stolenTask->Core() != NULL)
+			stolenTask->UnassignCore(false);
+	}
+	return stolenTask;
+}
+
+
+// Work-Stealing Implementation (Phase 1 Basic + Topology Awareness)
+static ThreadData*
+scheduler_try_work_steal(CPUEntry* thiefCPU)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ThreadData* stolenTask = NULL;
+	int32 numCPUs = smp_get_num_cpus();
+	int32 thiefCpuID = thiefCPU->ID();
+	CoreEntry* thiefCore = thiefCPU->Core();
+	PackageEntry* thiefPackage = (thiefCore != NULL) ? thiefCore->Package() : NULL;
+
+    // Stage 1: Same Core (SMT siblings / other logical CPUs on the same physical core)
+    if (thiefCore != NULL) {
+        CPUSet sameCoreCPUs = thiefCore->CPUMask();
+        // Iterate CPUs on the same core. Could randomize this inner loop too for fairness.
+        for (int32 victimCpuID = 0; victimCpuID < numCPUs; victimCpuID++) {
+            if (!sameCoreCPUs.GetBit(victimCpuID) || victimCpuID == thiefCpuID)
+                continue;
+
+            stolenTask = _attempt_one_steal(thiefCPU, victimCpuID);
+            if (stolenTask != NULL) {
+                TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " stole from same core (CPU %" B_PRId32 ")\n", thiefCpuID, victimCpuID);
+                return stolenTask;
+            }
+        }
+    }
+
+    // Stage 2: Same Package, different Core
+    if (thiefPackage != NULL) {
+        // Iterate all cores to find those in the same package
+        for (int32 coreIdx = 0; coreIdx < gCoreCount; coreIdx++) {
+            CoreEntry* victimCore = &gCoreEntries[coreIdx];
+            if (victimCore == thiefCore || victimCore->Package() != thiefPackage || victimCore->IsDefunct())
+                continue;
+
+            CPUSet victimCoreCPUs = victimCore->CPUMask();
+            for (int32 victimCpuID = 0; victimCpuID < numCPUs; victimCpuID++) {
+                 if (!victimCoreCPUs.GetBit(victimCpuID))
+			continue;
+                 stolenTask = _attempt_one_steal(thiefCPU, victimCpuID);
+                 if (stolenTask != NULL) {
+                     TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " stole from same package, diff core (CPU %" B_PRId32 " on Core %" B_PRId32 ")\n",
+                         thiefCpuID, victimCpuID, victimCore->ID());
+                     return stolenTask;
+                 }
+            }
+        }
+    }
+
+    // Stage 3: Other Packages (random iteration over all CPUs as a fallback)
+    int32 startCpuIndex = get_random<int32>() % numCPUs;
+    for (int32 i = 0; i < numCPUs; i++) {
+        int32 victimCpuID = (startCpuIndex + i) % numCPUs;
+        if (victimCpuID == thiefCpuID) continue;
+
+        CPUEntry* victimCPUEntry = CPUEntry::GetCPU(victimCpuID);
+        if (victimCPUEntry == NULL || victimCPUEntry->Core() == NULL) continue;
+
+        // Skip if victim is in the same package (already checked in Stage 1 & 2 more thoroughly)
+        if (thiefPackage != NULL && victimCPUEntry->Core()->Package() == thiefPackage) {
+            continue;
+        }
+
+        stolenTask = _attempt_one_steal(thiefCPU, victimCpuID);
+        if (stolenTask != NULL) {
+            TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " stole from other package (CPU %" B_PRId32 ")\n", thiefCpuID, victimCpuID);
+            return stolenTask;
+        }
+    }
+
+	TRACE_SCHED("WorkSteal: Adv CPU %" B_PRId32 " found no task to steal after checking all levels.\n", thiefCpuID);
 	return NULL;
 }
 
@@ -817,7 +873,13 @@ reschedule(int32 nextState)
 		// --- BEGIN WORK STEALING ATTEMPT ---
 		if (nextThreadData->IsIdle() && !gSingleCore /* && !gCPU[thisCPUId].disabled - already checked */ ) {
 			bool shouldAttemptSteal = (system_time() >= cpu->fNextStealAttemptTime);
-			// TODO: Power saving mode check: if (gCurrentMode && gCurrentMode->is_parking_cpu(cpu)) shouldAttemptSteal = false;
+
+		if (gCurrentMode != NULL && gCurrentMode->is_cpu_effectively_parked != NULL) {
+			if (gCurrentMode->is_cpu_effectively_parked(cpu)) {
+				shouldAttemptSteal = false;
+				TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " is parked by current mode, skipping steal attempt.\n", cpu->ID());
+			}
+		}
 
 			if (shouldAttemptSteal) {
 				cpu->UnlockRunQueue();
@@ -1782,7 +1844,6 @@ scheduler_perform_load_balance()
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
 		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
 
-		// Use the cached, lock-free getter for estimation
 		bigtime_t targetQueueMinVruntime = representativeTargetCPU->GetCachedMinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
 

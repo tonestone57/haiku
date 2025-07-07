@@ -49,6 +49,8 @@ struct scheduler_mode_operations {
 								Scheduler::CoreEntry* core,
 								int32 thread_load_estimate);
 	Scheduler::CoreEntry*	(*attempt_proactive_stc_designation)();
+	bool					(*is_cpu_effectively_parked)(
+								Scheduler::CPUEntry* cpu);
 };
 
 extern struct scheduler_mode_operations gSchedulerLowLatencyMode;

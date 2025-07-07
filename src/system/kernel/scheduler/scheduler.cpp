@@ -1589,6 +1589,9 @@ scheduler_perform_load_balance()
 		bigtime_t currentBenefitScore = currentLagOnSource + eligibilityImprovement;
 		// Alternative score: Focus purely on how much sooner it runs
 		// currentBenefitScore = eligibilityImprovement;
+		// Prioritize eligibility improvement more by weighting it higher.
+		currentBenefitScore = currentLagOnSource + (2 * eligibilityImprovement);
+
 
 		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), benefitScore %" B_PRId64 "\n",
 			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), currentBenefitScore);

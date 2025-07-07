@@ -27,26 +27,24 @@ _intel_i915_gem_context_free_internal(struct intel_i915_gem_context* ctx)
 
 	TRACE("GEM Context: Freeing context ID %lu\n", ctx->id);
 
-	if (ctx->hw_image_obj) {
-		if (ctx->hw_image_obj->gtt_mapped) {
-			intel_i915_gem_object_unmap_gtt(ctx->hw_image_obj);
-			// Free the GTT space allocated for this context image
-			intel_i915_gtt_free_space(ctx->dev_priv,
-				ctx->hw_image_obj->gtt_offset_pages,
-				ctx->hw_image_obj->num_phys_pages);
-		}
-		intel_i915_gem_object_put(ctx->hw_image_obj);
-		ctx->hw_image_obj = NULL;
+	// Release the PPGTT if one was associated
+	if (ctx->ppgtt != NULL) {
+		i915_ppgtt_put(ctx->ppgtt); // This will call _i915_ppgtt_destroy if refcount reaches 0
+		ctx->ppgtt = NULL;
 	}
 
-	// Placeholder for PPGTT cleanup
-	if (ctx->ppgtt != NULL) {
-		// This would involve unbinding all objects, freeing page table GEM objects, etc.
-		// e.g., intel_i915_ppgtt_fini(ctx->ppgtt); or similar hypothetical function.
-		// Since ppgtt is initialized to NULL and not created, this block is currently defensive.
-		TRACE("GEM Context: Freed context ID %lu (PPGTT cleanup STUBBED as ppgtt should be NULL).\n", ctx->id);
-		// If ppgtt was a dynamically allocated struct: free(ctx->ppgtt);
-		// If ppgtt had its own refcounting: i915_ppgtt_put(ctx->ppgtt);
+	// Release the hardware context image BO
+	if (ctx->hw_context_bo) {
+		// GTT unmapping and space freeing should be handled by gem_object_put if it was GTT mapped
+		// and not marked as gtt_mapped_by_execbuf (which context BOs shouldn't be).
+		// However, context BOs are typically pinned and their GTT mapping might be special.
+		// For now, assume gem_object_put handles necessary cleanup including GTT unmap if pinned.
+		// If it was pinned and mapped to a specific GTT offset, that GTT space also needs freeing.
+		if (ctx->hw_context_bo->gtt_mapped) {
+			intel_i915_gem_object_unmap_gtt(ctx->hw_context_bo); // This also frees GTT space via the bitmap
+		}
+		intel_i915_gem_object_put(ctx->hw_context_bo);
+		ctx->hw_context_bo = NULL;
 	}
 
 	mutex_destroy(&ctx->lock);
@@ -70,11 +68,10 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->dev_priv = devInfo;
 	ctx->id = atomic_add((int32*)&gNextContextID, 1);
-	ctx->refcount = 1;
-	ctx->hw_image_obj = NULL;
-	// Initialize new fields
+	ctx->refcount = 1; // Initial reference for the creator
+	ctx->hw_context_bo = NULL;
 	ctx->ppgtt = NULL;
-	ctx->context_flags = 0;
+	ctx->context_flags = flags; // Store user-provided flags
 	ctx->last_used_engine = NUM_ENGINES; // Assuming NUM_ENGINES is a valid 'invalid/unassigned' engine ID from engine.h
 	ctx->scheduling_priority = DEFAULT_CONTEXT_PRIORITY; // DEFAULT_CONTEXT_PRIORITY is in gem_context.h
 
@@ -92,70 +89,81 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 
 	// Allocate a GEM object for the hardware context image
 	// Size depends on Gen & engine. Context images should be pinned.
+	// For Gen7+, the context image (LRCA) is typically 1 page (4KB).
+	// It should be pinned in GTT as its GTT address is programmed into the GPU.
+	uint32_t hw_ctx_bo_flags = I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED;
+	// TODO: Determine if CONTIGUOUS is strictly needed. Usually for scanout or ringbuffers.
+	//       Context images often just need to be GTT-accessible.
+
 	status = intel_i915_gem_object_create(devInfo, GEN7_RCS_CONTEXT_IMAGE_SIZE,
-		I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED, &ctx->hw_image_obj);
+		hw_ctx_bo_flags, 0,0,0, &ctx->hw_context_bo);
 	if (status != B_OK) {
-		TRACE("GEM Context: Failed to create HW image object: %s\n", strerror(status));
+		TRACE("GEM Context: Failed to create HW context BO: %s\n", strerror(status));
 		mutex_destroy(&ctx->lock);
 		free(ctx);
 		return status;
 	}
 
-	// Map the HW context image object to GTT
+	// Map the HW context BO to GTT.
+	// The GTT offset will be programmed into the GPU for context switching.
 	uint32_t gtt_page_offset;
-	status = intel_i915_gtt_alloc_space(devInfo, ctx->hw_image_obj->num_phys_pages, &gtt_page_offset);
+	status = intel_i915_gtt_alloc_space(devInfo, ctx->hw_context_bo->num_phys_pages, &gtt_page_offset);
 	if (status != B_OK) {
-		TRACE("GEM Context: Failed to allocate GTT space for HW image: %s\n", strerror(status));
-		intel_i915_gem_object_put(ctx->hw_image_obj);
+		TRACE("GEM Context: Failed to allocate GTT space for HW context BO: %s\n", strerror(status));
+		intel_i915_gem_object_put(ctx->hw_context_bo);
 		mutex_destroy(&ctx->lock);
 		free(ctx);
 		return status;
 	}
 
-	// Context images are typically Uncached or WC. Let's use UC for safety/simplicity.
-	status = intel_i915_gem_object_map_gtt(ctx->hw_image_obj, gtt_page_offset, GTT_CACHE_UNCACHED);
+	// Context images are typically Uncached or WC for GPU access. Using UC for safety.
+	status = intel_i915_gem_object_map_gtt(ctx->hw_context_bo, gtt_page_offset, GTT_CACHE_UNCACHED);
 	if (status != B_OK) {
-		TRACE("GEM Context: Failed to map HW image object to GTT: %s\n", strerror(status));
-		intel_i915_gtt_free_space(devInfo, gtt_page_offset, ctx->hw_image_obj->num_phys_pages);
-		intel_i915_gem_object_put(ctx->hw_image_obj);
+		TRACE("GEM Context: Failed to map HW context BO to GTT: %s\n", strerror(status));
+		intel_i915_gtt_free_space(devInfo, gtt_page_offset, ctx->hw_context_bo->num_phys_pages);
+		intel_i915_gem_object_put(ctx->hw_context_bo);
 		mutex_destroy(&ctx->lock);
 		free(ctx);
 		return status;
 	}
-	ctx->hw_image_obj->gtt_mapped_by_execbuf = false; // This was mapped by context creation
+	ctx->hw_context_bo->gtt_mapped_by_execbuf = false; // Mapped by context creation, not execbuf
 
-	// Initialize the content of ctx->hw_image_obj with default hardware state
-	// for a Gen7 Logical Ring Context (RCS0).
-	// The exact layout of this context image is hardware-specific.
-	// For now, we assume it's zeroed by I915_BO_ALLOC_CPU_CLEAR,
-	// and we might only need to set a few key fields if they aren't zero by default,
-	// or if they need specific pointers (like to PPGTT PDPs, which we are not using yet).
-	// A minimal context might just need to be present for MI_SET_CONTEXT to point to.
-	// More advanced contexts would store register state (ring buffer, pipeline state, etc.).
+	// Initialize PPGTT if hardware supports it and it's requested or default for this context type.
+	// The CONTEXT_FLAG_USES_PPGTT might be set by userspace flags or determined by hardware defaults.
+	bool wants_ppgtt = (ctx->context_flags & CONTEXT_FLAG_USES_PPGTT) ||
+		(devInfo->static_caps.initial_ppgtt_type != INTEL_PPGTT_NONE &&
+		 INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id) >= 7); // Default to PPGTT for Gen7+ if supported
 
-	// If CONTEXT_FLAG_USES_PPGTT were set in `flags` passed to create (or by default for some systems),
-	// PPGTT initialization would happen here.
-	// Example:
-	// if (flags & CONTEXT_FLAG_USES_PPGTT || (devInfo->device_id & 0xff00) >= 0x0A00 /* Gen7.5+ might default to PPGTT */ ) {
-	//   // status = intel_i915_ppgtt_init(devInfo, ctx); // Hypothetical function
-	//   // if (status != B_OK) {
-	//   //   intel_i915_gem_object_put(ctx->hw_image_obj); // Clean up already created hw_image
-	//   //   mutex_destroy(&ctx->lock);
-	//   //   free(ctx);
-	//   //   return status;
-	//   // }
-	//   // ctx->context_flags |= CONTEXT_FLAG_USES_PPGTT;
-	//   // The LRCA's PDP entries would need to be updated with the GTT addresses of
-	//   // the PPGTT's page directory GEM objects. This typically happens when the
-	//   // context is first submitted to an engine, or if the LRCA is CPU mapped here.
-	//   TRACE("GEM Context: PPGTT initialization STUBBED for context ID %lu.\n", ctx->id);
-	// }
+	if (wants_ppgtt && devInfo->static_caps.initial_ppgtt_type != INTEL_PPGTT_NONE) {
+		status = i915_ppgtt_create(devInfo,
+			devInfo->static_caps.initial_ppgtt_type,
+			devInfo->static_caps.initial_ppgtt_size_bits,
+			&ctx->ppgtt);
+		if (status != B_OK) {
+			TRACE("GEM Context: Failed to create PPGTT: %s\n", strerror(status));
+			// Cleanup hw_context_bo GTT mapping and object
+			intel_i915_gem_object_unmap_gtt(ctx->hw_context_bo);
+			// GTT space freeing is handled by unmap_gtt if it was the one that allocated
+			intel_i915_gem_object_put(ctx->hw_context_bo);
+			mutex_destroy(&ctx->lock);
+			free(ctx);
+			return status;
+		}
+		ctx->context_flags |= CONTEXT_FLAG_USES_PPGTT; // Ensure flag is set if PPGTT created
+		TRACE("GEM Context: Associated new PPGTT %p with context ID %lu.\n", ctx->ppgtt, ctx->id);
+	} else {
+		ctx->ppgtt = NULL; // Explicitly NULL if no PPGTT
+		ctx->context_flags &= ~CONTEXT_FLAG_USES_PPGTT; // Ensure flag is clear
+		TRACE("GEM Context: Context ID %lu will use Global GTT (no PPGTT).\n", ctx->id);
+	}
 
-	void* hw_image_cpu_addr;
-	status = intel_i915_gem_object_map_cpu(ctx->hw_image_obj, &hw_image_cpu_addr);
-	if (status == B_OK && hw_image_cpu_addr != NULL) {
-		TRACE("GEM Context: HW image object CPU mapped at %p (size %lu). Initializing.\n",
-			hw_image_cpu_addr, ctx->hw_image_obj->size);
+
+	// Initialize the content of ctx->hw_context_bo (LRCA for Gen7+)
+	void* hw_context_cpu_addr;
+	status = intel_i915_gem_object_map_cpu(ctx->hw_context_bo, &hw_context_cpu_addr);
+	if (status == B_OK && hw_context_cpu_addr != NULL) {
+		// TRACE("GEM Context: HW context BO CPU mapped at %p (size %lu). Initializing LRCA.\n",
+		//	hw_context_cpu_addr, ctx->hw_context_bo->size); // Verbose
 
 		// Example: Writing some default values to conceptual context image offsets.
 		// These offsets and values are placeholders and need to match the hardware's

@@ -41,10 +41,10 @@ typedef struct intel_i915_gem_context {
 	mutex lock;
 
 	// Hardware context image (LRCA for Gen7+)
-	struct intel_i915_gem_object* hw_image_obj; // GEM object backing the context image
+	struct intel_i915_gem_object* hw_context_bo; // GEM object backing the context image
 
 	// Per-Process GTT (PPGTT) information
-	struct i915_hw_ppgtt* ppgtt; // Pointer to the PPGTT structure if this context uses one
+	struct i915_ppgtt* ppgtt; // Pointer to the PPGTT structure if this context uses one
 
 	// Other software state associated with a context
 	uint32_t context_flags;          // Flags like CONTEXT_FLAG_USES_PPGTT

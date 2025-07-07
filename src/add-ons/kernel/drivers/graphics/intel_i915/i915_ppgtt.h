@@ -1,62 +1,107 @@
-#ifndef I915_PPGTT_H
-#define I915_PPGTT_H
+/*
+ * Copyright 2023, Haiku, Inc. All rights reserved.
+ * Distributed under the terms of the MIT License.
+ *
+ * Authors:
+ *		Jules Maintainer
+ */
+#ifndef _I915_PPGTT_H_
+#define _I915_PPGTT_H_
 
-#include "intel_i915_priv.h" // For gen7_ppgtt_pde_t, device_info, GEM object struct (indirectly)
+#include "intel_i915_priv.h" // For intel_i915_device_info, intel_i915_gem_object, GEN7_PTE/PDE defines
 #include <kernel/locks/mutex.h>
-#include <kernel/util/list.h> // Potentially for managing PT BOs if not a fixed array
+#include <kernel/util/list.h> // For struct list and list_link
 
-// Forward declare GEM object structure if not fully visible via intel_i915_priv.h
-// struct intel_i915_gem_object; // Already implicitly available via intel_i915_priv.h -> gem_object.h (conceptually)
+// Forward declare
+struct i915_ppgtt;
+struct intel_i915_gem_object;
+struct intel_i915_device_info;
 
-// Structure to manage a Per-Process GTT instance
+
+// PTE and PDE defines (reusing GEN7 for now, may need per-gen specifics later)
+// These define the bits within a Page Table Entry or Page Directory Entry.
+#define PPGTT_PTE_PRESENT           GEN7_PTE_PRESENT
+#define PPGTT_PTE_WRITABLE          GEN7_PTE_WRITABLE
+// TODO: Add caching control bits for PTEs (e.g., PAT index for Gen8+, specific cache bits for Gen7)
+// For Gen7, GTT_PTE_CACHE_WC_GEN7, GTT_PTE_CACHE_UC_GEN7 can be used if applicable to PPGTT.
+#define PPGTT_PTE_ADDR_MASK         GEN7_PTE_ADDR_MASK
+
+#define PPGTT_PDE_PRESENT           GEN7_PDE_PRESENT
+#define PPGTT_PDE_WRITABLE          GEN7_PDE_WRITABLE // If the PT it points to can contain writable PTEs
+#define PPGTT_PDE_ADDR_MASK         GEN7_PDE_ADDR_MASK
+
+// TODO: Define PDPT (Page Directory Pointer Table) entry formats for 48-bit PPGTT (Gen8+)
+// TODO: Define PML4 (Page Map Level 4) entry formats if going beyond 48-bit (not for Gen7-9)
+
+
+/**
+ * struct i915_ppgtt - Represents a Per-Process Graphics Translation Table (GPU address space).
+ * @dev_priv: Back-pointer to the main device structure.
+ * @pd_bo: GEM object backing the top-level Page Directory (for 2-level PPGTT like Gen7 full)
+ *         or Page Directory Pointer Table (PDPT for 3-level 48-bit PPGTT like Gen8+).
+ * @pd_cpu_addr: CPU virtual address of the mapped pd_bo.
+ * @type: The type of PPGTT (e.g., aliasing, full 32-bit, full 48-bit).
+ *        From enum intel_ppgtt_type in intel_i915_priv.h.
+ * @ppgtt_size_bits: Effective number of address bits supported by this PPGTT (e.g., 31, 32, 48).
+ * @allocated_pts_list: List of GEM BOs allocated to serve as Page Tables (PTs) or
+ *                      intermediate Page Directories (PDs for multi-level tables).
+ *                      Each entry is `struct i915_ppgtt_pt_bo`.
+ * @lock: Mutex protecting this PPGTT's structures (e.g., page table modifications).
+ * @refcount: Reference count for this PPGTT structure.
+ */
 struct i915_ppgtt {
-	struct intel_i915_device_info* dev_priv;
-	struct mutex lock; // Lock for this ppgtt instance's operations
-	int refcount;      // Refcount for the PPGTT struct itself
+	intel_i915_device_info* dev_priv;
+	struct intel_i915_gem_object* pd_bo;
+	uint64_t* pd_cpu_addr; // Should match PDE/PDPT entry type (e.g. uint64_t* for Gen7+)
 
-	// Page Directory (PD) - for Gen7, one PD covers up to 4GB (1024 PDEs * 1024 PTEs * 4KB)
-	// We use one PD, pointed to by what would be PDP0 in the context image.
-	struct intel_i915_gem_object* pd_bo; // GEM object for the single Page Directory
-	gen7_ppgtt_pde_t* pd_cpu_map;        // CPU virtual address of the mapped PD BO
+	enum intel_ppgtt_type type;
+	uint8_t ppgtt_size_bits;
 
-	// Page Tables (PTs) are more dynamic.
-	// For Gen7, a single PD has 1024 PDEs, each potentially pointing to a PT.
-	// We store the GEM objects backing these PTs. NULL if no PT for that PDE.
-	struct intel_i915_gem_object* pt_bos[GEN7_PPGTT_PD_ENTRIES];
-	// We might also cache CPU mappings of these PTs, or map/unmap them on demand.
-	// For simplicity initially, we can map them when created and keep them mapped.
-	// gen7_ppgtt_pte_t* pt_cpu_maps[GEN7_PPGTT_PD_ENTRIES]; // Optional cached CPU maps for PTs
+	struct list allocated_pts_list; // List of i915_ppgtt_pt_bo
 
-	// GPU Virtual Address Space Allocator for this PPGTT
-	uint64_t vma_size;             // e.g., 4GB for a 32-bit PPGTT
-	struct list free_vma_list;     // List of i915_ppgtt_vma_node for free ranges
-	struct list allocated_vma_list; // List of i915_ppgtt_vma_node for allocated ranges (optional tracking)
-	// struct mutex vma_lock;      // Consider if ppgtt->lock is sufficient or separate lock needed. For now, use ppgtt->lock.
-
-	bool needs_tlb_invalidate;     // Flag to signal execbuffer to flush TLBs for this PPGTT
-
-	// Other PPGTT-specific info, e.g., generation, flags
+	mutex lock;
+	uint32_t refcount;
 };
 
-// Node for managing GPU Virtual Memory Address ranges within a PPGTT
-struct i915_ppgtt_vma_node {
-	list_link link;
-	uint64_t start_addr; // Start of the GPU VA range
-	uint64_t size;       // Size of the GPU VA range in bytes
-	// struct intel_i915_gem_object* obj; // Optional: if tracking which object is in an allocated node
+// Structure to track GEM objects used as Page Tables or intermediate Page Directories
+struct i915_ppgtt_pt_bo {
+	struct list_link link;
+	struct intel_i915_gem_object* bo;
+	uint64_t gpu_addr_base; // GPU address this PT/PD covers (for debugging/tracking)
+	uint32_t level;         // Level in the page table hierarchy (e.g., 0 for PT, 1 for PD)
 };
 
 
-// PPGTT lifecycle functions
-status_t i915_ppgtt_create(struct intel_i915_device_info* devInfo, struct i915_ppgtt** ppgtt_out);
-void i915_ppgtt_destroy(struct i915_ppgtt* ppgtt); // Takes a ref, destroys when refcount is 0
+// --- Function Prototypes for i915_ppgtt.c ---
+
+status_t i915_ppgtt_create(intel_i915_device_info* devInfo,
+	enum intel_ppgtt_type type, uint8_t size_bits,
+	struct i915_ppgtt** ppgtt_out);
+
+// Internal destroy, called by i915_ppgtt_put when refcount reaches zero.
+void _i915_ppgtt_destroy(struct i915_ppgtt* ppgtt);
+
 void i915_ppgtt_get(struct i915_ppgtt* ppgtt);
 void i915_ppgtt_put(struct i915_ppgtt* ppgtt);
 
+status_t i915_ppgtt_map_object(struct i915_ppgtt* ppgtt,
+	struct intel_i915_gem_object* obj,
+	uint64_t gpu_va,
+	uint32_t pte_caching_bits, // Abstracted: e.g., MOCS index or specific cache bits
+	uint32_t pte_flags);      // e.g., PPGTT_PTE_WRITABLE
 
-// PPGTT binding functions
-status_t i915_ppgtt_bind_object(struct i915_ppgtt* ppgtt, struct intel_i915_gem_object* obj,
-                                uint64_t ppgtt_addr, bool map_writable, enum gtt_caching_type gpu_cache_type);
-status_t i915_ppgtt_unbind_object(struct i915_ppgtt* ppgtt, uint64_t ppgtt_addr, size_t size);
+status_t i915_ppgtt_unmap_range(struct i915_ppgtt* ppgtt,
+	uint64_t gpu_va,
+	size_t num_pages);
 
-#endif /* I915_PPGTT_H */
+// Helper to clear PTEs (maps them to scratch page)
+void i915_ppgtt_clear_range(struct i915_ppgtt* ppgtt,
+	uint64_t gpu_va,
+	size_t num_pages,
+	bool flush_tlb); // Whether to issue a TLB flush after clearing
+
+// TODO: Add TLB invalidation functions if needed, e.g.,
+// void i915_ppgtt_invalidate_tlbs(struct i915_ppgtt* ppgtt);
+// void intel_i915_invalidate_gtt_tlbs(intel_i915_device_info* devInfo); (Global GTT TLB)
+
+#endif /* _I915_PPGTT_H_ */

@@ -39,16 +39,37 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			# Compile snmalloc_hooks.cpp with its specific flags into an intermediate object
 			# snmalloc_hooks.cpp is in the same directory as this Jamfile ($(SUBDIR))
 			# UsePrivateSystemHeaders (called earlier) should provide Haiku kit includes.
-			Object <$(architecture)>snmalloc_hooks.o : # Intermediate object name
-				snmalloc_hooks.cpp                 # Source file (relative to this Jamfile)
+			local snmallocTargetFlags =
+				# -I$(HAIKU_TOP)/BSD/snmalloc-main/src # REMOVED
+				# Add include path for the new local snmalloc directory structure.
+				# $(SUBDIR) is src/system/libroot/posix/malloc
+				# This allows #include "snmalloc/file.h" and #include "pal/file.h"
+				# from snmalloc_hooks.cpp (now in $(SUBDIR)/snmalloc/)
+				# and <snmalloc/file.h> from core snmalloc files.
+				-I$(SUBDIR)/snmalloc
+
+				# Other flags
+				-DLIBC_MALLOC_SNMALLOC_Hooks
+				-DSNMALLOC_CHECK_CLIENT=1
+				-DSNMALLOC_PAGEID=1
+				-DSNMALLOC_CHECK_LOADS=1
+				# Optional: -DSNMALLOC_TRACING=1
+				# Optional: -DSNMALLOC_STATS=1
+				# Optional: -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="metadata_protection"
+				# Optional: -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="freelist_forward_edge"
+				# Optional: -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="random_pagemap"
+			;
+
+			Object <$(architecture)>snmalloc_hooks.o :
+				snmalloc/snmalloc_hooks.cpp      # New path: source is now in the 'snmalloc' subdirectory
 				: # Action flags for this specific Object rule
 				$(snmallocTargetFlags)
 			;
-			NOCARE <$(architecture)>snmalloc_hooks.o ; # Don't link this intermediate object
+			NOCARE <$(architecture)>snmalloc_hooks.o ; # Restore this
 
 			# Merge the specifically compiled object into the final target name
-			MergeObject <$(architecture)>posix_malloc.o :
-				<$(architecture)>snmalloc_hooks.o  #Use the intermediate object
+			MergeObject <$(architecture)>posix_malloc.o : # Restore this
+				<$(architecture)>snmalloc_hooks.o
 			;
 
 		} else if $(HAIKU_LIBROOT_ALLOCATOR) = hoard2 {

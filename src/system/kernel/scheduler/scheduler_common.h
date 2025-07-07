@@ -155,9 +155,9 @@ static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {
 	18000,  // Level 10
 	22000,  // Level 11
 	26000,  // Level 12
-	30000,  // Level 13
-	40000,  // Level 14
-	50000   // Level 15 (lowest priority)
+	35000,  // Level 13 (was 30000) - Increased for high core count benefit
+	50000,  // Level 14 (was 40000) - Increased for high core count benefit
+	60000   // Level 15 (was 50000) - Increased (lowest priority, mainly idle)
 };
 
 // Aging thresholds (in system_time units - microseconds) for each MLFQ level

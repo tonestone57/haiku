@@ -21,6 +21,12 @@
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
 
+// Defaults for High Core Count systems
+#define HIGH_CORE_DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD 1500
+#define HIGH_CORE_DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 450
+#define HIGH_CORE_DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 2
+
+
 #include <OS.h>
 
 #include <AutoDeleter.h>
@@ -1571,27 +1577,27 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (effectiveLoad < bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// Tie-break for preferLeastBusy: prefer CPU with fewer high-priority tasks.
-					currentCPU->LockRunQueue();
-					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
-					currentCPU->UnlockRunQueue();
-					if (currentHighPrioTasks < bestTaskCountScore)
+					// Tie-break for preferLeastBusy: prefer CPU with lower ID for determinism.
+					// bestCPU is non-NULL here. bestTaskCountScore holds bestCPU's ID from the previous iteration
+					// where bestCPU was last updated.
+					if (currentCPU->ID() < bestTaskCountScore) { // Compare with the ID of the current bestCPU
 						isBetter = true;
+					}
 				}
 			}
 		}
 
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
-			// Update task count score for future tie-breaking based on mode.
-			currentCPU->LockRunQueue();
+			bestCPU = currentCPU; // Update bestCPU first
+			// Now update bestTaskCountScore based on the new bestCPU for the next iteration's tie-break
 			if (preferBusiest) {
-				bestTaskCountScore = currentCPU->GetTotalThreadCount();
-			} else {
-				bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
+				bestCPU->LockRunQueue(); // Lock the new bestCPU's queue
+				bestTaskCountScore = bestCPU->GetTotalThreadCount(); // Higher is better for preferBusiest
+				bestCPU->UnlockRunQueue();
+			} else { // !preferBusiest
+				bestTaskCountScore = bestCPU->ID(); // Store ID of the new bestCPU; lower is better for next tie-break
 			}
-			currentCPU->UnlockRunQueue();
-			bestCPU = currentCPU;
 		}
 	}
 	return bestCPU;

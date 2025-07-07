@@ -127,6 +127,155 @@ err_cleanup_ring:
 	return B_OK;
 }
 
+
+status_t
+intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_gem_context* new_ctx)
+{
+	uint32_t offset_in_dwords;
+	// For Gen7 LRCA: MI_FLUSH_DW (1) + MI_SET_CONTEXT (3) + MI_NOOP (1) = 5 dwords
+	// MI_SET_CONTEXT for Gen7+ uses 3 DWORDS (Opcode + ContextID + ContextImagePointer)
+	// Length field in MI_SET_CONTEXT is (Num DWORDS - 2), so 3-2 = 1.
+	const uint32_t cmd_len_dwords_ctx_switch = 1 /*MI_FLUSH_DW*/ + 3 /*MI_SET_CONTEXT*/ + 1 /*MI_NOOP*/;
+	const uint32_t cmd_len_dwords_flush_only = 1 /*MI_FLUSH_DW*/ + 1 /*MI_NOOP*/;
+	status_t status;
+	intel_i915_device_info* devInfo = engine->dev_priv;
+
+	if (!engine || !devInfo)
+		return B_BAD_VALUE;
+
+	// If new_ctx is NULL, it might mean switching to a default/kernel context (not fully supported yet)
+	// or an error. For now, if new_ctx is NULL and there was a current_context, we just flush.
+	if (new_ctx == NULL) {
+		if (engine->current_context != NULL) {
+			TRACE("Engine %s: Switching from context ID %lu to NULL (idle/kernel context?). Flushing old context.
+",
+				engine->name, engine->current_context->id);
+			// Emit a flush for the old context
+			status = intel_engine_get_space(engine, cmd_len_dwords_flush_only, &offset_in_dwords);
+			if (status != B_OK) return status;
+			intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | MI_FLUSH_RENDER_CACHE); // Add other relevant flush flags
+			intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
+			intel_engine_advance_tail(engine, cmd_len_dwords_flush_only);
+			// Consider waiting for this flush to complete with a seqno.
+
+			intel_i915_gem_context_put(engine->current_context);
+			engine->current_context = NULL;
+		}
+		return B_OK;
+	}
+
+	// It's crucial that new_ctx and its hw_context_bo are valid and GTT mapped.
+	if (!new_ctx->hw_context_bo || !new_ctx->hw_context_bo->gtt_mapped ||
+		new_ctx->hw_context_bo->gtt_offset_pages == (uint32_t)-1) {
+		TRACE("Engine %s: Switch context: Invalid new_ctx %p, hw_context_bo %p, or BO not GTT mapped (mapped: %d, offset: %u).\n",
+			engine->name, new_ctx, new_ctx->hw_context_bo,
+			new_ctx->hw_context_bo ? new_ctx->hw_context_bo->gtt_mapped : 0,
+			new_ctx->hw_context_bo ? new_ctx->hw_context_bo->gtt_offset_pages : 0);
+		return B_BAD_VALUE;
+	}
+
+	if (engine->current_context == new_ctx) {
+		// TRACE("Engine %s: Context ID %lu already current.\n", engine->name, new_ctx->id); // Can be noisy
+		return B_OK;
+	}
+
+	TRACE("Engine %s: Switching context from %p (ID %lu) to %p (ID %lu), HW BO GTT offset 0x%x pages
+",
+		engine->name, engine->current_context, engine->current_context ? engine->current_context->id : 0,
+		new_ctx, new_ctx->id, new_ctx->hw_context_bo->gtt_offset_pages);
+
+	// Ensure forcewake is held for command submission.
+	// The caller (e.g., execbuffer) should typically hold this.
+	// For safety, can add: status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); if (status != B_OK) return status;
+
+	status = intel_engine_get_space(engine, cmd_len_dwords_ctx_switch, &offset_in_dwords);
+	if (status != B_OK) {
+		TRACE("Engine %s: Failed to get space for context switch commands: %s\n", engine->name, strerror(status));
+		// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // if acquired above
+		return status;
+	}
+
+	// 1. MI_FLUSH_DW to ensure previous context's operations are done and caches are clean.
+	//    The specific flush flags depend on the engine and generation.
+	//    For RCS, render target and texture cache flushes are common.
+	uint32_t flush_flags = MI_FLUSH_RENDER_CACHE; // Default, from registers.h alias
+	// Add more flags as appropriate for the engine type and generation based on PRM.
+	// e.g., MI_FLUSH_DW_STORE_L3_MESSAGES, MI_FLUSH_DW_INVALIDATE_TLB (if context switch needs TLB invalidation for its address space)
+	// For Gen7+, MI_FLUSH_DW_STORE_L3_MESSAGES and MI_FLUSH_DW_INVALIDATE_TLB are good candidates.
+	flush_flags |= MI_FLUSH_DW_STORE_L3_MESSAGES | MI_FLUSH_DW_INVALIDATE_TLB;
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_FLUSH_DW | flush_flags);
+
+
+	// 2. MI_SET_CONTEXT
+	//    This command structure and meaning of its fields vary significantly by generation
+	//    and whether Execlists (Logical Ring Contexts Architecture - LRCA) are used (Gen8+).
+	uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+	uint32_t mi_set_context_cmd = (MI_COMMAND_TYPE_MI | (0x1E << MI_COMMAND_OPCODE_SHIFT)); // Opcode 0x1E
+	uint32_t context_image_gtt_addr = new_ctx->hw_context_bo->gtt_offset_pages * B_PAGE_SIZE;
+	uint32_t context_id_field = 0; // For LRCA, this is often 0 or a hardware assigned ID.
+	                               // For legacy, it might be a software assigned ID.
+
+	if (gen >= 8 && (devInfo->static_caps.has_logical_ring_contexts)) { // Gen8+ with LRCA
+		// For LRCA, MI_SET_CONTEXT is used to load the Logical Ring Context.
+		// DW0: Command Header (Opcode 0x1E, Length 1 (for 3DW total))
+		//      Bit 0: Logical Context Restore Enable (1 = Restore)
+		//      Bit 1: Force Restore (1 = Force full restore)
+		//      Bit 2: Restore Extended State Enable (if applicable)
+		//      Bit 3: Save Extended State Enable (if applicable)
+		//      Bit 8: Restore Inhibit (1 = Inhibit restore of some parts, 0 = allow full restore)
+		// DW1: Context ID (Logical Ring Context ID, often 0 as ID is part of LRCA itself or implicit)
+		// DW2: Logical Ring Context Address (GTT address of the LRCA - new_ctx->hw_context_bo)
+		mi_set_context_cmd |= (3 - 2); // Length
+		mi_set_context_cmd |= (1 << 0); // Logical Context Restore Enable
+		// mi_set_context_cmd |= (1 << 1); // Force Restore (optional, for full context reload)
+		// TRACE("Engine %s: Emitting MI_SET_CONTEXT (LRCA) for Gen %u. GTT Addr: 0x%x
+", engine->name, gen, context_image_gtt_addr);
+
+	} else if (gen == 7) { // Gen7 (pre-Execlists, but uses context images)
+		// DW0: Command Header (Opcode 0x1E, Length 1)
+		//      Bit 0: Restore Inhibit (0 = Restore context state)
+		//      Bit 1: Force Restore (1 = Force full restore)
+		//      Bit 2: Restore Extended State (if applicable)
+		//      Bit 3: Save Extended State (if applicable)
+		// DW1: Context ID (Not typically used directly for full PPGTT contexts like this, often 0)
+		// DW2: Context Image GTT Address (HWSP for legacy, or a more structured image for full PPGTT)
+		//      The PDPs inside this image are physical addresses.
+		mi_set_context_cmd |= (3 - 2); // Length
+		// Flags: Restore context, do not inhibit restore. Force restore can be set for robustness.
+		mi_set_context_cmd |= MI_SET_CONTEXT_FORCE_RESTORE; // (1 << 1)
+		// TRACE("Engine %s: Emitting MI_SET_CONTEXT (Gen7-style) for Gen %u. GTT Addr: 0x%x
+", engine->name, gen, context_image_gtt_addr);
+	} else {
+		// Gen6 or older might have different context switch mechanisms or simpler MI_SET_CONTEXT.
+		// This path needs specific implementation if Gen6 contexts are supported with this function.
+		TRACE("Engine %s: MI_SET_CONTEXT for Gen %u not fully detailed. Using Gen7-like for now.
+", engine->name, gen);
+		mi_set_context_cmd |= (3 - 2);
+		mi_set_context_cmd |= MI_SET_CONTEXT_FORCE_RESTORE;
+	}
+
+	intel_engine_write_dword(engine, offset_in_dwords++, mi_set_context_cmd);
+	intel_engine_write_dword(engine, offset_in_dwords++, context_id_field); // Context ID / Reserved
+	intel_engine_write_dword(engine, offset_in_dwords++, context_image_gtt_addr); // Context Image Pointer
+
+	// Add a MI_NOOP for padding or as a general good practice after control commands.
+	intel_engine_write_dword(engine, offset_in_dwords++, MI_NOOP);
+
+	intel_engine_advance_tail(engine, cmd_len_dwords_ctx_switch);
+
+	// Update software tracking of the current context
+	if (engine->current_context) {
+		intel_i915_gem_context_put(engine->current_context); // Release ref to old context
+	}
+	engine->current_context = new_ctx;
+	intel_i915_gem_context_get(new_ctx); // Engine now holds a new reference
+
+	// TRACE("Engine %s: Context switch to ID %lu submitted.
+", engine->name, new_ctx->id); // Verbose
+	// intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER); // if acquired above
+	return B_OK;
+}
+
 void
 intel_engine_uninit(struct intel_engine_cs* engine)
 {

@@ -25,7 +25,9 @@
 #include "edid.h"
 #include "clocks.h"
 #include "display.h"
-#include "gem_ioctl.h"
+#include "gem_ioctl.h" // For _generic_handle_lookup and other GEM IOCTLs if any are called internally
+#include "gem_context.h" // For struct intel_i915_gem_context
+#include "i915_ppgtt.h"  // For struct i915_ppgtt and related functions if used directly
 #include "engine.h"
 #include "pm.h"
 #include "forcewake.h"

@@ -21,22 +21,61 @@
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
 
-// EEVDF Specific Defines (placeholders, need tuning)
+// EEVDF Specific Defines (Initial values, require tuning)
 #define SCHEDULER_TARGET_LATENCY		20000		// Target latency for a scheduling period (e.g., 20ms)
-#define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs before preemption (e.g., 1ms)
-#define SCHEDULER_WEIGHT_SCALE			1024		// Scale factor for weights
+#define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs (e.g., 1ms)
+#define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
+
+// Corresponds to nice levels -20 to +19 (Linux CFS compatible)
+static const int32 gNiceToWeight[40] = {
+	/* -20 */ 88761, 71755, 56483, 46273, 36291,
+	/* -15 */ 29154, 22382, 18705, 14949, 11916,
+	/* -10 */  9548,  7620,  6100,  4867,  3906,
+	/*  -5 */  3121,  2501,  1991,  1586,  1277,
+	/*   0 */  1024,   820,   655,   526,   423, // Nice 0 maps to SCHEDULER_WEIGHT_SCALE
+	/*   5 */   335,   272,   215,   172,   137,
+	/*  10 */   110,    87,    70,    56,    45,
+	/*  15 */    36,    29,    23,    18,    15
+};
+
+// Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
+// Nice 0 (index 20) corresponds to B_NORMAL_PRIORITY.
+static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
+	int effNice;
+
+	// Crude linear mapping: B_NORMAL_PRIORITY (10) -> nice 0.
+	// Higher Haiku prio -> lower (more negative) nice value.
+	// Lower Haiku prio -> higher (more positive) nice value.
+	effNice = B_NORMAL_PRIORITY - priority;
+
+	// Clamp effNice to the typical nice value range [-20, 19]
+	effNice = max_c(-20, min_c(effNice, 19));
+
+	// Convert nice value to an index (nice -20 is index 0, nice 0 is index 20, nice 19 is index 39)
+	return effNice + 20;
+}
 
 static inline int32 scheduler_priority_to_weight(int32 priority) {
-	if (priority < B_LOWEST_ACTIVE_PRIORITY) return SCHEDULER_WEIGHT_SCALE >> 4;
-	if (priority >= B_MAX_REAL_TIME_PRIORITY) return SCHEDULER_WEIGHT_SCALE << 2;
+	// TODO EEVDF: This priority-to-weight mapping is crucial and needs extensive tuning
+	// based on desired Haiku behavior across its priority spectrum.
+	if (priority < B_LOWEST_ACTIVE_PRIORITY) { // Typically idle/background tasks
+		return gNiceToWeight[39]; // nice +19, minimum weight from table
+	}
 
-	int relativePriority = priority - B_NORMAL_PRIORITY;
-	int shift = relativePriority / 5;
+	// Real-time priorities: These should dominate non-real-time.
+	// How they integrate into EEVDF (or if they bypass it for strict priority) is a key design point.
+	// For now, assign very high weights if managed by EEVDF.
+	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) { // e.g. Media Kit (100)
+		if (priority >= B_URGENT_PRIORITY) { // e.g. Important Kernel Threads (110)
+			// Significantly higher than max normal weight (gNiceToWeight[0] is for nice -20)
+			return gNiceToWeight[0] * 4;
+		}
+		return gNiceToWeight[0] * 2;
+	}
 
-	if (shift >= 0)
-		return SCHEDULER_WEIGHT_SCALE << shift;
-	else
-		return SCHEDULER_WEIGHT_SCALE >> (-shift);
+	// Normal application and UI priorities
+	int niceIndex = scheduler_haiku_priority_to_nice_index(priority);
+	return gNiceToWeight[niceIndex];
 }
 
 
@@ -156,12 +195,17 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 		targetCPU->LockRunQueue();
 		bigtime_t queueMinVruntime = targetCPU->MinVirtualRuntime();
 		targetCPU->UnlockRunQueue();
-		thread->SetVirtualRuntime(max_c(thread->VirtualRuntime(), queueMinVruntime));
+
+		bigtime_t oldVruntime = thread->VirtualRuntime();
+		thread->SetVirtualRuntime(max_c(oldVruntime, queueMinVruntime));
+		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 " vruntime set to %" B_PRId64 " (was %" B_PRId64 ", qMinVRun %" B_PRId64")\n",
+			t->id, thread->VirtualRuntime(), oldVruntime, queueMinVruntime);
 
 		int32 weight = scheduler_priority_to_weight(thread->GetBasePriority());
 		if (weight <= 0) weight = 1;
 		bigtime_t weightedSlice = (thread->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
 		thread->SetLag(weightedSlice - (thread->VirtualRuntime() - queueMinVruntime));
+		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", lag calc %" B_PRId64 "\n", t->id, thread->Lag());
 
 		if (thread->Lag() >= 0) {
 			thread->SetEligibleTime(system_time());
@@ -170,7 +214,9 @@ ThreadEnqueuer::operator()(ThreadData* thread)
             delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
 			thread->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 		}
+		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", elig_time %" B_PRId64 "\n", t->id, thread->EligibleTime());
 		thread->SetVirtualDeadline(thread->EligibleTime() + thread->SliceDuration());
+		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", VD %" B_PRId64 "\n", t->id, thread->VirtualDeadline());
 	}
 
 	enqueue_thread_on_cpu_eevdf(t, targetCPU, targetCore);
@@ -191,8 +237,8 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core)
 	ThreadData* threadData = thread->scheduler_data;
 
 	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
-	TRACE("enqueue_thread_on_cpu_eevdf: thread %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ") onto CPU %" B_PRId32 "\n",
-		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), cpu->ID());
+	TRACE_SCHED("enqueue_thread_on_cpu_eevdf: T %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ") onto CPU %" B_PRId32 "\n",
+		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
 	cpu->AddThread(threadData);
@@ -209,7 +255,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core)
 		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
 		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime());
 		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline()) {
-			TRACE("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
+			TRACE_SCHED("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
 				thread->id, threadData->VirtualDeadline(),
 				currentThreadOnTarget->id, currentThreadDataOnTarget->VirtualDeadline(),
 				cpu->ID());
@@ -233,7 +279,7 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	ASSERT(!are_interrupts_enabled());
 	SCHEDULER_ENTER_FUNCTION();
 
-	TRACE("scheduler_enqueue_in_run_queue (EEVDF): thread %" B_PRId32 " prio %" B_PRId32 "\n",
+	TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): T %" B_PRId32 " prio %" B_PRId32 "\n",
 		thread->id, thread->priority);
 
 	ThreadData* threadData = thread->scheduler_data;
@@ -245,7 +291,7 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	ASSERT(threadData->Core() == targetCore && "ThreadData's core must match targetCore after ChooseCoreAndCPU");
 
 	if (thread_is_idle_thread(thread)) {
-		TRACE("scheduler_enqueue_in_run_queue (EEVDF): idle thread %" B_PRId32 " not added to EEVDF queue.\n", thread->id);
+		TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): idle T %" B_PRId32 " not added to EEVDF queue.\n", thread->id);
 		if (thread->state != B_THREAD_RUNNING)
 			thread->state = B_THREAD_READY;
 		return;
@@ -259,27 +305,24 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	queueMinVruntime = targetCPU->MinVirtualRuntime();
 	targetCPU->UnlockRunQueue();
 
-	bool isNewToScheduler = (threadData->VirtualRuntime() == 0 && threadData->Lag() == 0); // Approximation
+	bool isNewToScheduler = (threadData->VirtualRuntime() == 0 && threadData->Lag() == 0);
 
+	bigtime_t oldVruntime = threadData->VirtualRuntime();
 	if (isNewToScheduler) {
 		threadData->SetVirtualRuntime(queueMinVruntime);
-		TRACE("scheduler_enqueue_in_run_queue: New thread %" B_PRId32 " vruntime set to queue min_vruntime %" B_PRId64 "\n",
-			thread->id, queueMinVruntime);
 	} else {
-		bigtime_t newVruntime = max_c(threadData->VirtualRuntime(), queueMinVruntime);
-		if (newVruntime != threadData->VirtualRuntime()) {
-			TRACE("scheduler_enqueue_in_run_queue: Waking thread %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (queue min %" B_PRId64 ")\n",
-				thread->id, threadData->VirtualRuntime(), newVruntime, queueMinVruntime);
-		}
-		threadData->SetVirtualRuntime(newVruntime);
+		threadData->SetVirtualRuntime(max_c(oldVruntime, queueMinVruntime));
 	}
+	TRACE_SCHED("enqueue: T %" B_PRId32 ", vruntime %s from %" B_PRId64 " to %" B_PRId64 " (qMinVRun %" B_PRId64")\n",
+		thread->id, isNewToScheduler ? "set" : "adjusted", oldVruntime, threadData->VirtualRuntime(), queueMinVruntime);
+
 
 	int32 weight = scheduler_priority_to_weight(threadData->GetBasePriority());
 	if (weight <= 0) weight = 1;
 	bigtime_t weightedSliceDuration = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
 
 	threadData->SetLag(weightedSliceDuration - (threadData->VirtualRuntime() - queueMinVruntime));
-	TRACE("scheduler_enqueue_in_run_queue: thread %" B_PRId32 " initial lag set to %" B_PRId64 " (wSlice %" B_PRId64 ", vruntime %" B_PRId64 ", qMinVRun %" B_PRId64 ")\n",
+	TRACE_SCHED("enqueue: T %" B_PRId32 ", lag calc %" B_PRId64 " (wSlice %" B_PRId64 ", vR %" B_PRId64 ", qMinVR %" B_PRId64 ")\n",
 		thread->id, threadData->Lag(), weightedSliceDuration, threadData->VirtualRuntime(), queueMinVruntime);
 
 	if (threadData->Lag() >= 0) {
@@ -288,11 +331,13 @@ scheduler_enqueue_in_run_queue(Thread *thread)
         bigtime_t delay = (-threadData->Lag() * weight) / SCHEDULER_WEIGHT_SCALE;
         delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
 		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-        TRACE("scheduler_enqueue_in_run_queue: Thread %" B_PRId32 " has negative lag %" B_PRId64 ", eligible time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
+        TRACE_SCHED("enqueue: T %" B_PRId32 " has negative lag %" B_PRId64 ", elig_time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
             thread->id, threadData->Lag(), threadData->EligibleTime(), delay);
 	}
+	TRACE_SCHED("enqueue: T %" B_PRId32 ", elig_time %" B_PRId64 "\n", thread->id, threadData->EligibleTime());
 
 	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
+	TRACE_SCHED("enqueue: T %" B_PRId32 ", VD %" B_PRId64 "\n", thread->id, threadData->VirtualDeadline());
 
 	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
 }
@@ -307,7 +352,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 	ThreadData* threadData = thread->scheduler_data;
 	int32 oldBasePriority = thread->priority;
-	TRACE("scheduler_set_thread_priority (EEVDF): thread %" B_PRId32 " to %" B_PRId32 " (old base: %" B_PRId32 ")\n",
+	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " to %" B_PRId32 " (old base: %" B_PRId32 ")\n",
 		thread->id, priority, oldBasePriority);
 
 	thread->priority = priority;
@@ -318,7 +363,16 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	threadData->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
 		ThreadData::MapPriorityToMLFQLevel(threadData->GetBasePriority())));
 
+	// TODO EEVDF: A change in priority (weight) should ideally adjust current lag
+	// to reflect the change in entitlement rate relative to its current fVirtualRuntime.
+	// This is complex as it interacts with fVirtualRuntime.
+	// For now, we only adjust future slice duration and deadline based on current EligibleTime.
+	// This simplification means the primary effect of priority change is on future vruntime
+	// accumulation rate and future slice durations.
 	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
+	TRACE_SCHED("set_prio: T %" B_PRId32 " new slice %" B_PRId64 ", new VD %" B_PRId64 "\n",
+		thread->id, threadData->SliceDuration(), threadData->VirtualDeadline());
+
 
 	if (threadData->VirtualDeadline() != oldVirtualDeadline) {
 		needsRequeue = true;
@@ -355,6 +409,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	cpu->LockRunQueue();
 	if (threadData->IsEnqueued()) {
 		cpu->GetEevdfRunQueue().Update(threadData, oldVirtualDeadline);
+		TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n", thread->id, cpu->ID());
 	}
 	cpu->UnlockRunQueue();
 
@@ -457,8 +512,8 @@ reschedule(int32 nextState)
 
 	oldThreadData->StopCPUTime();
 
-	TRACE("reschedule (EEVDF): cpu %" B_PRId32 ", current thread %" B_PRId32 " (VD %" B_PRId64 ", state %s), next_state %" B_PRId32 "\n",
-		thisCPUId, oldThread->id, oldThreadData->VirtualDeadline(),
+	TRACE_SCHED("reschedule (EEVDF): cpu %" B_PRId32 ", oldT %" B_PRId32 " (VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 ", state %s), next_state %" B_PRId32 "\n",
+		thisCPUId, oldThread->id, oldThreadData->VirtualDeadline(), oldThreadData->Lag(), oldThreadData->VirtualRuntime(), oldThreadData->EligibleTime(),
 		get_thread_state_name(oldThread->state), nextState);
 
 	oldThread->state = nextState;
@@ -472,11 +527,11 @@ reschedule(int32 nextState)
 		bigtime_t weightedRuntime = (actualRuntime * SCHEDULER_WEIGHT_SCALE) / weight;
 
 		oldThreadData->AddVirtualRuntime(weightedRuntime);
-		TRACE("reschedule: thread %" B_PRId32 " ran for %" B_PRId64 "us, vruntime advanced by %" B_PRId64 " (weight %" B_PRId32 ")\n",
-			oldThread->id, actualRuntime, weightedRuntime, weight);
+		TRACE_SCHED("reschedule: oldT %" B_PRId32 " ran for %" B_PRId64 "us, vruntime advanced by %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 ")\n",
+			oldThread->id, actualRuntime, weightedRuntime, oldThreadData->VirtualRuntime(), weight);
 
 		oldThreadData->AddLag(-weightedRuntime);
-		TRACE("reschedule: thread %" B_PRId32 " lag reduced by %" B_PRId64 " (weighted actual), new lag %" B_PRId64 "\n",
+		TRACE_SCHED("reschedule: oldT %" B_PRId32 " lag reduced by %" B_PRId64 " (weighted actual) to %" B_PRId64 "\n",
 			oldThread->id, weightedRuntime, oldThreadData->Lag());
 	}
 
@@ -505,7 +560,7 @@ reschedule(int32 nextState)
 				if (re_weight <= 0) re_weight = 1;
 				bigtime_t weightedSliceEntitlement = (oldThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / re_weight;
 				oldThreadData->AddLag(weightedSliceEntitlement);
-				TRACE("reschedule: thread %" B_PRId32 " re-enqueue, adding weighted slice %" B_PRId64 " to lag, new lag %" B_PRId64 "\n",
+				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, lag increased by %" B_PRId64 " (wSlice) to %" B_PRId64 "\n",
 					oldThread->id, weightedSliceEntitlement, oldThreadData->Lag());
 
 				if (oldThreadData->Lag() >= 0) {
@@ -516,10 +571,10 @@ reschedule(int32 nextState)
 					bigtime_t delay = (-oldThreadData->Lag() * weight_for_delay) / SCHEDULER_WEIGHT_SCALE;
 					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
 					oldThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-					TRACE("reschedule: Thread %" B_PRId32 " re-enqueue has negative lag %" B_PRId64 ", eligible time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
-						oldThread->id, oldThreadData->Lag(), oldThreadData->EligibleTime(), delay);
+					TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, new elig_time %" B_PRId64 " (delay %" B_PRId64 ")\n", oldThread->id, oldThreadData->EligibleTime(), delay);
 				}
 				oldThreadData->SetVirtualDeadline(oldThreadData->EligibleTime() + oldThreadData->SliceDuration());
+				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, new VD %" B_PRId64 "\n", oldThread->id, oldThreadData->VirtualDeadline());
 			}
 			break;
 		}
@@ -573,8 +628,8 @@ reschedule(int32 nextState)
 	if (nextThread != oldThread)
 		acquire_spinlock(&nextThread->scheduler_lock);
 
-	TRACE("reschedule (EEVDF): cpu %" B_PRId32 " selected next thread %" B_PRId32 " (VD %" B_PRId64 ")\n",
-		thisCPUId, nextThread->id, nextThreadData->VirtualDeadline());
+	TRACE_SCHED("reschedule: cpu %" B_PRId32 " selected nextT %" B_PRId32 " (VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ")\n",
+		thisCPUId, nextThread->id, nextThreadData->VirtualDeadline(), nextThreadData->Lag(), nextThreadData->EligibleTime());
 
 	T(ScheduleThread(nextThread, oldThread));
 	NotifySchedulerListeners(&SchedulerListener::ThreadScheduled, oldThread, nextThread);
@@ -593,7 +648,7 @@ reschedule(int32 nextState)
 	if (!nextThreadData->IsIdle()) {
 		sliceForTimer = nextThreadData->SliceDuration();
 		nextThreadData->StartQuantum(sliceForTimer);
-		TRACE("reschedule (EEVDF): thread %" B_PRId32 " starting EEVDF slice %" B_PRId64 " on CPU %" B_PRId32 "\n",
+		TRACE_SCHED("reschedule: nextT %" B_PRId32 " starting EEVDF slice %" B_PRId64 " on CPU %" B_PRId32 "\n",
 			nextThread->id, sliceForTimer, thisCPUId);
 	} else {
 		sliceForTimer = kLoadMeasureInterval * 2;
@@ -666,7 +721,7 @@ scheduler_on_thread_init(Thread* thread)
 		threadData->SetVirtualRuntime(0);
 
 		CPUEntry::GetCPU(cpuID)->SetIdleThread(threadData);
-		TRACE("scheduler_on_thread_init (EEVDF): Initialized idle thread %" B_PRId32 " for CPU %" B_PRId32 "\n", thread->id, cpuID);
+		TRACE_SCHED("scheduler_on_thread_init (EEVDF): Initialized idle thread %" B_PRId32 " for CPU %" B_PRId32 "\n", thread->id, cpuID);
 
 	} else {
 		threadData->Init();
@@ -1372,28 +1427,52 @@ scheduler_perform_load_balance()
 
 	sourceCPU->LockRunQueue();
 	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
-	if (!sourceQueue.IsEmpty()) {
-		ThreadData* firstCandidate = sourceQueue.PeekMinimum();
-		if (sourceQueue.Count() > 1) {
-			ThreadData* tempPopped = sourceQueue.PopMinimum();
-			ThreadData* secondCandidate = sourceQueue.PeekMinimum();
-			sourceQueue.Add(tempPopped);
 
-			if (secondCandidate != NULL
-				&& secondCandidate->GetThread() != gCPU[sourceCPU->ID()].running_thread
-				&& secondCandidate->GetThread()->pinned_to_cpu == 0
-				&& (now - secondCandidate->LastMigrationTime() >= kMinTimeBetweenMigrations)) {
-				threadToMove = secondCandidate;
-			}
+	ThreadData* bestCandidateToMove = NULL;
+	bigtime_t maxPositiveLag = 0;
+	bigtime_t latestEligibleVDForCandidate = 0;
+
+	const int MAX_LB_CANDIDATES_TO_CHECK = 5;
+	const bigtime_t MIN_POSITIVE_LAG_FOR_MIGRATION = SCHEDULER_MIN_GRANULARITY * 2;
+
+	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK];
+	int checkedCount = 0;
+
+	for (int i = 0; i < MAX_LB_CANDIDATES_TO_CHECK && !sourceQueue.IsEmpty(); ++i) {
+		ThreadData* candidate = sourceQueue.PopMinimum();
+		if (candidate == NULL) break;
+		tempStorage[checkedCount++] = candidate;
+
+		if (candidate->IsIdle() ||
+			candidate->GetThread() == gCPU[sourceCPU->ID()].running_thread ||
+			candidate->GetThread()->pinned_to_cpu != 0 ||
+			(now - candidate->LastMigrationTime() < kMinTimeBetweenMigrations)) {
+			continue;
 		}
-		if (threadToMove == NULL && firstCandidate != NULL
-			&& firstCandidate->GetThread() != gCPU[sourceCPU->ID()].running_thread
-			&& firstCandidate->GetThread()->pinned_to_cpu == 0
-			&& (now - firstCandidate->LastMigrationTime() >= kMinTimeBetweenMigrations)) {
-			threadToMove = firstCandidate;
+
+		bigtime_t currentLag = candidate->Lag();
+		if (currentLag < MIN_POSITIVE_LAG_FOR_MIGRATION) {
+			continue;
+		}
+
+		if (bestCandidateToMove == NULL || currentLag > maxPositiveLag) {
+			bestCandidateToMove = candidate;
+			maxPositiveLag = currentLag;
+			latestEligibleVDForCandidate = candidate->VirtualDeadline();
+		} else if (currentLag == maxPositiveLag) {
+			if (candidate->VirtualDeadline() > latestEligibleVDForCandidate) {
+				bestCandidateToMove = candidate;
+				latestEligibleVDForCandidate = candidate->VirtualDeadline();
+			}
 		}
 	}
 
+	for (int i = 0; i < checkedCount; ++i) {
+		if (tempStorage[i] != bestCandidateToMove) {
+			sourceQueue.Add(tempStorage[i]);
+		}
+	}
+	threadToMove = bestCandidateToMove;
 
 	if (threadToMove == NULL) {
 		sourceCPU->UnlockRunQueue();
@@ -1403,19 +1482,24 @@ scheduler_perform_load_balance()
 
 	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
 	if (targetCPU == NULL || targetCPU == sourceCPU) {
+		if (threadToMove != NULL) {
+			sourceQueue.Add(threadToMove);
+		}
 		sourceCPU->UnlockRunQueue();
 		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 "\n",
 			threadToMove->GetThread()->id, finalTargetCore->ID());
 		return;
 	}
 
+	atomic_add(&sourceCPU->fTotalThreadCount, -1);
+	ASSERT(sourceCPU->fTotalThreadCount >=0);
+	sourceCPU->_UpdateMinVirtualRuntime();
 
-	sourceCPU->RemoveThread(threadToMove);
 	threadToMove->MarkDequeued();
 	sourceCPU->UnlockRunQueue();
 
-	TRACE("LoadBalance (EEVDF): Migrating thread %" B_PRId32 " (VD %" B_PRId64 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-		threadToMove->GetThread()->id, threadToMove->VirtualDeadline(), sourceCPU->ID(), targetCPU->ID());
+	TRACE("LoadBalance (EEVDF): Migrating thread %" B_PRId32 " (Lag %" B_PRId64 ", VD %" B_PRId64 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
+		threadToMove->GetThread()->id, threadToMove->Lag(), threadToMove->VirtualDeadline(), sourceCPU->ID(), targetCPU->ID());
 
 	if (threadToMove->Core() != NULL)
 		threadToMove->UnassignCore(false);
@@ -1446,8 +1530,9 @@ scheduler_perform_load_balance()
 		threadToMove->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 	}
 	threadToMove->SetVirtualDeadline(threadToMove->EligibleTime() + threadToMove->SliceDuration());
-	TRACE("LoadBalance: Migrated thread %" B_PRId32 " EEVDF params updated: VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 "\n",
-		threadToMove->GetThread()->id, threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime());
+	TRACE_SCHED("LoadBalance: Migrated T %" B_PRId32 " to CPU %" B_PRId32 ", new VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 "\n",
+		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
+
 
 	targetCPU->LockRunQueue();
 	targetCPU->AddThread(threadToMove);
@@ -1458,7 +1543,7 @@ scheduler_perform_load_balance()
 
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
-	bool newThreadIsEligible = (system_time() >= threadToMove->EligibleTime() || threadToMove->Lag() >= 0);
+	bool newThreadIsEligible = (system_time() >= threadToMove->EligibleTime());
 
 	if (newThreadIsEligible && (currentOnTarget == NULL || thread_is_idle_thread(currentOnTarget) ||
 		(currentOnTargetData != NULL && threadToMove->VirtualDeadline() < currentOnTargetData->VirtualDeadline()))) {

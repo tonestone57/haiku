@@ -63,6 +63,8 @@ static CoreLoadHeap sDebugCoreHeap;
 // ThreadRunQueue::Dump() is removed as ThreadRunQueue is removed.
 // A new dump method for EevdfRunQueue will be part of DebugDumper.
 
+static const int MAX_PEEK_ELIGIBLE_CANDIDATES = 3;
+
 
 CPUEntry::CPUEntry()
 	:
@@ -228,18 +230,49 @@ CPUEntry::PeekEligibleNextThread() const
 	//    }
 	// }
 	// return candidate;
-	// For now, simplified: check only the top element.
-	// A full EEVDF might search deeper or have mechanisms to advance eligible_time.
-	ThreadData* candidate = fEevdfRunQueue.PeekMinimum();
-	if (candidate != NULL) {
-		if (system_time() >= candidate->EligibleTime()) {
-			return candidate;
+	ThreadData* eligibleCandidate = NULL;
+	ThreadData* tempPopped[MAX_PEEK_ELIGIBLE_CANDIDATES];
+	int poppedCount = 0;
+	bigtime_t now = system_time();
+
+	for (int i = 0; i < MAX_PEEK_ELIGIBLE_CANDIDATES && !fEevdfRunQueue.IsEmpty(); ++i) {
+		ThreadData* candidate = fEevdfRunQueue.PopMinimum();
+		if (candidate == NULL) // Should not happen if IsEmpty was false
+			break;
+
+		if (now >= candidate->EligibleTime()) {
+			eligibleCandidate = candidate; // Found an eligible one
+			// Don't store it in tempPopped, it won't be re-added if chosen
+			break;
+		} else {
+			tempPopped[poppedCount++] = candidate; // Store ineligible to re-add
+			TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 ", candidate thread %" B_PRId32 " (VD %" B_PRId64 ") not eligible (eligible_time %" B_PRId64 ", now %" B_PRId64 "). Checked %d/%d.\n",
+				ID(), candidate->GetThread()->id, candidate->VirtualDeadline(), candidate->EligibleTime(), now, i + 1, MAX_PEEK_ELIGIBLE_CANDIDATES);
 		}
-		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 ", top thread %" B_PRId32 " (VD %" B_PRId64 ") not eligible (eligible_time %" B_PRId64 ", now %" B_PRId64 ").\n",
-			ID(), candidate->GetThread()->id, candidate->VirtualDeadline(), candidate->EligibleTime(), system_time());
-		return NULL; // Top thread is not eligible
 	}
-	return NULL; // Queue is empty
+
+	// Re-add any threads that were popped but not chosen (because they were ineligible)
+	for (int i = 0; i < poppedCount; ++i) {
+		fEevdfRunQueue.Add(tempPopped[i]);
+	}
+
+	// If re-adds happened, fMinVirtualRuntime might need update.
+	// AddThread calls _UpdateMinVirtualRuntime, so it should be handled.
+	// If eligibleCandidate is NULL and poppedCount > 0, then _UpdateMinVirtualRuntime
+	// was called by the last Add(). If eligibleCandidate is non-NULL, it means it was
+	// popped and NOT re-added, so the queue top might change.
+	// _UpdateMinVirtualRuntime is also called by RemoveThread in reschedule if a thread is chosen.
+	// So, this should be okay without an explicit call here if Add/Remove are robust.
+
+	if (eligibleCandidate != NULL) {
+		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " found eligible thread %" B_PRId32 " (VD %" B_PRId64 ").\n",
+			ID(), eligibleCandidate->GetThread()->id, eligibleCandidate->GetVirtualDeadline());
+	} else {
+		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " no eligible thread found in top %d candidates.\n",
+			ID(), MAX_PEEK_ELIGIBLE_CANDIDATES);
+	}
+
+	return eligibleCandidate;
 }
 
 
@@ -1003,22 +1036,37 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 	kprintf("  Idle Thread: %p (ID: %" B_PRId32 ")\n", cpu->fIdleThread ? cpu->fIdleThread->GetThread() : NULL, cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1);
 
 	cpu->LockRunQueue();
-	const EevdfRunQueue& queue = cpu->GetEevdfRunQueue();
+	// Use a non-const reference to be able to PopMinimum
+	EevdfRunQueue& queue = cpu->GetEevdfRunQueue();
 	if (queue.IsEmpty()) {
 		kprintf("  Run queue is empty.\n");
 	} else {
 		kprintf("  thread      id      virt_deadline   lag         elig_time   slice_dur   virt_runtime name\n");
 
-		// Temporary: Dump only top, full dump needs heap iteration support
-		ThreadData* td = queue.PeekMinimum();
-		if (td != NULL) {
+		const int maxToDump = 5;
+		ThreadData* dumpedThreads[maxToDump];
+		int numDumped = 0;
+
+		for (int i = 0; i < maxToDump && !queue.IsEmpty(); ++i) {
+			ThreadData* td = queue.PopMinimum();
+			if (td == NULL) break;
+			dumpedThreads[numDumped++] = td;
+
 			Thread* t = td->GetThread();
-			kprintf("  %p  %-7" B_PRId32 " %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %s (Top of Heap)\n",
+			kprintf("  %p  %-7" B_PRId32 " %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %s\n",
 				t, t->id, td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
 				td->SliceDuration(), td->VirtualRuntime(), t->name);
 		}
-		if (queue.Count() > 1)
-			kprintf("  (Full EEVDF queue dump requires heap iteration - showing top only)\n");
+
+		// Re-add popped threads
+		for (int i = 0; i < numDumped; ++i) {
+			queue.Add(dumpedThreads[i]);
+		}
+		// _UpdateMinVirtualRuntime will be called by Add if needed.
+
+		if (queue.Count() > numDumped) {
+			kprintf("  (... and %" B_PRId32 " more threads in queue ...)\n", queue.Count() - numDumped);
+		}
 	}
 	cpu->UnlockRunQueue();
 }

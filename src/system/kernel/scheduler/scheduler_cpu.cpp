@@ -25,10 +25,14 @@ namespace Scheduler {
 CPUEntry* gCPUEntries;
 
 CoreEntry* gCoreEntries;
-CoreLoadHeap gCoreLoadHeap;
-CoreLoadHeap gCoreHighLoadHeap;
-rw_spinlock gCoreHeapsLock = B_RW_SPINLOCK_INITIALIZER;
+// CoreLoadHeap gCoreLoadHeap; // Replaced
+// CoreLoadHeap gCoreHighLoadHeap; // Replaced
+// rw_spinlock gCoreHeapsLock = B_RW_SPINLOCK_INITIALIZER; // Replaced
 int32 gCoreCount;
+
+CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
+CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
+rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards]; // Initialized in scheduler_init
 
 PackageEntry* gPackageEntries;
 IdlePackageList gIdlePackageList;
@@ -749,9 +753,11 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 		fLastLoadUpdate = system_time();
 		fLoadMeasurementEpoch = 0;
 
-		WriteSpinLocker heapsLock(gCoreHeapsLock);
-		if (this->GetMinMaxHeapLink()->fIndex == -1) {
-			gCoreLoadHeap.Insert(this, 0);
+		// Insert into the appropriate shard if this is the first CPU
+		int32 shardIndex = this->ID() % Scheduler::kNumCoreLoadHeapShards;
+		WriteSpinLocker heapsLock(Scheduler::gCoreHeapsShardLock[shardIndex]);
+		if (this->GetMinMaxHeapLink()->fIndex == -1) { // If not already in any heap
+			Scheduler::gCoreLoadHeapShards[shardIndex].Insert(this, 0); // Initial load is 0
 		}
 		heapsLock.Unlock();
 
@@ -868,12 +874,13 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		fHighLoad = false;
 		localDefunctLock.Unlock();
 
-		WriteSpinLocker globalHeapsDefunctLock(gCoreHeapsLock);
+		int32 shardIndex = this->ID() % Scheduler::kNumCoreLoadHeapShards;
+		WriteSpinLocker globalHeapsDefunctLock(Scheduler::gCoreHeapsShardLock[shardIndex]);
 		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If in a heap
 			if (wasDefunctHighLoad)
-				gCoreHighLoadHeap.Remove(this);
+				Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
 			else
-				gCoreLoadHeap.Remove(this);
+				Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
 		}
 		// globalHeapsDefunctLock released by destructor
 		return;
@@ -935,26 +942,27 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	}
 
 	// 5. If significant change or forceUpdate, update global heaps
-	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
+	int32 shardIndex = this->ID() % Scheduler::kNumCoreLoadHeapShards;
+	WriteSpinLocker coreHeapsLocker(Scheduler::gCoreHeapsShardLock[shardIndex]);
 
 	if (wasInAHeap) {
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
 		if (highLoadStatusWhenLastInHeap)
-			gCoreHighLoadHeap.Remove(this);
+			Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
 		else
-			gCoreLoadHeap.Remove(this);
+			Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.
 	// The heap insertion will use the CoreEntry's current fLoad (which is newAverageLoad) as the key.
 	// The fHighLoad field (which is isNowEffectivelyHighLoad) determines which heap.
 	if (fHighLoad) { // Use the just-updated fHighLoad from internal state
-		gCoreHighLoadHeap.Insert(this, fLoad); // Insert with current fLoad
+		Scheduler::gCoreHighLoadHeapShards[shardIndex].Insert(this, fLoad); // Insert with current fLoad
 	} else {
-		gCoreLoadHeap.Insert(this, fLoad); // Insert with current fLoad
+		Scheduler::gCoreLoadHeapShards[shardIndex].Insert(this, fLoad); // Insert with current fLoad
 	}
-	// coreHeapsLocker releases gCoreHeapsLock at end of scope
+	// coreHeapsLocker releases gCoreHeapsShardLock[shardIndex] at end of scope
 }
 
 
@@ -976,13 +984,9 @@ CoreLoadHeap::CoreLoadHeap(int32 coreCount)
 
 
 void
-CoreLoadHeap::Dump()
+CoreLoadHeap::Dump() // Lock is now handled by the caller
 {
-	WriteSpinLocker lock(gCoreHeapsLock);
-	if (!lock.IsLocked()) {
-		kprintf("CoreLoadHeap::Dump(): Failed to acquire gCoreHeapsLock. Aborting dump.\n");
-		return;
-	}
+	// WriteSpinLocker lock(gCoreHeapsLock); // REMOVED
 
 	CoreEntry* entry = PeekMinimum();
 	while (entry) {
@@ -1176,11 +1180,30 @@ dump_run_queue(int /* argc */, char** /* argv */)
 static int
 dump_cpu_heap(int /* argc */, char** /* argv */)
 {
-	kprintf("Low Load Cores (ID  AvgLoad InstLoad Threads Epoch):\n");
-	gCoreLoadHeap.Dump();
-	kprintf("\nHigh Load Cores (ID  AvgLoad InstLoad Threads Epoch):\n");
-	gCoreHighLoadHeap.Dump();
+	kprintf("Core Load Heaps (Sharded):\n");
+	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
+		kprintf("---- Shard %" B_PRId32 " ----\n", shardIdx);
 
+		WriteSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
+
+		kprintf("  Low Load Cores in Shard %" B_PRId32 " (ID AvgLoad InstLoad Threads Epoch):\n", shardIdx);
+		if (Scheduler::gCoreLoadHeapShards[shardIdx].Count() > 0) {
+			Scheduler::gCoreLoadHeapShards[shardIdx].Dump();
+		} else {
+			kprintf("    (empty)\n");
+		}
+
+		kprintf("\n  High Load Cores in Shard %" B_PRId32 " (ID AvgLoad InstLoad Threads Epoch):\n", shardIdx);
+		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].Count() > 0) {
+			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump();
+		} else {
+			kprintf("    (empty)\n");
+		}
+		shardLocker.Unlock();
+		kprintf("\n");
+	}
+
+	// The rest of the function (dumping per-core CPU heaps) remains the same.
 	for (int32 i = 0; i < gCoreCount; i++) {
 		bool coreHasEnabledCPUs = false;
 		for(int j=0; j < smp_get_num_cpus(); ++j) {

@@ -314,10 +314,15 @@ PackageEntry::GetIdleCore(int32 index /* = 0 */) const
 extern CPUEntry* gCPUEntries;
 
 extern CoreEntry* gCoreEntries;
-extern CoreLoadHeap gCoreLoadHeap;
-extern CoreLoadHeap gCoreHighLoadHeap;
-extern rw_spinlock gCoreHeapsLock;
+// extern CoreLoadHeap gCoreLoadHeap; // Replaced by sharded version
+// extern CoreLoadHeap gCoreHighLoadHeap; // Replaced by sharded version
+// extern rw_spinlock gCoreHeapsLock; // Replaced by sharded version
 extern int32 gCoreCount;
+
+const int32 kNumCoreLoadHeapShards = 8; // Number of shards for core load heaps
+extern CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
+extern CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
+extern rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
 
 extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;

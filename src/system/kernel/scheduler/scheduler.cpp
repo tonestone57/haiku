@@ -1193,8 +1193,14 @@ init()
 	if (gPackageEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<PackageEntry> packageEntriesDeleter(gPackageEntries);
 
-	new(&gCoreLoadHeap) CoreLoadHeap(coreCount);
-	new(&gCoreHighLoadHeap) CoreLoadHeap(coreCount);
+	// Initialize sharded core load heaps and their locks
+	for (int32 i = 0; i < Scheduler::kNumCoreLoadHeapShards; i++) {
+		// Approximate initial size for each shard's heap. MinMaxHeap can grow.
+		int32 shardHeapSize = gCoreCount / Scheduler::kNumCoreLoadHeapShards + 4;
+		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
+		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
+		rw_spinlock_init(&Scheduler::gCoreHeapsShardLock[i], "core_heap_shard_lock");
+	}
 	new(&gIdlePackageList) IdlePackageList;
 
 	// Initialize gReportedCpuMinVR array
@@ -1728,19 +1734,73 @@ scheduler_perform_load_balance()
 		return migrationPerformed;
 	}
 
-	ReadSpinLocker globalCoreHeapsLock(gCoreHeapsLock);
 	CoreEntry* sourceCoreCandidate = NULL;
-	for (int32 i = 0; (sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!sourceCoreCandidate->IsDefunct()) break;
-	}
 	CoreEntry* targetCoreCandidate = NULL;
-	for (int32 i = 0; (targetCoreCandidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!targetCoreCandidate->IsDefunct()) break;
-	}
-	globalCoreHeapsLock.Unlock();
+	int32 maxLoadFound = -1;
+	int32 minLoadFound = 0x7fffffff;
 
-	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate->IsDefunct() || targetCoreCandidate->IsDefunct() || sourceCoreCandidate == targetCoreCandidate)
+	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
+		ReadSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
+
+		// Find best source candidate in this shard's high-load heap
+		for (int32 i = 0; ; i++) {
+			CoreEntry* core = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum(i);
+			if (core == NULL) break;
+			if (core->IsDefunct()) continue;
+			if (core->GetLoad() > maxLoadFound) {
+				maxLoadFound = core->GetLoad();
+				sourceCoreCandidate = core;
+			}
+			break;
+		}
+
+		// Find best target candidate in this shard's low-load heap
+		for (int32 i = 0; ; i++) {
+			CoreEntry* core = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(i);
+			if (core == NULL) break;
+			if (core->IsDefunct()) continue;
+
+			// Ensure target is not the same as the current overall best source candidate
+			// This check is a bit simplified; ideally, we'd collect all candidates then pick distinct source/target.
+			// For now, if a core is a good target and also the current best source, we might skip it as target.
+			if (sourceCoreCandidate != NULL && core == sourceCoreCandidate) continue;
+
+			if (core->GetLoad() < minLoadFound) {
+				minLoadFound = core->GetLoad();
+				targetCoreCandidate = core;
+			}
+			break;
+		}
+		shardLocker.Unlock();
+	}
+
+	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
 		return migrationPerformed;
+
+	// Re-check if targetCoreCandidate became the same as sourceCoreCandidate due to separate shard processing
+	if (targetCoreCandidate == sourceCoreCandidate) {
+	    // Try to find a different targetCoreCandidate from all shards that is not sourceCoreCandidate
+	    minLoadFound = 0x7fffffff;
+	    CoreEntry* alternativeTarget = NULL;
+	    for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
+	        ReadSpinLocker altShardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
+	        for (int32 i = 0; ; i++) {
+	            CoreEntry* core = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(i);
+	            if (core == NULL) break;
+	            if (core->IsDefunct() || core == sourceCoreCandidate) continue;
+	            if (core->GetLoad() < minLoadFound) {
+	                minLoadFound = core->GetLoad();
+	                alternativeTarget = core;
+	            }
+	            break;
+	        }
+	        altShardLocker.Unlock();
+	    }
+	    targetCoreCandidate = alternativeTarget;
+	    if (targetCoreCandidate == NULL) // Still no alternative target
+		return migrationPerformed;
+	}
+
 
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
 		return migrationPerformed;

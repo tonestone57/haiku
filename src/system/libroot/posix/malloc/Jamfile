@@ -44,6 +44,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 				: # Action flags for this specific Object rule
 				$(snmallocTargetFlags)
 			;
+			NOCARE <$(architecture)>snmalloc_hooks.o ; # Don't link this intermediate object
 
 			# Merge the specifically compiled object into the final target name
 			MergeObject <$(architecture)>posix_malloc.o :

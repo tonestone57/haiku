@@ -82,4 +82,3 @@ if $(allocatorObjects) {
     # SubDirC++Flags $(allocatorDefines) ;
 }
 
-[end of src/system/kernel/alloc/Jamfile]

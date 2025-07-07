@@ -36,69 +36,61 @@ giving it a larger share of the CPU.
   - **Calculation**: When a thread runs for ``actual_duration``, its
     ``virtual_runtime`` increases by approximately
     ``(actual_duration * SCHEDULER_WEIGHT_SCALE) / thread_weight``.
-    (Note: ``SCHEDULER_WEIGHT_SCALE`` and ``thread_weight`` are conceptual; the
-    current implementation uses a simplified, unweighted addition of
-    ``actual_duration`` to ``fVirtualRuntime`` as a placeholder).
+    ``(actual_duration * SCHEDULER_WEIGHT_SCALE) / thread_weight``.
   - **Initialization**: When a new thread becomes runnable or a sleeping thread
-    wakes, its ``fVirtualRuntime`` is typically initialized to be slightly
-    greater than or equal to the minimum virtual runtime currently in its target
-    CPU's run queue. This ensures fairness and prevents immediate starvation or
-    unfair preemption.
+    wakes, its ``fVirtualRuntime`` is initialized to ``max(current_vruntime, min_vruntime_of_target_queue)``.
+    This ensures fairness and prevents immediate starvation or unfair preemption.
 
 Lag (``fLag``)
 ~~~~~~~~~~~~~~
 Lag measures the difference between the CPU time a thread *should have* received
 (its fair entitlement based on virtual time progression) and the CPU time it
-*actually* received.
+*actually* received, expressed in weighted time units.
 
   - **Positive Lag**: The thread has received less CPU time than its fair share.
     It is "owed" CPU time.
   - **Negative Lag**: The thread has received more CPU time than its fair share.
     It has a "debt" of CPU time.
   - **Calculation**:
-    ``Lag = CurrentEntitlement - ServiceReceived``
-    Conceptually, when a thread runs, its lag decreases by the amount of service
-    (weighted runtime) it consumed. When it's time for it to get a new slice, its
-    lag increases by the duration of that new slice (its entitlement).
-    The precise calculation involves comparing the thread's virtual runtime with
-    a reference virtual time (e.g., the minimum virtual runtime of the run queue).
-    (Note: Current implementation uses simplified updates to ``fLag``).
+    Upon enqueue/requeue: ``Lag = WeightedSliceEntitlement - (VirtualRuntime - QueueMinVirtualRuntime)``.
+    When service is received: ``Lag -= WeightedServiceReceived``.
+    When new entitlement is granted (for next slice): ``Lag += WeightedSliceEntitlement``.
 
 Slice Duration (``fSliceDuration``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-This is the target duration a thread should run for once it's selected by the
+This is the target wall-clock duration a thread should run for once it's selected by the
 scheduler before its state (lag, deadline) is re-evaluated.
 
-  - **Determination**: Influenced by the thread's base priority and potentially
-    a future "latency-nice" parameter. Higher priority or more latency-sensitive
-    threads might receive shorter slices to allow for quicker preemption and
-    turnaround, even if their total CPU share over time is the same as other
-    threads of similar weight.
-  - **Current Implementation**: Derived from Haiku's existing priority levels
-    using ``ThreadData::GetBaseQuantumForLevel(ThreadData::MapPriorityToMLFQLevel(...))``.
+  - **Determination**: Influenced by the thread's base priority (via ``MapPriorityToEffectiveLevel``
+    and ``kBaseQuanta``) and its ``fLatencyNice`` parameter (which defaults to 0).
+    Higher priority or more latency-sensitive threads (lower ``fLatencyNice``)
+    can receive shorter slices.
+  - **Current Implementation**: Derived using
+    ``ThreadData::CalculateDynamicQuantum()`` which incorporates base priority and ``fLatencyNice``.
+    The ``fLatencyNice`` mechanism is structurally in place; user-space controls for it are future work.
 
 Eligible Time (``fEligibleTime``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The wall-clock time at which a thread becomes eligible to run.
 
   - **Calculation**:
-    If ``Lag >= 0``, ``EligibleTime = system_time()`` (eligible immediately).
-    If ``Lag < 0``, ``EligibleTime = system_time() + (-Lag / ServiceRate)``, where
-    ``ServiceRate`` is related to the thread's weight. This means a thread that
-    has run too much (negative lag) will only become eligible again in the future
-    once its entitlement "catches up."
-    (Note: Current implementation uses a placeholder for negative lag eligibility).
+    If ``Lag >= 0`` (thread is owed time or is on schedule), ``EligibleTime = system_time()`` (eligible immediately).
+    If ``Lag < 0`` (thread has run too much),
+    ``EligibleTime = system_time() + Delay``, where ``Delay`` is calculated as
+    ``(-Lag_weighted_units * SCHEDULER_WEIGHT_SCALE) / thread_weight_units``.
+    The delay is capped (e.g., ``SCHEDULER_TARGET_LATENCY * 2``) and has a minimum floor (``SCHEDULER_MIN_GRANULARITY``).
 
 Virtual Deadline (``fVirtualDeadline``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The core scheduling key. It's the wall-clock time by which a thread *should*
-ideally complete its current ``SliceDuration``, considering its eligibility.
+ideally complete its current ``fSliceDuration``, considering its eligibility.
 
-  - **Calculation**: ``VirtualDeadline = EligibleTime + (SliceDuration / NormalizedWeight)``
-    For a simplified, unweighted interpretation or where slice duration is already
-    weight-adjusted: ``VirtualDeadline = EligibleTime + SliceDuration``.
-  - **Scheduling Decision**: The scheduler picks the *eligible* thread with the
-    *earliest* (smallest) ``VirtualDeadline``.
+  - **Calculation**: ``VirtualDeadline = EligibleTime + SliceDuration``.
+    Both ``EligibleTime`` and ``SliceDuration`` are wall-clock times. The EEVDF
+    fairness properties emerge from how ``VirtualRuntime``, ``Lag``, and subsequently
+    ``EligibleTime`` are managed in a weighted manner.
+  - **Scheduling Decision**: The scheduler picks the *eligible* thread (where
+    ``system_time() >= EligibleTime``) with the *earliest* (smallest) ``VirtualDeadline``.
 
 Key Data Structures
 -------------------
@@ -139,13 +131,11 @@ Handled by ``scheduler_enqueue_in_run_queue()`` in ``scheduler.cpp``:
     This considers affinity and current scheduler mode policies. The underlying
     CPU fitness metrics (load) used by ``_ChooseCPU`` are still relevant.
 2.  **EEVDF Parameter Initialization**: For the thread being enqueued:
-    *   ``fSliceDuration``: Calculated (currently based on priority via MLFQ mapping).
-    *   ``fVirtualRuntime``: Initialized. Ideally, set to be slightly >= the minimum
-      virtual runtime of the target CPU's EEVDF run queue to ensure fairness.
-      (Current implementation has a placeholder for this).
-    *   ``fLag``: Initialized (e.g., to 0, or based on preserved entitlement if waking).
-      (Current implementation resets to 0).
-    *   ``fEligibleTime``: Calculated based on current time and lag.
+    *   ``fSliceDuration``: Calculated using ``ThreadData::CalculateDynamicQuantum()``,
+      which considers base priority and ``fLatencyNice``.
+    *   ``fVirtualRuntime``: Initialized to be ``max(current_vruntime, min_vruntime_of_target_queue)``.
+    *   ``fLag``: Calculated as ``WeightedSliceEntitlement - (VirtualRuntime - QueueMinVirtualRuntime)``.
+    *   ``fEligibleTime``: Calculated based on current time and the new ``fLag``.
     *   ``fVirtualDeadline``: Calculated as ``fEligibleTime + fSliceDuration``.
 3.  **Add to Run Queue**: The thread is added to the target ``CPUEntry``'s
     ``fEevdfRunQueue`` using ``CPUEntry::AddThread()``.
@@ -173,15 +163,17 @@ priority (earlier deadline) thread becomes runnable.
 3.  **Select Next Thread**:
     *   ``CPUEntry::ChooseNextThread()`` is called.
     *   It first considers re-enqueueing ``oldThread`` as above if applicable.
-    *   Then, it calls ``CPUEntry::PeekEligibleNextThread()`` to find the thread
-      in its ``fEevdfRunQueue`` with the earliest virtual deadline that is also
-      currently eligible (``Lag >= 0`` or ``system_time() >= EligibleTime``).
-      (Note: The eligibility check in ``PeekEligibleNextThread`` is currently a TODO).
-    *   If no eligible non-idle thread is found, the CPU's designated idle thread
-      (``CPUEntry::fIdleThread``) is chosen.
-    *   The chosen non-idle ``nextThread`` is removed from the ``EevdfRunQueue``.
+    *   Then, it calls the (now non-const) ``CPUEntry::PeekEligibleNextThread()``.
+      This method iterates through the CPU's ``fEevdfRunQueue`` (by temporarily
+      popping and re-adding entries) to find the first thread (ordered by
+      ``VirtualDeadline``) that is currently eligible (i.e., ``system_time() >= EligibleTime``).
+    *   If an eligible non-idle thread is found, ``PeekEligibleNextThread``
+      removes it from the run queue and returns it.
+    *   If no eligible non-idle thread is found, ``CPUEntry::ChooseNextThread()``
+      selects the CPU's designated idle thread (``CPUEntry::fIdleThread``).
 4.  **New Thread Setup**:
-    *   The ``nextThread``'s state is set to ``B_THREAD_RUNNING``.
+    *   The chosen ``nextThread`` (which could be an active thread or the idle thread)
+      has its state set to ``B_THREAD_RUNNING``.
     *   Its CPU time accounting starts.
     *   The hardware timer is set to fire after ``nextThread->SliceDuration()``.
 5.  **Context Switch**: If ``nextThread`` is different from ``oldThread``, a context
@@ -217,16 +209,14 @@ Load Balancing, SMT, and Cache Awareness
 These aspects are handled as follows:
 
   - **Load Balancing**:
-    The existing mechanism in ``scheduler_perform_load_balance()`` for identifying
-    overloaded and underloaded cores (using ``gCoreHighLoadHeap`` and
-    ``gCoreLoadHeap`` based on historical core load) is retained.
-    *   *Thread Selection for Migration*: The logic to pick a specific thread from
-      the source CPU's EEVDF run queue is currently a placeholder and needs
-      a more EEVDF-aware strategy (e.g., migrating threads with high positive lag).
+    The mechanism in ``scheduler_perform_load_balance()`` identifies
+    overloaded and underloaded cores.
+    *   *Thread Selection for Migration*: From the source CPU's EEVDF run queue,
+      it selects a migratable thread, prioritizing those with significant
+      positive ``fLag`` (i.e., threads that are "owed" CPU time).
     *   *Parameter Re-initialization*: When a thread is migrated, its EEVDF
-      parameters (especially ``fVirtualRuntime`` and ``fLag``) must be
-      re-initialized appropriately for the target CPU's run queue. This is
-      also currently a placeholder.
+      parameters (``fVirtualRuntime``, ``fLag``, ``fEligibleTime``, ``fVirtualDeadline``)
+      are re-initialized relative to the target CPU's run queue state.
   - **SMT Awareness**:
     ``_scheduler_select_cpu_on_core()`` includes a penalty for selecting a CPU
     whose SMT siblings are busy. This logic, scaled by
@@ -261,30 +251,46 @@ Relevant Debugger Commands
   - Other commands like ``threads``, ``cpu``, ``scheduler_get_smt_factor``
     remain relevant.
 
-TODOs / Future Work (Key Placeholders)
---------------------------------------
-The current EEVDF implementation is structural. Key algorithmic details
-require further work:
+TODOs / Future Work
+-------------------
+The EEVDF implementation has been significantly fleshed out with core parameter
+calculations (Virtual Runtime, Lag, Eligible Time) and eligibility checks now
+reflecting EEVDF principles. Load balancing is also more EEVDF-aware.
 
-  - **Precise Virtual Runtime Management**:
-    *   Correct initialization for new/waking threads relative to the target
-      queue's minimum virtual runtime.
-    *   Accurate weighted advancement of virtual runtime based on priority/weight.
-  - **Accurate Lag Calculation**: Based on the difference between a thread's
-    virtual runtime and the run queue's reference virtual time.
-  - **Eligible Time Calculation**: Proper calculation for threads with negative
-    lag, considering their service rate (weight).
-  - **Eligibility Check**: Robust implementation in
-    ``CPUEntry::PeekEligibleNextThread()`` and ``reschedule()``.
-  - **Slice Duration Calculation**: Implement "latency-nice" and use it alongside
-    priority to determine slice durations for better latency control.
-  - **Load Balancing Thread Selection**: Develop a better heuristic for choosing
-    which thread to migrate from an EEVDF queue.
-  - **Tie-Breaking**: Refine tie-breaking in ``_scheduler_select_cpu_on_core``
-    for EEVDF if virtual deadlines or fitness scores are equal.
+Outstanding areas for future work and refinement include:
+
+  - **Slice Duration and Latency-Nice**: The ``fLatencyNice`` field and its use in
+    ``ThreadData::CalculateDynamicQuantum()`` are in place. Full user-space
+    exposure via syscalls and development of policies for its use are future
+    enhancements. The current slice duration derivation from ``kBaseQuanta``
+    and ``MapPriorityToEffectiveLevel`` may also benefit from further tuning.
+  - **Load Balancing Heuristics**: The current heuristic for selecting a thread
+    to migrate (based on positive lag) is a good start. More advanced heuristics
+    could be developed, potentially considering the target CPU's state more deeply.
+  - **Tie-Breaking**: Tie-breaking in ``_scheduler_select_cpu_on_core`` (based
+    on task count for CPUs with equal load scores) is generally acceptable but could
+    be reviewed for EEVDF-specific scenarios if issues arise.
+  - **``EevdfRunQueue::Update()`` Inefficiency**: The current remove-then-add
+    approach for updating a thread's position in the run queue (in
+    ``scheduler_set_thread_priority``) is less efficient than a direct heap sift
+    operation. This is a known area for future performance optimization,
+    potentially requiring changes to ``util/Heap.h`` or a custom heap solution.
+  - **Priority-to-Weight Tuning**: The ``scheduler_priority_to_weight()`` mapping
+    needs extensive real-world testing and tuning to achieve desired Haiku
+    application responsiveness and fairness characteristics across the full
+    spectrum of Haiku priorities.
+  - **Interaction with ``scheduler_set_thread_priority()``**: When a thread's
+    priority (and thus weight) changes, its current ``fLag`` and ``fVirtualRuntime``
+    are not retrospectively adjusted against past execution. This could be a
+    refinement for more immediate fairness upon priority change, though it adds
+    complexity.
   - **Real-time Threads**: The current EEVDF implementation primarily targets
-    normal (FAIR) threads. How real-time priorities integrate or bypass EEVDF
-    needs to be clearly defined (currently, they'd likely get very short slices
-    and early deadlines via the temporary priority mapping). A separate
-    real-time scheduling class might still be needed alongside EEVDF.
-  - **Testing and Benchmarking**: Extensive testing is required.
+    normal (FAIR) threads. How real-time priorities integrate with or bypass EEVDF
+    (currently they receive very high weights leading to short effective slices and
+    early deadlines) needs ongoing evaluation. A separate, dedicated real-time
+    scheduling class might still be beneficial alongside EEVDF for hard real-time
+    guarantees.
+  - **Testing and Benchmarking**: Extensive testing and benchmarking are crucial
+    to validate correctness, tune parameters (like ``SCHEDULER_TARGET_LATENCY``,
+    weights, slice duration constants), and measure performance across various
+    workloads (interactive, batch, mixed).

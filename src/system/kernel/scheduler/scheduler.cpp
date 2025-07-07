@@ -248,8 +248,11 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 		if (thread->Lag() >= 0) {
 			thread->SetEligibleTime(system_time());
 		} else {
-            bigtime_t delay = (-thread->Lag() * weight) / SCHEDULER_WEIGHT_SCALE;
-            delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+            // Convert negative lag (debt of weighted time) to wall time delay.
+            // delay_wall_time = (-Lag_weighted_units * SCHEDULER_WEIGHT_SCALE) / weight_units
+            bigtime_t delay = (-thread->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
+            if (weight == 0) delay = SCHEDULER_TARGET_LATENCY * 2; // Avoid division by zero, max out delay
+            delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2); // Cap the delay
 			thread->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 		}
 		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", elig_time %" B_PRId64 "\n", t->id, thread->EligibleTime());
@@ -365,8 +368,11 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	if (threadData->Lag() >= 0) {
 		threadData->SetEligibleTime(system_time());
 	} else {
-        bigtime_t delay = (-threadData->Lag() * weight) / SCHEDULER_WEIGHT_SCALE;
-        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+        // Convert negative lag (debt of weighted time) to wall time delay.
+        // delay_wall_time = (-Lag_weighted_units * SCHEDULER_WEIGHT_SCALE) / weight_units
+        bigtime_t delay = (-threadData->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
+        if (weight == 0) delay = SCHEDULER_TARGET_LATENCY * 2; // Avoid division by zero, max out delay
+        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2); // Cap the delay
 		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
         TRACE_SCHED("enqueue: T %" B_PRId32 " has negative lag %" B_PRId64 ", elig_time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
             thread->id, threadData->Lag(), threadData->EligibleTime(), delay);
@@ -607,9 +613,13 @@ reschedule(int32 nextState)
 					oldThreadData->SetEligibleTime(system_time());
 				} else {
 					int32 weight_for_delay = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
-					if (weight_for_delay <= 0) weight_for_delay = 1;
-					bigtime_t delay = (-oldThreadData->Lag() * weight_for_delay) / SCHEDULER_WEIGHT_SCALE;
-					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+					// Ensure weight_for_delay is positive to prevent division by zero or negative delay calculation.
+					// scheduler_priority_to_weight should already ensure this, but as a safeguard:
+					if (weight_for_delay <= 0) weight_for_delay = 1; // Use minimal weight if something went wrong.
+					// Convert negative lag (debt of weighted time) to wall time delay.
+					// delay_wall_time = (-Lag_weighted_units * SCHEDULER_WEIGHT_SCALE) / weight_units
+					bigtime_t delay = (-oldThreadData->Lag() * SCHEDULER_WEIGHT_SCALE) / weight_for_delay;
+					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2); // Cap the delay
 					oldThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 					TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, new elig_time %" B_PRId64 " (delay %" B_PRId64 ")\n", oldThread->id, oldThreadData->EligibleTime(), delay);
 				}
@@ -646,19 +656,13 @@ reschedule(int32 nextState)
 			? oldThreadData : NULL;
 
 		nextThreadData = cpu->ChooseNextThread(oldThreadToConsider, false, 0);
-
-		if (nextThreadData != NULL && !nextThreadData->IsIdle()) {
-			cpu->RemoveThread(nextThreadData);
-			nextThreadData->MarkDequeued();
-		} else {
-			nextThreadData = cpu->PeekIdleThread();
-			if (nextThreadData == NULL)
-				panic("reschedule (EEVDF): No idle thread available on CPU %" B_PRId32 " after ChooseNextThread!", thisCPUId);
-		}
+		// ChooseNextThread now returns the chosen thread, already removed from the
+		// EEVDF run queue if it was a non-idle thread, and it also calls MarkDequeued.
+		// If no eligible non-idle thread was found, ChooseNextThread returns fIdleThread.
 	}
 
 	if (!gCPU[thisCPUId].disabled)
-		cpu->_UpdateMinVirtualRuntime();
+		cpu->_UpdateMinVirtualRuntime(); // This ensures fMinVirtualRuntime is correct after queue ops.
 	cpu->UnlockRunQueue();
 
 	Thread* nextThread = nextThreadData->GetThread();
@@ -1602,8 +1606,9 @@ scheduler_perform_load_balance()
 	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU);
 	ASSERT(threadToMove->Core() == finalTargetCore);
 
+	// Use MapPriorityToEffectiveLevel for consistency with CalculateDynamicQuantum
 	threadToMove->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
-		ThreadData::MapPriorityToMLFQLevel(threadToMove->GetBasePriority())));
+		ThreadData::MapPriorityToEffectiveLevel(threadToMove->GetBasePriority())));
 
 	targetCPU->LockRunQueue();
 	bigtime_t targetQueueMinVruntime = targetCPU->MinVirtualRuntime();
@@ -1619,8 +1624,11 @@ scheduler_perform_load_balance()
 	if (threadToMove->Lag() >= 0) {
 		threadToMove->SetEligibleTime(system_time());
 	} else {
-        bigtime_t delay = (-threadToMove->Lag() * migratedWeight) / SCHEDULER_WEIGHT_SCALE;
-        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+        // Convert negative lag (debt of weighted time) to wall time delay.
+        // delay_wall_time = (-Lag_weighted_units * SCHEDULER_WEIGHT_SCALE) / weight_units
+        bigtime_t delay = (-threadToMove->Lag() * SCHEDULER_WEIGHT_SCALE) / migratedWeight;
+        if (migratedWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2; // Avoid division by zero
+        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2); // Cap the delay
 		threadToMove->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 	}
 	threadToMove->SetVirtualDeadline(threadToMove->EligibleTime() + threadToMove->SliceDuration());

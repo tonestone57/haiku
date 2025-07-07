@@ -62,7 +62,8 @@ public:
 						// RemoveFromQueue might be obsolete or just call RemoveThread.
 
 						// Renamed and functionality will change for EEVDF (eligibility check).
-						ThreadData*		PeekEligibleNextThread() const;
+						// This is now non-const as it will pop the chosen candidate.
+						ThreadData*		PeekEligibleNextThread();
 	//inline				int				HighestMLFQLevel() const { return fMlfqHighestNonEmptyLevel; } // Obsolete
 	inline				int32			GetTotalThreadCount() const { return fTotalThreadCount; }
 

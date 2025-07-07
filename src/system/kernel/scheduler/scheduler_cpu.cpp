@@ -218,67 +218,68 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 
 
 ThreadData*
-CPUEntry::PeekEligibleNextThread() const
+CPUEntry::PeekEligibleNextThread()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
+	ASSERT(are_interrupts_enabled() == false); // Lock should be held by caller (reschedule)
 
-	// TODO EEVDF: This needs to iterate through fEevdfRunQueue.PeekMinimum()
-	// and check eligibility (lag >= 0 or system_time() >= eligible_time).
-	// For now, just peeking the absolute minimum.
-	// This is a placeholder and will need significant refinement.
-	// Proper eligibility check:
-	// ThreadData* candidate = NULL;
-	// int count = fEevdfRunQueue.Count(); // Avoid calling in loop if possible
-	// for (int i = 0; i < count; ++i) {
-	//    ThreadData* temp = fEevdfRunQueue.PeekAt(i); // Requires PeekAt or iterator
-	//    if (temp && (system_time() >= temp->EligibleTime() || temp->Lag() >= 0)) {
-	//        candidate = temp; // This is the first eligible one due to VD order
-	//        break;
-	//    }
-	// }
-	// return candidate;
+	// Iterates through the EEVDF run queue (by popping and re-adding elements
+	// not chosen) to find the first thread (by VirtualDeadline order) that is
+	// currently eligible (system_time() >= EligibleTime()).
+	// The chosen eligibleCandidate is *not* re-added to the queue.
 	ThreadData* eligibleCandidate = NULL;
-	ThreadData* tempPopped[MAX_PEEK_ELIGIBLE_CANDIDATES];
-	int poppedCount = 0;
+	// Use a DoublyLinkedList to temporarily store threads popped but not chosen.
+	// This is because we don't know how many we might pop before finding an eligible one.
+	DoublyLinkedList<ThreadData> temporarilyPoppedList;
+
 	bigtime_t now = system_time();
 
-	for (int i = 0; i < MAX_PEEK_ELIGIBLE_CANDIDATES && !fEevdfRunQueue.IsEmpty(); ++i) {
-		ThreadData* candidate = fEevdfRunQueue.PopMinimum();
+	// Iterate through the heap by popping.
+	// We are looking for the first eligible thread based on VirtualDeadline order.
+	while (!fEevdfRunQueue.IsEmpty()) {
+		ThreadData* candidate = fEevdfRunQueue.PopMinimum(); // Pop from actual queue
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
 		if (now >= candidate->EligibleTime()) {
 			eligibleCandidate = candidate; // Found an eligible one
-			// Don't store it in tempPopped, it won't be re-added if chosen
+			// It's already popped, so we keep it out and will return it.
+			// The caller (ChooseNextThread) will call MarkDequeued() on it.
 			break;
 		} else {
-			tempPopped[poppedCount++] = candidate; // Store ineligible to re-add
-			TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 ", candidate thread %" B_PRId32 " (VD %" B_PRId64 ") not eligible (eligible_time %" B_PRId64 ", now %" B_PRId64 "). Checked %d/%d.\n",
-				ID(), candidate->GetThread()->id, candidate->VirtualDeadline(), candidate->EligibleTime(), now, i + 1, MAX_PEEK_ELIGIBLE_CANDIDATES);
+			// Not eligible, store it in our temporary list to re-add later.
+			// We use a specific link within ThreadData for this temporary list if available,
+			// or manage it externally if ThreadData doesn't have a generic extra link.
+			// For simplicity, assuming ThreadData can be linked in a DoublyLinkedList directly
+			// (it inherits from DoublyLinkedListLinkImpl).
+			temporarilyPoppedList.Add(candidate);
+			TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 ", candidate thread %" B_PRId32 " (VD %" B_PRId64 ") not eligible (eligible_time %" B_PRId64 ", now %" B_PRId64 ").\n",
+				ID(), candidate->GetThread()->id, candidate->VirtualDeadline(), candidate->EligibleTime(), now);
 		}
 	}
 
-	// Re-add any threads that were popped but not chosen (because they were ineligible)
-	for (int i = 0; i < poppedCount; ++i) {
-		fEevdfRunQueue.Add(tempPopped[i]);
+	// Re-add any threads that were popped from fEevdfRunQueue but found to be ineligible.
+	// They are re-added in the order they were popped, though Add will place them
+	// correctly by deadline.
+	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
+		fEevdfRunQueue.Add(toReAdd);
+		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
+		// becomes the head or if the queue was empty.
 	}
-
-	// If re-adds happened, fMinVirtualRuntime might need update.
-	// AddThread calls _UpdateMinVirtualRuntime, so it should be handled.
-	// If eligibleCandidate is NULL and poppedCount > 0, then _UpdateMinVirtualRuntime
-	// was called by the last Add(). If eligibleCandidate is non-NULL, it means it was
-	// popped and NOT re-added, so the queue top might change.
-	// _UpdateMinVirtualRuntime is also called by RemoveThread in reschedule if a thread is chosen.
-	// So, this should be okay without an explicit call here if Add/Remove are robust.
 
 	if (eligibleCandidate != NULL) {
-		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " found eligible thread %" B_PRId32 " (VD %" B_PRId64 ").\n",
+		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " chose eligible thread %" B_PRId32 " (VD %" B_PRId64 "). It has been removed from queue.\n",
 			ID(), eligibleCandidate->GetThread()->id, eligibleCandidate->GetVirtualDeadline());
 	} else {
-		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " no eligible thread found in top %d candidates.\n",
-			ID(), MAX_PEEK_ELIGIBLE_CANDIDATES);
+		TRACE_SCHED("PeekEligibleNextThread: CPU %" B_PRId32 " no eligible thread found.\n", ID());
 	}
+
+	// If eligibleCandidate is NULL, all popped items were re-added.
+	// If eligibleCandidate is non-NULL, it was removed.
+	// _UpdateMinVirtualRuntime is called by PopMinimum if root changes or queue becomes empty,
+	// and by Add if queue was empty or new item is root. This should cover most cases.
+	// A final _UpdateMinVirtualRuntime is called in reschedule() after ChooseNextThread,
+	// ensuring consistency.
 
 	return eligibleCandidate;
 }
@@ -433,17 +434,20 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	}
 
 	// Peek the next eligible thread from the EEVDF run queue.
-	ThreadData* nextThreadData = PeekEligibleNextThread(); // TODO EEVDF: Implement full eligibility check
+	ThreadData* nextThreadData = PeekEligibleNextThread(); // This is now non-const
 
 	if (nextThreadData != NULL) {
-		// An eligible thread was found.
-		// The caller (scheduler_reschedule) will remove it from fEevdfRunQueue.
+		// nextThreadData is already removed from the queue by PeekEligibleNextThread
+		// and needs to be marked as dequeued.
+		nextThreadData->MarkDequeued();
 	} else {
 		// No eligible, non-idle thread found. Choose this CPU's idle thread.
 		nextThreadData = fIdleThread;
 		if (nextThreadData == NULL) { // Should have been set during init
 			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());
 		}
+		// Idle thread is not "dequeued" from the EEVDF queue in the same way.
+		// Its fEnqueued state should reflect its special status.
 	}
 
 	ASSERT(nextThreadData != NULL);

@@ -132,6 +132,8 @@ init_common(int device, bool isClone)
 			memset(&gInfo->shared_info->edid_infos[i], 0, sizeof(edid1_info));
 			gInfo->shared_info->has_edid[i] = false;
 		}
+		gInfo->shared_info->use_temp_edid_for_proposal = false;
+		memset(&gInfo->shared_info->temp_edid_for_proposal, 0, sizeof(edid1_info));
 	}
 
 	infoDeleter.Detach();

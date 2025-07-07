@@ -358,6 +358,31 @@ device_ioctl(void* data, uint32 op, void* buffer, size_t bufferLength)
 			return B_OK;
 		}
 
+		case INTEL_SET_EDID_FOR_PROPOSAL:
+		{
+			if (buffer == NULL || bufferLength < sizeof(intel_set_edid_for_proposal_params))
+				return B_BAD_VALUE;
+
+			intel_set_edid_for_proposal_params params;
+			if (user_memcpy(&params, buffer, sizeof(intel_set_edid_for_proposal_params)) < B_OK)
+				return B_BAD_ADDRESS;
+
+			if (params.magic != INTEL_PRIVATE_DATA_MAGIC)
+				return B_BAD_VALUE;
+
+			acquire_sem(info->shared_info->accelerant_lock_sem);
+			if (params.use_it) {
+				memcpy(&info->shared_info->temp_edid_for_proposal, &params.edid, sizeof(edid1_info));
+				info->shared_info->use_temp_edid_for_proposal = true;
+			} else {
+				info->shared_info->use_temp_edid_for_proposal = false;
+				// Optionally memset temp_edid_for_proposal to 0 if desired when disabling
+			}
+			release_sem(info->shared_info->accelerant_lock_sem);
+
+			return B_OK;
+		}
+
 		case INTEL_GET_DISPLAY_COUNT:
 		{
 			if (buffer == NULL || bufferLength < sizeof(uint32))

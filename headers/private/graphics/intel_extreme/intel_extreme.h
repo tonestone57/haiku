@@ -468,6 +468,13 @@ struct intel_shared_info {
 	edid1_info		edid_infos[MAX_PIPES];	// EDID data read from the display connected to the corresponding pipe.
 	bool			has_edid[MAX_PIPES];	// True if EDID is available for the corresponding (array-indexed) pipe.
 
+	// Temporary storage for EDID context for intel_propose_display_mode calls.
+	// This allows user-space (via INTEL_SET_EDID_FOR_PROPOSAL ioctl) or internal logic
+	// (like intel_set_display_mode's validation pass) to prime a specific EDID
+	// to be used by the next call to the intel_propose_display_mode accelerant hook.
+	edid1_info		temp_edid_for_proposal;		// Holds the temporary EDID.
+	bool			use_temp_edid_for_proposal;	// If true, intel_propose_display_mode will use temp_edid_for_proposal.
+
 	// addr_t			frame_buffer; // Replaced by per-pipe frame_buffer_base in pipe_display_configs
 	// uint32			frame_buffer_offset; // Replaced by per-pipe frame_buffer_offset in pipe_display_configs
 
@@ -604,7 +611,18 @@ enum {
 	INTEL_GET_DISPLAY_INFO,
 	INTEL_SET_DISPLAY_CONFIG,
 	INTEL_GET_DISPLAY_CONFIG,
-	INTEL_PROPOSE_DISPLAY_CONFIG
+	INTEL_PROPOSE_DISPLAY_CONFIG,
+	INTEL_SET_EDID_FOR_PROPOSAL // IOCTL to set a temporary EDID in shared_info for the next
+								// call to the PROPOSE_DISPLAY_MODE accelerant hook.
+								// Allows user-space to validate modes against specific EDIDs.
+};
+
+// Structure for INTEL_SET_EDID_FOR_PROPOSAL ioctl
+struct intel_set_edid_for_proposal_params {
+	uint32		magic;      // Should be INTEL_PRIVATE_DATA_MAGIC
+	edid1_info	edid;       // The EDID data to temporarily store for proposal.
+	bool		use_it;     // If true, temp_edid_for_proposal will be used by next PROPOSE_DISPLAY_MODE.
+							// If false, temp_edid_for_proposal mechanism is disabled.
 };
 
 // Structures for multi-monitor IOCTLs

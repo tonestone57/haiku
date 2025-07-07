@@ -349,12 +349,53 @@ intel_propose_display_mode(display_mode* target, const display_mode* low,
 {
 	CALLED();
 
-	display_mode mode = *target;
+	display_mode original_mode = *target; // Keep a copy for TRACE
+	edid1_info* edid_to_use = NULL;
+	bool use_specific_edid = false;
 
-	if (sanitize_display_mode(*target)) {
+	// Check if a temporary EDID has been set for this proposal call
+	if (gInfo->shared_info->use_temp_edid_for_proposal) {
+		edid_to_use = &gInfo->shared_info->temp_edid_for_proposal;
+		use_specific_edid = true;
+		TRACE("%s: Using temp_edid_for_proposal.\n", __func__);
+	} else {
+		// Fallback to primary display's EDID or VESA EDID
+		uint32 primaryPipeArrayIndex = gInfo->shared_info->primary_pipe_index;
+		if (primaryPipeArrayIndex < MAX_PIPES && gInfo->shared_info->has_edid[primaryPipeArrayIndex]) {
+			edid_to_use = &gInfo->shared_info->edid_infos[primaryPipeArrayIndex];
+			use_specific_edid = true;
+			TRACE("%s: Using primary display (pipe array idx %u) EDID for proposal.\n", __func__, primaryPipeArrayIndex);
+		} else if (gInfo->shared_info->has_vesa_edid_info) {
+			edid_to_use = &gInfo->shared_info->vesa_edid_info;
+			use_specific_edid = true;
+			TRACE("%s: Using VESA EDID for proposal.\n", __func__);
+		} else {
+			TRACE("%s: No specific EDID available for proposal, using generic constraints.\n", __func__);
+		}
+	}
+
+	// Prepare constraints (copied from the global sanitize_display_mode wrapper)
+	uint16 pixelCount = 1;
+	if (gInfo->shared_info->device_type.InGroup(INTEL_GROUP_Gxx)
+			|| gInfo->shared_info->device_type.InGroup(INTEL_GROUP_96x)
+			|| gInfo->shared_info->device_type.InGroup(INTEL_GROUP_94x)
+			|| gInfo->shared_info->device_type.InGroup(INTEL_GROUP_91x)
+			|| gInfo->shared_info->device_type.InFamily(INTEL_FAMILY_8xx)) {
+		pixelCount = 2;
+	}
+	display_constraints constraints = {
+		320, 4096, 200, 4096, // resolution
+		gInfo->shared_info->pll_info.min_frequency, // pixel clock
+		gInfo->shared_info->pll_info.max_frequency,
+		{pixelCount, 0, 8160, 32, 8192, 0, 8192}, // horizontal
+		{1, 1, 8190, 2, 8192, 1, 8192}  // vertical
+	};
+
+	// Call the Haiku API sanitize_display_mode directly with the chosen EDID context
+	if (sanitize_display_mode(*target, constraints, edid_to_use)) {
 		TRACE("Video mode was adjusted by sanitize_display_mode\n");
 		TRACE("Initial mode: Hd %d Hs %d He %d Ht %d Vd %d Vs %d Ve %d Vt %d\n",
-			mode.timing.h_display, mode.timing.h_sync_start,
+			original_mode.timing.h_display, original_mode.timing.h_sync_start,
 			mode.timing.h_sync_end, mode.timing.h_total,
 			mode.timing.v_display, mode.timing.v_sync_start,
 			mode.timing.v_sync_end, mode.timing.v_total);
@@ -487,31 +528,68 @@ intel_set_display_mode(display_mode* mode)
 	uint32 first_active_pipe_color_mode = 0;
 
 	// Main loop: Iterate through TARGET pipe configurations
+	// Pass 1: Validate all targeted active display modes
 	for (uint32 pipeArrIdx = 0; pipeArrIdx < MAX_PIPES; pipeArrIdx++) {
 		struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[pipeArrIdx];
 
-		if (!pipeConfig.is_active) { // Target state from shared_info
+		if (!pipeConfig.is_active) // Only validate modes that are intended to be active
 			continue;
+
+		display_mode target_mode_for_pipe = pipeConfig.current_mode;
+
+		// Set temporary EDID context for this specific pipe for intel_propose_display_mode
+		bool original_use_temp_edid = sharedInfo.use_temp_edid_for_proposal;
+		edid1_info original_temp_edid; // Not strictly needed to save if we always overwrite or clear
+		if (sharedInfo.use_temp_edid_for_proposal) {
+			// This case should ideally not be hit if we reset the flag after each use.
+			// For safety, copy current temp if it was somehow set.
+			memcpy(&original_temp_edid, &sharedInfo.temp_edid_for_proposal, sizeof(edid1_info));
 		}
 
-		display_mode target_mode_for_pipe = pipeConfig.current_mode; // Mode set by IOCTL or single fallback
-		uint32 currentPipeColorMode, currentPipeBytesPerRow, currentPipeBitsPerPixel;
+		if (sharedInfo.has_edid[pipeArrIdx]) {
+			memcpy(&sharedInfo.temp_edid_for_proposal, &sharedInfo.edid_infos[pipeArrIdx], sizeof(edid1_info));
+			sharedInfo.use_temp_edid_for_proposal = true;
+			TRACE("%s: Priming temp EDID for pipe array index %u for proposal.\n", __func__, pipeArrIdx);
+		} else {
+			sharedInfo.use_temp_edid_for_proposal = false;
+			TRACE("%s: No specific EDID for pipe array index %u; proposal will use fallback.\n", __func__, pipeArrIdx);
+		}
 
-		// Propose mode again here, ideally with per-pipe EDID if sanitize_display_mode could take it.
-		// For now, we assume modes in shared_info are either pre-validated or will use primary EDID context.
-		display_mode proposed_mode_final = target_mode_for_pipe;
-		if (intel_propose_display_mode(&proposed_mode_final, &proposed_mode_final, &proposed_mode_final) != B_OK) {
+		if (intel_propose_display_mode(&target_mode_for_pipe, &target_mode_for_pipe, &target_mode_for_pipe) != B_OK) {
 			ERROR("%s: Mode for pipe array index %d rejected by intel_propose_display_mode.\n", __func__, pipeArrIdx);
-			pipeConfig.is_active = false;
-			if (pipeConfig.frame_buffer_base != 0) {
+			pipeConfig.is_active = false; // Mark this part of the config as failed
+		} else {
+			pipeConfig.current_mode = target_mode_for_pipe; // Store the (potentially) sanitized mode
+		}
+
+		// Restore/clear temporary EDID state
+		if (original_use_temp_edid) { // Restore only if it was set before our priming
+			memcpy(&sharedInfo.temp_edid_for_proposal, &original_temp_edid, sizeof(edid1_info));
+			sharedInfo.use_temp_edid_for_proposal = true;
+		} else {
+			sharedInfo.use_temp_edid_for_proposal = false;
+		}
+	}
+
+
+	// Pass 2: Allocate resources and program hardware for validated active displays
+	uint32 successfully_configured_displays = 0;
+	uint32 first_active_pipe_color_mode = 0; // For a single call to program_pipe_color_modes
+
+	for (uint32 pipeArrIdx = 0; pipeArrIdx < MAX_PIPES; pipeArrIdx++) {
+		struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[pipeArrIdx];
+
+		if (!pipeConfig.is_active) { // Skip if marked inactive by user or failed validation in Pass 1
+			if (pipeConfig.frame_buffer_base != 0) { // Ensure any old buffer for a now-inactive pipe is freed
 				intel_free_memory(pipeConfig.frame_buffer_base);
 				memset(&pipeConfig, 0, sizeof(struct intel_shared_info::per_pipe_display_info));
 			}
 			continue;
 		}
-		target_mode_for_pipe = proposed_mode_final;
-		pipeConfig.current_mode = target_mode_for_pipe; // Store the sanitized mode
 
+		// Mode is already validated and stored in pipeConfig.current_mode
+		display_mode target_mode_for_pipe = pipeConfig.current_mode;
+		uint32 currentPipeColorMode, currentPipeBytesPerRow, currentPipeBitsPerPixel;
 		get_color_space_format(target_mode_for_pipe, currentPipeColorMode, currentPipeBytesPerRow, currentPipeBitsPerPixel);
 
 		size_t requiredSize = currentPipeBytesPerRow * target_mode_for_pipe.virtual_height;

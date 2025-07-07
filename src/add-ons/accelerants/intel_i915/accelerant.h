@@ -51,7 +51,9 @@ enum {
 	INTEL_I915_PROPOSE_DISPLAY_CONFIG,    // User-space might call this to validate a whole setup
 	INTEL_I915_SET_EDID_FOR_PROPOSAL,
 	INTEL_I915_WAIT_FOR_DISPLAY_CHANGE,
-	INTEL_I915_PROPOSE_SPECIFIC_MODE // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
+	INTEL_I915_PROPOSE_SPECIFIC_MODE, // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
+	INTEL_I915_GET_PIPE_DISPLAY_MODE,
+	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE
 };
 
 // Args for INTEL_I915_PROPOSE_SPECIFIC_MODE
@@ -60,8 +62,21 @@ typedef struct {
 	display_mode low_bound;   // Input: lower bound for proposal
 	display_mode high_bound;  // Input: upper bound for proposal
 	display_mode result_mode; // Output: proposed/sanitized mode
+	uint8_t      pipe_id;     // Input: which pipe this proposal is for
 	// magic number can be added if desired for validation
 } intel_i915_propose_specific_mode_args;
+
+// Args for INTEL_I915_GET_PIPE_DISPLAY_MODE
+typedef struct {
+	uint8_t      pipe_id;     // Input: which pipe to query
+	display_mode pipe_mode;   // Output: the mode of that pipe
+} intel_i915_get_pipe_display_mode_args;
+
+// Args for INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE
+typedef struct {
+	uint8_t pipe_id;  // Input
+	sem_id  sem;      // Output
+} intel_i915_get_retrace_semaphore_args;
 
 
 // Structures for the new multi-monitor IOCTLs

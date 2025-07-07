@@ -38,7 +38,30 @@ static void     intel_i915_get_accelerant_clone_info(void *data) { GET_ACCELERAN
 static status_t intel_i915_clone_accelerant(void *data) { return CLONE_ACCELERANT(data); }
 static void     intel_i915_uninit_accelerant(void) { UNINIT_ACCELERANT(); }
 static status_t intel_i915_get_accelerant_device_info(accelerant_device_info *adi) { return GET_ACCELERANT_DEVICE_INFO(adi); }
-static sem_id   intel_i915_accelerant_retrace_semaphore(void) { return ACCELERANT_RETRACE_SEMAPHORE(); }
+
+static sem_id
+intel_i915_accelerant_retrace_semaphore(void)
+{
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE("ACCELERANT_RETRACE_SEMAPHORE: Accelerant not initialized.\n");
+		return B_BAD_VALUE;
+	}
+
+	intel_i915_get_retrace_semaphore_args args;
+	args.pipe_id = gInfo->target_pipe;
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE, &args, sizeof(args)) == B_OK) {
+		return args.sem;
+	}
+
+	TRACE("ACCELERANT_RETRACE_SEMAPHORE: IOCTL INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE failed for pipe %d. Falling back to global sem.\n", gInfo->target_pipe);
+	// Fallback to global one from shared_info if IOCTL fails or not implemented
+	if (gInfo->shared_info) {
+		return gInfo->shared_info->vblank_sem;
+	}
+
+	return B_ERROR; // Should ideally not happen if init was successful
+}
 
 // Mode Configuration
 static uint32   intel_i915_accelerant_mode_count(void) {
@@ -59,6 +82,7 @@ static status_t intel_i915_propose_display_mode(display_mode *target, const disp
 	args.target_mode = *target;
 	args.low_bound = *low;
 	args.high_bound = *high;
+	args.pipe_id = gInfo->target_pipe; // Set the pipe for the IOCTL
 	// args.magic = INTEL_I915_PRIVATE_DATA_MAGIC; // If using magic
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_PROPOSE_SPECIFIC_MODE, &args, sizeof(args));
@@ -74,14 +98,39 @@ static status_t intel_i915_set_display_mode(display_mode *mode_to_set) {
 	// the primary display in a single-head fallback scenario if no config
 	// was previously staged by an ioctl.
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	// The mode_to_set here might be for a specific pipe if the SET_DISPLAY_CONFIG
+	// has already configured multiple heads. The kernel needs to know which pipe
+	// this mode refers to if it's making fine adjustments.
+	// However, the main mechanism is SET_DISPLAY_CONFIG.
+	// For now, we pass the mode as is; the kernel might use it for the primary
+	// or the pipe associated with the fd if it can determine that.
+	// A more robust SET_DISPLAY_MODE would also take a pipe_id.
+	// For now, relying on SET_DISPLAY_CONFIG to do the heavy lifting for multi-head.
 	return ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
 }
 static status_t intel_i915_get_display_mode(display_mode *current_mode) {
-	if (!gInfo || !gInfo->shared_info || !current_mode) return B_BAD_VALUE;
-	// This assumes current_mode in shared_info is relevant for this accelerant instance (head).
-	// If shared_info is truly global, kernel would need to populate it per-head or this needs an IOCTL.
-	*current_mode = gInfo->shared_info->current_mode;
-	return B_OK;
+	if (!gInfo || gInfo->device_fd < 0 || !current_mode) return B_BAD_VALUE;
+
+	intel_i915_get_pipe_display_mode_args args;
+	args.pipe_id = gInfo->target_pipe;
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_GET_PIPE_DISPLAY_MODE, &args, sizeof(args));
+	if (status == B_OK) {
+		*current_mode = args.pipe_mode;
+	} else {
+		TRACE("GET_DISPLAY_MODE: IOCTL INTEL_I915_GET_PIPE_DISPLAY_MODE failed for pipe %d: %s.\n",
+			gInfo->target_pipe, strerror(status));
+		// Fallback to shared_info as a last resort, though it might be inaccurate for clones
+		if (gInfo->shared_info) {
+			TRACE("GET_DISPLAY_MODE: Falling back to gInfo->shared_info->current_mode for pipe %d.\n", gInfo->target_pipe);
+			*current_mode = gInfo->shared_info->current_mode;
+			// If this is a clone and shared_info->current_mode is for primary, this is not ideal.
+			// The IOCTL is the correct way.
+		} else {
+			return B_ERROR; // No way to get the mode
+		}
+	}
+	return status;
 }
 static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fb_config) {
 	return GET_FRAME_BUFFER_CONFIG(fb_config);

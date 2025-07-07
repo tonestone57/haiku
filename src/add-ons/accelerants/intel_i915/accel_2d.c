@@ -69,9 +69,11 @@ _log_tiling_generalization_status()
 		if (gen == 7) {
 			syslog(LOG_INFO, "intel_i915_accelerant_2d: Using Gen7 specific tiling logic for XY blits.");
 		} else if (gen == 8 || gen == 9) {
-			syslog(LOG_INFO, "intel_i915_accelerant_2d: Using Gen7-like tiling logic for Gen %u XY blits. PRM verification needed for full correctness.", gen);
-		} else if (gen != 0) {
-			syslog(LOG_WARNING, "intel_i915_accelerant_2d: WARNING! Tiling logic for unknown Gen %u is UNTESTED and using Gen7 assumptions for XY blits.", gen);
+			syslog(LOG_INFO, "intel_i915_accelerant_2d: Using Gen7-like tiling logic for Gen %u XY blits. PRM verification strongly recommended.", gen);
+		} else if (gen > 9) {
+			syslog(LOG_WARNING, "intel_i915_accelerant_2d: WARNING! Tiling command flags for Gen %u are UNKNOWN and thus DISABLED for XY blits. Surface tiling properties are still set by kernel.", gen);
+		} else if (gen != 0 && gen < 7) {
+			syslog(LOG_INFO, "intel_i915_accelerant_2d: Tiling command flags for Gen %u (pre-Gen7) are not explicitly set by this accelerant for XY blits.", gen);
 		}
 		status_logged = true;
 	}
@@ -223,7 +225,12 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count,
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				// Apply tiling flags for known/assumed compatible generations
+				if (gen == 7 || gen == 8 || gen == 9) {
+					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				}
+				// For gen > 9, specific tiling flags are unknown, so not set.
+				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
@@ -298,10 +305,13 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (gen >= 7) {
+				// Apply tiling flags for known/assumed compatible generations
+				if (gen == 7 || gen == 8 || gen == 9) {
 					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
 					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
 				}
+				// For gen > 9, specific tiling flags are unknown, so not set.
+				// For gen < 7, these specific Gen7+ flags are not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
@@ -329,10 +339,54 @@ cleanup_chroma_key:
 }
 
 static void
-intel_i915_screen_to_screen_scaled_blit(engine_token* et, scaled_blit_params *list, uint32 count, bool enable_hw_clip) {
-	// enable_hw_clip is ignored for this stub
-	TRACE("s2s_scaled_blit: Stub, %lu ops. HW Accel N/A.\n", count);
+intel_i915_screen_to_screen_scaled_filtered_blit(engine_token* et,
+    scaled_blit_params *list, uint32 count, bool enable_hw_clip)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) {
+		TRACE("s2s_scaled_blit: No gInfo or no ops.\n");
+		return;
+	}
+	_log_tiling_generalization_status();
+	// uint8_t gen = gInfo->shared_info->graphics_generation; // For future use
+
+	// IMPORTANT: This function is a conceptual outline.
+	// Actual implementation requires deep PRM knowledge for setting up:
+	// 1. Surface states (for source and destination)
+	// 2. Sampler states (for bilinear filtering from source)
+	// 3. Vertex formats and vertex buffers (defining the destination quad)
+	// 4. Shader programs (vertex and fragment shaders for texture sampling)
+	// 5. Viewport, Scissor, Blend states, etc.
+	// 6. Binding table entries to link shaders to surfaces.
+	// This is far more complex than XY_SRC_COPY_BLT and typically uses the Render Command Streamer (RCS).
+
+	TRACE("s2s_scaled_filtered_blit: %lu ops. HW Accel for this is COMPLEX and NOT fully implemented - conceptual outline only.\n", count);
+
+	// Fallback: Perform an UN SCALED blit for the first item as a placeholder.
+	// This makes the function somewhat testable without full RCS programming.
+	// A real driver might fall back to software scaling if HW is too complex or unavailable.
+	if (count > 0) {
+		blit_params unscaled_op;
+		unscaled_op.src_left = list[0].src_left;
+		unscaled_op.src_top = list[0].src_top;
+		unscaled_op.dest_left = list[0].dest_left;
+		unscaled_op.dest_top = list[0].dest_top;
+		// Use the SMALLER of src/dest width/height for this unscaled example to ensure it fits
+		unscaled_op.width = min_c(list[0].src_width, list[0].dest_width);
+		unscaled_op.height = min_c(list[0].src_height, list[0].dest_height);
+
+		if (unscaled_op.width > 0 && unscaled_op.height > 0) {
+			TRACE("s2s_scaled_filtered_blit: Performing an UN SCALED blit for the first item (size %dx%d) as a placeholder.\n",
+				unscaled_op.width, unscaled_op.height);
+			// Use the existing screen_to_screen_blit with enable_hw_clip flag
+			intel_i915_screen_to_screen_blit(et, &unscaled_op, 1, enable_hw_clip);
+		} else {
+			TRACE("s2s_scaled_filtered_blit: Placeholder unscaled blit for first item resulted in zero dimension.\n");
+		}
+		// For a full implementation, one would loop through all 'count' items.
+	}
+	// Due to complexity and need for PRM, full RCS-based implementation is deferred.
 }
+
 
 void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count,
 	bool enable_hw_clip) { // Added enable_hw_clip
@@ -368,7 +422,12 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				// Apply tiling flags for known/assumed compatible generations
+				if (gen == 7 || gen == 8 || gen == 9) {
+					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				}
+				// For gen > 9, specific tiling flags are unknown, so not set.
+				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
@@ -418,7 +477,12 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				// Apply tiling flags for known/assumed compatible generations
+				if (gen == 7 || gen == 8 || gen == 9) {
+					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				}
+				// For gen > 9, specific tiling flags are unknown, so not set.
+				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
@@ -467,10 +531,13 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				if (gen >= 7) {
+				// Apply tiling flags for known/assumed compatible generations
+				if (gen == 7 || gen == 8 || gen == 9) {
 					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
 					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
 				}
+				// For gen > 9, specific tiling flags are unknown, so not set.
+				// For gen < 7, these specific Gen7+ flags are not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row; // Dest pitch

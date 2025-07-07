@@ -317,6 +317,7 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		memset(devInfo->shared_info, 0, sizeof(intel_i915_shared_info));
 		devInfo->shared_info->mode_list_area = -1;
 
+		// Populate basic shared_info fields
 		devInfo->shared_info->vendor_id = devInfo->pciinfo.vendor_id;
 		devInfo->shared_info->device_id = devInfo->runtime_caps.device_id;
 		devInfo->shared_info->revision = devInfo->runtime_caps.revision_id;
@@ -328,12 +329,61 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		devInfo->shared_info->graphics_generation = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
 		devInfo->shared_info->fb_tiling_mode = I915_TILING_NONE; // Default, will be updated by display driver if FB is tiled
 
+		// Populate extended hardware capabilities in shared_info for userspace (e.g., Mesa)
+		// Tiling support: Gen7-9 generally support Linear, X, and Y tiling for scanout and rendering.
+		devInfo->shared_info->supported_tiling_modes = (1 << I915_TILING_NONE)
+			| (1 << I915_TILING_X) | (1 << I915_TILING_Y);
+
+		// Max surface dimensions: These are typical for Gen7-9. Precise values can vary by SKU.
+		// Refer to PRMs for exact limits if critical. 8192 is a common texture limit.
+		devInfo->shared_info->max_texture_2d_width = 8192;
+		devInfo->shared_info->max_texture_2d_height = 8192;
+
+		// Max Buffer Object size: Heuristic, could be limited by GTT size or system memory.
+		// Initial default, updated after GTT init.
+		devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024; // 128MB default
+
+		// Alignment requirements
+		devInfo->shared_info->base_address_alignment_bytes = B_PAGE_SIZE; // BOs are page-aligned.
+		devInfo->shared_info->pitch_alignment_bytes = 64; // Common minimum for linear surfaces.
+		                                                 // Tiled surfaces have stricter alignment handled by stride calculation.
+
+		// Copy core capabilities from kernel structures
+		devInfo->shared_info->platform_engine_mask = devInfo->static_caps.platform_engine_mask;
+		devInfo->shared_info->graphics_ip = devInfo->runtime_caps.graphics_ip;
+		devInfo->shared_info->media_ip = devInfo->runtime_caps.media_ip; // Assumes media_ip is init'd in runtime_caps
+
+		devInfo->shared_info->has_llc = devInfo->static_caps.has_llc;
+		devInfo->shared_info->has_gt_uc = devInfo->static_caps.has_gt_uc;
+		devInfo->shared_info->has_logical_ring_contexts = devInfo->static_caps.has_logical_ring_contexts;
+		devInfo->shared_info->ppgtt_size_bits = devInfo->static_caps.initial_ppgtt_size_bits;
+		devInfo->shared_info->ppgtt_type = (uint8_t)devInfo->static_caps.initial_ppgtt_type;
+		devInfo->shared_info->dma_mask_size = devInfo->static_caps.dma_mask_size;
+		devInfo->shared_info->gt_type = devInfo->static_caps.gt_type;
+		devInfo->shared_info->has_reset_engine = devInfo->static_caps.has_reset_engine;
+		devInfo->shared_info->has_64bit_reloc = devInfo->static_caps.has_64bit_reloc;
+		devInfo->shared_info->has_l3_dpf = devInfo->static_caps.has_l3_dpf;
+
+
 		// Call runtime caps init after MMIO is mapped and basic shared_info is populated
 		if ((status = intel_i915_runtime_caps_init(devInfo)) != B_OK) TRACE("Runtime caps init failed: %s
 ", strerror(status));
 
 		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s
 ", strerror(status));
+		// Update max_bo_size_bytes again now that GTT is initialized
+		if (devInfo->gtt_aperture_actual_size > 0) {
+			// A heuristic: max BO size could be half the GTT aperture, or a fixed large value.
+			// Mesa might have its own limits or query OS for available memory.
+			// For now, let's cap at 2GB or half GTT, whichever is smaller.
+			uint64_t half_gtt = devInfo->gtt_aperture_actual_size / 2;
+			uint64_t two_gb = 2ULL * 1024 * 1024 * 1024;
+			devInfo->shared_info->max_bo_size_bytes = min_c(half_gtt, two_gb);
+			if (devInfo->shared_info->max_bo_size_bytes == 0) // if GTT was tiny
+				devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024; // ensure a fallback
+		}
+
+
 		if ((status = intel_i915_irq_init(devInfo)) != B_OK) TRACE("IRQ init failed: %s
 ", strerror(status));
 		if ((status = intel_i915_vbt_init(devInfo)) != B_OK) TRACE("VBT init failed: %s

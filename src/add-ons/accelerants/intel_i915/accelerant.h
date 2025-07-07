@@ -195,6 +195,44 @@ typedef struct {
 	uint32			min_pixel_clock;
 	uint32			max_pixel_clock;
 	display_mode	preferred_mode_suggestion;
+
+	// --- Extended Hardware Capabilities (for Mesa/Gallium & general driver use) ---
+	// Tiling capabilities
+	uint32			supported_tiling_modes;     // Bitmask: (1<<I915_TILING_NONE) | (1<<I915_TILING_X) | (1<<I915_TILING_Y)
+	                                            // Indicates tiling modes supported for GEM BOs.
+
+	// Surface/Buffer limits
+	uint32			max_texture_2d_width;       // Maximum width for a 2D texture/surface.
+	uint32			max_texture_2d_height;      // Maximum height for a 2D texture/surface.
+	uint64			max_bo_size_bytes;          // Maximum size for a single GEM Buffer Object.
+	uint32			base_address_alignment_bytes; // Required alignment for BO base addresses (usually page size).
+	uint32			pitch_alignment_bytes;      // Minimum pitch (stride) alignment in bytes.
+
+	// Hardware/Platform Identification & Core Features
+	uint32			platform_engine_mask;       // Bitmask of available hardware engines (RCS0, BCS0, etc.).
+	struct intel_ip_version graphics_ip;        // Graphics IP (Render Engine) version (ver.rel.step).
+	struct intel_ip_version media_ip;           // Media IP (Video Engine) version (ver.rel.step).
+	uint8_t			gt_type;                    // Graphics tier (GT1, GT2, GT3, etc.).
+
+	// Memory & Cache Features
+	bool			has_llc;                    // Has Last Level Cache shared with CPU.
+	uint8_t			dma_mask_size;              // DMA addressable bits (e.g., 39-bit for 512GB).
+	bool			has_l3_dpf;                 // Has L3 Dynamic Parity Feature.
+
+	// Execution & Context Features
+	bool			has_logical_ring_contexts;  // Supports Execlists (logical ring contexts).
+	bool			has_gt_uc;                  // Has GuC (Graphics uController).
+	bool			has_reset_engine;           // Supports engine reset capability.
+	bool			has_64bit_reloc;            // Supports 64-bit relocations in batch buffers.
+	uint8_t			ppgtt_type;                 // Type of PPGTT supported (enum intel_ppgtt_type).
+	uint8_t			ppgtt_size_bits;            // Effective addressable bits for PPGTT.
+
+	// Add other boolean caps or specific feature parameters as needed by Mesa/Gallium
+	// For example:
+	// bool has_media_pipeline; (if distinct from general media_ip version)
+	// uint32_t max_render_targets;
+	// uint32_t max_threads_per_eu;
+	// etc.
 } intel_i915_shared_info;
 
 typedef struct {

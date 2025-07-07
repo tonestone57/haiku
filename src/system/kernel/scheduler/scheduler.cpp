@@ -1500,7 +1500,9 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 	CPUEntry* bestCPU = NULL;
 	// Initialize bestLoadScore: if preferring busiest, start low; if preferring least busy, start high.
 	float bestLoadScore = preferBusiest ? -1.0f : 2.0f;
-	// Initialize bestTaskCountScore similarly for tie-breaking.
+	// Initialize bestTaskCountScore. Its meaning depends on 'preferBusiest'.
+	// If preferBusiest == true, it stores total tasks (higher is better for tie-break).
+	// If preferBusiest == false, it stores high-priority tasks (lower is better for tie-break).
 	int32 bestTaskCountScore = preferBusiest ? -1 : 0x7fffffff;
 
 	CPUSet coreCPUs = core->CPUMask();
@@ -1556,32 +1558,36 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (effectiveLoad > bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// Tie-break: prefer CPU with more high-priority tasks.
-					// As noted in original comment, this tie-breaker's utility for 'preferBusiest'
-					// might warrant review, but current logic is kept.
+					// Tie-break for preferBusiest: prefer CPU with more total tasks.
 					currentCPU->LockRunQueue();
-					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
+					int32 currentTotalTasks = currentCPU->GetTotalThreadCount();
 					currentCPU->UnlockRunQueue();
-					if (currentHighPrioTasks > bestTaskCountScore) isBetter = true;
+					if (currentTotalTasks > bestTaskCountScore)
+						isBetter = true;
 				}
 			} else { // Prefer least busy (lower effectiveLoad is better)
 				if (effectiveLoad < bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// Tie-break: prefer CPU with fewer high-priority tasks.
+					// Tie-break for preferLeastBusy: prefer CPU with fewer high-priority tasks.
 					currentCPU->LockRunQueue();
 					int32 currentHighPrioTasks = _get_cpu_high_priority_task_count_locked(currentCPU);
 					currentCPU->UnlockRunQueue();
-					if (currentHighPrioTasks < bestTaskCountScore) isBetter = true;
+					if (currentHighPrioTasks < bestTaskCountScore)
+						isBetter = true;
 				}
 			}
 		}
 
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
-			// Update task count score for future tie-breaking.
+			// Update task count score for future tie-breaking based on mode.
 			currentCPU->LockRunQueue();
-			bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
+			if (preferBusiest) {
+				bestTaskCountScore = currentCPU->GetTotalThreadCount();
+			} else {
+				bestTaskCountScore = _get_cpu_high_priority_task_count_locked(currentCPU);
+			}
 			currentCPU->UnlockRunQueue();
 			bestCPU = currentCPU;
 		}

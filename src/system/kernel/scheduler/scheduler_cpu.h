@@ -242,7 +242,8 @@ public:
 						void			Dump();
 };
 
-class PackageEntry : public DoublyLinkedListLinkImpl<PackageEntry> {
+class PackageEntry : public DoublyLinkedListLinkImpl<PackageEntry>,
+	public MinMaxHeapLinkImpl<PackageEntry, int32> {
 public:
 											PackageEntry();
 
@@ -263,13 +264,18 @@ public:
 
 	// Public getters
 	inline				int32				PackageID() const { return fPackageID; }
+	inline				int32				GetLoad() const; // To be implemented
 	inline				int32				IdleCoreCountNoLock() const { return fIdleCoreCount; }
 	inline				int32				CoreCountNoLock() const { return fCoreCount; }
 	inline				rw_spinlock&		CoreLock() { return fCoreLock; }
 	inline const		rw_spinlock&		CoreLock() const { return fCoreLock; }
 
+						// Method to update the package's load metric
+						void				UpdateLoad();
+
 private:
 						int32				fPackageID;
+						int32				fLoad;		// Average load of active cores in this package
 
 						DoublyLinkedList<CoreEntry>	fIdleCores;
 						int32				fIdleCoreCount;
@@ -304,6 +310,12 @@ extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
+
+// Heaps for package-level load balancing
+typedef MinMaxHeap<PackageEntry, int32> PackageLoadHeap;
+extern PackageLoadHeap gPackageLoadHeap;
+extern PackageLoadHeap gPackageHighLoadHeap;
+extern rw_spinlock gPackageHeapsLock;
 
 
 inline void

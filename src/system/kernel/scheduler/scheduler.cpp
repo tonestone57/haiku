@@ -887,6 +887,8 @@ init()
 	new(&gCoreLoadHeap) CoreLoadHeap(actualCoreCount);
 	new(&gCoreHighLoadHeap) CoreLoadHeap(actualCoreCount);
 	new(&gIdlePackageList) IdlePackageList;
+	new(&gPackageLoadHeap) PackageLoadHeap(packageCount);
+	new(&gPackageHighLoadHeap) PackageLoadHeap(packageCount);
 
 	// Initialize Package IDs first
 	for (int32 i = 0; i < actualPackageCount; ++i) {
@@ -942,6 +944,18 @@ init()
 		// PackageEntry and CoreEntry are now initialized, and PackageEntry::fCoreCount is set.
 		gCPUEntries[i].Init(i, currentCore);
 		currentCore->AddCPU(&gCPUEntries[i]); // This might call PackageEntry::AddIdleCore
+	}
+
+	// Add all packages to the gPackageLoadHeap initially
+	// Ensure gPackageEntries, packageCount are correctly scoped or passed if actualPackageCount is different
+	// Assuming packageCount from build_topology_mappings is the correct count for gPackageEntries array.
+	for (int32 i = 0; i < packageCount; i++) {
+		// Calculate initial load. Since all cores/CPUs are just initialized and idle,
+		// this should result in a load of 0 for the package.
+		gPackageEntries[i].UpdateLoad();
+		gPackageLoadHeap.Insert(&gPackageEntries[i], gPackageEntries[i].GetLoad());
+		TRACE_SCHEDULER("scheduler_init: Added package %" B_PRId32 " to gPackageLoadHeap with initial load %" B_PRId32 "\n",
+			gPackageEntries[i].PackageID(), gPackageEntries[i].GetLoad());
 	}
 
 	packageEntriesDeleter.Detach();

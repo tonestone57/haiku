@@ -33,6 +33,10 @@ IdlePackageList gIdlePackageList;
 rw_spinlock gIdlePackageLock = B_RW_SPINLOCK_INITIALIZER;
 int32 gPackageCount;
 
+PackageLoadHeap gPackageLoadHeap;
+PackageLoadHeap gPackageHighLoadHeap;
+rw_spinlock gPackageHeapsLock = B_RW_SPINLOCK_INITIALIZER;
+
 
 }	// namespace Scheduler
 
@@ -1143,7 +1147,8 @@ CoreLoadHeap::Dump()
 PackageEntry::PackageEntry()
 	:
 	fIdleCoreCount(0),
-	fCoreCount(0) // Should be initialized by counting cores in Init or when cores are added
+	fCoreCount(0), // Should be initialized by counting cores in Init or when cores are added
+	fLoad(0)
 {
 	B_INITIALIZE_RW_SPINLOCK(&fCoreLock);
 }
@@ -1152,29 +1157,143 @@ PackageEntry::PackageEntry()
 void
 PackageEntry::Init(int32 id)
 {
-	// Initializes this PackageEntry for the CPU package/socket `id`.
-	// fCoreCount is determined as CoreEntry objects are associated with this package
-	// (implicitly, as CoreEntry::Init links a core to its package, and
-	// CoreEntry::AddCPU increments its package's core count if it's the first CPU).
-	// For now, this Init primarily sets the ID. The number of cores this package
-	// contains (fCoreCount) will be updated as cores are initialized and
-	// their CPUEntries are added via CoreEntry::AddCPU, which in turn would
-	// update the package's fCoreCount if it's the first CPU for a new core
-	// on this package.
-	// A more direct way to set fCoreCount here would be to iterate all gCoreEntries
-	// and count those whose Package() points to this, but that depends on
-	// gCoreEntries being fully initialized first.
-	// Current logic: fCoreCount is incremented in PackageEntry::AddIdleCore
-	// if the core being added makes fIdleCoreCount == fCoreCount (meaning this
-	// core was not previously known to the package or it's complex).
-	// Let's simplify: fCoreCount should be accurately maintained by CoreEntry::Init
-	// when it sets its fPackage, and CoreEntry::AddCPU when it makes a core active.
-	// This Init just sets the ID. The caller (scheduler::init) builds the topology.
 	fPackageID = id;
+	fLoad = 0;
+	fHighLoad = false;
+	// fCoreCount is updated by _AddConfiguredCore
+	// fIdleCoreCount is managed by AddIdleCore/RemoveIdleCore
 }
 
 
-// Definition moved to scheduler_cpu.h as it's an inline function.
+inline int32
+PackageEntry::GetLoad() const
+{
+	// This provides a mostly atomic read of fLoad.
+	// For more complex scenarios, fCoreLock might be needed if fLoad updates
+	// become more complex and non-atomic. For a simple int32, this is fine.
+	// A seqlock could be used if fLoad involved multiple fields.
+	return atomic_get(&fLoad);
+}
+
+
+void
+PackageEntry::UpdateLoad()
+{
+	SCHEDULER_ENTER_FUNCTION();
+	int32 totalCoreLoad = 0;
+	int32 activeConfiguredCores = 0;
+
+	// fCoreLock protects iteration over fIdleCores and ensures fCoreCount is stable.
+	// It also implicitly protects against concurrent modification of CoreEntry::fLoad
+	// if CoreEntry::_UpdateLoad also took this package's fCoreLock (which it doesn't).
+	// We need to iterate all cores belonging to this package, not just idle ones.
+	// This requires a list of all cores per package or iterating gCoreEntries.
+	// For now, assuming we iterate gCoreEntries and check their package.
+	// This means UpdateLoad should not be called too frequently without optimization.
+
+	// To iterate cores of *this* package, we need a list of them.
+	// The PackageEntry currently only knows its fIdleCores.
+	// This design needs adjustment: PackageEntry should have a list of *all* its cores.
+	// Let's assume for now such a list fCores exists (e.g. DoublyLinkedList<CoreEntry> fCores).
+	// This requires changes to CoreEntry::Init to add itself to its package's fCores list.
+	//
+	// Simplified approach for this step: Iterate all gCoreEntries and check parent package.
+	// This is less efficient but avoids major struct changes in this step.
+	// Proper fCores list would be a follow-up refinement.
+
+	for (int32 i = 0; i < gCoreCount; ++i) {
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->Package() == this) {
+			if (!core->IsDefunct()) { // Consider only non-defunct cores
+				// CoreEntry::GetLoad() itself handles locking for its fLoad value
+				totalCoreLoad += core->GetLoad();
+				activeConfiguredCores++;
+			}
+		}
+	}
+
+	int32 newPackageLoad = 0;
+	if (activeConfiguredCores > 0) {
+		newPackageLoad = totalCoreLoad / activeConfiguredCores;
+	}
+	newPackageLoad = std::min(newPackageLoad, kMaxLoad); // Cap at kMaxLoad
+
+	// Atomically update fLoad.
+	// Note: If this UpdateLoad is part of heap management for packages,
+	// then similar to CoreEntry::_UpdateLoad, decisions about heap changes
+	// should be made, and then gPackageHeapsLock acquired for heap ops.
+	// For this step, we just update fLoad. Heap management is next.
+	// atomic_set(&fLoad, newPackageLoad); // Will be set as part of heap logic
+
+	// --- Heap Management Logic (mirroring CoreEntry::_UpdateLoad) ---
+	// This assumes kPackageHighLoadThresholdPercent will be defined later.
+	// For now, using kHighLoad (core threshold) as a placeholder for package threshold.
+	// This should be replaced with an actual package-specific threshold.
+	const int32 packageHighLoadThreshold = kHighLoad; // PLACEHOLDER
+
+	int32 previousLoadValue;
+	bool wasHighLoadBeforeUpdate;
+	bool wasInAHeapBeforeUpdate;
+	bool needsHeapUpdate = false;
+	bool targetIsHighLoadHeap;
+
+	// PackageEntry does not have its own fLoadLock yet.
+	// For simplicity in this step, we'll assume fLoad updates and decisions
+	// can be made, and then gPackageHeapsLock is taken.
+	// A dedicated fLoadLock for PackageEntry would be a further refinement if contention occurs.
+	// For now, all decisions and updates regarding heap placement for packages
+	// will happen under gPackageHeapsLock to ensure safety, similar to initial CoreEntry.
+
+	// The following logic needs to be wrapped in gPackageHeapsLock
+	WriteSpinLocker packageHeapsLocker(gPackageHeapsLock);
+
+	previousLoadValue = fLoad;
+	wasInAHeapBeforeUpdate = GetMinMaxHeapLink()->fIndex != -1;
+	wasHighLoadBeforeUpdate = fHighLoad;
+
+	// Update fLoad directly here as we hold the packageHeapsLock
+	// In a more refined model, fLoad might be updated under a local package lock first.
+	fLoad = newPackageLoad;
+	// Note: PackageEntry does not have an epoch or fLastLoadUpdate yet. Added if needed.
+
+	targetIsHighLoadHeap = fLoad > packageHighLoadThreshold;
+
+	if (wasInAHeapBeforeUpdate) {
+		if (fLoad != previousLoadValue || wasHighLoadBeforeUpdate != targetIsHighLoadHeap) {
+			needsHeapUpdate = true;
+		}
+	} else {
+		needsHeapUpdate = true; // Should be added if not in a heap
+	}
+
+	if (!needsHeapUpdate) {
+		TRACE_SCHEDULER_CPU("PackageEntry::UpdateLoad: Package %" B_PRId32 ", load %" B_PRId32 ", no heap modification needed.\n",
+			fPackageID, fLoad);
+		// packageHeapsLocker unlocks automatically
+		return;
+	}
+
+	TRACE_SCHEDULER_CPU("PackageEntry::UpdateLoad: Package %" B_PRId32 ", new load %" B_PRId32 ", old load %" B_PRId32 ", wasInHeap %d, wasHigh %d, targetHigh %d. Heap update required.\n",
+		fPackageID, fLoad, previousLoadValue, wasInAHeapBeforeUpdate, wasHighLoadBeforeUpdate, targetIsHighLoadHeap);
+
+	if (wasInAHeapBeforeUpdate) {
+		if (wasHighLoadBeforeUpdate) {
+			gPackageHighLoadHeap.Remove(this);
+		} else {
+			gPackageLoadHeap.Remove(this);
+		}
+	}
+
+	fHighLoad = targetIsHighLoadHeap; // Update the flag
+
+	if (targetIsHighLoadHeap) {
+		gPackageHighLoadHeap.Insert(this, fLoad);
+	} else {
+		gPackageLoadHeap.Insert(this, fLoad);
+	}
+	// packageHeapsLocker unlocks automatically
+}
+
 
 void
 PackageEntry::_AddConfiguredCore()

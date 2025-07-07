@@ -530,7 +530,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		// For simplicity, might use gGlobalMinVirtualRuntime or let it be 0 if no context.
 		// This path is for threads not actively on a run queue or running.
 		// Their parameters will be fully re-evaluated on next enqueue.
-		reference_min_v = gGlobalMinVirtualRuntime; // Fallback
+		reference_min_v = atomic_get64((int64*)&gGlobalMinVirtualRuntime); // Fallback, use atomic read
 	}
 	// If thread is not active, its current fVirtualRuntime might be stale.
 	// This logic is mostly for active threads.
@@ -1068,6 +1068,11 @@ init()
 	new(&gCoreHighLoadHeap) CoreLoadHeap(coreCount);
 	new(&gIdlePackageList) IdlePackageList;
 
+	// Initialize gReportedCpuMinVR array
+	for (int32 i = 0; i < MAX_CPUS; i++) {
+		atomic_set64(&gReportedCpuMinVR[i], 0);
+	}
+
 	for (int32 i = 0; i < packageCount; ++i) {
 		gPackageEntries[i].Init(i);
 	}
@@ -1117,8 +1122,14 @@ init()
 
 
 // Global minimum virtual runtime for the system
-bigtime_t gGlobalMinVirtualRuntime = 0;
-spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
+bigtime_t gGlobalMinVirtualRuntime = 0; // Accessed via atomic_get64 by readers
+spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER; // Used by writer
+
+// Array for CPUs to proactively report their local MinVirtualRuntime
+// Accessed via atomic_get64/set64. MAX_CPUS is defined in <smp.h>
+#include <smp.h> // For MAX_CPUS
+int64 gReportedCpuMinVR[MAX_CPUS];
+
 
 // Function to update gGlobalMinVirtualRuntime
 // This is typically called periodically, e.g., by the load balancer timer event.
@@ -1134,35 +1145,22 @@ scheduler_update_global_min_vruntime()
 		if (!gCPUEnabled.GetBit(i)) // Only consider enabled CPUs
 			continue;
 
-		CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
-		if (cpuEntry == NULL) continue;
+		// Read the proactively reported value atomically
+		bigtime_t cpuReportedMin = atomic_get64(&gReportedCpuMinVR[i]);
 
-		// CPUEntry::MinVirtualRuntime() gets the CPU's local fMinVirtualRuntime.
-		// This call might internally update the CPU's fMinVirtualRuntime against
-		// the *previous* gGlobalMinVirtualRuntime if CPUEntry::MinVirtualRuntime()
-		// calls _UpdateMinVirtualRuntime().
-		bigtime_t cpuMinVRuntime = cpuEntry->MinVirtualRuntime();
-
-		// We are interested in CPUs that are active or have recently been active.
-		// An idle CPU's MinVirtualRuntime might be very old if not for the global sync.
-		// If a CPU's MinVirtualRuntime is 0 and it's truly idle without history,
-		// it shouldn't drag down the global minimum if other CPUs are active.
-		// However, MinVirtualRuntime() itself now ensures it's >= gGlobalMinVirtualRuntime (previous cycle).
-		// So, taking the minimum of these already-floored values is correct.
-		if (calculatedNewGlobalMin == -1LL || cpuMinVRuntime < calculatedNewGlobalMin) {
-			calculatedNewGlobalMin = cpuMinVRuntime;
+		if (calculatedNewGlobalMin == -1LL || cpuReportedMin < calculatedNewGlobalMin) {
+			calculatedNewGlobalMin = cpuReportedMin;
 		}
 	}
 
 	if (calculatedNewGlobalMin != -1LL) {
-		InterruptsSpinLocker locker(gGlobalMinVRuntimeLock);
+		InterruptsSpinLocker locker(gGlobalMinVRuntimeLock); // Lock for final RMW update
 		// gGlobalMinVirtualRuntime should only advance.
-		// If all CPUs were idle and their min_vruntime (already floored by old global_min)
-		// are all equal to old global_min, then calculatedNewGlobalMin will be old global_min,
-		// and no update occurs. If one CPU advanced, it might pull global_min up.
-		if (calculatedNewGlobalMin > gGlobalMinVirtualRuntime) {
-			gGlobalMinVirtualRuntime = calculatedNewGlobalMin;
-			TRACE_SCHED("GlobalMinVRuntime updated to %" B_PRId64 "\n", gGlobalMinVirtualRuntime);
+		bigtime_t currentGlobalVal = atomic_get64((int64*)&gGlobalMinVirtualRuntime); // Read current value atomically even under lock for consistency
+		if (calculatedNewGlobalMin > currentGlobalVal) {
+			// gGlobalMinVirtualRuntime = calculatedNewGlobalMin; // Direct assignment under lock is fine
+			atomic_set64((int64*)&gGlobalMinVirtualRuntime, calculatedNewGlobalMin); // Or atomic_set64 for explicitness
+			TRACE_SCHED("GlobalMinVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
 }

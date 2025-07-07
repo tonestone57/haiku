@@ -159,17 +159,21 @@ CPUEntry::_UpdateMinVirtualRuntime()
 
 	// These are defined in scheduler.cpp
 	extern bigtime_t gGlobalMinVirtualRuntime;
-	extern spinlock gGlobalMinVRuntimeLock;
+	// extern spinlock gGlobalMinVRuntimeLock; // Lock no longer directly used by reader
 
-	InterruptsSpinLocker globalLock(gGlobalMinVRuntimeLock);
-	bigtime_t currentGlobalMin = gGlobalMinVirtualRuntime;
-	globalLock.Unlock();
+	// Use atomic_get64 for lock-free read. util/atomic.h is included.
+	bigtime_t currentGlobalMin = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
 
 	fMinVirtualRuntime = max_c(localAnchorVR, currentGlobalMin);
 
 	TRACE_SCHED_CPU("CPUEntry %" B_PRId32 ": _UpdateMinVirtualRuntime: new fMinVR %" B_PRId64
 		" (wasOldLocalMinVR %" B_PRId64 ", localAnchorVR %" B_PRId64 ", globalMin %" B_PRId64 ")\n",
 		ID(), fMinVirtualRuntime, oldLocalMinVR, localAnchorVR, currentGlobalMin);
+
+	// Proactively report this new local minimum to the global array.
+	// gReportedCpuMinVR is declared in scheduler.cpp
+	extern int64 gReportedCpuMinVR[MAX_CPUS]; // MAX_CPUS from smp.h
+	atomic_set64(&gReportedCpuMinVR[fCPUNumber], fMinVirtualRuntime);
 }
 
 

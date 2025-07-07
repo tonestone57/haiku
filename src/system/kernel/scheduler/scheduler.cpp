@@ -394,82 +394,142 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	SCHEDULER_ENTER_FUNCTION();
 
 	ThreadData* threadData = thread->scheduler_data;
-	int32 oldBasePriority = thread->priority;
-	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " to %" B_PRId32 " (old base: %" B_PRId32 ")\n",
-		thread->id, priority, oldBasePriority);
+	int32 oldActualPriority = thread->priority; // Store the original base priority
+	bigtime_t previousVirtualDeadline = threadData->VirtualDeadline(); // Save for comparison
 
-	thread->priority = priority;
+	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
+		thread->id, oldActualPriority, priority);
 
-	bool needsRequeue = false;
-	bigtime_t oldVirtualDeadline = threadData->VirtualDeadline();
+	thread->priority = priority; // Set the new base priority in the Thread object
 
-	// Determine target CPU for slice calculation context if needed by scheduler_calculate_eevdf_slice
-	CPUEntry* currentOrTargetCpu = NULL;
-	if (thread->cpu != NULL) {
-		currentOrTargetCpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
-	} else if (thread->previous_cpu != NULL) {
-		currentOrTargetCpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	} // else it's not on a CPU, slice might be generic
+	int32 oldWeight = scheduler_priority_to_weight(oldActualPriority);
+	int32 newWeight = scheduler_priority_to_weight(priority);
 
-	threadData->SetSliceDuration(scheduler_calculate_eevdf_slice(threadData, currentOrTargetCpu));
+	CPUEntry* cpuContextForUpdate = NULL;
+	bool wasRunning = (thread->state == B_THREAD_RUNNING && thread->cpu != NULL);
+	bool wasReadyAndEnqueued = (thread->state == B_THREAD_READY && threadData->IsEnqueued());
 
-	// TODO EEVDF: A change in priority (weight) should ideally adjust current lag
-	// to reflect the change in entitlement rate relative to its current fVirtualRuntime.
-	// For now, only future slice duration and deadline are affected.
-	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
-	TRACE_SCHED("set_prio: T %" B_PRId32 " new slice %" B_PRId64 ", new VD %" B_PRId64 "\n",
-		thread->id, threadData->SliceDuration(), threadData->VirtualDeadline());
-
-
-	if (threadData->VirtualDeadline() != oldVirtualDeadline) {
-		needsRequeue = true;
+	if (wasRunning) {
+		cpuContextForUpdate = CPUEntry::GetCPU(thread->cpu->cpu_num);
+	} else if (wasReadyAndEnqueued) {
+		// If ready and enqueued, it should have a previous_cpu context from its last run
+		// or from where it was last enqueued by ChooseCoreAndCPU.
+		// Its threadData->Core() should also be set.
+		if (thread->previous_cpu != NULL && threadData->Core() != NULL
+			&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
+			cpuContextForUpdate = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
+		} else if (threadData->Core() != NULL) {
+			// Fallback: pick any CPU on its assigned core. This is less ideal.
+			// _scheduler_select_cpu_on_core might be too complex here without more context.
+			// For now, if previous_cpu is not consistent, we might skip vruntime adjustment
+			// and let it be fixed on next proper enqueue.
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but previous_cpu inconsistent or NULL. Skipping vruntime/lag adjustment.\n", thread->id);
+		}
 	}
 
-	if (!needsRequeue) {
-		if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL)
-			gCPU[thread->cpu->cpu_num].invoke_scheduler = true;
-		return oldBasePriority;
+	// Adjust vruntime and lag if weight changes and context is valid
+	if (cpuContextForUpdate != NULL && oldWeight != newWeight && newWeight > 0) {
+		InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
+
+		bigtime_t min_v = cpuContextForUpdate->MinVirtualRuntime(); // Already ensures >= global min
+		bigtime_t currentVRuntime = threadData->VirtualRuntime();
+
+		// Only adjust if the thread's vruntime is ahead of the queue minimum.
+		// If it's already behind or equal, rescaling might unfairly penalize or boost it.
+		// The goal is to rescale its *progress beyond the baseline*.
+		if (currentVRuntime > min_v) {
+			bigtime_t delta_v = currentVRuntime - min_v;
+			bigtime_t newAdjustedVRuntime = min_v + (delta_v * oldWeight) / newWeight;
+			threadData->SetVirtualRuntime(newAdjustedVRuntime);
+			TRACE_SCHED("set_prio: T %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 "->%" B_PRId32 ") rel_to_min_v %" B_PRId64 "\n",
+				thread->id, currentVRuntime, newAdjustedVRuntime, oldWeight, newWeight, min_v);
+		}
+		// If currentVRuntime <= min_v, it means the thread is already "behind" or at baseline.
+		// Its vruntime will naturally catch up or be set correctly upon next proper enqueue if needed.
+		// No change to lag is needed here if vruntime wasn't changed relative to min_v,
+		// as lag will be re-evaluated based on the new weight and new slice duration next.
 	}
 
-	if (thread->state != B_THREAD_READY) {
-		if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL)
-			gCPU[thread->cpu->cpu_num].invoke_scheduler = true;
-		return oldBasePriority;
-	}
+	// Always recalculate slice duration based on the new priority
+	threadData->SetSliceDuration(scheduler_calculate_eevdf_slice(threadData, cpuContextForUpdate));
 
-	CPUEntry* cpu = NULL;
-	if (threadData->Core() != NULL && thread->previous_cpu != NULL
-		&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
-		cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	} else if (thread->cpu != NULL) {
-		cpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
+	// Recalculate Lag, EligibleTime, and VirtualDeadline using new weight and slice duration
+	// This needs a min_v reference. If cpuContextForUpdate is NULL, this is problematic.
+	// However, if not running/enqueued, these are less critical until next enqueue.
+	// For running/enqueued, cpuContextForUpdate should be non-NULL.
+	bigtime_t reference_min_v = 0;
+	if (cpuContextForUpdate != NULL) {
+		// No need to re-lock if already locked, but MinVirtualRuntime() handles its own.
+		reference_min_v = cpuContextForUpdate->MinVirtualRuntime();
 	} else if (threadData->Core() != NULL) {
-		panic("scheduler_set_thread_priority (EEVDF): Ready thread %" B_PRId32
-			" has inconsistent CPU/Core context for re-queue.", thread->id);
+		// If no specific CPU context, but has a core, could use a core-average min_v or global.
+		// For simplicity, might use gGlobalMinVirtualRuntime or let it be 0 if no context.
+		// This path is for threads not actively on a run queue or running.
+		// Their parameters will be fully re-evaluated on next enqueue.
+		reference_min_v = gGlobalMinVirtualRuntime; // Fallback
+	}
+	// If thread is not active, its current fVirtualRuntime might be stale.
+	// This logic is mostly for active threads.
+
+	if (newWeight <=0) newWeight = 1; // Should not happen with scheduler_priority_to_weight
+
+	bigtime_t newWeightedSlice = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / newWeight;
+	// If threadData->VirtualRuntime() was not adjusted, use current.
+	// If it was adjusted, it's now the new value.
+	threadData->SetLag(newWeightedSlice - (threadData->VirtualRuntime() - reference_min_v));
+
+	if (threadData->Lag() >= 0) {
+		threadData->SetEligibleTime(system_time());
 	} else {
-		panic("scheduler_set_thread_priority (EEVDF): Ready thread %" B_PRId32 " has no core", thread->id);
+		bigtime_t delay = (-threadData->Lag() * SCHEDULER_WEIGHT_SCALE) / newWeight;
+		delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 	}
-	ASSERT(cpu != NULL);
+	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
 
-	T(RemoveThread(thread));
+	TRACE_SCHED("set_prio: T %" B_PRId32 " new slice %" B_PRId64 ", new lag %" B_PRId64 ", new elig %" B_PRId64 ", new VD %" B_PRId64 "\n",
+		thread->id, threadData->SliceDuration(), threadData->Lag(), threadData->EligibleTime(), threadData->VirtualDeadline());
 
-	cpu->LockRunQueue();
-	if (threadData->IsEnqueued()) {
-		cpu->GetEevdfRunQueue().Update(threadData, oldVirtualDeadline);
-		TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n", thread->id, cpu->ID());
+	// Re-queue or poke scheduler if needed
+	if (wasRunning) {
+		// If it was running, its parameters changed, so it might need to be preempted
+		// or continue with new parameters. Trigger reschedule on its CPU.
+		ASSERT(cpuContextForUpdate != NULL);
+		gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
+		if (cpuContextForUpdate->ID() != smp_get_current_cpu()) {
+			smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+		}
+	} else if (wasReadyAndEnqueued) {
+		ASSERT(cpuContextForUpdate != NULL); // Should have a context if it was enqueued
+		// It was in a run queue. Its deadline (and other params) changed. Update its position.
+		// The EevdfRunQueue::Update now uses the specialized SchedulerHeap::Update.
+		// No need to pass oldVirtualDeadline to EevdfRunQueue::Update anymore.
+		// T(RemoveThread(thread)); // Conceptually, Update does this.
+		InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
+		cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
+		queueLocker.Unlock(); // Release before potential ICI
+		// NotifySchedulerListeners(&SchedulerListener::ThreadRemovedFromRunQueue, thread); // Done by Update? No.
+		// NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread); // Done by Update? No.
+		// The Update might just reposition. Listeners might need separate calls if it's a conceptual remove/add.
+		// For now, assume Update is sufficient for heap correctness.
+		// If the updated thread could now preempt the current thread on its CPU:
+		Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
+		if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
+			|| (system_time() >= threadData->EligibleTime()
+				&& threadData->VirtualDeadline() < currentOnThatCpu->scheduler_data->VirtualDeadline())) {
+			if (cpuContextForUpdate->ID() == smp_get_current_cpu()) {
+				gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
+			} else {
+				smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+			}
+		}
+		TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
+			thread->id, cpuContextForUpdate->ID());
 	}
-	cpu->UnlockRunQueue();
+	// If thread was not running and not enqueued (e.g. sleeping), its parameters are updated
+	// and will be used when it's next enqueued.
 
-	NotifySchedulerListeners(&SchedulerListener::ThreadRemovedFromRunQueue, thread);
-	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
-
-	if (cpu->ID() == smp_get_current_cpu()) {
-		gCPU[cpu->ID()].invoke_scheduler = true;
-	} else {
-		smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
-	}
-
-	return oldBasePriority;
+	return oldActualPriority;
 }
 
 

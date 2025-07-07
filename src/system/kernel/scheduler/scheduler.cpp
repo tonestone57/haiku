@@ -243,7 +243,8 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	// The caller must hold the thread's scheduler_lock with interrupts disabled.
 	ASSERT(!are_interrupts_enabled());
 	SCHEDULER_ENTER_FUNCTION();
-	SchedulerModeLocker locker; // Ensures scheduler mode parameters are stable.
+	// SchedulerModeLocker was here, removed as it became a no-op.
+	// Global mode parameters are read with interrupts disabled or other locks held.
 	TRACE("scheduler_enqueue_in_run_queue: thread %" B_PRId32 " with base priority %" B_PRId32 "\n",
 		thread->id, thread->priority);
 	ThreadData* threadData = thread->scheduler_data;
@@ -264,7 +265,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	// whose priority changes, it will be re-evaluated in its run queue.
 	ASSERT(are_interrupts_enabled());
 	InterruptsSpinLocker interruptLocker(thread->scheduler_lock);
-	SchedulerModeLocker modeLocker;
+	// SchedulerModeLocker was here, removed as it became a no-op.
 	SCHEDULER_ENTER_FUNCTION();
 
 	ThreadData* threadData = thread->scheduler_data;
@@ -475,7 +476,8 @@ reschedule(int32 nextState)
 
 	// Stop CPU time accounting for the old thread for this slice.
 	oldThreadData->StopCPUTime();
-	SchedulerModeLocker modeLocker; // Ensures mode-specific parameters are stable.
+	// SchedulerModeLocker was here, removed as it became a no-op.
+	// Global mode parameters are read with interrupts disabled.
 
 	TRACE("reschedule: cpu %" B_PRId32 ", current thread %" B_PRId32 " (level %d, state %s), next_state %" B_PRId32 "\n",
 		thisCPUId, oldThread->id, oldThreadData->CurrentMLFQLevel(), /*oldThreadInitialMlfqLevel,*/
@@ -643,7 +645,7 @@ reschedule(int32 nextState)
 		gCurrentMode->rebalance_irqs(true /* CPU is now idle */);
 	}
 
-	modeLocker.Unlock(); // Release scheduler mode lock.
+	// modeLocker.Unlock() was here; removed as modeLocker instance was removed.
 	SCHEDULER_EXIT_FUNCTION();
 
 	if (nextThread != oldThread) {

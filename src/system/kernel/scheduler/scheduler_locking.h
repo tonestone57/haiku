@@ -1,12 +1,14 @@
 /*
- * Copyright 2014, Paweł Dziepak, pdziepak@quarnos.org.
+ * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
  * Distributed under the terms of the MIT License.
  */
 #ifndef KERNEL_SCHEDULER_LOCKING_H
 #define KERNEL_SCHEDULER_LOCKING_H
 
 
-#include <util/AutoLock.h>
+#include <cpu.h>
+#include <int.h>
+#include <smp.h>
 
 #include "scheduler_cpu.h"
 
@@ -14,135 +16,41 @@
 namespace Scheduler {
 
 
-class CPURunQueueLocking {
+// When scheduler is doing some significant work, like traversing list of all
+// threads assigned to a core it should disable interrupts and acquire this lock.
+// It is needed because some operations (e.g. changing thread's priority) may
+// want to acquire both thread's and CPU's scheduler lock.
+// This lock is also acquired when CPU is about to be (de)activated.
+class InterruptsBigSchedulerLocker {
 public:
-	inline bool Lock(CPUEntry* cpu)
-	{
-		cpu->LockRunQueue();
-		return true;
-	}
-
-	inline void Unlock(CPUEntry* cpu)
-	{
-		cpu->UnlockRunQueue();
-	}
-};
-
-typedef AutoLocker<CPUEntry, CPURunQueueLocking> CPURunQueueLocker;
-
-
-// CoreRunQueueLocking and CoreRunQueueLocker have been removed as CoreEntry
-// does not have a single run queue. Locking must be done per-CPUEntry.
-
-class CoreCPUHeapLocking {
-public:
-	inline bool Lock(CoreEntry* core)
-	{
-		core->LockCPUHeap();
-		return true;
-	}
-
-	inline void Unlock(CoreEntry* core)
-	{
-		core->UnlockCPUHeap();
-	}
-};
-
-typedef AutoLocker<CoreEntry, CoreCPUHeapLocking> CoreCPUHeapLocker;
-
-class SchedulerModeLocking {
-public:
-	bool Lock(int* /* lockable */)
-	{
-		CPUEntry::GetCPU(smp_get_current_cpu())->EnterScheduler();
-		return true;
-	}
-
-	void Unlock(int* /* lockable */)
-	{
-		CPUEntry::GetCPU(smp_get_current_cpu())->ExitScheduler();
-	}
-};
-
-class SchedulerModeLocker :
-	public AutoLocker<int, SchedulerModeLocking> {
-public:
-	SchedulerModeLocker(bool alreadyLocked = false, bool lockIfNotLocked = true)
-		:
-		AutoLocker<int, SchedulerModeLocking>(&fDummy, alreadyLocked,
-			lockIfNotLocked)
-	{
-	}
+	inline				InterruptsBigSchedulerLocker();
+	inline				~InterruptsBigSchedulerLocker();
 
 private:
-	int		fDummy;
+			cpu_status	fState;
 };
 
-class InterruptsSchedulerModeLocking {
-public:
-	bool Lock(int* lockable)
-	{
-		*lockable = disable_interrupts();
-		CPUEntry::GetCPU(smp_get_current_cpu())->EnterScheduler();
-		return true;
-	}
 
-	void Unlock(int* lockable)
-	{
-		CPUEntry::GetCPU(smp_get_current_cpu())->ExitScheduler();
-		restore_interrupts(*lockable);
-	}
-};
+inline
+InterruptsBigSchedulerLocker::InterruptsBigSchedulerLocker()
+{
+	fState = disable_interrupts();
+	// Global scheduler parameters are primarily changed during scheduler_set_operation_mode(),
+	// which uses this InterruptsBigSchedulerLocker. This interrupt disabling
+	// provides protection for reads of those global parameters in most scheduler hot paths.
+	// Original code also locked all CPUEntry::fSchedulerModeLock here, which has been removed.
+}
 
-class InterruptsSchedulerModeLocker :
-	public AutoLocker<int, InterruptsSchedulerModeLocking> {
-public:
-	InterruptsSchedulerModeLocker(bool alreadyLocked = false,
-		bool lockIfNotLocked = true)
-		:
-		AutoLocker<int, InterruptsSchedulerModeLocking>(&fState, alreadyLocked,
-			lockIfNotLocked)
-	{
-	}
 
-private:
-	int		fState;
-};
-
-class InterruptsBigSchedulerLocking {
-public:
-	bool Lock(int* lockable)
-	{
-		*lockable = disable_interrupts();
-		for (int32 i = 0; i < smp_get_num_cpus(); i++)
-			CPUEntry::GetCPU(i)->LockScheduler();
-		return true;
-	}
-
-	void Unlock(int* lockable)
-	{
-		for (int32 i = 0; i < smp_get_num_cpus(); i++)
-			CPUEntry::GetCPU(i)->UnlockScheduler();
-		restore_interrupts(*lockable);
-	}
-};
-
-class InterruptsBigSchedulerLocker :
-	public AutoLocker<int, InterruptsBigSchedulerLocking> {
-public:
-	InterruptsBigSchedulerLocker()
-		:
-		AutoLocker<int, InterruptsBigSchedulerLocking>(&fState, false, true)
-	{
-	}
-
-private:
-	int		fState;
-};
+inline
+InterruptsBigSchedulerLocker::~InterruptsBigSchedulerLocker()
+{
+	// Original code unlocked all CPUEntry::fSchedulerModeLock here.
+	restore_interrupts(fState);
+}
 
 
 }	// namespace Scheduler
 
 
 #endif	// KERNEL_SCHEDULER_LOCKING_H
-

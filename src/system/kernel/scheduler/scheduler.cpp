@@ -208,7 +208,7 @@ scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
 
 
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
-static bool scheduler_perform_load_balance(); // Return bool to indicate if migration occurred
+static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
 
 // Work-Stealing related forward declaration
@@ -786,80 +786,86 @@ reschedule(int32 nextState)
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue(); // LOCKING CPU's run queue
 
-	if (gCPU[thisCPUId].disabled) {
-		if (oldThread->cpu == &gCPU[thisCPUId] && oldThreadData->IsEnqueued() && !oldThreadData->IsIdle()) {
-			cpu->RemoveThread(oldThreadData);
-			oldThreadData->MarkDequeued();
+	if (gCPU[thisCPUId].disabled) { // Current CPU is being disabled
+		if (oldThread != NULL && !oldThreadData->IsIdle()) {
+			TRACE_SCHED("reschedule: CPU %" B_PRId32 " disabling, re-homing T %" B_PRId32 "\n", thisCPUId, oldThread->id);
+
+			if (oldThreadData->IsEnqueued() && oldThreadData->Core() == core) {
+				cpu->RemoveThread(oldThreadData);
+				oldThreadData->MarkDequeued();
+			}
+            if (oldThreadData->Core() == core) {
+                oldThreadData->UnassignCore(true);
+            }
+
+			cpu->UnlockRunQueue(); // Unlock before global enqueue
+
+			atomic_set((int32*)&oldThread->state, B_THREAD_READY);
+			scheduler_enqueue_in_run_queue(oldThread);
+
+			cpu->LockRunQueue(); // Re-acquire lock
 		}
 		nextThreadData = cpu->PeekIdleThread();
 		if (nextThreadData == NULL)
-			panic("reschedule (EEVDF): No idle thread found on disabling CPU %" B_PRId32 "!", thisCPUId);
+			panic("reschedule: No idle thread on disabling CPU %" B_PRId32 "!", thisCPUId);
 	} else {
+		// Normal path: CPU is not disabling
 		ThreadData* oldThreadToConsider = (shouldReEnqueueOldThread && !oldThreadData->IsIdle())
 			? oldThreadData : NULL;
 		nextThreadData = cpu->ChooseNextThread(oldThreadToConsider, false, 0);
-	}
 
-	// --- BEGIN WORK STEALING ATTEMPT ---
-	if (nextThreadData->IsIdle() && !gSingleCore && !gCPU[thisCPUId].disabled) {
-		bool shouldAttemptSteal = (system_time() >= cpu->fNextStealAttemptTime);
-		// TODO: Power saving mode check: if (gCurrentMode && gCurrentMode->is_parking_cpu(cpu)) shouldAttemptSteal = false;
+		// --- BEGIN WORK STEALING ATTEMPT ---
+		if (nextThreadData->IsIdle() && !gSingleCore /* && !gCPU[thisCPUId].disabled - already checked */ ) {
+			bool shouldAttemptSteal = (system_time() >= cpu->fNextStealAttemptTime);
+			// TODO: Power saving mode check: if (gCurrentMode && gCurrentMode->is_parking_cpu(cpu)) shouldAttemptSteal = false;
 
-		if (shouldAttemptSteal) {
-			// Unlock this CPU's queue while attempting to steal from others,
-			// to avoid holding it too long and to allow victim CPU to lock its own queue.
-			// The current lock is cpu->fQueueLock.
-			cpu->UnlockRunQueue();
-			ThreadData* actuallyStolenThreadData = scheduler_try_work_steal(cpu); // cpu is thiefCPU
-			cpu->LockRunQueue(); // Re-acquire lock for current CPU (thief)
+			if (shouldAttemptSteal) {
+				cpu->UnlockRunQueue();
+				ThreadData* actuallyStolenThreadData = scheduler_try_work_steal(cpu);
+				cpu->LockRunQueue();
 
-			if (actuallyStolenThreadData != NULL) {
-				// Stole a thread. It's dequeued from victim. Re-init params for thief.
-				actuallyStolenThreadData->SetSliceDuration(scheduler_calculate_eevdf_slice(actuallyStolenThreadData, cpu));
+				if (actuallyStolenThreadData != NULL) {
+					actuallyStolenThreadData->SetSliceDuration(scheduler_calculate_eevdf_slice(actuallyStolenThreadData, cpu));
 
-				// MinVirtualRuntime is read under cpu->fQueueLock which we now hold
-				bigtime_t thiefQueueMinVruntime = cpu->MinVirtualRuntime();
+					bigtime_t thiefQueueMinVruntime = cpu->MinVirtualRuntime();
 
-				actuallyStolenThreadData->SetVirtualRuntime(max_c(actuallyStolenThreadData->VirtualRuntime(), thiefQueueMinVruntime));
+					actuallyStolenThreadData->SetVirtualRuntime(max_c(actuallyStolenThreadData->VirtualRuntime(), thiefQueueMinVruntime));
 
-				int32 stolenWeight = scheduler_priority_to_weight(actuallyStolenThreadData->GetBasePriority());
-				if (stolenWeight <= 0) stolenWeight = 1; // Should not happen
-				bigtime_t stolenWeightedSlice = (actuallyStolenThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
-				actuallyStolenThreadData->SetLag(stolenWeightedSlice - (actuallyStolenThreadData->VirtualRuntime() - thiefQueueMinVruntime));
+					int32 stolenWeight = scheduler_priority_to_weight(actuallyStolenThreadData->GetBasePriority());
+					if (stolenWeight <= 0) stolenWeight = 1;
+					bigtime_t stolenWeightedSlice = (actuallyStolenThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
+					actuallyStolenThreadData->SetLag(stolenWeightedSlice - (actuallyStolenThreadData->VirtualRuntime() - thiefQueueMinVruntime));
 
-				if (actuallyStolenThreadData->IsRealTime()) {
-					actuallyStolenThreadData->SetEligibleTime(system_time());
-				} else if (actuallyStolenThreadData->Lag() >= 0) {
-					actuallyStolenThreadData->SetEligibleTime(system_time());
+					if (actuallyStolenThreadData->IsRealTime()) {
+						actuallyStolenThreadData->SetEligibleTime(system_time());
+					} else if (actuallyStolenThreadData->Lag() >= 0) {
+						actuallyStolenThreadData->SetEligibleTime(system_time());
+					} else {
+						bigtime_t delay = (-actuallyStolenThreadData->Lag() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
+						if (stolenWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
+						delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+						actuallyStolenThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+					}
+					actuallyStolenThreadData->SetVirtualDeadline(actuallyStolenThreadData->EligibleTime() + actuallyStolenThreadData->SliceDuration());
+
+					TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " successfully STOLE T %" B_PRId32 ". VD %" B_PRId64 "\n",
+						cpu->ID(), actuallyStolenThreadData->GetThread()->id, actuallyStolenThreadData->VirtualDeadline());
+
+					nextThreadData = actuallyStolenThreadData;
+					cpu->fNextStealAttemptTime = system_time() + kStealSuccessCooldownPeriod;
+
+					if (actuallyStolenThreadData->Core() != cpu->Core()) {
+						 if (actuallyStolenThreadData->Core() != NULL) actuallyStolenThreadData->UnassignCore(false);
+						 actuallyStolenThreadData->MarkEnqueued(cpu->Core());
+					}
+					atomic_add(&cpu->fTotalThreadCount, 1);
 				} else {
-					bigtime_t delay = (-actuallyStolenThreadData->Lag() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
-					if (stolenWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2; // Should not happen
-					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-					actuallyStolenThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+					cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
 				}
-				actuallyStolenThreadData->SetVirtualDeadline(actuallyStolenThreadData->EligibleTime() + actuallyStolenThreadData->SliceDuration());
-
-				TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " successfully STOLE T %" B_PRId32 ". VD %" B_PRId64 "\n",
-					cpu->ID(), actuallyStolenThreadData->GetThread()->id, actuallyStolenThreadData->VirtualDeadline());
-
-				nextThreadData = actuallyStolenThreadData; // This is now the thread to schedule
-				cpu->fNextStealAttemptTime = system_time() + kStealSuccessCooldownPeriod;
-
-				// Associate with this core for accounting.
-				if (actuallyStolenThreadData->Core() != cpu->Core()) {
-					 if (actuallyStolenThreadData->Core() != NULL) actuallyStolenThreadData->UnassignCore(false);
-					 actuallyStolenThreadData->MarkEnqueued(cpu->Core());
-				}
-				// Increment total thread count as we are replacing an idle thread with a non-idle one.
-				atomic_add(&cpu->fTotalThreadCount, 1);
-				// _UpdateMinVirtualRuntime will be called below.
-			} else {
-				// Steal failed
-				cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
 			}
 		}
+		// --- END WORK STEALING ATTEMPT ---
 	}
-	// --- END WORK STEALING ATTEMPT ---
 
 	if (!gCPU[thisCPUId].disabled)
 		cpu->_UpdateMinVirtualRuntime();

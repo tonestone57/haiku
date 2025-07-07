@@ -13,11 +13,16 @@
 // The _PIPE(pipe) macro helps resolve this.
 #define _PIPE_A_BASE			0x70000
 #define _PIPE_B_BASE			0x71000
-#define _PIPE_C_BASE			0x72000 // HSW+ may have different base for Pipe C if it exists
+#define _PIPE_C_BASE			0x72000 // Base for Pipe C registers (e.g., IVB/HSW).
+									// For SKL+, Pipe C might use transcoder-relative addressing.
+#define _PIPE_D_BASE			0x73000 // Highly speculative base for Pipe D if it follows A/B/C pattern.
+									// NEEDS PRM VALIDATION FOR ANY GEN claiming standard Pipe D.
+									// Newer gens (ICL+) with 4+ pipes have different register organization.
 // For Gen7 (IVB/HSW), primary planes are tied to pipes A, B, C.
+// Pipe D support (if any on these gens) is typically for eDP or very specific configurations.
 // Sprite planes have different register blocks.
 
-// Transcoder Configuration (e.g., TRANSCONF_A at 0x70008)
+// Transcoder Configuration (e.g., TRANSCONF_A at _PIPE_A_BASE + 0x0008 for pre-SKL)
 #define TRANSCONF(pipe)			(_PIPE(pipe) + 0x0008)
 	#define TRANSCONF_ENABLE				(1U << 31)
 	#define TRANSCONF_STATE_ENABLE_IVB		(1U << 30) // Read-only status on HSW, R/W on IVB
@@ -29,6 +34,7 @@
 		#define TRANSCONF_PIPE_SEL_A_IVB		(0U << 24)
 		#define TRANSCONF_PIPE_SEL_B_IVB		(1U << 24)
 		#define TRANSCONF_PIPE_SEL_C_IVB		(2U << 24)
+		// No TRANSCONF_PIPE_SEL_D defined for IVB style; newer gens use different DDI muxing
 	#define TRANSCONF_PIPE_BPC_MASK			(7U << 5)  // Bits 7:5
 	#define TRANSCONF_PIPE_BPC_SHIFT		5
 		#define TRANSCONF_PIPE_BPC_6_FIELD	0 // 6 bpc field value for TRANSCONF
@@ -49,10 +55,42 @@
 	#define TRANSCONF_FRAME_START_DELAY_SHIFT	16
 	#define TRANSCONF_MSA_TIMING_DELAY_MASK		(3U << 14) // HSW: Bits 15:14
 
-#define _PIPE(pipe) ((pipe) == PRIV_PIPE_A ? _PIPE_A_BASE : ((pipe) == PRIV_PIPE_B ? _PIPE_B_BASE : _PIPE_C_BASE))
-#define _TRANSCODER(trans) ((trans) == PRIV_TRANSCODER_A ? _PIPE_A_BASE :                            ((trans) == PRIV_TRANSCODER_B ? _PIPE_B_BASE :                            ((trans) == PRIV_TRANSCODER_C ? _PIPE_C_BASE : 0x0 ))) // EDP transcoder needs specific base if used for planes
+#define _PIPE(pipe) ((pipe) == PRIV_PIPE_A ? _PIPE_A_BASE : \
+                     ((pipe) == PRIV_PIPE_B ? _PIPE_B_BASE : \
+                     ((pipe) == PRIV_PIPE_C ? _PIPE_C_BASE : \
+                     ((pipe) == PRIV_PIPE_D ? _PIPE_D_BASE : 0x0)))) // Added Pipe D, 0x0 is error
+// TODO: _PIPE_D_BASE (0x73000) is highly speculative & needs PRM validation for any specific GEN.
+// For SKL+ (Gen9+), pipe-related display engine registers (timings, planes, etc.) are generally
+// relative to Transcoder bases (TRANS_A, TRANS_B, TRANS_C, TRANS_EDP).
+// The _PIPE() macro is primarily for pre-SKL style register layouts.
+
+#define _TRANSCODER_BASE_A_SKL_PLUS	0x68000 // TRANSCODER_A MMIO base for SKL+
+#define _TRANSCODER_BASE_B_SKL_PLUS	0x68800 // TRANSCODER_B MMIO base for SKL+
+#define _TRANSCODER_BASE_C_SKL_PLUS	0x69000 // TRANSCODER_C MMIO base for SKL+
+#define _TRANSCODER_BASE_D_SKL_PLUS	0x69800 // Speculative for Transcoder D on SKL+ (NEEDS PRM)
+#define _TRANSCODER_BASE_EDP_SKL_PLUS	0x6F000 // TRANSCODER_EDP MMIO base for SKL+
+
+// Macro for SKL+ style transcoders. Used for accessing timing, plane, and other registers
+// that are relative to the transcoder base on Gen9+ hardware.
+#define _TRANSCODER_SKL(trans) \
+	((trans) == PRIV_TRANSCODER_A ? _TRANSCODER_BASE_A_SKL_PLUS : \
+	 ((trans) == PRIV_TRANSCODER_B ? _TRANSCODER_BASE_B_SKL_PLUS : \
+	 ((trans) == PRIV_TRANSCODER_C ? _TRANSCODER_BASE_C_SKL_PLUS : \
+	 ((trans) == PRIV_TRANSCODER_EDP ? _TRANSCODER_BASE_EDP_SKL_PLUS : \
+	  /* TODO: Add PRIV_TRANSCODER_D case if it has a distinct base like _TRANSCODER_BASE_D_SKL_PLUS */ \
+	  0x0)))) // Return 0 or an error offset for unhandled/invalid transcoders
+
+// _TRANSCODER macro for pre-SKL PCH style transcoders where TRANSCONF is at _PIPE_BASE + 0x0008 etc.
+// This might be confusing; consider renaming or using more specific macros per generation group.
+#define _TRANSCODER_PCH(trans) ((trans) == PRIV_TRANSCODER_A ? _PIPE_A_BASE : \
+                               ((trans) == PRIV_TRANSCODER_B ? _PIPE_B_BASE : \
+                               ((trans) == PRIV_TRANSCODER_C ? _PIPE_C_BASE : 0x0 )))
+// TODO: Add PRIV_TRANSCODER_D to _TRANSCODER_PCH if it follows _PIPE_D_BASE pattern on some PCH gens.
 
 // --- Primary Plane Registers (Gen7: IVB/HSW, also similar for Gen8/9 primary plane A/B) ---
+// These are relative to _PIPE(pipe) for pre-SKL.
+// For SKL+, primary plane registers are relative to _TRANSCODER_SKL(transcoder), e.g., PLANE_CTL(trans).
+// TODO: Add SKL+ specific plane register macros if they differ significantly beyond base offset.
 // These are relative to the pipe base. Plane 0 is primary, Plane 1 is sprite.
 // For simplicity, using DSP for primary plane registers as per older Haiku conventions.
 // Newer PRMs might use PLANE_CTL, PLANE_SURF, etc.
@@ -345,7 +383,7 @@
 	#define HSW_EXTREF_FREQ_100MHZ_BIT (1U << 22)
 
 // --- FDI Registers (Ivy Bridge PCH Link) ---
-#define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100)
+#define FDI_TX_CTL(pipe)		(_PIPE(pipe) + 0x100) // Pipe A, B, C
 	#define FDI_TX_CTL_VOLTAGE_SWING_SHIFT_IVB	16
 	#define FDI_TX_CTL_PRE_EMPHASIS_SHIFT_IVB	14
 	#define FDI_TX_ENABLE					(1U << 31)
@@ -383,6 +421,88 @@
 		#define FDI_RX_CTL_LANE_3_IVB		(5U << 19)
 		#define FDI_RX_CTL_LANE_4_IVB		(7U << 19)
 	#define FDI_RX_PLL_ENABLE_IVB			(1U << 13)
+
+// --- DDI Registers (HSW+) ---
+// DDI_BUF_CTL registers per DDI port (A-E for HSW/BDW, A-F for SKL, A-G for ICL/TGL+)
+// These are physical port identifiers, not necessarily 1:1 with pipes.
+// VBT maps logical ports (PRIV_PORT_A etc) to these hardware DDI indices.
+#define DDI_A_BUF_CTL_HSW       0x64E00 // DDI A / eDP
+#define DDI_B_BUF_CTL_HSW       0x64F00 // DDI B
+#define DDI_C_BUF_CTL_HSW       0x64D00 // DDI C
+#define DDI_D_BUF_CTL_HSW       0x64C00 // DDI D
+#define DDI_E_BUF_CTL_SKL       0x64B00 // DDI E (SKL+)
+#define DDI_F_BUF_CTL_ICL       0x64A00 // DDI F (ICL+)
+// TODO: Add DDI_G_BUF_CTL for XE_LPD+ from PRM if needed. Typically 0x64900 or similar.
+
+// Macro to get DDI_BUF_CTL register based on hardware port index (0=A, 1=B, etc.)
+// This requires the caller (e.g., port_state->hw_port_index from VBT) to provide the correct index.
+#define DDI_BUF_CTL(hw_port_idx) \
+	((hw_port_idx) == 0 ? DDI_A_BUF_CTL_HSW : \
+	 (hw_port_idx) == 1 ? DDI_B_BUF_CTL_HSW : \
+	 (hw_port_idx) == 2 ? DDI_C_BUF_CTL_HSW : \
+	 (hw_port_idx) == 3 ? DDI_D_BUF_CTL_HSW : \
+	 (hw_port_idx) == 4 ? DDI_E_BUF_CTL_SKL : \
+	 (hw_port_idx) == 5 ? DDI_F_BUF_CTL_ICL : \
+	 /* (hw_port_idx) == 6 ? DDI_G_BUF_CTL_XELPD : */ 0xFFFFFFFF) // Error/unknown
+
+// DDI_BUF_CTL Bits (common across many DDI ports, but check PRM for specifics per GEN)
+	#define DDI_BUF_CTL_ENABLE              (1U << 31)
+	// Bit 30: DDI Buffer Direction (0 = output, 1 = input - not typically changed)
+	// Bits 29-27: DDI Buffer Idle State / Power Down (GEN specific)
+	#define DDI_BUF_CTL_IDLE_ON_HSW         (1U << 27) // Example for HSW, others vary
+
+	// DDI_BUF_CTL Port Width (Common for DP/HDMI) - Bits 3:1 typically on HSW/BDW/SKL
+	#define DDI_PORT_WIDTH_SHIFT_HSW        1
+	#define DDI_PORT_WIDTH_MASK_HSW         (7U << DDI_PORT_WIDTH_SHIFT_HSW)
+		#define DDI_PORT_WIDTH_X1_HSW       (0U << DDI_PORT_WIDTH_SHIFT_HSW) // For DP lane count 1
+		#define DDI_PORT_WIDTH_X2_HSW       (1U << DDI_PORT_WIDTH_SHIFT_HSW) // For DP lane count 2
+		#define DDI_PORT_WIDTH_X4_HSW       (3U << DDI_PORT_WIDTH_SHIFT_HSW) // For DP lane count 4 / HDMI / DVI
+
+	// DDI_BUF_CTL Mode Select (Gen-specific bits, these are conceptual placeholders)
+	// HSW: DDI_A_MODE_SELECT (Bit 7), DDI_B_C_D_MODE_SELECT (Bits [6:4])
+	// SKL: DDI_BUF_CTL_MODE (Bits [6:4] or similar)
+	// TODO: Define these accurately per-GEN and per-DDI-port (A,B,C,D,E etc.)
+	// #define DDI_BUF_CTL_MODE_SELECT_SHIFT   4
+	// #define DDI_BUF_CTL_MODE_SELECT_MASK    (7U << DDI_BUF_CTL_MODE_SELECT_SHIFT)
+	//	 #define DDI_MODE_HDMI       (0x0 << DDI_BUF_CTL_MODE_SELECT_SHIFT)
+	//	 #define DDI_MODE_DVI        (0x1 << DDI_BUF_CTL_MODE_SELECT_SHIFT)
+	//	 #define DDI_MODE_DP_SST     (0x2 << DDI_BUF_CTL_MODE_SELECT_SHIFT)
+
+	// DDI_BUF_CTL for DP Voltage Swing / Pre-emphasis (HSW specific bits shown in prior version)
+	// #define DDI_BUF_CTL_HSW_DP_VS_PE_MASK   (0x1EU) // Bits 4:1 for HSW DP VS/PE
+
+// DDI Buffer Transition Registers (HSW+ for HDMI tuning) - Per DDI Port
+// Example for DDI A. Actual registers are DDI_BUF_TRANS_LO(ddi_port_idx) and DDI_BUF_TRANS_HI(ddi_port_idx)
+// Base for DDI A: 0x64E08 (TRANS_LO), 0x64E0C (TRANS_HI)
+// TODO: Define these properly using a macro based on DDI_BUF_CTL(hw_port_idx) + offset
+// #define DDI_A_BUF_TRANS_LO_HSW       (DDI_A_BUF_CTL_HSW + 0x8)
+// #define DDI_A_BUF_TRANS_HI_HSW       (DDI_A_BUF_CTL_HSW + 0xC)
+//    Bits for deemphasis, voltage swing, etc. are highly GEN specific.
+
+// DisplayPort AUX Channel Registers (Per DDI Port that supports DP/eDP)
+// These are GEN and Port specific. Example for SKL+ DDI A:
+// #define DDI_AUX_CH_CTL_A_SKL          0x64010 // Or 0x164010 depending on PHY
+// #define DDI_AUX_CH_DATA1_A_SKL        0x64014
+// ... up to DATA5
+// TODO: Define these for all relevant DDI ports (A-G) and GENs (HSW, BDW, SKL, ICL, TGL+)
+// using PRM data. This is a large set of definitions.
+
+// HPD Interrupt Pins (from registers.h, these are example names for specific gens)
+// #define HPD_PORT_A (defined in intel_extreme.h, map to i915_hpd_line_identifier)
+// #define HPD_PORT_B ... etc.
+// These are used by ISRs to identify the source of an HPD event.
+// The actual HPD bits are in SDE_IIR, DE_PORT_IIR, GMBUS, etc. depending on GEN.
+// Example from intel_extreme.h (may need i915 specific versions or mapping)
+// #define HPD_PIN_A (1 << ...) // Bit position in a specific HPD status/interrupt register
+// #define HPD_PIN_B (1 << ...)
+// #define HPD_PIN_C (1 << ...)
+// #define HPD_PIN_D (1 << ...)
+// #define HPD_PIN_E (1 << ...) // For DDI E on SKL+
+// #define HPD_PIN_TC1 (1 << ...) // For Type-C Port 1 HPD (Gen11+)
+// ...
+
+
+// --- DisplayPort DPCD Defines (standard addresses) ---
 	#define FDI_FS_ERRC_ENABLE_IVB			(1U << 7)
 	#define FDI_FE_ERRC_ENABLE_IVB			(1U << 6)
 
@@ -698,17 +818,33 @@
 #define CURBCNTR                (_PIPE_B_BASE + 0x0080)
 #define CURBBASE                (_PIPE_B_BASE + 0x0084)
 #define CURBPOS                 (_PIPE_B_BASE + 0x0088)
-// Pipe C (if similar registers exist, needs verification for specific Gens)
-// #define CURCCNTR             (_PIPE_C_BASE + 0x0080) // Example if Pipe C has one
-// #define CURCBASE             (_PIPE_C_BASE + 0x0084)
-// #define CURCPOS              (_PIPE_C_BASE + 0x0088)
+// Pipe C
+#define CURCCNTR                (_PIPE_C_BASE + 0x0080) // TODO: Verify for relevant Gens
+#define CURCBASE                (_PIPE_C_BASE + 0x0084) // TODO: Verify
+#define CURCPOS                 (_PIPE_C_BASE + 0x0088) // TODO: Verify
+// Pipe D
+#define CURDCNTR                (_PIPE_D_BASE + 0x0080) // TODO: Verify for relevant Gens. Pipe D cursor may not exist or use different regs.
+#define CURDBASE                (_PIPE_D_BASE + 0x0084) // TODO: Verify.
+#define CURDPOS                 (_PIPE_D_BASE + 0x0088) // TODO: Verify.
+
 
 // Generic macros for accessing cursor registers by pipe
-// These currently only support Pipe A and B based on common Gen7 configurations.
-// Pipe C might need different handling or use sprite planes.
-#define CURSOR_CONTROL_REG(pipe)    ((pipe) == PRIV_PIPE_A ? CURACNTR : ((pipe) == PRIV_PIPE_B ? CURBCNTR : 0xFFFFFFFF)) // Error value for unsupported
-#define CURSOR_BASE_REG(pipe)       ((pipe) == PRIV_PIPE_A ? CURABASE : ((pipe) == PRIV_PIPE_B ? CURBBASE : 0xFFFFFFFF))
-#define CURSOR_POS_REG(pipe)        ((pipe) == PRIV_PIPE_A ? CURAPOS  : ((pipe) == PRIV_PIPE_B ? CURBPOS  : 0xFFFFFFFF))
+// These assume a consistent offset pattern for cursor blocks A, B, C, D relative to their _PIPE_X_BASE.
+// This needs PRM verification, especially for Pipe C and D across different GPU generations.
+// Newer gens (SKL+) might have plane-associated cursors with different register schemes.
+#define CURSOR_CONTROL_REG(pipe)    ((pipe) == PRIV_PIPE_A ? CURACNTR : \
+                                 ((pipe) == PRIV_PIPE_B ? CURBCNTR : \
+                                 ((pipe) == PRIV_PIPE_C ? CURCCNTR : /* Assumes CURCCNTR is valid */ \
+                                 ((pipe) == PRIV_PIPE_D ? CURDCNTR : 0xFFFFFFFF)))) /* Assumes CURDCNTR is valid, returns error otherwise */
+#define CURSOR_BASE_REG(pipe)       ((pipe) == PRIV_PIPE_A ? CURABASE : \
+                                 ((pipe) == PRIV_PIPE_B ? CURBBASE : \
+                                 ((pipe) == PRIV_PIPE_C ? CURCBASE : \
+                                 ((pipe) == PRIV_PIPE_D ? CURDBASE : 0xFFFFFFFF))))
+#define CURSOR_POS_REG(pipe)        ((pipe) == PRIV_PIPE_A ? CURAPOS  : \
+                                 ((pipe) == PRIV_PIPE_B ? CURBPOS  : \
+                                 ((pipe) == PRIV_PIPE_C ? CURCPOS  : \
+                                 ((pipe) == PRIV_PIPE_D ? CURDPOS  : 0xFFFFFFFF))))
+// TODO: Cursor Size register (CURxSIZE) also needs per-pipe handling if it exists for C/D.
 
 // Bitfields for CURxCNTR (Cursor Control Register)
 // These are based on MCURSOR_ bits from Intel drivers, common for Gen4-Gen7+

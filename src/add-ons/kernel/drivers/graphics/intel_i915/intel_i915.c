@@ -510,7 +510,69 @@ static status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) {
 	return B_OK;
 }
 
-status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipe);
+status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* modeFromHook, enum pipe_id_priv pipeFromHook);
+static status_t i915_apply_staged_display_config(intel_i915_device_info* devInfo);
+
+
+// This static function will now be the core logic for applying modes,
+// reading the complete configuration from shared_info.
+static status_t
+i915_apply_staged_display_config(intel_i915_device_info* devInfo)
+{
+	if (!devInfo || !devInfo->shared_info)
+		return B_BAD_VALUE;
+
+	TRACE("i915_apply_staged_display_config: Applying configuration from shared_info. Active displays: %u, Primary pipe array idx: %u\n",
+		devInfo->shared_info->active_display_count, devInfo->shared_info->primary_pipe_index);
+
+	status_t finalStatus = B_ERROR; // Assume error until at least one display is set
+
+	// The accelerant's intel_set_display_mode (which calls this via IOCTL)
+	// should have already performed a two-pass validation and resource allocation,
+	// updating shared_info->pipe_display_configs[i].is_active for successfully validated pipes.
+	// Here, we iterate what's marked active and program it.
+	// This is a conceptual shift: the accelerant's mode.c intel_set_display_mode
+	// should be the one doing the heavy lifting based on shared_info.
+	// This kernel entry point might become simpler, or it might call into
+	// a more complex display.c function that does the iteration.
+
+	// For now, let's assume this function is called *after* shared_info accurately reflects
+	// the full target state (which pipes are active, what their modes are).
+	// The actual iteration and calling intel_i915_display_set_mode_internal per active pipe
+	// should happen in the accelerant's main set_display_mode function.
+	// This IOCTL entry point, if called directly with a single mode, now primarily
+	// handles that single mode for the given pipe, or triggers the application of
+	// a previously staged multi-monitor config if modeFromHook is special (e.g., NULL).
+
+	// If shared_info->active_display_count > 0, it implies a multi-monitor config is staged.
+	// The accelerant's intel_set_display_mode should iterate this.
+	// If this IOCTL is still called directly for a single pipe, it needs to respect that.
+
+	// This function's role needs to be clarified:
+	// Option 1: It applies ONLY the modeFromHook to pipeFromHook. Multi-monitor is purely by shared_info.
+	// Option 2: If modeFromHook is a special value (e.g. NULL), it applies shared_info. Otherwise, modeFromHook.
+
+	// Let's refine intel_display_set_mode_ioctl_entry to be the one that decides.
+	// i915_apply_staged_display_config will be called by it if appropriate.
+	// For now, this function is a placeholder if we decide to centralize the multi-pipe loop here.
+	// The current plan is that accelerant's mode.c::intel_set_display_mode does the loop.
+	// So, this function might not be needed if intel_display_set_mode_ioctl_entry
+	// just sets one pipe or signals the accelerant to process shared_info.
+
+	// Assuming the accelerant's intel_set_display_mode in mode.c handles the iteration:
+	// This IOCTL might just be a trigger or for single primary display init.
+	// The complex multi-pipe orchestration is better placed in the accelerant's
+	// main mode setting function, which then calls the kernel for individual pipe settings if needed.
+	// The current INTEL_I915_SET_DISPLAY_MODE IOCTL is too simple for multi-monitor.
+	// It should perhaps be deprecated in favor of SET_DISPLAY_CONFIG + a "COMMIT_CONFIG" IOCTL,
+	// or the accelerant's SET_DISPLAY_MODE hook implicitly means "COMMIT_CONFIG_FROM_SHARED_INFO".
+
+	// For now, this function remains a placeholder for potential future refactoring
+	// if more complex kernel-side orchestration is needed.
+	// The current plan has the main loop in the accelerant's mode.c.
+	TRACE("i915_apply_staged_display_config: Placeholder. Main multi-pipe logic is in accelerant's mode.c.\n");
+	return B_NOT_SUPPORTED; // Indicates this path isn't the primary way to set full multi-config.
+}
 
 
 static status_t
@@ -552,7 +614,23 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				return B_BAD_VALUE;
 			}
 			// TRACE("SET_DISPLAY_MODE IOCTL: devInfo %p maps to targetPipe %d
-", devInfo, targetPipe); // Can be noisy
+", devInfo, targetPipe);
+
+			// This IOCTL is now primarily a trigger for the accelerant's main
+			// intel_set_display_mode function (from mode.c) to apply the
+			// configuration that was staged in shared_info by INTEL_I915_SET_DISPLAY_CONFIG.
+			// The kernel's intel_display_set_mode_ioctl_entry will be called by that accelerant function
+			// potentially multiple times, once for each active pipe in the staged config.
+			// Or, if no multi-config is staged, this IOCTL call implies setting a single
+			// primary display. The accelerant's intel_set_display_mode will make this decision.
+			// For now, we pass it through. The complex logic is in the accelerant.
+			// The kernel side just needs to ensure its low-level functions (set_pipe_timings, etc.)
+			// work correctly for the given pipe.
+			//
+			// A simpler model for this IOCTL:
+			// If user-space calls this, it's for the *primary display associated with this accelerant instance*.
+			// The kernel will then call the internal function to set this one display.
+			// If a SET_CONFIG has happened, the accelerant's main set_display_mode will read that.
 			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode, targetPipe);
 		}
 		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);

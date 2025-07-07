@@ -345,8 +345,17 @@ intel_i915_write32(intel_i915_device_info* devInfo, uint32 offset, uint32 value)
 }
 
 
-enum pipe_id_priv { PRIV_PIPE_A = 0, PRIV_PIPE_B, PRIV_PIPE_C, PRIV_PIPE_INVALID = -1, PRIV_MAX_PIPES = PRIV_PIPE_C + 1 };
+enum pipe_id_priv {
+	PRIV_PIPE_A = 0,
+	PRIV_PIPE_B,
+	PRIV_PIPE_C,
+	PRIV_PIPE_D, // Added for 4-pipe support. Full hw programming for Pipe D requires PRM validation.
+	PRIV_PIPE_INVALID = -1,
+	PRIV_MAX_PIPES = PRIV_PIPE_D + 1 // Now 4. Ensure all arrays sized by this are handled.
+};
 enum transcoder_id_priv { PRIV_TRANSCODER_A=0, PRIV_TRANSCODER_B, PRIV_TRANSCODER_C, PRIV_TRANSCODER_EDP, PRIV_TRANSCODER_DSI0, PRIV_TRANSCODER_DSI1, PRIV_TRANSCODER_INVALID=-1, PRIV_MAX_TRANSCODERS=PRIV_TRANSCODER_DSI1+1};
+// TODO: Consider adding PRIV_TRANSCODER_D if distinct from EDP/DSI on 4-pipe HW,
+// and ensure its registers are defined and used in display.c / clocks.c.
 enum intel_port_id_priv {
 	PRIV_PORT_ID_NONE = 0,
 	PRIV_PORT_A, // Typically eDP or DP

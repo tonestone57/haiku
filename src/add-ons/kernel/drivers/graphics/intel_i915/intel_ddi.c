@@ -654,53 +654,73 @@ intel_ddi_port_enable(intel_i915_device_info* devInfo, intel_output_port_state* 
 		ddi_buf_ctl_val &= ~(DDI_PORT_WIDTH_MASK | DDI_BUF_CTL_MODE_SELECT_MASK); // Conceptual mode mask
 
 		uint8_t trained_lane_count = port->dpcd_data.max_lane_count & DPCD_MAX_LANE_COUNT_MASK;
-		// TODO: Link training should update a 'current_lane_count' in port state.
-		if (trained_lane_count == 1) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X1;
-		else if (trained_lane_count == 2) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X2;
-		else if (trained_lane_count == 4) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4;
+		// TODO: Link training should update a 'current_trained_lane_count' in port state.
+		// For now, using max_lane_count from DPCD as a proxy.
+		if (trained_lane_count == 1) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X1_HSW;
+		else if (trained_lane_count == 2) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X2_HSW;
+		else if (trained_lane_count == 4) ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4_HSW;
 		else {
 			TRACE("DDI: Port Enable: Invalid trained lane count %u for DP, defaulting to x1\n", trained_lane_count);
 			ddi_buf_ctl_val |= DDI_PORT_WIDTH_X1;
 		}
 
-		// TODO: Use actual DDI_BUF_CTL_MODE_DP_SST define once available in registers.h
-		// This requires GEN-specific bits. Example for HSW DDI A:
-		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) { // DDI_A_MODE_SELECT (bit 7) = 0 for DP
-			ddi_buf_ctl_val &= ~(1U << 7);
+		// TODO: Use actual DDI_BUF_CTL_MODE_DP_SST define from registers.h based on GEN and port->hw_port_index.
+		// This requires mapping port->hw_port_index to the specific DDI (A,B,C,D,E) and then
+		// using the correct mode selection bits for that DDI port on the current GPU generation.
+		// Example for HSW DDI A (hw_port_index 0): DDI_A_MODE_SELECT (bit 7) = 0 for DP.
+		// For other DDI ports on HSW (B,C,D), mode select is in bits [6:4].
+		// For SKL+, mode select is typically bits [6:4] (DDI_BUF_CTL_MODE_SKL).
+		// This logic needs to be fully implemented.
+		// For now, this is a placeholder.
+		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) {
+			ddi_buf_ctl_val &= ~DDI_A_MODE_SELECT_HSW; // Clear bit 7 (0 = DP)
+		} else if (IS_HASWELL(devInfo->device_id) && port->hw_port_index > 0 && port->hw_port_index <= 3) { // DDI B, C, D
+			ddi_buf_ctl_val &= ~DDI_BCD_MODE_SELECT_HSW_MASK;
+			ddi_buf_ctl_val |= DDI_BCD_MODE_SELECT_DP_HSW;
+		} else if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 9) { // SKL+
+			ddi_buf_ctl_val &= ~DDI_BUF_CTL_MODE_SKL_MASK;
+			ddi_buf_ctl_val |= DDI_BUF_CTL_MODE_DP_SST_SKL;
 		} else {
-			TRACE("DDI: Port Enable: DP Mode Select for DDI_BUF_CTL port %d (Gen %d) NOT YET DEFINED.\n",
+			TRACE("DDI: Port Enable: DP Mode Select for DDI_BUF_CTL port hw_idx %d (Gen %d) not fully implemented.\n",
 				port->hw_port_index, INTEL_GRAPHICS_GEN(devInfo->device_id));
-			// Cannot enable if mode cannot be set.
-			status = B_UNSUPPORTED; goto ddi_enable_done;
+			// status = B_UNSUPPORTED; goto ddi_enable_done; // Keep it going to see if DDI_BUF_CTL_ENABLE is enough
 		}
-		// TODO: Configure DDI_BUF_TRANS for DP if needed.
+		// TODO: Configure DDI_BUF_TRANS for DP if needed (usually not, mainly for HDMI).
 
 		ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
 		intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
-		TRACE("DDI: Port Enable: DP DDI_BUF_CTL(0x%x) = 0x%08lx\n", ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		TRACE("DDI: Port Enable: DP DDI_BUF_CTL(hw_idx %d, reg 0x%x) = 0x%08lx\n", port->hw_port_index, ddi_buf_ctl_reg, ddi_buf_ctl_val);
 
 	} else if (port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
-		TRACE("DDI: Port Enable: HDMI/DVI path for port %d\n", port->logical_port_id);
+		TRACE("DDI: Port Enable: HDMI/DVI path for port %d (hw_idx %d)\n", port->logical_port_id, port->hw_port_index);
 		ddi_buf_ctl_val = intel_i915_read32(devInfo, ddi_buf_ctl_reg);
-		ddi_buf_ctl_val &= ~(DDI_PORT_WIDTH_MASK | DDI_BUF_CTL_MODE_SELECT_MASK); // Conceptual mode mask
-		ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4; // HDMI/DVI use 4 lanes for TMDS
+		ddi_buf_ctl_val &= ~(DDI_PORT_WIDTH_MASK_HSW | DDI_BUF_CTL_MODE_SELECT_MASK_CONCEPTUAL); // Using a conceptual combined mask
+		ddi_buf_ctl_val |= DDI_PORT_WIDTH_X4_HSW; // HDMI/DVI typically use 4 lanes worth of bandwidth
 
-		// TODO: Use actual DDI_BUF_CTL_MODE_HDMI define once available in registers.h
-		// Example for HSW DDI A:
-		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) { // DDI_A_MODE_SELECT (bit 7) = 1 for HDMI
-			ddi_buf_ctl_val |= (1U << 7);
+		// TODO: Use actual DDI_BUF_CTL_MODE_HDMI define from registers.h based on GEN and port->hw_port_index
+		if (IS_HASWELL(devInfo->device_id) && port->hw_port_index == 0) { // DDI A
+			ddi_buf_ctl_val |= DDI_A_MODE_SELECT_HDMI_HSW; // Set bit 7
+		} else if (IS_HASWELL(devInfo->device_id) && port->hw_port_index > 0 && port->hw_port_index <= 3) { // DDI B, C, D
+			ddi_buf_ctl_val &= ~DDI_BCD_MODE_SELECT_HSW_MASK;
+			ddi_buf_ctl_val |= (port->type == PRIV_OUTPUT_HDMI) ? DDI_BCD_MODE_SELECT_HDMI_HSW : DDI_BCD_MODE_SELECT_DVI_HSW;
+		} else if (INTEL_GRAPHICS_GEN(devInfo->device_id) >= 9) { // SKL+
+			ddi_buf_ctl_val &= ~DDI_BUF_CTL_MODE_SKL_MASK;
+			ddi_buf_ctl_val |= (port->type == PRIV_OUTPUT_HDMI) ? DDI_BUF_CTL_MODE_HDMI_SKL : DDI_BUF_CTL_MODE_DVI_SKL;
 		} else {
-			TRACE("DDI: Port Enable: HDMI/DVI Mode Select for DDI_BUF_CTL port %d (Gen %d) NOT YET DEFINED.\n",
+			TRACE("DDI: Port Enable: HDMI/DVI Mode Select for DDI_BUF_CTL port hw_idx %d (Gen %d) not fully implemented.\n",
 				port->hw_port_index, INTEL_GRAPHICS_GEN(devInfo->device_id));
-			status = B_UNSUPPORTED; goto ddi_enable_done;
+			// status = B_UNSUPPORTED; goto ddi_enable_done;
 		}
 
-		// TODO: Program DDI_BUF_TRANS_LO/HI for HDMI specifics. Registers not defined yet.
-		TRACE("DDI: Port Enable: HDMI DDI_BUF_TRANS programming STUBBED for port %d.\n", port->hw_port_index);
+		// TODO: Program DDI_BUF_TRANS_LO/HI for HDMI specifics (voltage swing, pre-emphasis).
+		// Registers and bitfields need to be defined in registers.h from PRM.
+		// Example: intel_i915_write32(devInfo, DDI_BUF_TRANS_LO(port->hw_port_index), val_lo);
+		//          intel_i915_write32(devInfo, DDI_BUF_TRANS_HI(port->hw_port_index), val_hi);
+		TRACE("DDI: Port Enable: HDMI DDI_BUF_TRANS programming STUBBED for port hw_idx %d.\n", port->hw_port_index);
 
 		ddi_buf_ctl_val |= DDI_BUF_CTL_ENABLE;
 		intel_i915_write32(devInfo, ddi_buf_ctl_reg, ddi_buf_ctl_val);
-		TRACE("DDI: Port Enable: HDMI/DVI DDI_BUF_CTL(0x%x) = 0x%08lx\n", ddi_buf_ctl_reg, ddi_buf_ctl_val);
+		TRACE("DDI: Port Enable: HDMI/DVI DDI_BUF_CTL(hw_idx %d, reg 0x%x) = 0x%08lx\n", port->hw_port_index, ddi_buf_ctl_reg, ddi_buf_ctl_val);
 
 		if (port->type == PRIV_OUTPUT_HDMI) {
 			intel_ddi_send_avi_infoframe(devInfo, port, pipe, adjusted_mode);

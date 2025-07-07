@@ -295,6 +295,14 @@ intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id
 	// and that the plane has been disabled prior to calling if critical parameters
 	// like pixel format or tiling are changing.
 
+	// Verify pipe is valid for these register macros (_PIPE only covers A,B,C, and D speculatively)
+	if (pipe == PRIV_PIPE_INVALID || _PIPE(pipe) == 0x0) {
+		// _PIPE(pipe) returns 0x0 if pipe is PRIV_PIPE_D and _PIPE_D_BASE is not correctly set for this context,
+		// or if an invalid pipe enum is passed.
+		ERROR("DISPLAY: configure_primary_plane: Invalid pipe %d for register access.\n", pipe);
+		return B_BAD_INDEX;
+	}
+
 	uint32_t current_dspcntr_val = intel_i915_read32(devInfo, DSPCNTR(pipe));
 	uint32_t new_dspcntr_val = current_dspcntr_val;
 
@@ -306,15 +314,12 @@ intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id
 	new_dspcntr_val |= get_dspcntr_format_bits(format); // Helper function determines format bits.
 
 	// Set tiling mode.
-	// Currently, only X-tiling is explicitly handled for primary scanout.
-	// Y-tiling for primary planes is less common and might require different register bits
-	// or have stricter alignment/stride requirements on some hardware generations.
 	if (tiling_mode == I915_TILING_X) {
 		new_dspcntr_val |= DISPPLANE_TILED_X;
 	} else if (tiling_mode == I915_TILING_Y) {
-		// TODO: Add support for Y-tiling if necessary. This might involve different
-		// DISPPLANE_TILED_Y bits or additional setup. For now, Y-tiled primary
-		// planes will be treated as linear by this configuration.
+		// TODO: Add support for Y-tiling if necessary for primary plane on target GENs.
+		// This might involve different DISPPLANE_TILED_Y bits or additional setup.
+		// For now, Y-tiled primary planes will be treated as linear by this configuration.
 		TRACE("DISPLAY: configure_primary_plane: Y-tiling for pipe %d primary plane not explicitly handled, may use linear path.\n", pipe);
 	}
 
@@ -326,28 +331,16 @@ intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id
 		new_dspcntr_val |= DISPPLANE_TRICKLE_FEED_DISABLE;
 	}
 
-	// Write the new control value.
-	// The plane should ideally be disabled by the caller before these critical changes.
 	intel_i915_write32(devInfo, DSPCNTR(pipe), new_dspcntr_val);
-
-	// Program the stride (bytes per row).
 	intel_i915_write32(devInfo, DSPSTRIDE(pipe), stride_bytes);
-
-	// Program the plane size (width-1, height-1).
 	intel_i915_write32(devInfo, DSPSIZE(pipe), ((uint32_t)(height - 1) << 16) | (width - 1));
-
-	// Program the surface base address (GTT offset in bytes).
-	// DSPADDR and DSPSURF are often the same register or aliased for the primary plane.
 	intel_i915_write32(devInfo, DSPADDR(pipe), gtt_page_offset * B_PAGE_SIZE);
-
-	// Program the display plane offset (typically (0,0) for full surface scanout).
-	// DSPOFFSET handles panning within the larger surface if DSPSIZE is smaller than surface dimensions.
 	intel_i915_write32(devInfo, DSPOFFSET(pipe), 0); // Default to no offset
 
-	// TRACE("DISPLAY: Configured Primary Plane Pipe %d: Format 0x%x, Tiling %d, Stride %u, Size %ux%u, GTT Offset 0x%lx\n",
-	//	pipe, (unsigned int)((new_dspcntr_val & DISPPLANE_PIXFORMAT_MASK) >> DISPPLANE_PIXFORMAT_SHIFT),
-	//	(new_dspcntr_val & DISPPLANE_TILED_X) ? 1 : 0,
-	//	stride_bytes, width, height, (uint32_t)gtt_page_offset * B_PAGE_SIZE); // Verbose
+	TRACE("DISPLAY: Configured Primary Plane Pipe %d: Format 0x%x, Tiling %d, Stride %u, Size %ux%u, GTT Offset 0x%lx\n",
+		pipe, (unsigned int)((new_dspcntr_val & DISPPLANE_PIXFORMAT_MASK) >> DISPPLANE_PIXFORMAT_SHIFT),
+		(new_dspcntr_val & DISPPLANE_TILED_X) ? 1 : 0,
+		stride_bytes, width, height, (uint32_t)gtt_page_offset * B_PAGE_SIZE);
 
 	return B_OK;
 }
@@ -356,13 +349,47 @@ status_t
 intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	const display_mode* target_mode, const struct intel_clock_params_t* clocks)
 {
-	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
+	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES || target_mode == NULL || clocks == NULL)
 		return B_BAD_VALUE;
 
-	TRACE("DISPLAY: STUB intel_i915_pipe_enable for pipe %d\n", pipe);
-	// TODO: Implement actual register programming for TRANSCONF(pipe) to set TRANSCONF_ENABLE.
-	//       Wait for pipe to become active (poll TRANS_STATE_ENABLE_PENDING).
-	// Caller must hold forcewake.
+	// Caller must hold appropriate forcewake (FW_DOMAIN_ALL or specific display domain)
+
+	uint32_t trans_conf_reg = TRANSCONF(pipe); // TRANSCONF uses _PIPE(pipe) which now includes PIPE_D
+	if (_PIPE(pipe) == 0x0 && pipe != PRIV_PIPE_A) { // _PIPE macro returns 0 for unhandled/speculative PIPE_D base
+		ERROR("DISPLAY: pipe_enable: Pipe %d base address not resolved, cannot configure TRANSCONF.\n", pipe);
+		return B_ERROR;
+	}
+
+	uint32_t trans_conf_val = intel_i915_read32(devInfo, trans_conf_reg);
+	trans_conf_val |= TRANSCONF_ENABLE;
+	// TODO: Set interlace mode from target_mode->timing.flags if necessary
+	// trans_conf_val &= ~TRANSCONF_INTERLACE_MODE_MASK_IVB;
+	// if (target_mode->timing.flags & B_TIMING_INTERLACED) { ... set interlace bits ... }
+	// else { trans_conf_val |= TRANSCONF_PROGRESSIVE_IVB; }
+
+	// TODO: Set BPC (Bits Per Color) for the pipe/transcoder based on target_mode->space
+	// or a pre-calculated bpp_total from clock_params. This is generation specific.
+	// Example for Gen7-like:
+	// uint32_t bpc_val = TRANSCONF_PIPE_BPC_8_FIELD; // Default to 8bpc
+	// if (clocks->fdi_params.pipe_bpc_total == 18) bpc_val = TRANSCONF_PIPE_BPC_6_FIELD;
+	// else if (clocks->fdi_params.pipe_bpc_total == 30) bpc_val = TRANSCONF_PIPE_BPC_10_FIELD;
+	// else if (clocks->fdi_params.pipe_bpc_total == 36) bpc_val = TRANSCONF_PIPE_BPC_12_FIELD;
+	// trans_conf_val &= ~TRANSCONF_PIPE_BPC_MASK;
+	// trans_conf_val |= (bpc_val << TRANSCONF_PIPE_BPC_SHIFT);
+
+	intel_i915_write32(devInfo, trans_conf_reg, trans_conf_val);
+	I915_POSTING_READ(trans_conf_reg); // Posting read
+
+	// TODO: Wait for pipe/transcoder to become active by polling TRANSCONF_STATE_ENABLE_IVB (for IVB)
+	// or other generation-specific status bits. This is critical.
+	// For Haswell+, TRANSCONF_STATE_ENABLE_IVB is read-only, actual status is elsewhere.
+	// Example polling:
+	// if (intel_wait_for_register_fw(devInfo, trans_conf_reg, TRANSCONF_STATE_ENABLE_IVB, TRANSCONF_STATE_ENABLE_IVB, 1000, 0) != B_OK) {
+	//    ERROR("DISPLAY: Pipe %d failed to enable (TRANSCONF state).\n", pipe);
+	//    return B_TIMED_OUT;
+	// }
+	TRACE("DISPLAY: Pipe %d enabled (TRANSCONF 0x%lx written with 0x%lx).\n", pipe, trans_conf_reg, trans_conf_val);
+	devInfo->pipes[pipe].enabled = true;
 	return B_OK;
 }
 
@@ -372,10 +399,26 @@ intel_i915_pipe_disable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
 	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
 		return;
 
-	TRACE("DISPLAY: STUB intel_i915_pipe_disable for pipe %d\n", pipe);
-	// TODO: Implement actual register programming for TRANSCONF(pipe) to clear TRANSCONF_ENABLE.
-	//       Wait for pipe to become inactive.
-	// Caller must hold forcewake.
+	// Caller must hold appropriate forcewake
+
+	uint32_t trans_conf_reg = TRANSCONF(pipe);
+	if (_PIPE(pipe) == 0x0 && pipe != PRIV_PIPE_A) {
+		ERROR("DISPLAY: pipe_disable: Pipe %d base address not resolved.\n", pipe);
+		return;
+	}
+
+	uint32_t trans_conf_val = intel_i915_read32(devInfo, trans_conf_reg);
+	trans_conf_val &= ~TRANSCONF_ENABLE;
+	intel_i915_write32(devInfo, trans_conf_reg, trans_conf_val);
+	I915_POSTING_READ(trans_conf_reg);
+
+	// TODO: Wait for pipe/transcoder to become inactive by polling status bits.
+	// Example:
+	// if (intel_wait_for_register_fw(devInfo, trans_conf_reg, TRANSCONF_STATE_ENABLE_IVB, 0, 1000, 0) != B_OK) {
+	//    ERROR("DISPLAY: Pipe %d failed to disable (TRANSCONF state).\n", pipe);
+	// }
+	TRACE("DISPLAY: Pipe %d disabled (TRANSCONF 0x%lx written with 0x%lx).\n", pipe, trans_conf_reg, trans_conf_val);
+	devInfo->pipes[pipe].enabled = false;
 }
 
 status_t
@@ -384,9 +427,25 @@ intel_i915_plane_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	if (devInfo == NULL || pipe >= PRIV_MAX_PIPES)
 		return B_BAD_VALUE;
 
-	TRACE("DISPLAY: STUB intel_i915_plane_enable for pipe %d, enable: %s\n", pipe, enable ? "true" : "false");
-	// TODO: Implement actual register programming for DSPCNTR(pipe) to set/clear DSPLANE_ENABLE.
-	// Caller must hold forcewake.
+	// Caller must hold appropriate forcewake
+
+	uint32_t dspcntr_reg = DSPCNTR(pipe);
+	if (_PIPE(pipe) == 0x0 && pipe != PRIV_PIPE_A) {
+		ERROR("DISPLAY: plane_enable: Pipe %d base address not resolved for DSPCNTR.\n", pipe);
+		return B_ERROR;
+	}
+
+	uint32_t dspcntr_val = intel_i915_read32(devInfo, dspcntr_reg);
+	if (enable) {
+		dspcntr_val |= DISPPLANE_ENABLE;
+	} else {
+		dspcntr_val &= ~DISPPLANE_ENABLE;
+	}
+	intel_i915_write32(devInfo, dspcntr_reg, dspcntr_val);
+	I915_POSTING_READ(dspcntr_reg); // Posting read to flush
+
+	TRACE("DISPLAY: Plane for pipe %d %s (DSPCNTR 0x%lx set to 0x%lx).\n", pipe,
+		enable ? "enabled" : "disabled", dspcntr_reg, dspcntr_val);
 	return B_OK;
 }
 

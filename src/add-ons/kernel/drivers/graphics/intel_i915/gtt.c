@@ -323,14 +323,69 @@ intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 
 	mutex_lock(&devInfo->gtt_allocator_lock);
 
+	// Initial check for overall free space
 	if (num_pages > devInfo->gtt_free_pages_count) {
+		// Not enough total free pages, even if fragmented.
+		// This check is before attempting to find a contiguous block.
 		mutex_unlock(&devInfo->gtt_allocator_lock);
-		TRACE("GTT Alloc: Not enough free pages globally (%u available) for %lu pages.\n",
-			devInfo->gtt_free_pages_count, num_pages);
-		return B_NO_MEMORY;
+		// TRACE("GTT Alloc: Not enough total free pages (%u available) for %lu pages before scan.\n",
+		//	devInfo->gtt_free_pages_count, num_pages); // Can be noisy
+		// Proceed to eviction attempts directly.
+	} else {
+		// Scan for a contiguous block first if enough total pages seem available.
+		uint32_t consecutive_free_count = 0;
+		uint32_t current_search_start_idx = 1; // Start searching from GTT page index 1
+
+		for (uint32_t i = 1; i < devInfo->gtt_total_pages_managed; ++i) {
+			if (!_gtt_is_bit_set(i, devInfo->gtt_page_bitmap)) {
+				if (consecutive_free_count == 0) {
+					current_search_start_idx = i;
+				}
+				consecutive_free_count++;
+				if (consecutive_free_count == num_pages) {
+					for (uint32_t k = 0; k < num_pages; ++k) {
+						_gtt_set_bit(current_search_start_idx + k, devInfo->gtt_page_bitmap);
+					}
+					devInfo->gtt_free_pages_count -= num_pages;
+					*gtt_page_offset_out = current_search_start_idx;
+					mutex_unlock(&devInfo->gtt_allocator_lock);
+					// TRACE("GTT Alloc: Allocated %lu pages at GTT page offset %u. Free pages remaining: %u\n",
+					//	num_pages, *gtt_page_offset_out, devInfo->gtt_free_pages_count); // Noisy
+					return B_OK;
+				}
+			} else {
+				consecutive_free_count = 0;
+			}
+		}
+		// If we reach here, no contiguous block was found despite enough total free pages.
+		mutex_unlock(&devInfo->gtt_allocator_lock);
 	}
 
-	uint32_t consecutive_free_count = 0;
+
+	// No suitable contiguous block found, or not enough total pages. Attempt to evict and retry.
+	// mutex_unlock(&devInfo->gtt_allocator_lock); // Already unlocked or was never locked if initial check failed
+
+	int max_retries = 5; // Try evicting a few times before giving up
+	for (int retry_count = 0; retry_count < max_retries; ++retry_count) {
+		// TRACE("GTT Alloc: No contiguous block of %lu pages. Free: %u. Attempting eviction (try %d/%d).\n",
+		//	num_pages, devInfo->gtt_free_pages_count, retry_count + 1, max_retries); // Noisy
+
+		if (intel_i915_gem_evict_one_object(devInfo) != B_OK) {
+			// TRACE("GTT Alloc: Eviction failed or no suitable objects to evict on try %d.\n", retry_count + 1);
+			break; // No point retrying if eviction fails
+		}
+
+		// TRACE("GTT Alloc: Eviction successful (try %d), retrying allocation scan.\n", retry_count + 1);
+		mutex_lock(&devInfo->gtt_allocator_lock); // Re-acquire lock for retry scan
+
+		if (num_pages > devInfo->gtt_free_pages_count) {
+			mutex_unlock(&devInfo->gtt_allocator_lock);
+			// TRACE("GTT Alloc: Still not enough total free pages (%u) after eviction for %lu pages.\n",
+			//	devInfo->gtt_free_pages_count, num_pages);
+			continue;
+		}
+
+		uint32_t consecutive_free_count = 0;
 	uint32_t current_search_start_idx = 1; // Start searching from GTT page index 1 (0 is scratch)
 
 	for (uint32_t i = 1; i < devInfo->gtt_total_pages_managed; ++i) {
@@ -356,36 +411,45 @@ intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 		}
 	}
 
-	// No suitable contiguous block found
-	// Attempt to evict something and retry ONCE.
-	// A more sophisticated loop could try multiple evictions if needed.
+	// No suitable contiguous block found. Attempt to evict and retry.
 	mutex_unlock(&devInfo->gtt_allocator_lock); // Release lock before calling eviction
 
-	TRACE("GTT Alloc: No contiguous block of %lu pages. Free: %u. Attempting eviction.\n",
-		num_pages, devInfo->gtt_free_pages_count);
+	int max_retries = 5; // Try evicting a few times before giving up
+	for (int retry_count = 0; retry_count < max_retries; ++retry_count) {
+		TRACE("GTT Alloc: No contiguous block of %lu pages. Free: %u. Attempting eviction (try %d/%d).\n",
+			num_pages, devInfo->gtt_free_pages_count, retry_count + 1, max_retries);
 
-	if (intel_i915_gem_evict_one_object(devInfo) == B_OK) {
-		TRACE("GTT Alloc: Eviction successful, retrying allocation.\n");
-		mutex_lock(&devInfo->gtt_allocator_lock); // Re-acquire lock for retry
-		// Retry logic (same as above, simplified for one retry attempt)
-		if (num_pages > devInfo->gtt_free_pages_count) {
-			mutex_unlock(&devInfo->gtt_allocator_lock);
-			return B_NO_MEMORY;
+		if (intel_i915_gem_evict_one_object(devInfo) != B_OK) {
+			TRACE("GTT Alloc: Eviction failed or no suitable objects to evict on try %d.\n", retry_count + 1);
+			break; // No point retrying if eviction fails
 		}
+
+		TRACE("GTT Alloc: Eviction successful (try %d), retrying allocation scan.\n", retry_count + 1);
+		mutex_lock(&devInfo->gtt_allocator_lock); // Re-acquire lock for retry scan
+
+		if (num_pages > devInfo->gtt_free_pages_count) {
+			// Still not enough total free pages even after eviction
+			mutex_unlock(&devInfo->gtt_allocator_lock);
+			TRACE("GTT Alloc: Still not enough total free pages (%u) after eviction for %lu pages.\n",
+				devInfo->gtt_free_pages_count, num_pages);
+			continue; // continue to next eviction attempt if max_retries not reached
+		}
+
 		consecutive_free_count = 0;
-		current_search_start_idx = 1;
+		current_search_start_idx = 1; // Restart search from GTT page 1
 		for (uint32_t i = 1; i < devInfo->gtt_total_pages_managed; ++i) {
 			if (!_gtt_is_bit_set(i, devInfo->gtt_page_bitmap)) {
 				if (consecutive_free_count == 0) current_search_start_idx = i;
 				consecutive_free_count++;
 				if (consecutive_free_count == num_pages) {
+					// Found a block after eviction and retry
 					for (uint32_t k = 0; k < num_pages; ++k) {
 						_gtt_set_bit(current_search_start_idx + k, devInfo->gtt_page_bitmap);
 					}
 					devInfo->gtt_free_pages_count -= num_pages;
 					*gtt_page_offset_out = current_search_start_idx;
 					mutex_unlock(&devInfo->gtt_allocator_lock);
-					TRACE("GTT Alloc: Retry successful. Allocated %lu pages at offset %u. Free: %u\n",
+					TRACE("GTT Alloc: Retry successful after eviction. Allocated %lu pages at GTT offset %u. Free pages: %u\n",
 						num_pages, *gtt_page_offset_out, devInfo->gtt_free_pages_count);
 					return B_OK;
 				}
@@ -393,13 +457,11 @@ intel_i915_gtt_alloc_space(intel_i915_device_info* devInfo,
 				consecutive_free_count = 0;
 			}
 		}
-		mutex_unlock(&devInfo->gtt_allocator_lock); // Release lock if retry also failed
-	} else {
-		TRACE("GTT Alloc: Eviction failed or no objects to evict.\n");
+		mutex_unlock(&devInfo->gtt_allocator_lock); // Release lock if this scan failed, before next eviction attempt
 	}
 
-	TRACE("GTT Alloc: Failed to find/make space for %lu pages. Free pages globally: %u\n",
-		num_pages, devInfo->gtt_free_pages_count);
+	TRACE("GTT Alloc: Failed to find/make space for %lu pages after %d eviction retries. Free pages globally: %u\n",
+		num_pages, max_retries, devInfo->gtt_free_pages_count);
 	return B_NO_MEMORY;
 }
 

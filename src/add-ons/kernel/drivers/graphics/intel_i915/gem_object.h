@@ -63,8 +63,12 @@ status_t intel_i915_gem_object_map_cpu(struct intel_i915_gem_object* obj,
 void intel_i915_gem_object_unmap_cpu(struct intel_i915_gem_object* obj);
 
 status_t intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
-	uint32_t gtt_page_offset, enum gtt_caching_type cache_type); // Changed gtt_offset_pages to gtt_page_offset
+	uint32_t gtt_page_offset, enum gtt_caching_type cache_type);
 status_t intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj);
+
+// Functions for managing CPU/GPU coherency
+status_t intel_i915_gem_object_finish_gpu_access(struct intel_i915_gem_object* obj, bool gpu_was_writing);
+status_t intel_i915_gem_object_prepare_gpu_access(struct intel_i915_gem_object* obj, bool gpu_will_write);
 
 
 #ifdef __cplusplus

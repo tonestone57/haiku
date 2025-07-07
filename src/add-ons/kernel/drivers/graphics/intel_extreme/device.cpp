@@ -358,6 +358,180 @@ device_ioctl(void* data, uint32 op, void* buffer, size_t bufferLength)
 			return B_OK;
 		}
 
+		case INTEL_GET_DISPLAY_COUNT:
+		{
+			if (buffer == NULL || bufferLength < sizeof(uint32))
+				return B_BAD_VALUE;
+
+			uint32 count = 0;
+			// More accurate count would be from shared_info->active_display_count
+			// after accelerant initializes it properly.
+			// For now, we can estimate based on detected ports that have pipes.
+			// This is a placeholder until accelerant fully populates shared_info.
+			for (int i = 0; i < MAX_PIPES; i++) {
+				if (info->shared_info->pipe_display_configs[i].is_active)
+					count++;
+			}
+			if (count == 0 && info->shared_info->active_display_count > 0) {
+				// Fallback if is_active isn't set yet but accelerant might know.
+				count = info->shared_info->active_display_count;
+			} else if (count == 0) {
+				// A very rough estimate if nothing else is set:
+				// This part is problematic as kernel doesn't know about accelerant's port probing directly.
+				// User-space should rely on accelerant's detection primarily.
+				// This ioctl is better implemented by accelerant if it can handle ioctls,
+				// or shared_info must be very reliably populated.
+				// For now, let's assume shared_info->active_display_count is the authority.
+				count = info->shared_info->active_display_count;
+			}
+
+			if (user_memcpy(buffer, &count, sizeof(uint32)) < B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+		}
+
+		case INTEL_GET_DISPLAY_INFO:
+		{
+			if (buffer == NULL || bufferLength < sizeof(intel_display_info_params))
+				return B_BAD_VALUE;
+
+			intel_display_info_params params;
+			if (user_memcpy(&params, buffer, sizeof(intel_display_info_params)) < B_OK)
+				return B_BAD_ADDRESS;
+
+			if (params.magic != INTEL_PRIVATE_DATA_MAGIC)
+				return B_BAD_VALUE;
+
+			uint32 pipeIndex = params.id.pipe_index;
+			if (pipeIndex >= MAX_PIPES)
+				return B_BAD_INDEX; // Or a more specific error
+
+			// Populate params from shared_info
+			params.is_connected = info->shared_info->pipe_display_configs[pipeIndex].is_active; // Approximation
+			params.is_currently_active = info->shared_info->pipe_display_configs[pipeIndex].is_active;
+			params.has_edid = info->shared_info->has_edid[pipeIndex];
+			if (params.has_edid) {
+				memcpy(&params.edid_data, &info->shared_info->edid_infos[pipeIndex], sizeof(edid1_info));
+			} else {
+				memset(&params.edid_data, 0, sizeof(edid1_info));
+			}
+			if (params.is_currently_active) {
+				params.current_mode = info->shared_info->pipe_display_configs[pipeIndex].current_mode;
+			} else {
+				memset(&params.current_mode, 0, sizeof(display_mode));
+			}
+			// TODO: Populate connector_name if that info is available in shared_info
+
+			if (user_memcpy(buffer, &params, sizeof(intel_display_info_params)) < B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+		}
+
+		case INTEL_SET_DISPLAY_CONFIG:
+		{
+			if (buffer == NULL || bufferLength < sizeof(intel_multi_display_config))
+				return B_BAD_VALUE;
+
+			intel_multi_display_config multi_config;
+			if (user_memcpy(&multi_config, buffer, sizeof(intel_multi_display_config)) < B_OK)
+				return B_BAD_ADDRESS;
+
+			if (multi_config.magic != INTEL_PRIVATE_DATA_MAGIC)
+				return B_BAD_VALUE;
+
+			// Critical section: update shared_info with the new target configuration.
+			// The accelerant will pick this up and apply it.
+			// This requires careful synchronization if the accelerant reads this asynchronously.
+			// For now, assume direct update and accelerant reads on its next mode set call.
+			acquire_sem(info->shared_info->accelerant_lock_sem); // Assuming a sem for this
+
+			info->shared_info->active_display_count = 0; // Reset before counting active ones from config
+			for (uint32 i = 0; i < MAX_PIPES; i++) {
+				// First, mark all as inactive
+				info->shared_info->pipe_display_configs[i].is_active = false;
+			}
+
+			for (uint32 i = 0; i < multi_config.display_count; i++) {
+				uint32 pipeIdx = multi_config.configs[i].id.pipe_index;
+				if (pipeIdx < MAX_PIPES) {
+					info->shared_info->pipe_display_configs[pipeIdx].current_mode = multi_config.configs[i].mode; // This is the TARGET mode
+					info->shared_info->pipe_display_configs[pipeIdx].is_active = multi_config.configs[i].is_active;
+					// TODO: Store pos_x, pos_y if layout manager is in kernel/shared_info
+					if (multi_config.configs[i].is_active) {
+						info->shared_info->active_display_count++;
+						// Logic to set primary_pipe_index if this display is primary
+						// For now, user-space should ensure one primary or driver picks first active.
+						// if (multi_config.configs[i].is_primary)
+						// info->shared_info->primary_pipe_index = pipeIdx;
+					}
+				}
+			}
+			// If no primary was explicitly set, default logic in accelerant might pick one.
+			// Or, ensure primary_pipe_index is valid among active displays.
+			bool primaryStillActive = false;
+			if (info->shared_info->primary_pipe_index < MAX_PIPES &&
+				info->shared_info->pipe_display_configs[info->shared_info->primary_pipe_index].is_active) {
+				primaryStillActive = true;
+			}
+			if (!primaryStillActive && info->shared_info->active_display_count > 0) {
+				for(uint32 i=0; i < MAX_PIPES; ++i) {
+					if (info->shared_info->pipe_display_configs[i].is_active) {
+						info->shared_info->primary_pipe_index = i;
+						break;
+					}
+				}
+			}
+
+
+			release_sem(info->shared_info->accelerant_lock_sem);
+
+			// TODO: How to trigger the accelerant to re-evaluate and apply the mode?
+			// This might involve a condition variable, or the accelerant periodically checks,
+			// or the next call to an accelerant function like intel_set_display_mode (which would
+			// need to be adapted to take no arguments and read from shared_info).
+			// For now, this ioctl just updates shared_info. The actual mode switch
+			// is assumed to be triggered by a subsequent call to the (modified)
+			// intel_set_display_mode accelerant hook.
+			// A call to a function like `intel_extreme_set_display_configuration_hook(info)` could be made here
+			// if such a hook is exposed by the accelerant via the driver.
+
+			return B_OK;
+		}
+
+		case INTEL_GET_DISPLAY_CONFIG:
+		{
+			if (buffer == NULL || bufferLength < sizeof(intel_multi_display_config))
+				return B_BAD_VALUE;
+
+			intel_multi_display_config multi_config;
+			multi_config.magic = INTEL_PRIVATE_DATA_MAGIC;
+			multi_config.display_count = 0;
+
+			acquire_sem(info->shared_info->accelerant_lock_sem); // Protect shared_info access
+
+			for (uint32 i = 0; i < MAX_PIPES; i++) {
+				if (info->shared_info->pipe_display_configs[i].is_active) {
+					uint32 cfgIdx = multi_config.display_count++;
+					multi_config.configs[cfgIdx].id.pipe_index = i;
+					multi_config.configs[cfgIdx].mode = info->shared_info->pipe_display_configs[i].current_mode;
+					multi_config.configs[cfgIdx].is_active = true;
+					// TODO: Populate pos_x, pos_y if stored
+					// multi_config.configs[cfgIdx].is_primary = (i == info->shared_info->primary_pipe_index);
+				}
+			}
+			release_sem(info->shared_info->accelerant_lock_sem);
+
+			if (user_memcpy(buffer, &multi_config, sizeof(intel_multi_display_config)) < B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+		}
+
+		case INTEL_PROPOSE_DISPLAY_CONFIG:
+			// This would be similar to SET, but calls a "propose" function in the accelerant
+			// which doesn't apply the mode, only validates it.
+			// For now, returning B_UNSUPPORTED as the full validation logic isn't in place.
+			return B_UNSUPPORTED;
+
 		default:
 			ERROR("ioctl() unknown message %" B_PRIu32 " (length = %"
 				B_PRIuSIZE ")\n", op, bufferLength);

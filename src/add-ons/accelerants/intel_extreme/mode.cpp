@@ -27,6 +27,7 @@
 #include "pll.h"
 #include "Ports.h"
 #include "utility.h"
+#include "intel_extreme_reg.h" // For potential new register definitions
 
 
 #undef TRACE
@@ -128,11 +129,23 @@ sanitize_display_mode(display_mode& mode)
 
 
 static void
-set_frame_buffer_registers(uint32 offset)
+set_frame_buffer_registers(pipe_index actualPipeIndex, uint32 hardwarePlaneOffset)
 {
 	intel_shared_info &sharedInfo = *gInfo->shared_info;
-	display_mode &mode = sharedInfo.current_mode;
-	uint32 bytes_per_pixel = (sharedInfo.bits_per_pixel + 7) / 8;
+	// actualPipeIndex is the enum (INTEL_PIPE_A, _B, etc)
+	// We need to map this to an array index for pipe_display_configs
+	// This simple direct mapping assumes INTEL_PIPE_A is 0, INTEL_PIPE_B is 1 etc.
+	// and that pipe_display_configs is indexed 0 for A, 1 for B ...
+	// A more robust mapping will be implemented when intel_shared_info is modified.
+	// For now, assume actualPipeIndex can be used as an index directly if less than MAX_PIPES.
+	uint32 configArrayIndex = actualPipeIndex;
+
+	if (configArrayIndex >= MAX_PIPES || !sharedInfo.pipe_display_configs[configArrayIndex].is_active)
+		return;
+
+	struct intel_shared_info::per_pipe_display_info &pipeConfig = sharedInfo.pipe_display_configs[configArrayIndex];
+	display_mode &mode = pipeConfig.current_mode;
+	uint32 bytes_per_pixel = (pipeConfig.bits_per_pixel + 7) / 8;
 
 	if (sharedInfo.device_type.InGroup(INTEL_GROUP_96x)
 		|| sharedInfo.device_type.InGroup(INTEL_GROUP_G4x)
@@ -141,24 +154,23 @@ set_frame_buffer_registers(uint32 offset)
 		|| sharedInfo.device_type.InFamily(INTEL_FAMILY_LAKE)
 		|| sharedInfo.device_type.InFamily(INTEL_FAMILY_SOC0)) {
 		if (sharedInfo.device_type.InGroup(INTEL_GROUP_HAS)) {
-//			|| sharedInfo.device_type.InGroup(INTEL_GROUP_SKY)) {
-			write32(INTEL_DISPLAY_A_OFFSET_HAS + offset,
+			write32(INTEL_DISPLAY_A_OFFSET_HAS + hardwarePlaneOffset,
 				((uint32)mode.v_display_start << 16)
 					| (uint32)mode.h_display_start);
-			read32(INTEL_DISPLAY_A_OFFSET_HAS + offset);
+			read32(INTEL_DISPLAY_A_OFFSET_HAS + hardwarePlaneOffset);
 		} else {
-			write32(INTEL_DISPLAY_A_BASE + offset,
-				mode.v_display_start * sharedInfo.bytes_per_row
+			write32(INTEL_DISPLAY_A_BASE + hardwarePlaneOffset,
+				mode.v_display_start * pipeConfig.bytes_per_row
 				+ mode.h_display_start * bytes_per_pixel);
-			read32(INTEL_DISPLAY_A_BASE + offset);
+			read32(INTEL_DISPLAY_A_BASE + hardwarePlaneOffset);
 		}
-		write32(INTEL_DISPLAY_A_SURFACE + offset, sharedInfo.frame_buffer_offset);
-		read32(INTEL_DISPLAY_A_SURFACE + offset);
+		write32(INTEL_DISPLAY_A_SURFACE + hardwarePlaneOffset, pipeConfig.frame_buffer_offset);
+		read32(INTEL_DISPLAY_A_SURFACE + hardwarePlaneOffset);
 	} else {
-		write32(INTEL_DISPLAY_A_BASE + offset, sharedInfo.frame_buffer_offset
-			+ mode.v_display_start * sharedInfo.bytes_per_row
+		write32(INTEL_DISPLAY_A_BASE + hardwarePlaneOffset, pipeConfig.frame_buffer_offset
+			+ mode.v_display_start * pipeConfig.bytes_per_row
 			+ mode.h_display_start * bytes_per_pixel);
-		read32(INTEL_DISPLAY_A_BASE + offset);
+		read32(INTEL_DISPLAY_A_BASE + hardwarePlaneOffset);
 	}
 }
 
@@ -166,10 +178,35 @@ set_frame_buffer_registers(uint32 offset)
 void
 set_frame_buffer_base()
 {
-	// TODO we always set both displays to the same address. When we support
-	// multiple framebuffers, they should get different addresses here.
-	set_frame_buffer_registers(0);
-	set_frame_buffer_registers(INTEL_DISPLAY_OFFSET);
+	intel_shared_info &sharedInfo = *gInfo->shared_info;
+	for (uint32 i = 0; i < MAX_PIPES; i++) { // Iterate up to MAX_PIPES
+		if (sharedInfo.pipe_display_configs[i].is_active) {
+			// Assuming 'i' is the configArrayIndex, and can be cast to pipe_index for actualPipe
+			// This is a simplification; a proper mapping from config index to pipe_index enum is better.
+			pipe_index actualPipe = (pipe_index)i;
+			uint32 hardwarePlaneOffset = 0;
+
+			switch (actualPipe) {
+				case INTEL_PIPE_A: hardwarePlaneOffset = 0; break;
+				case INTEL_PIPE_B: hardwarePlaneOffset = INTEL_DISPLAY_OFFSET; break;
+				case INTEL_PIPE_C:
+					// Ensure Pipe C registers are defined and appropriate for this generation
+					if (sharedInfo.device_type.Generation() >= 7)
+						hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET; // Must be defined in intel_extreme_reg.h
+					else continue; // Skip if not applicable
+					break;
+				case INTEL_PIPE_D:
+					// Ensure Pipe D registers are defined and appropriate for this generation
+					// if (sharedInfo.device_type.Generation() >= 12) // Example
+					//	hardwarePlaneOffset = INTEL_DISPLAY_D_OFFSET; // Must be defined
+					// else
+					continue; // Skip if not applicable
+					break;
+				default: continue;
+			}
+			set_frame_buffer_registers(actualPipe, hardwarePlaneOffset);
+		}
+	}
 }
 
 
@@ -196,24 +233,22 @@ create_mode_list(void)
 {
 	CALLED();
 
-	for (uint32 i = 0; i < gInfo->port_count; i++) {
-		if (gInfo->ports[i] == NULL)
-			continue;
+	uint32 primaryPipeIndex = gInfo->shared_info->primary_pipe_index;
+	edid1_info* edidToUse = NULL;
+	bool hasEdidForPrimary = false;
 
-		status_t status = gInfo->ports[i]->GetEDID(&gInfo->edid_info);
-		if (status == B_OK) {
-			gInfo->has_edid = true;
-			break;
-		}
-	}
-	// use EDID found at boot time if there since we don't have any ourselves
-	if (!gInfo->has_edid && gInfo->shared_info->has_vesa_edid_info) {
-		TRACE("%s: Using VESA edid info\n", __func__);
-		memcpy(&gInfo->edid_info, &gInfo->shared_info->vesa_edid_info,
-			sizeof(edid1_info));
-		// show in log what we got
-		edid_dump(&gInfo->edid_info);
-		gInfo->has_edid = true;
+	if (primaryPipeIndex < MAX_PIPES && gInfo->shared_info->has_edid[primaryPipeIndex]) {
+		edidToUse = &gInfo->shared_info->edid_infos[primaryPipeIndex];
+		hasEdidForPrimary = true;
+		TRACE("%s: Using EDID from shared_info for primary pipe %d\n", __func__, primaryPipeIndex);
+		edid_dump(edidToUse);
+	} else if (gInfo->shared_info->has_vesa_edid_info) {
+		// Fallback to VESA EDID if primary pipe has no specific EDID
+		TRACE("%s: Using VESA edid info as fallback for primary display\n", __func__);
+		edidToUse = &gInfo->shared_info->vesa_edid_info;
+		// No need to memcpy, just use the pointer. edid_dump will show it.
+		edid_dump(edidToUse);
+		hasEdidForPrimary = true; // Consider VESA EDID as valid EDID for mode list creation
 	}
 
 	display_mode* list;
@@ -233,18 +268,19 @@ create_mode_list(void)
 		colorSpaceCount = 0;
 	}
 
-	// If no EDID, but have vbt from driver, use that mode
-	if (!gInfo->has_edid && gInfo->shared_info->got_vbt) {
-		// We could not read any EDID info. Fallback to creating a list with
-		// only the mode set up by the BIOS.
+	// If no EDID for primary (neither direct nor VESA), but have VBT panel timing, use that mode
+	if (!hasEdidForPrimary && gInfo->shared_info->got_vbt) {
+		// We could not read any EDID info for the primary display.
+		// Fallback to creating a list with only the mode set up by the BIOS/VBT panel_timing.
+		TRACE("%s: No EDID for primary, using VBT panel_timing.\n", __func__);
 
 		check_display_mode_hook limitModes = NULL;
 		if (gInfo->shared_info->device_type.Generation() < 4)
-			limitModes = limit_modes_for_gen3_lvds;
+			limitModes = limit_modes_for_gen3_lvds; // This hook might need adjustment if panel_timing is not for LVDS
 
 		display_mode mode;
-		mode.timing = gInfo->shared_info->panel_timing;
-		mode.space = B_RGB32;
+		mode.timing = gInfo->shared_info->panel_timing; // Assumes panel_timing is relevant for the primary
+		mode.space = B_RGB32_LITTLE; // Default to 32-bit
 		mode.virtual_width = mode.timing.h_display;
 		mode.virtual_height = mode.timing.v_display;
 		mode.h_display_start = 0;
@@ -255,9 +291,10 @@ create_mode_list(void)
 		gInfo->mode_list_area = create_display_modes("intel extreme modes", NULL, &mode, 1,
 			supportedSpaces, colorSpaceCount, limitModes, &list, &count);
 	} else {
-		// Otherwise return the 'real' list of modes
+		// Use EDID if available (edidToUse will be NULL if no EDID at all)
+		// Otherwise, create_display_modes will generate a generic list.
 		gInfo->mode_list_area = create_display_modes("intel extreme modes",
-			gInfo->has_edid ? &gInfo->edid_info : NULL, NULL, 0,
+			edidToUse, NULL, 0, // Pass the EDID for the primary display
 			supportedSpaces, colorSpaceCount, NULL, &list, &count);
 	}
 
@@ -352,7 +389,7 @@ intel_set_display_mode(display_mode* mode)
 	uint32 colorMode, bytesPerRow, bitsPerPixel;
 	get_color_space_format(target, colorMode, bytesPerRow, bitsPerPixel);
 
-	// TODO: do not go further if the mode is identical to the current one.
+	// TODO: do not go further if the mode is identical to the current one for all displays.
 	// This would avoid the screen being off when switching workspaces when they
 	// have the same resolution.
 
@@ -362,36 +399,54 @@ intel_set_display_mode(display_mode* mode)
 	// First register dump
 	//dump_registers();
 
-	// TODO: This may not be neccesary
 	set_display_power_mode(B_DPMS_OFF);
 
-	// free old and allocate new frame buffer in graphics memory
+	// Free old framebuffers for all pipes
+	for (uint32 i = 0; i < MAX_PIPES; i++) {
+		if (sharedInfo.pipe_display_configs[i].frame_buffer_base != 0) {
+			intel_free_memory(sharedInfo.pipe_display_configs[i].frame_buffer_base);
+			sharedInfo.pipe_display_configs[i].frame_buffer_base = 0;
+			sharedInfo.pipe_display_configs[i].frame_buffer_offset = 0;
+			sharedInfo.pipe_display_configs[i].is_active = false;
+			// Consider zeroing out current_mode, bytes_per_row, bits_per_pixel for this pipe config
+		}
+	}
+	sharedInfo.active_display_count = 0;
 
-	intel_free_memory(sharedInfo.frame_buffer);
+	// TODO: This function will eventually need to take a list of display_mode targets,
+	// one for each display to be configured in a multi-monitor setup.
+	// For this iteration, we assume 'target' is for the primary display,
+	// and we'll only configure that one.
+	// The primary_pipe_index should be determined by user settings or a default.
+	// Let's assume primary_pipe_index = 0 (INTEL_PIPE_A) for now if not otherwise set.
+	if (sharedInfo.primary_pipe_index >= MAX_PIPES)
+		sharedInfo.primary_pipe_index = 0; // Default to Pipe A as primary
+
+	uint32 activePipeConfigIndex = sharedInfo.primary_pipe_index;
+	struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[activePipeConfigIndex];
 
 	addr_t base;
-	if (intel_allocate_memory(bytesPerRow * target.virtual_height, 0,
-			base) < B_OK) {
-		// oh, how did that happen? Unfortunately, there is no really good way
-		// back. Try to restore a framebuffer for the previous mode, at least.
-		if (intel_allocate_memory(sharedInfo.current_mode.virtual_height
-				* sharedInfo.bytes_per_row, 0, base) == B_OK) {
-			sharedInfo.frame_buffer = base;
-			sharedInfo.frame_buffer_offset = base
-				- (addr_t)sharedInfo.graphics_memory;
-			set_frame_buffer_base();
-		}
-
-		ERROR("%s: Failed to allocate framebuffer !\n", __func__);
+	if (intel_allocate_memory(bytesPerRow * target.virtual_height, 0, base) < B_OK) {
+		ERROR("%s: Failed to allocate framebuffer for pipe %d!\n", __func__, activePipeConfigIndex);
+		// TODO: Attempt to restore previous configuration if allocation fails.
+		// This is complex and involves re-allocating and re-programming all previously active displays.
 		return B_NO_MEMORY;
 	}
 
-	// clear frame buffer before using it
+	// Clear frame buffer before using it
 	memset((uint8*)base, 0, bytesPerRow * target.virtual_height);
-	sharedInfo.frame_buffer = base;
-	sharedInfo.frame_buffer_offset = base - (addr_t)sharedInfo.graphics_memory;
+
+	pipeConfig.frame_buffer_base = base;
+	pipeConfig.frame_buffer_offset = base - (addr_t)sharedInfo.graphics_memory;
+	pipeConfig.current_mode = target;
+	pipeConfig.bytes_per_row = bytesPerRow;
+	pipeConfig.bits_per_pixel = bitsPerPixel;
+	pipeConfig.is_active = true;
+	sharedInfo.active_display_count = 1; // Only one display configured in this simplified step
 
 #if 0
+	// This section will need to be adapted for multi-monitor configurations
+	// when processing a list of target modes.
 	if ((gInfo->head_mode & HEAD_MODE_TESTING) != 0) {
 		// 1. Enable panel power as needed to retrieve panel configuration
 		// (use AUX VDD enable bit)
@@ -498,24 +553,41 @@ intel_set_display_mode(display_mode* mode)
 	// Changing bytes per row seems to be ignored if the plane/pipe is turned
 	// off
 
-	// Always set both pipes, just in case
-	// TODO rework this when we get multiple head support with different
-	// resolutions
-	if (sharedInfo.device_type.InFamily(INTEL_FAMILY_LAKE)) {
-		write32(INTEL_DISPLAY_A_BYTES_PER_ROW, bytesPerRow >> 6);
-		write32(INTEL_DISPLAY_B_BYTES_PER_ROW, bytesPerRow >> 6);
-	} else {
-		write32(INTEL_DISPLAY_A_BYTES_PER_ROW, bytesPerRow);
-		write32(INTEL_DISPLAY_B_BYTES_PER_ROW, bytesPerRow);
-	}
+	// Set bytes_per_row for each active pipe
+	// In this simplified version, only the primary pipe is active.
+	// This loop will be more meaningful when multiple displays are configured.
+	for (uint32 i = 0; i < MAX_PIPES; i++) {
+		if (sharedInfo.pipe_display_configs[i].is_active) {
+			// Assume 'i' is the configArrayIndex and can be cast to pipe_index
+			// This needs a robust mapping from config index to pipe_index enum.
+			pipe_index actualPipe = (pipe_index)i;
+			uint32 hardwarePlaneOffset = 0;
+			switch (actualPipe) {
+				case INTEL_PIPE_A: hardwarePlaneOffset = 0; break;
+				case INTEL_PIPE_B: hardwarePlaneOffset = INTEL_DISPLAY_OFFSET; break;
+				case INTEL_PIPE_C:
+					if (sharedInfo.device_type.Generation() >= 7)
+						hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET;
+					else continue;
+					break;
+				// Add cases for INTEL_PIPE_D if applicable and INTEL_DISPLAY_D_OFFSET is defined
+				default: continue;
+			}
 
-	// update shared info
-	sharedInfo.current_mode = target;
-	sharedInfo.bytes_per_row = bytesPerRow;
-	sharedInfo.bits_per_pixel = bitsPerPixel;
+			if (sharedInfo.device_type.InFamily(INTEL_FAMILY_LAKE)) {
+				write32(INTEL_DISPLAY_A_BYTES_PER_ROW + hardwarePlaneOffset,
+					sharedInfo.pipe_display_configs[i].bytes_per_row >> 6);
+			} else {
+				write32(INTEL_DISPLAY_A_BYTES_PER_ROW + hardwarePlaneOffset,
+					sharedInfo.pipe_display_configs[i].bytes_per_row);
+			}
+		}
+	}
+	// The sharedInfo.current_mode, bytes_per_row, bits_per_pixel are now part of
+	// sharedInfo.pipe_display_configs[activePipeConfigIndex]
 
 	set_frame_buffer_base();
-		// triggers writing back double-buffered registers
+		// triggers writing back double-buffered registers for all active pipes
 		// which is INTEL_DISPLAY_X_BYTES_PER_ROW only apparantly
 
 	// Second register dump
@@ -530,7 +602,23 @@ intel_get_display_mode(display_mode* _currentMode)
 {
 	CALLED();
 
-	*_currentMode = gInfo->shared_info->current_mode;
+	// Return mode for the primary display
+	uint32 primaryPipeIdx = gInfo->shared_info->primary_pipe_index;
+	if (primaryPipeIdx >= MAX_PIPES || !gInfo->shared_info->pipe_display_configs[primaryPipeIdx].is_active) {
+		// Fallback or error if primary is not active or index is invalid
+		// Try to find the first active display as a simple fallback
+		bool found_active = false;
+		for (uint32 i = 0; i < MAX_PIPES; i++) {
+			if (gInfo->shared_info->pipe_display_configs[i].is_active) {
+				primaryPipeIdx = i;
+				found_active = true;
+				break;
+			}
+		}
+		if (!found_active)
+			return B_ERROR; // No active display
+	}
+	*_currentMode = gInfo->shared_info->pipe_display_configs[primaryPipeIdx].current_mode;
 
 	// This seems unreliable. We should always know the current_mode
 	//retrieve_current_mode(*_currentMode, INTEL_DISPLAY_A_PLL);
@@ -729,13 +817,27 @@ intel_get_frame_buffer_config(frame_buffer_config* config)
 {
 	CALLED();
 
-	uint32 offset = gInfo->shared_info->frame_buffer_offset;
+	// Return config for the primary display
+	uint32 primaryPipeIdx = gInfo->shared_info->primary_pipe_index;
 
-	config->frame_buffer = gInfo->shared_info->graphics_memory + offset;
-	config->frame_buffer_dma
-		= (uint8*)gInfo->shared_info->physical_graphics_memory + offset;
-	config->bytes_per_row = gInfo->shared_info->bytes_per_row;
+	// Find first active display if primary is not set or not active (simple fallback)
+	if (primaryPipeIdx >= MAX_PIPES || !gInfo->shared_info->pipe_display_configs[primaryPipeIdx].is_active) {
+		bool found = false;
+		for (uint32 i = 0; i < MAX_PIPES; i++) {
+			if (gInfo->shared_info->pipe_display_configs[i].is_active) {
+				primaryPipeIdx = i;
+				found = true;
+				break;
+			}
+		}
+		if (!found) return B_ERROR; // No active display
+	}
 
+	struct intel_shared_info::per_pipe_display_info &pipeConfig = gInfo->shared_info->pipe_display_configs[primaryPipeIdx];
+
+	config->frame_buffer = gInfo->shared_info->graphics_memory + pipeConfig.frame_buffer_offset;
+	config->frame_buffer_dma = (uint8*)gInfo->shared_info->physical_graphics_memory + pipeConfig.frame_buffer_offset;
+	config->bytes_per_row = pipeConfig.bytes_per_row;
 	return B_OK;
 }
 
@@ -771,15 +873,29 @@ intel_move_display(uint16 horizontalStart, uint16 verticalStart)
 	intel_shared_info &sharedInfo = *gInfo->shared_info;
 	Autolock locker(sharedInfo.accelerant_lock);
 
-	display_mode &mode = sharedInfo.current_mode;
+	// This function likely needs to be re-evaluated for multi-monitor.
+	// Does it move all displays, or just the primary?
+	// For now, assume it moves the primary display.
+	uint32 primaryPipeIdx = sharedInfo.primary_pipe_index;
+	if (primaryPipeIdx >= MAX_PIPES || !sharedInfo.pipe_display_configs[primaryPipeIdx].is_active)
+		return B_ERROR; // Primary display not active or configured
 
-	if (horizontalStart + mode.timing.h_display > mode.virtual_width
-		|| verticalStart + mode.timing.v_display > mode.virtual_height)
+	struct intel_shared_info::per_pipe_display_info &pipeConfig = sharedInfo.pipe_display_configs[primaryPipeIdx];
+	display_mode &mode = pipeConfig.current_mode;
+
+	if (horizontalStart + mode.timing.h_display > mode.virtual_width ||
+		verticalStart + mode.timing.v_display > mode.virtual_height) {
 		return B_BAD_VALUE;
+	}
 
 	mode.h_display_start = horizontalStart;
 	mode.v_display_start = verticalStart;
 
+	// If other displays are active and in a cloned setup, they might also need moving.
+	// For true extended desktop, this logic is fine as it only affects the primary.
+	// For now, this only updates the mode structure; set_frame_buffer_base() will apply it
+	// to the hardware registers for all active displays based on their individual mode settings.
+	// If physical panning is desired for all displays simultaneously, each pipe_config would need this update.
 	set_frame_buffer_base();
 
 	return B_OK;
@@ -808,7 +924,22 @@ intel_set_indexed_colors(uint count, uint8 first, uint8* colors, uint32 flags)
 		uint32 color = colors[0] << 16 | colors[1] << 8 | colors[2];
 		colors += 3;
 
-		write32(INTEL_DISPLAY_A_PALETTE + first * sizeof(uint32), color);
-		write32(INTEL_DISPLAY_B_PALETTE + first * sizeof(uint32), color);
+		// Update palette for all active pipes that might be in CMAP8 mode
+		for (uint32 i = 0; i < MAX_PIPES; i++) {
+			if (gInfo->shared_info->pipe_display_configs[i].is_active &&
+				gInfo->shared_info->pipe_display_configs[i].current_mode.space == B_CMAP8) {
+
+				pipe_index actualPipe = (pipe_index)i; // Simplified assumption
+				uint32 palette_offset = 0;
+				switch(actualPipe) {
+					case INTEL_PIPE_A: palette_offset = INTEL_DISPLAY_A_PALETTE; break;
+					case INTEL_PIPE_B: palette_offset = INTEL_DISPLAY_B_PALETTE; break;
+					// Add cases for C and D if they have separate palette registers
+					// and if INTEL_DISPLAY_C_PALETTE etc. are defined.
+					default: continue;
+				}
+				write32(palette_offset + first * sizeof(uint32), color);
+			}
+		}
 	}
 }

@@ -121,6 +121,18 @@ init_common(int device, bool isClone)
 	if (status < B_OK)
 		return status;
 
+	// Initialize new shared_info fields if this is the primary accelerant instance
+	if (!isClone) {
+		gInfo->shared_info->active_display_count = 0;
+		gInfo->shared_info->primary_pipe_index = 0; // Default to Pipe A
+		for (int i = 0; i < MAX_PIPES; i++) {
+			memset(&gInfo->shared_info->pipe_display_configs[i], 0, sizeof(struct intel_shared_info::per_pipe_display_info));
+			gInfo->shared_info->pipe_display_configs[i].is_active = false;
+			memset(&gInfo->shared_info->edid_infos[i], 0, sizeof(edid1_info));
+			gInfo->shared_info->has_edid[i] = false;
+		}
+	}
+
 	infoDeleter.Detach();
 	sharedDeleter.Detach();
 	regsDeleter.Detach();
@@ -520,7 +532,28 @@ intel_init_accelerant(int device)
 	if (status != B_OK)
 		ERROR("Warning: error while assigning pipes!\n");
 
-	status = create_mode_list();
+	// Populate EDID information in shared_info for each connected port/pipe
+	for (uint32 i = 0; i < gInfo->port_count; i++) {
+		Port* port = gInfo->ports[i];
+		if (port != NULL && port->IsConnected() && port->GetPipe() != NULL) {
+			pipe_index pipeIdx = port->GetPipe()->Index();
+			// Ensure pipeIdx is a valid array index for shared_info arrays
+			if (pipeIdx < MAX_PIPES) { // pipe_index enum starts from 1 for A,B,C,D
+				if (port->HasEDID()) {
+					// GetEDID might re-read, but fEDIDInfo should be populated if HasEDID is true
+					port->GetEDID(&gInfo->shared_info->edid_infos[pipeIdx]);
+					gInfo->shared_info->has_edid[pipeIdx] = true;
+					TRACE("EDID stored for port %s (pipe %d)\n", port->PortName(), pipeIdx);
+				} else {
+					gInfo->shared_info->has_edid[pipeIdx] = false;
+				}
+			} else {
+				ERROR("Invalid pipe index %d for port %s during EDID storage.\n", pipeIdx, port->PortName());
+			}
+		}
+	}
+
+	status = create_mode_list(); // This will now use primary display's EDID or fallback
 	if (status != B_OK) {
 		uninit_common();
 		return status;

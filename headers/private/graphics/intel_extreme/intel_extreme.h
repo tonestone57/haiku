@@ -56,6 +56,11 @@
 #define INTEL_GROUP_JSL		(INTEL_FAMILY_LAKE | 0x0100)  // JasperLake
 #define INTEL_GROUP_TGL		(INTEL_FAMILY_LAKE | 0x0200)  // TigerLake
 #define INTEL_GROUP_ALD		(INTEL_FAMILY_LAKE | 0x0400)  // AlderLake
+
+#ifndef MAX_PIPES
+#define MAX_PIPES 4 // Defines the maximum number of display pipes supported by data structures.
+                    // Hardware may support fewer. Current Intel GPUs up to 4.
+#endif
 // models
 #define INTEL_TYPE_SERVER	0x0004
 #define INTEL_TYPE_MOBILE	0x0008
@@ -421,29 +426,56 @@ enum hpd_pin {
 
 
 struct intel_shared_info {
-	area_id			mode_list_area;		// area containing display mode list
-	uint32			mode_count;
+	area_id			mode_list_area;		// area containing the primary display mode list (legacy)
+	uint32			mode_count;			// count of modes in mode_list_area (legacy)
 
-	display_mode	current_mode;		// pretty much a hack until per-display modes
-	display_timing	panel_timing;		// Hardware timings of the LVDS panel, extracted from BIOS
-	uint32			bytes_per_row;
-	uint32			bits_per_pixel;
-	uint32			dpms_mode;
-	uint16			min_brightness;
+	// display_mode	current_mode;		// Replaced by per-pipe current_mode in pipe_display_configs
+	display_timing	panel_timing;		// Hardware timings of the LVDS/eDP panel, from VBT or EDID.
+										// Used as a fallback or for internal panels.
+	// uint32			bytes_per_row;		// Replaced by per-pipe bytes_per_row
+	// uint32			bits_per_pixel;		// Replaced by per-pipe bits_per_pixel
+	uint32			dpms_mode;			// Current global DPMS mode. May need per-display later.
+	uint16			min_brightness;		// Minimum brightness level for backlight.
 
-	area_id			registers_area;		// area of memory mapped registers
-	uint32			register_blocks[REGISTER_BLOCK_COUNT];
+	area_id			registers_area;		// Area_id for memory-mapped I/O registers.
+	uint32			register_blocks[REGISTER_BLOCK_COUNT]; // Offsets for register blocks.
 
-	uint8*			status_page;
-	phys_addr_t		physical_status_page;
-	uint8*			graphics_memory;
-	phys_addr_t		physical_graphics_memory;
-	uint32			graphics_memory_size;
+	uint8*			status_page[MAX_PIPES];		// Pointers to hardware status pages (if used per pipe).
+	phys_addr_t		physical_status_page[MAX_PIPES]; // Physical addresses for status pages.
 
-	addr_t			frame_buffer;
-	uint32			frame_buffer_offset;
+	// Per-pipe display configuration.
+	// This structure holds both the target configuration (set by user-space via IOCTL)
+	// and the current actual state after a mode set attempt.
+	struct per_pipe_display_info {
+		addr_t		frame_buffer_base;		// Base virtual address in graphics memory for this pipe's display.
+		uint32		frame_buffer_offset;	// Offset from start of shared graphics_memory.
+		display_mode current_mode;			// Current actual mode programmed for this pipe.
+											// When being set by user-space, this holds the target mode.
+		uint32		bytes_per_row;			// Bytes per row for this pipe's framebuffer.
+		uint16		bits_per_pixel;			// Bits per pixel for this pipe's framebuffer.
+		bool		is_active;				// Target state: true if this pipe should be active.
+											// Driver updates this if mode set fails for this pipe.
+		// uint32		port_index; // Optional: Store associated port_index from accelerant_info->ports for easy lookup.
+	} pipe_display_configs[MAX_PIPES];		// Indexed by array index (0 for Pipe A, 1 for Pipe B, etc.).
+											// Requires mapping from pipe_index enum (INTEL_PIPE_A, etc.).
+	uint32			active_display_count;	// Number of displays successfully configured and active,
+											// or number of displays *requested* to be active by last SET_CONFIG ioctl.
+	uint32			primary_pipe_index;		// Array index (0-based, e.g., 0 for INTEL_PIPE_A if mapped) of the pipe
+											// considered primary. Used for single-head fallback, cursor, overlay default.
 
-	uint32			fdi_link_frequency;	// In Mhz
+	// EDID information for each potential display pipe.
+	// Indexed by array index (0 for Pipe A, etc., requires mapping from pipe_index enum).
+	edid1_info		edid_infos[MAX_PIPES];	// EDID data read from the display connected to the corresponding pipe.
+	bool			has_edid[MAX_PIPES];	// True if EDID is available for the corresponding (array-indexed) pipe.
+
+	// addr_t			frame_buffer; // Replaced by per-pipe frame_buffer_base in pipe_display_configs
+	// uint32			frame_buffer_offset; // Replaced by per-pipe frame_buffer_offset in pipe_display_configs
+
+	uint8*			graphics_memory;		// Pointer to the start of usable graphics aperture.
+	phys_addr_t		physical_graphics_memory; // Physical address of the start of graphics aperture.
+	uint32			graphics_memory_size;	// Total size of the graphics aperture.
+
+	uint32			fdi_link_frequency;	// In MHz, for PCH-based systems.
 	uint32			hraw_clock;
 	uint32			hw_cdclk;
 
@@ -541,8 +573,49 @@ enum {
 	INTEL_ALLOCATE_GRAPHICS_MEMORY,
 	INTEL_FREE_GRAPHICS_MEMORY,
 	INTEL_GET_BRIGHTNESS_LEGACY,
-	INTEL_SET_BRIGHTNESS_LEGACY
+	INTEL_SET_BRIGHTNESS_LEGACY,
+
+	// Multi-monitor IOCTLs
+	INTEL_GET_DISPLAY_COUNT = B_DEVICE_OP_CODES_END + 100,
+	INTEL_GET_DISPLAY_INFO,
+	INTEL_SET_DISPLAY_CONFIG,
+	INTEL_GET_DISPLAY_CONFIG,
+	INTEL_PROPOSE_DISPLAY_CONFIG
 };
+
+// Structures for multi-monitor IOCTLs
+struct intel_display_identifier {
+	uint32		pipe_index; // As per enum pipe_index (INTEL_PIPE_A, _B, _C, _D)
+	// uint32		connector_id; // Optional: Could be physical connector ID if available from VBT/HW
+};
+
+struct intel_single_display_config {
+	intel_display_identifier	id;
+	display_mode				mode;       // Target mode for this display
+	bool						is_active;  // Whether this display should be active
+	int32						pos_x;      // X position in a virtual desktop
+	int32						pos_y;      // Y position in a virtual desktop
+	// bool						is_primary; // Optional: to explicitly set primary
+};
+
+struct intel_multi_display_config {
+	uint32							magic; // Should be INTEL_PRIVATE_DATA_MAGIC
+	uint32							display_count; // Number of valid entries in configs array
+	intel_single_display_config		configs[MAX_PIPES]; // Array of configurations
+};
+
+struct intel_display_info_params {
+	uint32						magic; // Should be INTEL_PRIVATE_DATA_MAGIC
+	intel_display_identifier	id;    // Input: which display to query
+	// Output fields:
+	bool						is_connected; // Physically connected
+	bool						is_currently_active; // Programmed and active by driver
+	bool						has_edid;
+	edid1_info					edid_data;
+	display_mode				current_mode; // Current actual mode if active
+	// char						connector_name[32]; // e.g., "HDMI-1", "DP-2"
+};
+
 
 // retrieve the area_id of the kernel/accelerant shared info
 struct intel_get_private_data {

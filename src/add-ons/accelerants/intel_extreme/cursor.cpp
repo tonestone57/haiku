@@ -85,16 +85,45 @@ intel_set_cursor_shape(uint16 width, uint16 height, uint16 hotX, uint16 hotY,
 
 
 void
-intel_move_cursor(uint16 _x, uint16 _y)
+intel_move_cursor(uint16 screenX, uint16 screenY)
 {
-	int32 x = (int32)_x - gInfo->shared_info->cursor_hot_x;
-	int32 y = (int32)_y - gInfo->shared_info->cursor_hot_x;
+	// Adjust coordinates to be relative to the primary display's origin
+	// and then apply hot spot.
+	// Assumes cursor is always on the primary display.
+	intel_shared_info &sharedInfo = *gInfo->shared_info;
+	uint32 primaryPipeIdx = sharedInfo.primary_pipe_index;
+	int32 x, y;
+
+	if (primaryPipeIdx < MAX_PIPES && sharedInfo.pipe_display_configs[primaryPipeIdx].is_active) {
+		display_mode &primary_mode = sharedInfo.pipe_display_configs[primaryPipeIdx].current_mode;
+
+		int32 cursorScreenX = (int32)screenX - primary_mode.h_display_start;
+		int32 cursorScreenY = (int32)screenY - primary_mode.v_display_start;
+
+		// Hide cursor if it's outside the primary display's bounds
+		if (cursorScreenX < 0 || cursorScreenX >= primary_mode.timing.h_display ||
+			cursorScreenY < 0 || cursorScreenY >= primary_mode.timing.v_display) {
+			// intel_show_cursor(false); // This might flicker, better to just position it off-screen
+			// For now, let hardware clip or position it at edge.
+			// A more robust solution would hide it if truly off the designated screen.
+		}
+
+		x = cursorScreenX - sharedInfo.cursor_hot_x;
+		y = cursorScreenY - sharedInfo.cursor_hot_y; // Original code had cursor_hot_x for y, likely a typo
+	} else {
+		// Fallback or no active primary display, use absolute coords (current behavior)
+		x = (int32)screenX - sharedInfo.cursor_hot_x;
+		y = (int32)screenY - sharedInfo.cursor_hot_y; // Corrected typo from original
+	}
 
 	if (x < 0)
 		x = -x | CURSOR_POSITION_NEGATIVE;
 	if (y < 0)
 		y = -y | CURSOR_POSITION_NEGATIVE;
 
+	// TODO: Select correct cursor registers (A, B, etc.) based on primary_pipe_index
+	// For now, assumes INTEL_CURSOR_POSITION is for the correct (primary) pipe.
+	// Example: uint32 cursorPositionReg = INTEL_CURSOR_A_POSITION + (primaryPipeIdx * CURSOR_PIPE_OFFSET);
 	write32(INTEL_CURSOR_POSITION, (y << 16) | x);
 }
 
@@ -102,14 +131,29 @@ intel_move_cursor(uint16 _x, uint16 _y)
 void
 intel_show_cursor(bool isVisible)
 {
-	if (gInfo->shared_info->cursor_visible == isVisible)
+	// TODO: Select correct cursor registers (A, B, etc.) based on primary_pipe_index
+	// For now, assumes INTEL_CURSOR_CONTROL & INTEL_CURSOR_BASE are for the correct (primary) pipe.
+	// Example: uint32 cursorControlReg = INTEL_CURSOR_A_CONTROL + (primaryPipeIdx * CURSOR_PIPE_OFFSET);
+	//          uint32 cursorBaseReg = INTEL_CURSOR_A_BASE + (primaryPipeIdx * CURSOR_PIPE_OFFSET);
+
+	if (gInfo->shared_info->cursor_visible == isVisible && !gInfo->is_clone) // Avoid redundant writes unless cloning
 		return;
 
-	write32(INTEL_CURSOR_CONTROL, (isVisible ? CURSOR_ENABLED : 0)
-		| gInfo->shared_info->cursor_format);
-	write32(INTEL_CURSOR_BASE,
-		(uint32)gInfo->shared_info->physical_graphics_memory
-		+ gInfo->shared_info->cursor_buffer_offset);
+	uint32 cursorControlValue = 0;
+	if (isVisible) {
+		// Ensure the cursor is associated with the correct pipe if hardware supports it.
+		// Some hardware versions have pipe select bits in CURSOR_CONTROL.
+		// Example: cursorControlValue |= CURSOR_PIPE_SELECT(sharedInfo.primary_pipe_index);
+		cursorControlValue |= CURSOR_ENABLED | gInfo->shared_info->cursor_format;
+	}
+
+	write32(INTEL_CURSOR_CONTROL, cursorControlValue);
+
+	if (isVisible) { // Only set base if enabling, might not be needed if already set and valid
+		write32(INTEL_CURSOR_BASE,
+			(uint32)gInfo->shared_info->physical_graphics_memory
+			+ gInfo->shared_info->cursor_buffer_offset);
+	}
 
 	gInfo->shared_info->cursor_visible = isVisible;
 }

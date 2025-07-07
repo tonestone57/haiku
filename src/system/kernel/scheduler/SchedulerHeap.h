@@ -173,7 +173,7 @@ SCHEDULER_HEAP_CLASS_NAME::SchedulerHeap()
 	fElements(NULL),
 	fLastElement(0),
 	fSize(0),
-	fCompare(),       // Default construct policies
+	fCompare(),       // Default construct policies; suitable if Compare/GetLink are simple structs/functors
 	fGetLink()
 {
 }
@@ -184,8 +184,8 @@ SCHEDULER_HEAP_CLASS_NAME::SchedulerHeap(Compare comparePolicy, GetLink getLinkP
 	fElements(NULL),
 	fLastElement(0),
 	fSize(0),
-	fCompare(comparePolicy),
-	fGetLink(getLinkPolicy)
+	fCompare(comparePolicy), // Store instances of policy objects. This allows policies
+	fGetLink(getLinkPolicy)  // that might have state or complex initialization.
 {
 	if (initialSize > 0)
 		_GrowHeap(initialSize);

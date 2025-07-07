@@ -218,17 +218,17 @@ private:
 			CoreEntry*	fCore;
 
 	// EEVDF specific fields
-			bigtime_t	fVirtualDeadline;
-			bigtime_t	fLag;
-			bigtime_t	fEligibleTime;
-			bigtime_t	fSliceDuration;
-			bigtime_t	fVirtualRuntime;
-			int8		fLatencyNice;     // Latency preference (-20 to +19)
-			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue
+			bigtime_t	fVirtualDeadline;			// EEVDF: Target completion time (wall-clock).
+			bigtime_t	fLag;						// EEVDF: Service deficit/surplus (weighted time).
+			bigtime_t	fEligibleTime;				// EEVDF: Wall-clock time when thread can next run.
+			bigtime_t	fSliceDuration;				// EEVDF: Current wall-clock slice/quantum duration.
+			bigtime_t	fVirtualRuntime;			// EEVDF: Accumulated weighted execution time.
+			int8		fLatencyNice;				// EEVDF: Latency preference (-20 to +19), affects slice.
+			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue (contains SchedulerHeapLink).
 
 	// I/O-bound detection heuristic fields
-			bigtime_t	fAverageRunBurstTimeEWMA;	// EWMA of runtime before voluntary sleep
-			uint32		fVoluntarySleepTransitions;	// Count of voluntary sleeps, for EWMA stability
+			bigtime_t	fAverageRunBurstTimeEWMA;	// EWMA of runtime (us) before a voluntary sleep.
+			uint32		fVoluntarySleepTransitions;	// Count of voluntary sleeps, for EWMA stability.
 
 public:
 	// I/O-bound detection heuristic methods

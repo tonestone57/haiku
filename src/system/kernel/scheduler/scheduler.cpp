@@ -1709,10 +1709,10 @@ scheduler_perform_load_balance()
 		bigtime_t affinityBonus = 0;
 		if (idleTargetCPUOnTargetCore != NULL
 			&& candidate->GetThread()->previous_cpu == &gCPU[idleTargetCPUOnTargetCore->ID()]) {
-			// This thread last ran on the currently idle target CPU. Give it a large bonus.
-			// The magnitude of the bonus should be significant enough to outweigh
-			// typical benefit scores, e.g., comparable to a large lag or eligibility improvement.
-			affinityBonus = SCHEDULER_TARGET_LATENCY * 2; // Example bonus value
+			// This thread last ran on the currently idle target CPU. Give it a large bonus
+			// to strongly prefer moving it back for cache affinity.
+			// The bonus should be significant, e.g., equivalent to a couple of scheduling periods.
+			affinityBonus = SCHEDULER_TARGET_LATENCY * 2;
 			currentBenefitScore += affinityBonus;
 			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " gets wake-affinity bonus %" B_PRId64 " for CPU %" B_PRId32 "\n",
 				candidate->GetThread()->id, affinityBonus, idleTargetCPUOnTargetCore->ID());
@@ -1721,8 +1721,10 @@ scheduler_perform_load_balance()
 		// If the candidate is likely I/O bound, reduce its benefit score
 		// to make it more reluctant to migrate (after affinity bonus, so affinity can still win).
 		if (candidate->IsLikelyIOBound()) {
-			// Don't penalize if it has strong affinity to an idle core, let affinity win.
+			// Don't penalize if it has strong affinity to an idle core; let affinity win.
 			if (affinityBonus == 0) {
+				// Dividing the score makes it less likely to be chosen.
+				// kIOBoundScorePenaltyFactor = 2 means halving the score.
 				currentBenefitScore /= kIOBoundScorePenaltyFactor;
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
 					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);

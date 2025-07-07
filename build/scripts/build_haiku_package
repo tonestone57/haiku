@@ -42,6 +42,10 @@ eval "$addBuildCompatibilityLibDir"
 packageName=`basename "$packagePath"`
 echo "$packageName: Removing and re-creating package contents dir ..."
 contentsDir="$tmpDir/contents"
+if [ -z "$rmAttrs" ]; then
+    echo "$0: Warning: rmAttrs not set by init script. Defaulting to 'rm'." >&2
+    rmAttrs=rm  # Default to standard rm
+fi
 $rmAttrs -rf "$contentsDir"
 mkdir -p "$contentsDir"
 

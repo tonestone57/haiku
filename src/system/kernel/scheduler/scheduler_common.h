@@ -113,6 +113,14 @@
 #	define TRACE(...) do { } while (false)
 #endif
 
+// Specific trace for I/O bound heuristic debugging
+//#define TRACE_SCHEDULER_IO_BOUND
+#ifdef TRACE_SCHEDULER_IO_BOUND
+#	define TRACE_SCHED_IO(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_IO(...) do { } while (false)
+#endif
+
 
 namespace Scheduler {
 

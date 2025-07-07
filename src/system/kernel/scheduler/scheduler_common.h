@@ -246,6 +246,12 @@ const int32 kMaxLoadForWarmCorePreference = kHighLoad;
 // potentially triggering different scheduler parameter tuning.
 const int32 kHighCoreCountThreshold = 32;
 
+// --- Constants for Migration Cost Awareness ---
+// Additional load difference required to justify migration, as a percentage of kMaxLoad.
+const int32 kIntraPackageMigrationCostPercent = 5;  // Cost for migrating within the same package
+const int32 kInterPackageMigrationCostPercent = 10; // Cost for migrating between different packages
+// --- End Constants for Migration Cost Awareness ---
+
 const int kLowLoad = kMaxLoad * 20 / 100;
 const int kTargetLoad = kMaxLoad * 55 / 100;
 const int kHighLoad = kMaxLoad * 70 / 100;

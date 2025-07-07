@@ -2,7 +2,7 @@
 #define KERNEL_SCHEDULER_EEVDF_RUN_QUEUE_H
 
 #include <lock.h> // For spinlock
-#include <util/Heap.h>
+#include "SchedulerHeap.h" // Use our specialized heap
 
 // Forward declaration
 struct thread;
@@ -13,32 +13,40 @@ namespace Scheduler {
 class ThreadData;
 
 // Link structure to be embedded in ThreadData for EEVDF run queue
+// It will use SchedulerHeapLink now.
 struct EevdfRunQueueLink {
 	EevdfRunQueueLink() {}
-	// No explicit fVirtualDeadline here; the heap will store ThreadData*
-	// and use an accessor to get the deadline for comparison.
-	HeapLink fHeapLink;
+	// SchedulerHeapLink will be templated on ElementType (ThreadData*)
+	// and KeyType (also ThreadData* for EevdfDeadlineCompare, or could be bigtime_t
+	// if we stored keys explicitly, but EevdfDeadlineCompare derives it).
+	// For simplicity and minimal change to ThreadData, let's use ElementType as KeyType.
+	SchedulerHeapLink<ThreadData*, ThreadData*> fSchedulerHeapLink;
 };
 
-// Policy for Heap: How to get the virtual deadline from a ThreadData*
+// Policy for SchedulerHeap: How to get the virtual deadline from a ThreadData*
 // This requires ThreadData to have a VirtualDeadline() method.
+// This policy compares elements directly, not stored keys.
 struct EevdfDeadlineCompare {
 	// Returns true if a has a "better" (earlier) deadline than b.
 	// For a min-heap, "better" means "less than".
-	bool IsBetter(const ThreadData* a, const ThreadData* b) const;
-
-	// Returns true if a's key is less than b's key.
-	// Used by Heap::SiftDown and SiftUp via comparison.
-	// For our min-heap of virtual deadlines, this means a->VD < b->VD.
+	// Used by SchedulerHeap's _MoveUp and _MoveDown.
 	bool IsKeyLess(const ThreadData* a, const ThreadData* b) const;
+
+	// IsBetter is not directly used by SchedulerHeap's internal sifting,
+	// but might be useful for conceptual clarity or other heap uses.
+	// We can define it in terms of IsKeyLess for a min-heap.
+	bool IsBetter(const ThreadData* a, const ThreadData* b) const {
+		return IsKeyLess(a, b);
+	}
 };
 
-// Policy for Heap: How to get the HeapLink from a ThreadData*
-// This requires ThreadData to have a fEevdfLink member of type EevdfRunQueueLink.
+// Policy for SchedulerHeap: How to get the SchedulerHeapLink from a ThreadData*
+// This requires ThreadData to have a fEevdfLink member of type EevdfRunQueueLink,
+// which in turn contains fSchedulerHeapLink.
 class EevdfGetLink {
 public:
-	inline HeapLink* operator()(ThreadData* element) const;
-	inline const HeapLink* operator()(const ThreadData* element) const;
+	inline SchedulerHeapLink<ThreadData*, ThreadData*>* operator()(ThreadData* element) const;
+	inline const SchedulerHeapLink<ThreadData*, ThreadData*>* operator()(const ThreadData* element) const;
 };
 
 
@@ -55,15 +63,16 @@ public:
 	bool IsEmpty() const;
 	int32 Count() const;
 
-	// TODO: Consider if a Modify operation is needed if a thread's deadline changes
-	// while it's in the queue. (Yes, this will be needed)
-	void Update(ThreadData* thread, bigtime_t oldDeadline);
+	// Update will now use SchedulerHeap::Update
+	void Update(ThreadData* thread); // oldDeadline no longer needed by this call
 
 
 private:
-	// Using Heap from Haiku's util directory.
-	// It will store ThreadData pointers, ordered by their virtual_deadline.
-	typedef Heap<ThreadData*, EevdfDeadlineCompare, EevdfGetLink> DeadlineHeap;
+	// Using our specialized SchedulerHeap.
+	// ElementType is ThreadData*.
+	// Compare policy is EevdfDeadlineCompare.
+	// GetLink policy is EevdfGetLink.
+	typedef SchedulerHeap<ThreadData*, EevdfDeadlineCompare, EevdfGetLink> DeadlineHeap;
 
 	DeadlineHeap fDeadlineHeap;
 	// Spinlock for protecting the run queue

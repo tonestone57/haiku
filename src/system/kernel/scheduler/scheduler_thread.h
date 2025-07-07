@@ -246,16 +246,18 @@ public:
 // --- Inlined Method Implementations ---
 
 // Definition for EevdfGetLink now that ThreadData is defined with fEevdfLink
-inline HeapLink*
+// and EevdfRunQueueLink contains fSchedulerHeapLink.
+// Note: EevdfRunQueue.h (which includes SchedulerHeap.h) must be included before this point.
+inline SchedulerHeapLink<ThreadData*, ThreadData*>*
 Scheduler::EevdfGetLink::operator()(ThreadData* element) const
 {
-	return &element->fEevdfLink.fHeapLink;
+	return &element->fEevdfLink.fSchedulerHeapLink;
 }
 
-inline const HeapLink*
+inline const SchedulerHeapLink<ThreadData*, ThreadData*>*
 Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
 {
-	return &element->fEevdfLink.fHeapLink;
+	return &element->fEevdfLink.fSchedulerHeapLink;
 }
 
 

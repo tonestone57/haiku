@@ -397,204 +397,265 @@ intel_set_display_mode(display_mode* mode)
 	intel_shared_info &sharedInfo = *gInfo->shared_info;
 	Autolock locker(sharedInfo.accelerant_lock);
 
-	// First register dump
+	// The 'primary_or_fallback_mode' parameter is used if no multi-display config is active.
+	// Otherwise, the configuration in sharedInfo.pipe_display_configs (set by IOCTL) is used.
+
+	intel_shared_info &sharedInfo = *gInfo->shared_info;
+	Autolock locker(sharedInfo.accelerant_lock);
+
+	TRACE("%s: Applying display configuration.\n", __func__);
 	//dump_registers();
 
-	set_display_power_mode(B_DPMS_OFF);
+	bool use_multi_config_from_shared_info = false;
+	if (sharedInfo.active_display_count > 0) { // active_display_count should be set by IOCTL
+		for (uint32 i = 0; i < MAX_PIPES; ++i) {
+			if (sharedInfo.pipe_display_configs[i].is_active) {
+				use_multi_config_from_shared_info = true;
+				break;
+			}
+		}
+	}
 
-	// Free old framebuffers for all pipes
-	for (uint32 i = 0; i < MAX_PIPES; i++) {
-		if (sharedInfo.pipe_display_configs[i].frame_buffer_base != 0) {
-			intel_free_memory(sharedInfo.pipe_display_configs[i].frame_buffer_base);
-			sharedInfo.pipe_display_configs[i].frame_buffer_base = 0;
-			sharedInfo.pipe_display_configs[i].frame_buffer_offset = 0;
+	if (!use_multi_config_from_shared_info) {
+		// Single display mode setup (boot time or explicit single mode set)
+		if (primary_or_fallback_mode == NULL) {
+			ERROR("%s: No mode provided for single display setup.\n", __func__);
+			return B_BAD_VALUE;
+		}
+		TRACE("%s: Single display mode setup for primary pipe (array index %d).\n", __func__, sharedInfo.primary_pipe_index);
+
+		display_mode proposed_single_mode = *primary_or_fallback_mode;
+		// Use primary display's EDID for proposal if available
+		edid1_info* primaryEdid = NULL;
+		if (sharedInfo.primary_pipe_index < MAX_PIPES && sharedInfo.has_edid[sharedInfo.primary_pipe_index]) {
+			primaryEdid = &sharedInfo.edid_infos[sharedInfo.primary_pipe_index];
+		} else if (sharedInfo.has_vesa_edid_info) {
+			primaryEdid = &sharedInfo.vesa_edid_info;
+		}
+		// Temporarily set gInfo->edid_info for sanitize_display_mode if needed, or modify sanitize
+		// For now, assume sanitize_display_mode uses a generic approach if gInfo->has_edid is false.
+		// A better sanitize_display_mode would take edid_info as a parameter.
+		if (intel_propose_display_mode(&proposed_single_mode, &proposed_single_mode, &proposed_single_mode) != B_OK) {
+			ERROR("%s: Proposed mode for primary display rejected.\n", __func__);
+			return B_BAD_VALUE;
+		}
+
+		// Clear all pipe configs and set only the primary
+		for (uint32 i = 0; i < MAX_PIPES; i++) {
+			if (sharedInfo.pipe_display_configs[i].frame_buffer_base != 0) {
+				intel_free_memory(sharedInfo.pipe_display_configs[i].frame_buffer_base);
+			}
+			memset(&sharedInfo.pipe_display_configs[i], 0, sizeof(struct intel_shared_info::per_pipe_display_info));
 			sharedInfo.pipe_display_configs[i].is_active = false;
-			// Consider zeroing out current_mode, bytes_per_row, bits_per_pixel for this pipe config
-		}
-	}
-	sharedInfo.active_display_count = 0;
-
-	// TODO: This function will eventually need to take a list of display_mode targets,
-	// one for each display to be configured in a multi-monitor setup.
-	// For this iteration, we assume 'target' is for the primary display,
-	// and we'll only configure that one.
-	// The primary_pipe_index should be determined by user settings or a default.
-	// Let's assume primary_pipe_index = 0 (INTEL_PIPE_A) for now if not otherwise set.
-	if (sharedInfo.primary_pipe_index >= MAX_PIPES)
-		sharedInfo.primary_pipe_index = 0; // Default to Pipe A as primary
-
-	uint32 activePipeConfigIndex = sharedInfo.primary_pipe_index;
-	struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[activePipeConfigIndex];
-
-	addr_t base;
-	if (intel_allocate_memory(bytesPerRow * target.virtual_height, 0, base) < B_OK) {
-		ERROR("%s: Failed to allocate framebuffer for pipe %d!\n", __func__, activePipeConfigIndex);
-		// TODO: Attempt to restore previous configuration if allocation fails.
-		// This is complex and involves re-allocating and re-programming all previously active displays.
-		return B_NO_MEMORY;
-	}
-
-	// Clear frame buffer before using it
-	memset((uint8*)base, 0, bytesPerRow * target.virtual_height);
-
-	pipeConfig.frame_buffer_base = base;
-	pipeConfig.frame_buffer_offset = base - (addr_t)sharedInfo.graphics_memory;
-	pipeConfig.current_mode = target;
-	pipeConfig.bytes_per_row = bytesPerRow;
-	pipeConfig.bits_per_pixel = bitsPerPixel;
-	pipeConfig.is_active = true;
-	sharedInfo.active_display_count = 1; // Only one display configured in this simplified step
-
-#if 0
-	// This section will need to be adapted for multi-monitor configurations
-	// when processing a list of target modes.
-	if ((gInfo->head_mode & HEAD_MODE_TESTING) != 0) {
-		// 1. Enable panel power as needed to retrieve panel configuration
-		// (use AUX VDD enable bit)
-			// skip, did detection already, might need that before that though
-
-		// 2. Enable PCH clock reference source and PCH SSC modulator,
-		// wait for warmup (Can be done anytime before enabling port)
-			// skip, most certainly already set up by bios to use other ports,
-			// will need for coldstart though
-
-		// 3. If enabling CPU embedded DisplayPort A: (Can be done anytime
-		// before enabling CPU pipe or port)
-		//	a.	Enable PCH 120MHz clock source output to CPU, wait for DMI
-		//		latency
-		//	b.	Configure and enable CPU DisplayPort PLL in the DisplayPort A
-		//		register, wait for warmup
-			// skip, not doing eDP right now, should go into
-			// EmbeddedDisplayPort class though
-
-		// 4. If enabling port on PCH: (Must be done before enabling CPU pipe
-		// or FDI)
-		//	a.	Enable PCH FDI Receiver PLL, wait for warmup plus DMI latency
-		//	b.	Switch from Rawclk to PCDclk in FDI Receiver (FDI A OR FDI B)
-		//	c.	[DevSNB] Enable CPU FDI Transmitter PLL, wait for warmup
-		//	d.	[DevILK] CPU FDI PLL is always on and does not need to be
-		//		enabled
-		FDILink* link = pipe->FDILink();
-		if (link != NULL) {
-			link->Receiver().EnablePLL();
-			link->Receiver().SwitchClock(true);
-			link->Transmitter().EnablePLL();
 		}
 
-		// 5. Enable CPU panel fitter if needed for hires, required for VGA
-		// (Can be done anytime before enabling CPU pipe)
-		PanelFitter* fitter = pipe->PanelFitter();
-		if (fitter != NULL)
-			fitter->Enable(mode);
+		uint32 pIdx = sharedInfo.primary_pipe_index; // This is already an array index
+		if (pIdx >= MAX_PIPES) pIdx = PipeEnumToArrayIndex(INTEL_PIPE_A); // Fallback if invalid
 
-		// 6. Configure CPU pipe timings, M/N/TU, and other pipe settings
-		// (Can be done anytime before enabling CPU pipe)
-		pll_divisors divisors;
-		compute_pll_divisors(target, divisors, false);
-		pipe->ConfigureTimings(divisors);
+		sharedInfo.pipe_display_configs[pIdx].current_mode = proposed_single_mode;
+		sharedInfo.pipe_display_configs[pIdx].is_active = true;
+		get_color_space_format(proposed_single_mode, colorMode, // colorMode declared outside this block
+			sharedInfo.pipe_display_configs[pIdx].bytes_per_row,
+			sharedInfo.pipe_display_configs[pIdx].bits_per_pixel);
 
-		// 7. Enable CPU pipe
-		pipe->Enable();
-
-8. Configure and enable CPU planes (VGA or hires)
-9. If enabling port on PCH:
-		//	a.   Program PCH FDI Receiver TU size same as Transmitter TU size for TU error checking
-		//	b.   Train FDI
-		//		i. Set pre-emphasis and voltage (iterate if training steps fail)
-                    ii. Enable CPU FDI Transmitter and PCH FDI Receiver with Training Pattern 1 enabled.
-                   iii. Wait for FDI training pattern 1 time
-                   iv. Read PCH FDI Receiver ISR ([DevIBX-B+] IIR) for bit lock in bit 8 (retry at least once if no lock)
-                    v. Enable training pattern 2 on CPU FDI Transmitter and PCH FDI Receiver
-                   vi.  Wait for FDI training pattern 2 time
-                  vii. Read PCH FDI Receiver ISR ([DevIBX-B+] IIR) for symbol lock in bit 9 (retry at least once if no
-                        lock)
-                  viii. Enable normal pixel output on CPU FDI Transmitter and PCH FDI Receiver
-                   ix.  Wait for FDI idle pattern time for link to become active
-         c.   Configure and enable PCH DPLL, wait for PCH DPLL warmup (Can be done anytime before enabling
-              PCH transcoder)
-         d.   [DevCPT] Configure DPLL SEL to set the DPLL to transcoder mapping and enable DPLL to the
-              transcoder.
-         e.   [DevCPT] Configure DPLL_CTL DPLL_HDMI_multipler.
-         f.   Configure PCH transcoder timings, M/N/TU, and other transcoder settings (should match CPU settings).
-         g.   [DevCPT] Configure and enable Transcoder DisplayPort Control if DisplayPort will be used
-         h.   Enable PCH transcoder
-10. Enable ports (DisplayPort must enable in training pattern 1)
-11. Enable panel power through panel power sequencing
-12. Wait for panel power sequencing to reach enabled steady state
-13. Disable panel power override
-14. If DisplayPort, complete link training
-15. Enable panel backlight
+		sharedInfo.active_display_count = 1;
+		sharedInfo.primary_pipe_index = pIdx; // Ensure it's set
 	}
-#endif
+	// Now, sharedInfo.pipe_display_configs reflects the desired state.
 
-	// make sure VGA display is disabled
+	// Power down everything before reconfiguration
+	set_display_power_mode(B_DPMS_OFF);
+	// Consider more granular pipe disabling:
+	// for (uint32 i = 0; i < gInfo->pipe_count; i++) {
+	// 	if (gInfo->pipes[i] != NULL) gInfo->pipes[i]->Enable(false);
+	// }
+
+	// Free framebuffers for pipes that are no longer active or whose config changes significantly
+	for (uint32 pipeIdx = 0; pipeIdx < MAX_PIPES; pipeIdx++) {
+		struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[pipeIdx];
+		if (!pipeConfig.is_active && pipeConfig.frame_buffer_base != 0) {
+			intel_free_memory(pipeConfig.frame_buffer_base);
+			memset(&pipeConfig, 0, sizeof(struct intel_shared_info::per_pipe_display_info));
+			pipeConfig.is_active = false; // Redundant but safe
+		}
+		// If pipeConfig.is_active, but its mode (resolution/bpp) changed from what might be
+		// currently allocated, its buffer also needs to be freed here.
+		// This check is complex; simplified reallocation logic is in the main loop below.
+	}
+
+	uint32 successfully_configured_displays = 0;
+	uint32 first_active_pipe_color_mode = 0;
+
+	// Main loop: Iterate through TARGET pipe configurations
+	for (uint32 pipeArrIdx = 0; pipeArrIdx < MAX_PIPES; pipeArrIdx++) {
+		struct intel_shared_info::per_pipe_display_info& pipeConfig = sharedInfo.pipe_display_configs[pipeArrIdx];
+
+		if (!pipeConfig.is_active) { // Target state from shared_info
+			continue;
+		}
+
+		display_mode target_mode_for_pipe = pipeConfig.current_mode; // Mode set by IOCTL or single fallback
+		uint32 currentPipeColorMode, currentPipeBytesPerRow, currentPipeBitsPerPixel;
+
+		// Propose mode again here, ideally with per-pipe EDID if sanitize_display_mode could take it.
+		// For now, we assume modes in shared_info are either pre-validated or will use primary EDID context.
+		display_mode proposed_mode_final = target_mode_for_pipe;
+		if (intel_propose_display_mode(&proposed_mode_final, &proposed_mode_final, &proposed_mode_final) != B_OK) {
+			ERROR("%s: Mode for pipe array index %d rejected by intel_propose_display_mode.\n", __func__, pipeArrIdx);
+			pipeConfig.is_active = false;
+			if (pipeConfig.frame_buffer_base != 0) {
+				intel_free_memory(pipeConfig.frame_buffer_base);
+				memset(&pipeConfig, 0, sizeof(struct intel_shared_info::per_pipe_display_info));
+			}
+			continue;
+		}
+		target_mode_for_pipe = proposed_mode_final;
+		pipeConfig.current_mode = target_mode_for_pipe; // Store the sanitized mode
+
+		get_color_space_format(target_mode_for_pipe, currentPipeColorMode, currentPipeBytesPerRow, currentPipeBitsPerPixel);
+
+		size_t requiredSize = currentPipeBytesPerRow * target_mode_for_pipe.virtual_height;
+		bool needsReallocation = false;
+		if (pipeConfig.frame_buffer_base == 0) {
+			needsReallocation = true;
+		} else {
+			// Check if existing buffer is suitable
+			if (pipeConfig.bytes_per_row != currentPipeBytesPerRow ||
+				pipeConfig.bits_per_pixel != currentPipeBitsPerPixel ||
+				// Simulating a check if buffer is too small:
+				(bytesPerRow * target_mode_for_pipe.virtual_height > pipeConfig.bytes_per_row * pipeConfig.current_mode.virtual_height && pipeConfig.bytes_per_row !=0 && pipeConfig.current_mode.virtual_height !=0 ) ||
+				pipeConfig.current_mode.space != target_mode_for_pipe.space ) {
+				intel_free_memory(pipeConfig.frame_buffer_base);
+				pipeConfig.frame_buffer_base = 0;
+				needsReallocation = true;
+			}
+		}
+
+		addr_t currentPipeBase = pipeConfig.frame_buffer_base;
+		if (needsReallocation) {
+			if (intel_allocate_memory(requiredSize, 0, currentPipeBase) < B_OK) {
+				ERROR("%s: Failed to allocate framebuffer for pipe array idx %d (size %lu)!\n", __func__, pipeArrIdx, requiredSize);
+				pipeConfig.is_active = false;
+				continue;
+			}
+			memset((uint8*)currentPipeBase, 0, requiredSize);
+			pipeConfig.frame_buffer_base = currentPipeBase;
+			pipeConfig.frame_buffer_offset = currentPipeBase - (addr_t)sharedInfo.graphics_memory;
+		}
+
+		pipeConfig.bytes_per_row = currentPipeBytesPerRow;
+		pipeConfig.bits_per_pixel = currentPipeBitsPerPixel;
+
+		Port* targetPort = NULL;
+		pipe_index targetPipeEnum = ArrayToPipeEnum(pipeArrIdx);
+
+		if (targetPipeEnum != INTEL_PIPE_ANY) {
+			for (uint32 portNum = 0; portNum < gInfo->port_count; portNum++) {
+				if (gInfo->ports[portNum] != NULL && gInfo->ports[portNum]->IsConnected() &&
+					gInfo->ports[portNum]->GetPipe() != NULL &&
+					gInfo->ports[portNum]->GetPipe()->Index() == targetPipeEnum) {
+					targetPort = gInfo->ports[portNum];
+					break;
+				}
+			}
+		}
+
+		if (targetPort == NULL) {
+			ERROR("%s: No connected port found for active pipe_config (array index %d, enum %d)\n", __func__, pipeArrIdx, targetPipeEnum);
+			if (needsReallocation && pipeConfig.frame_buffer_base == currentPipeBase) {
+				intel_free_memory(pipeConfig.frame_buffer_base);
+			}
+			memset(&pipeConfig, 0, sizeof(struct intel_shared_info::per_pipe_display_info));
+			pipeConfig.is_active = false;
+			continue;
+		}
+
+		TRACE("%s: Configuring Port %s (Pipe Enum %d, Array Idx %d) with mode %dx%d\n", __func__,
+			targetPort->PortName(), targetPipeEnum, pipeArrIdx, target_mode_for_pipe.timing.h_display, target_mode_for_pipe.timing.v_display);
+
+		status_t status = targetPort->SetDisplayMode(&target_mode_for_pipe, currentPipeColorMode);
+		if (status != B_OK) {
+			ERROR("%s: Port %s (Pipe Enum %d, Array Idx %d) failed to set display mode!\n", __func__, targetPort->PortName(), targetPipeEnum, pipeArrIdx);
+			if (needsReallocation && pipeConfig.frame_buffer_base == currentPipeBase) {
+				intel_free_memory(pipeConfig.frame_buffer_base);
+			}
+			memset(&pipeConfig, 0, sizeof(struct intel_shared_info::per_pipe_display_info));
+			pipeConfig.is_active = false;
+			continue;
+		}
+
+		if (successfully_configured_displays == 0) {
+			first_active_pipe_color_mode = currentPipeColorMode;
+			// Update primary_pipe_index if the current one is no longer valid or not set
+			bool currentPrimaryValidAndActive = false;
+			if (sharedInfo.primary_pipe_index < MAX_PIPES && sharedInfo.pipe_display_configs[sharedInfo.primary_pipe_index].is_active) {
+				currentPrimaryValidAndActive = true;
+			}
+			if (!currentPrimaryValidAndActive) {
+				sharedInfo.primary_pipe_index = pipeArrIdx;
+			}
+		}
+		successfully_configured_displays++;
+	}
+
+	sharedInfo.active_display_count = successfully_configured_displays;
+	// If all displays failed, ensure primary_pipe_index is reset to a default (e.g. Pipe A's array index)
+	if (successfully_configured_displays == 0 && sharedInfo.primary_pipe_index >= MAX_PIPES) {
+	    sharedInfo.primary_pipe_index = PipeEnumToArrayIndex(INTEL_PIPE_A);
+	}
+
+
+	// Ensure VGA display is disabled if no specific configuration uses it.
 	write32(INTEL_VGA_DISPLAY_CONTROL, VGA_DISPLAY_DISABLED);
 	read32(INTEL_VGA_DISPLAY_CONTROL);
 
-	// Go over each port and set the display mode
-	for (uint32 i = 0; i < gInfo->port_count; i++) {
-		if (gInfo->ports[i] == NULL)
-			continue;
-		if (!gInfo->ports[i]->IsConnected())
-			continue;
 
-		status_t status = gInfo->ports[i]->SetDisplayMode(&target, colorMode);
-		if (status != B_OK)
-			ERROR("%s: Unable to set display mode!\n", __func__);
+	if (successfully_configured_displays > 0) {
+		uint32 colorModeToProgramGlobal = 0;
+		if(sharedInfo.primary_pipe_index < MAX_PIPES && sharedInfo.pipe_display_configs[sharedInfo.primary_pipe_index].is_active) {
+			display_mode primMode = sharedInfo.pipe_display_configs[sharedInfo.primary_pipe_index].current_mode;
+			uint32 dummyBr, dummyBpp;
+			get_color_space_format(primMode, colorModeToProgramGlobal, dummyBr, dummyBpp);
+		} else { // Fallback if primary_pipe_index is somehow not active
+			colorModeToProgramGlobal = first_active_pipe_color_mode;
+		}
+		program_pipe_color_modes(colorModeToProgramGlobal);
 	}
 
-	TRACE("%s: Port configuration completed successfully!\n", __func__);
-
-	// We set the same color mode across all pipes
-	program_pipe_color_modes(colorMode);
-
-	// TODO: This may not be neccesary (see DPMS OFF at top)
-	set_display_power_mode(sharedInfo.dpms_mode);
-
-	// Changing bytes per row seems to be ignored if the plane/pipe is turned
-	// off
-
 	// Set bytes_per_row for each active pipe
-	// In this simplified version, only the primary pipe is active.
-	// This loop will be more meaningful when multiple displays are configured.
-	for (uint32 i = 0; i < MAX_PIPES; i++) {
-		if (sharedInfo.pipe_display_configs[i].is_active) {
-			// Assume 'i' is the configArrayIndex and can be cast to pipe_index
-			// This needs a robust mapping from config index to pipe_index enum.
-			pipe_index actualPipe = (pipe_index)i;
+	for (uint32 arrayIndex = 0; arrayIndex < MAX_PIPES; arrayIndex++) {
+		if (sharedInfo.pipe_display_configs[arrayIndex].is_active) {
+			pipe_index actualPipe = ArrayToPipeEnum(arrayIndex);
+			if (actualPipe == INTEL_PIPE_ANY) continue;
+
 			uint32 hardwarePlaneOffset = 0;
+			bool supportedPipe = true;
 			switch (actualPipe) {
 				case INTEL_PIPE_A: hardwarePlaneOffset = 0; break;
 				case INTEL_PIPE_B: hardwarePlaneOffset = INTEL_DISPLAY_OFFSET; break;
 				case INTEL_PIPE_C:
-					if (sharedInfo.device_type.Generation() >= 7)
-						hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET;
-					else continue;
+					if (sharedInfo.device_type.Generation() >= 7) hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET;
+					else supportedPipe = false;
 					break;
-				// Add cases for INTEL_PIPE_D if applicable and INTEL_DISPLAY_D_OFFSET is defined
-				default: continue;
+				default: supportedPipe = false; break;
 			}
+			if (!supportedPipe) continue;
 
 			if (sharedInfo.device_type.InFamily(INTEL_FAMILY_LAKE)) {
 				write32(INTEL_DISPLAY_A_BYTES_PER_ROW + hardwarePlaneOffset,
-					sharedInfo.pipe_display_configs[i].bytes_per_row >> 6);
+					sharedInfo.pipe_display_configs[arrayIndex].bytes_per_row >> 6);
 			} else {
 				write32(INTEL_DISPLAY_A_BYTES_PER_ROW + hardwarePlaneOffset,
-					sharedInfo.pipe_display_configs[i].bytes_per_row);
+					sharedInfo.pipe_display_configs[arrayIndex].bytes_per_row);
 			}
 		}
 	}
-	// The sharedInfo.current_mode, bytes_per_row, bits_per_pixel are now part of
-	// sharedInfo.pipe_display_configs[activePipeConfigIndex]
 
-	set_frame_buffer_base();
-		// triggers writing back double-buffered registers for all active pipes
-		// which is INTEL_DISPLAY_X_BYTES_PER_ROW only apparantly
+	set_frame_buffer_base(); // Update base addresses for all active pipes
+	set_display_power_mode(sharedInfo.dpms_mode);
 
-	// Second register dump
 	//dump_registers();
-
-	return B_OK;
+	return (successfully_configured_displays > 0 || primary_or_fallback_mode != NULL) ? B_OK : B_ERROR;
 }
 
 

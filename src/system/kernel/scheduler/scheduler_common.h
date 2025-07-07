@@ -196,7 +196,7 @@ static const float kInstantLoadEWMAAlpha = 0.4f;
 // --- Mode-Settable Global Parameters ---
 // These are set by scheduler_set_operation_mode via mode's switch_to_mode
 extern float gKernelKDistFactor; // TODO EEVDF: Re-evaluate usefulness or repurpose. Currently no direct effect.
-extern float gSchedulerBaseQuantumMultiplier; // Affects SliceDuration via GetBaseQuantumForLevel
+// extern float gSchedulerBaseQuantumMultiplier; // Directly used in ThreadData::GetBaseQuantumForLevel, not needed as extern here if modes don't set it.
 // extern float gSchedulerAgingThresholdMultiplier; // Aging is obsolete with EEVDF
 enum SchedulerLoadBalancePolicy {
 	SCHED_LOAD_BALANCE_SPREAD,

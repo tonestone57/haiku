@@ -43,35 +43,64 @@ static const int32 gNiceToWeight[40] = {
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
 // B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
 static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
-	int effNice;
-	int relativePriority = priority - B_NORMAL_PRIORITY;
+    float effNiceFloat;
+    // B_NORMAL_PRIORITY is 10
+    int relativePriority = priority - B_NORMAL_PRIORITY;
 
-	// Scale so that 2.5 Haiku priority points roughly equals 1 nice level step.
-	effNice = -((relativePriority * 2) / 5);
+    // Scale: 2.5 Haiku priority points = 1 nice level.
+    effNiceFloat = -((float)relativePriority * 2.0f / 5.0f);
 
-	// Clamp effNice to a typical range used by the table, e.g., -15 to +15 for most app priorities.
-	effNice = max_c(-15, min_c(effNice, 15));
+    // Round to nearest integer for nice value
+    int effNice = (int)roundf(effNiceFloat);
 
-	return effNice + 20; // Convert nice value to an index (nice -20 is index 0, nice 0 is index 20)
+    // Clamp effNice. The gNiceToWeight table covers nice -20 to +19.
+    // For general applications (priorities typically 5-19), map them
+    // to nice -15 to +15, which corresponds to indices 5 to 35.
+    effNice = max_c(-15, min_c(effNice, 15));
+
+    // Convert nice value to index for gNiceToWeight (nice -20=idx 0, nice 0=idx 20)
+    return effNice + 20;
 }
 
 static inline int32 scheduler_priority_to_weight(int32 priority) {
-	// TODO EEVDF: This priority-to-weight mapping is crucial and needs extensive tuning
-	// based on desired Haiku behavior across its priority spectrum.
-	if (priority < B_LOWEST_ACTIVE_PRIORITY) {
-		return gNiceToWeight[39];
-	}
-	if (priority >= B_MAX_REAL_TIME_PRIORITY) {
-		return gNiceToWeight[0] * 16;
-	}
-	if (priority >= B_URGENT_PRIORITY) {
-		return gNiceToWeight[0] * 8;
-	}
-	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		return gNiceToWeight[0] * 4;
-	}
-	int niceIndex = scheduler_haiku_priority_to_nice_index(priority);
-	return gNiceToWeight[niceIndex];
+    // Idle threads get the absolute lowest weight
+    if (priority < B_LOWEST_ACTIVE_PRIORITY) { // Typically priority 0-4
+        return gNiceToWeight[39]; // nice +19, weight 15
+    }
+
+    // Kernel Real-Time (highest importance, e.g., timer threads)
+    if (priority >= B_MAX_REAL_TIME_PRIORITY) { // >= 120
+        return gNiceToWeight[0] * 16; // Nice -20 base, heavily boosted
+    }
+
+    // Kernel Urgent/Worker Threads (very high importance)
+    if (priority >= B_URGENT_PRIORITY) { // >= 100 (e.g., some kernel daemons)
+        return gNiceToWeight[0] * 8;  // Nice -20 base, significantly boosted
+    }
+
+    // High Priority User/System Threads (e.g. media kit internals, high-priority user RT apps)
+    // Range: 60 to B_URGENT_PRIORITY - 1 (99)
+    if (priority >= 60) {
+        return gNiceToWeight[0] * 4; // Nice -20 base, moderately boosted
+    }
+
+    // Medium-High Priority User/System Threads (e.g. typical user RT apps, some media)
+    // Range: B_REAL_TIME_PRIORITY (30) to 59
+    if (priority >= B_REAL_TIME_PRIORITY) { // >= 30
+        return gNiceToWeight[0] * 2; // Nice -20 base, boosted
+    }
+
+    // System Services (app_server, input_server, lower-priority media threads)
+    // Range: B_REAL_TIME_DISPLAY_PRIORITY (20) to B_REAL_TIME_PRIORITY - 1 (29)
+    if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) { // >= 20
+        return gNiceToWeight[0]; // Nice -20 base (weight 88761)
+    }
+
+    // Normal Application Priorities
+    // Range: B_LOWEST_ACTIVE_PRIORITY (5) to B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
+    // Uses the refined scheduler_haiku_priority_to_nice_index()
+    int niceIndex = scheduler_haiku_priority_to_nice_index(priority);
+    return gNiceToWeight[niceIndex];
 }
 
 
@@ -90,6 +119,7 @@ static inline int32 scheduler_priority_to_weight(int32 priority) {
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
 #include <algorithm>
+#include <math.h> // For roundf
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -239,6 +269,10 @@ static const bigtime_t kMinTimeBetweenMigrations = 20000;
 // Factor by which the benefit score of a likely I/O-bound thread is divided,
 // making it more reluctant to migrate.
 static const int32 kIOBoundScorePenaltyFactor = 2;
+
+// Factors for load balancing benefit score calculation
+static const int32 kBenefitScoreLagFactor = 1;
+static const int32 kBenefitScoreEligFactor = 2;
 
 
 void
@@ -1699,11 +1733,8 @@ scheduler_perform_load_balance()
 		// or zero if its eligibility is still in the future on target.
 		// A simpler metric could be just (-estimatedEligibleTimeOnTarget) if we assume 'now' is 0.
 		bigtime_t eligibilityImprovement = candidate->EligibleTime() - estimatedEligibleTimeOnTarget;
-		bigtime_t currentBenefitScore = currentLagOnSource + eligibilityImprovement;
-		// Alternative score: Focus purely on how much sooner it runs
-		// currentBenefitScore = eligibilityImprovement;
-		// Prioritize eligibility improvement more by weighting it higher.
-		currentBenefitScore = currentLagOnSource + (2 * eligibilityImprovement);
+		bigtime_t currentBenefitScore = (kBenefitScoreLagFactor * currentLagOnSource)
+		                              + (kBenefitScoreEligFactor * eligibilityImprovement);
 
 		// Apply wake-affinity bonus if applicable
 		bigtime_t affinityBonus = 0;

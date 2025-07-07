@@ -38,10 +38,11 @@ if $(HAIKU_KERNEL_ALLOCATOR) = snmalloc {
     # snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="freelist_forward_edge" ;
     # snmallocTargetFlags += -DSNMALLOC_CHECK_CLIENT_MITIGATIONS="random_pagemap" ;
     # Note: Some mitigations like 'pal_enforce_access' require specific PAL support.
-
+   
+    # Target specific flags
     KernelMergeObject snmalloc_kernel_api.o :
         snmalloc/snmalloc_kernel_api.cpp
-        : # Target specific flags
+        : 
         $(snmallocTargetFlags)
     ;
     allocatorObjects = snmalloc_kernel_api.o ;

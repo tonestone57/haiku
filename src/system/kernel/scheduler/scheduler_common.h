@@ -242,13 +242,19 @@ const int32 kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15% load allowance
 const int32 kMaxLoadForWarmCorePreference = kHighLoad;
 // --- End Constants for Cache-Aware Task Placement Bonus ---
 
+// Threshold for considering a system as having a "very large" number of cores,
+// potentially triggering different scheduler parameter tuning.
+const int32 kHighCoreCountThreshold = 32;
+
 const int kLowLoad = kMaxLoad * 20 / 100;
 const int kTargetLoad = kMaxLoad * 55 / 100;
 const int kHighLoad = kMaxLoad * 70 / 100;
 const int kMediumLoad = (kHighLoad + kTargetLoad) / 2;
 const int kVeryHighLoad = (kMaxLoad + kHighLoad) / 2;
 
-const int kLoadDifference = kMaxLoad * 20 / 100;
+// const int kLoadDifference = kMaxLoad * 20 / 100; // Replaced by adaptive logic
+const int32 kBaseLoadDifferencePercent = 20;        // Default: 20%
+const int32 kHighCoreLoadDifferencePercent = 25;    // For high core counts: 25%
 
 extern bool gSingleCore;
 extern bool gTrackCoreLoad;

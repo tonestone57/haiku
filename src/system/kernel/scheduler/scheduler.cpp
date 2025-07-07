@@ -151,7 +151,9 @@ static const bigtime_t kAgingCheckInterval = 500000;
 
 static timer sLoadBalanceTimer;
 static const bigtime_t kLoadBalanceCheckInterval = 100000;
-static const bigtime_t kMinTimeBetweenMigrations = 20000;
+// static const bigtime_t kMinTimeBetweenMigrations = 20000; // Replaced by adaptive logic
+static const bigtime_t kBaseMinTimeBetweenMigrations = 20000;    // Default: 20ms
+static const bigtime_t kHighCoreMinTimeBetweenMigrations = 35000; // For high core counts: 35ms
 
 
 static inline bigtime_t
@@ -1698,10 +1700,10 @@ scheduler_perform_load_balance()
 		return; // Not enough distinct, non-defunct cores in heaps to balance between.
 
 	// Only balance if the load difference is significant.
-	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
+	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + get_effective_load_difference())
 		return;
 
-	TRACE("LoadBalance: Potential imbalance. SourceCore %" B_PRId32 " (avg load %" B_PRId32 ") TargetCore %" B_PRId32 " (avg load %" B_PRId32 ")\n",
+	TRACE("LoadBalance: Potential imbalance. SourceCore %" B_PRId32 " (avg load %" B_PRId32 ") TargetCore %" B_PRId32 " (avg load %" B_PRId32 "). EffectiveDiffThreshold: %" B_PRId32 "\n",
 		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(), targetCoreCandidate->ID(), targetCoreCandidate->GetLoad());
 
 	CPUEntry* sourceCPU = NULL;

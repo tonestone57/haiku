@@ -1132,8 +1132,11 @@ struct intel_brightness_legacy {
 // display
 
 #define INTEL_DISPLAY_OFFSET			0x1000
+#define INTEL_DISPLAY_C_OFFSET			(INTEL_DISPLAY_OFFSET * 2)
+// #define INTEL_DISPLAY_D_OFFSET		(INTEL_DISPLAY_OFFSET * 3) // If a similar pattern applies
 
-// Note: on Skylake below registers are part of the transcoder
+// Note: on Skylake and newer, pipe timing registers (HTOTAL etc.) are part of the transcoder block.
+// The definitions below are for pre-Skylake style pipe registers.
 #define INTEL_DISPLAY_A_HTOTAL			(0x0000 | REGS_NORTH_PIPE_AND_PORT)
 #define INTEL_DISPLAY_A_HBLANK			(0x0004 | REGS_NORTH_PIPE_AND_PORT)
 #define INTEL_DISPLAY_A_HSYNC			(0x0008 | REGS_NORTH_PIPE_AND_PORT)
@@ -1149,6 +1152,11 @@ struct intel_brightness_legacy {
 
 #define INTEL_DISPLAY_A_PIPE_SIZE		(0x001c | REGS_NORTH_PIPE_AND_PORT)
 #define INTEL_DISPLAY_B_PIPE_SIZE		(0x101c | REGS_NORTH_PIPE_AND_PORT)
+// TODO: Define for Pipe C if applicable for relevant generations:
+// #define INTEL_DISPLAY_C_HTOTAL			(INTEL_DISPLAY_A_HTOTAL - REGS_NORTH_PIPE_AND_PORT + INTEL_DISPLAY_C_OFFSET | REGS_NORTH_PIPE_AND_PORT)
+// ... and other C timings ...
+// #define INTEL_DISPLAY_C_PIPE_SIZE		(INTEL_DISPLAY_A_PIPE_SIZE - REGS_NORTH_PIPE_AND_PORT + INTEL_DISPLAY_C_OFFSET | REGS_NORTH_PIPE_AND_PORT)
+// TODO: Pipe D registers need PRM lookup for relevant generations.
 
 //G45 displayport link
 #define INTEL_PIPE_A_DATA_M				(0x0050 | REGS_NORTH_PLANE_CONTROL)
@@ -1413,6 +1421,10 @@ struct intel_brightness_legacy {
 #define INTEL_DISPLAY_B_SURFACE			(0x119c | REGS_NORTH_PLANE_CONTROL)
 #define INTEL_DISPLAY_B_OFFSET_HAS		(0x11a4 | REGS_NORTH_PLANE_CONTROL)
 	// i965 and up only
+// TODO: Define for Pipe C if applicable for relevant generations:
+// #define INTEL_DISPLAY_C_CONTROL		(INTEL_DISPLAY_A_CONTROL - REGS_NORTH_PLANE_CONTROL + INTEL_DISPLAY_C_OFFSET | REGS_NORTH_PLANE_CONTROL)
+// ... and other C plane registers ...
+// TODO: Pipe D plane registers need PRM lookup.
 
 // INTEL_DISPLAY_A_CONTROL source pixel format
 #define DISPLAY_CONTROL_ENABLED			(1UL << 31)
@@ -1453,7 +1465,15 @@ struct intel_brightness_legacy {
 #define INTEL_CURSOR_POSITION			(0x0088 | REGS_NORTH_PLANE_CONTROL)
 #define INTEL_CURSOR_PALETTE			(0x0090 | REGS_NORTH_PLANE_CONTROL)
 	// (- 0x009f)
-#define INTEL_CURSOR_SIZE				(0x00a0 | REGS_NORTH_PLANE_CONTROL)
+#define INTEL_CURSOR_SIZE				(0x00a0 | REGS_NORTH_PLANE_CONTROL) // Typically Cursor A size
+// TODO: Define INTEL_CURSOR_B_SIZE, INTEL_CURSOR_C_SIZE etc. if they exist and follow offset pattern.
+// Example for B (if INTEL_PLANE_OFFSET applies, which it usually does for cursor blocks):
+// #define INTEL_CURSOR_B_CONTROL		(INTEL_CURSOR_CONTROL + INTEL_PLANE_OFFSET)
+// #define INTEL_CURSOR_B_BASE			(INTEL_CURSOR_BASE + INTEL_PLANE_OFFSET)
+// #define INTEL_CURSOR_B_POSITION		(INTEL_CURSOR_POSITION + INTEL_PLANE_OFFSET)
+// #define INTEL_CURSOR_B_SIZE			(INTEL_CURSOR_SIZE + INTEL_PLANE_OFFSET)
+// TODO: Pipe C & D cursor registers need PRM lookup or pattern verification.
+
 #define CURSOR_ENABLED					(1UL << 31)
 #define CURSOR_FORMAT_2_COLORS			(0UL << 24)
 #define CURSOR_FORMAT_3_COLORS			(1UL << 24)

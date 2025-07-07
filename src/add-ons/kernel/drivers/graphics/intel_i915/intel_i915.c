@@ -65,19 +65,39 @@ static const uint16 kSupportedDevices[] = {
 	// Kaby Lake
 	0x5902, 0x5906, 0x5912, 0x5916, 0x5917, 0x591b, 0x591c, 0x591d, 0x591e, 0x5921, 0x5926, 0x5927,
 	// Coffee Lake (includes some from kSupportedDevices that map to CFL)
-	0x3E90, 0x3E91, 0x3E92, 0x3E93, 0x3E96, 0x3E98, 0x3E9A, 0x3E9B, /*0x3EAB CFL GT2?*/ /*0x3EA5, 0x3EA6 CFL GT3?*/
+	0x3E90, 0x3E91, 0x3E92, 0x3E93, 0x3E96, 0x3E98, 0x3E9A, 0x3E9B,
 	// Comet Lake (includes some from kSupportedDevices that map to CML)
-	/*0x9B21,*/ 0x9B41, /*0x9BA4, 0x9BA8, 0x9BAA,*/ 0x9BC4, 0x9BC5, 0x9BC6, 0x9BC8, /*0x9BCA, 0x9BCC,*/ 0x9BE6, 0x9BF6,
+	0x9B41, 0x9BC4, 0x9BC5, 0x9BC6, 0x9BC8, 0x9BE6, 0x9BF6,
 	// Gemini Lake
 	0x3184, 0x3185,
-	// Ice Lake
-	0x8a56, 0x8a5c, 0x8a5a, 0x8a51, 0x8a52, 0x8a53, // Matched from FreeBSD, may need more
-	// Jasper Lake
-	0x4e55, 0x4e61, 0x4e71,
-	// Tiger Lake
-	0x9a49, 0x9a78, 0x9a40, 0x9a60, 0x9a68, 0x9a70,
-	// Alder Lake (example, add more specific ADL-S/P/N IDs if known)
-	0x46a6, 0x46d1,
+
+	// Additional Gen7 Haswell from FreeBSD i915_pciids.h
+	0x0A02, 0x0A0A, 0x0A0B, 0x0A0E,
+	0x040A, 0x040B, 0x040E,
+	0x0C02, 0x0C06, 0x0C0A, 0x0C0B, 0x0C0E,
+	0x0D02, 0x0D06, 0x0D0A, 0x0D0B, 0x0D0E,
+	0x0A12, 0x0A1A, 0x0A1B, 0x0A1E,
+	0x041A, 0x041B, 0x041E,
+	0x0C12, 0x0C16, 0x0C1A, 0x0C1B, 0x0C1E,
+	0x0D12, 0x0D16, 0x0D1A, 0x0D1B, 0x0D1E,
+	0x0A22, 0x0A2A, 0x0A2B,
+	0x042A, 0x042B, 0x042E,
+	0x0C22, 0x0C26, 0x0C2A, 0x0C2B, 0x0C2E,
+	0x0D2A, 0x0D2B, 0x0D2E,
+
+	// Additional Gen9 Skylake
+	0x1913, 0x1915, 0x1917, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D,
+
+	// Additional Gen9 Kaby Lake
+	0x5913, 0x5915, 0x5908, 0x590B, 0x590A, 0x591A, 0x5923, 0x593B, 0x87C0,
+
+	// Additional Gen9 Coffee Lake
+	0x3E99, 0x3E9C, 0x3E94, 0x3EA9, 0x3EA7, 0x3EA8, 0x3EA1, 0x3EA4, 0x3EA0, 0x3EA3, 0x3EA2, 0x87CA,
+	0x3EAB, 0x3EA5, 0x3EA6,
+
+	// Additional Gen9 Comet Lake
+	0x9B21, 0x9BA2, 0x9BA5, 0x9BA4, 0x9BA8, 0x9BAA,
+	0x9BAC, 0x9BC2, 0x9BCA, 0x9BCC,
 };
 intel_i915_device_info* gDeviceInfo[MAX_SUPPORTED_CARDS];
 status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipe);
@@ -87,7 +107,8 @@ extern "C" const char** publish_devices(void) { /* ... */ return (const char**)g
 extern "C" status_t init_hardware(void) { /* ... */ return B_OK; }
 
 extern "C" status_t init_driver(void) {
-	TRACE("init_driver()\n");
+	TRACE("init_driver()
+");
 	status_t status = get_module(B_PCI_MODULE_NAME, (module_info**)&gPCI);
 	if (status != B_OK) return status;
 
@@ -113,7 +134,6 @@ extern "C" status_t init_driver(void) {
 			intel_i915_forcewake_uninit(NULL);
 			intel_i915_gem_uninit_handle_manager();
 			put_module(B_PCI_MODULE_NAME); gPCI = NULL;
-			// Free any previously allocated gDeviceInfo entries
 			for(uint32 k=0; k < gDeviceCount; ++k) { free(gDeviceNames[k]); free(gDeviceInfo[k]); }
 			return B_NO_MEMORY;
 		}
@@ -132,26 +152,37 @@ extern "C" status_t init_driver(void) {
 				current_dev_info->platform = gIntelPlatformData[k].platform_id;
 				current_dev_info->static_caps = gIntelPlatformData[k].static_caps;
 				current_dev_info->runtime_caps.graphics_ip = gIntelPlatformData[k].initial_graphics_ip;
-				current_dev_info->runtime_caps.media_ip = gIntelPlatformData[k].initial_graphics_ip;
-				current_dev_info->runtime_caps.ppgtt_type = gIntelPlatformData[k].initial_ppgtt_type;
-				current_dev_info->runtime_caps.ppgtt_size = gIntelPlatformData[k].initial_ppgtt_size_bits;
-				current_dev_info->runtime_caps.page_sizes_gtt = gIntelPlatformData[k].initial_page_sizes_gtt;
+				current_dev_info->runtime_caps.media_ip = gIntelPlatformData[k].initial_graphics_ip; // Assume same as graphics for now
+				current_dev_info->runtime_caps.page_sizes_gtt = gIntelPlatformData[k].static_caps.initial_page_sizes_gtt;
 				current_dev_info->runtime_caps.rawclk_freq_khz = gIntelPlatformData[k].default_rawclk_freq_khz;
 				platform_data_found = true;
-				TRACE("init_driver: Matched DevID 0x%04x to Platform %d, GT Type %d\n",
-					info.device_id, current_dev_info->platform, current_dev_info->static_caps.gt_type);
+				TRACE("init_driver: Matched DevID 0x%04x to Platform %d (Gen %d), GT Type %d
+",
+					info.device_id, current_dev_info->platform,
+					INTEL_GRAPHICS_GEN(current_dev_info->runtime_caps.device_id),
+					current_dev_info->static_caps.gt_type);
 				break;
 			}
 		}
 		if (!platform_data_found) {
-			dprintf(DEVICE_NAME_PRIV ": WARNING - No platform data found for DeviceID 0x%04x. Using UNKNOWN/default caps.\n", info.device_id);
+			dprintf(DEVICE_NAME_PRIV ": WARNING - No platform data found for DeviceID 0x%04x. Using UNKNOWN/default caps.
+", info.device_id);
 			current_dev_info->platform = INTEL_PLATFORM_UNKNOWN;
 			memset(&current_dev_info->static_caps, 0, sizeof(struct intel_static_caps));
-			current_dev_info->static_caps.dma_mask_size = 39;
-			current_dev_info->runtime_caps.graphics_ip.ver = 7;
-			current_dev_info->runtime_caps.ppgtt_type = INTEL_PPGTT_ALIASING;
-			current_dev_info->runtime_caps.ppgtt_size = 31;
+			current_dev_info->static_caps.dma_mask_size = 39; // A common default
+			current_dev_info->runtime_caps.graphics_ip.ver = INTEL_GRAPHICS_GEN(info.device_id); // Best guess
+			if (current_dev_info->runtime_caps.graphics_ip.ver >= 8) {
+				current_dev_info->static_caps.initial_ppgtt_type = INTEL_PPGTT_FULL;
+				current_dev_info->static_caps.initial_ppgtt_size_bits = 48;
+			} else if (current_dev_info->runtime_caps.graphics_ip.ver == 7 || current_dev_info->runtime_caps.graphics_ip.ver == 6) {
+				current_dev_info->static_caps.initial_ppgtt_type = INTEL_PPGTT_ALIASING;
+				current_dev_info->static_caps.initial_ppgtt_size_bits = 31;
+			} else {
+				current_dev_info->static_caps.initial_ppgtt_type = INTEL_PPGTT_NONE;
+				current_dev_info->static_caps.initial_ppgtt_size_bits = 0;
+			}
 			current_dev_info->runtime_caps.page_sizes_gtt = SZ_4K;
+			current_dev_info->static_caps.initial_page_sizes_gtt = SZ_4K;
 		}
 
 		for (int pipe_idx = 0; pipe_idx < PRIV_MAX_PIPES; pipe_idx++) {
@@ -233,7 +264,8 @@ extern "C" status_t init_driver(void) {
 }
 
 extern "C" void uninit_driver(void) {
-	TRACE("uninit_driver()\n");
+	TRACE("uninit_driver()
+");
 	intel_i915_forcewake_uninit(NULL);
 	intel_i915_gem_uninit_handle_manager();
 	for (uint32 i = 0; i < gDeviceCount; i++) {
@@ -293,16 +325,25 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 		devInfo->shared_info->gtt_physical_base = devInfo->gtt_mmio_physical_address;
 		devInfo->shared_info->gtt_size = devInfo->gtt_mmio_aperture_size;
 		devInfo->shared_info->regs_clone_area = devInfo->mmio_area_id;
+		devInfo->shared_info->graphics_generation = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+		devInfo->shared_info->fb_tiling_mode = I915_TILING_NONE; // Default, will be updated by display driver if FB is tiled
 
-		// Call runtime caps init after MMIO is mapped
-		if ((status = intel_i915_runtime_caps_init(devInfo)) != B_OK) TRACE("Runtime caps init failed: %s\n", strerror(status));
+		// Call runtime caps init after MMIO is mapped and basic shared_info is populated
+		if ((status = intel_i915_runtime_caps_init(devInfo)) != B_OK) TRACE("Runtime caps init failed: %s
+", strerror(status));
 
-		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s\n", strerror(status));
-		if ((status = intel_i915_irq_init(devInfo)) != B_OK) TRACE("IRQ init failed: %s\n", strerror(status));
-		if ((status = intel_i915_vbt_init(devInfo)) != B_OK) TRACE("VBT init failed: %s\n", strerror(status));
-		if ((status = intel_i915_gmbus_init(devInfo)) != B_OK) TRACE("GMBUS init failed: %s\n", strerror(status));
-		if ((status = intel_i915_clocks_init(devInfo)) != B_OK) TRACE("Clocks init failed: %s\n", strerror(status));
-		if ((status = intel_i915_pm_init(devInfo)) != B_OK) TRACE("PM init failed: %s\n", strerror(status));
+		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s
+", strerror(status));
+		if ((status = intel_i915_irq_init(devInfo)) != B_OK) TRACE("IRQ init failed: %s
+", strerror(status));
+		if ((status = intel_i915_vbt_init(devInfo)) != B_OK) TRACE("VBT init failed: %s
+", strerror(status));
+		if ((status = intel_i915_gmbus_init(devInfo)) != B_OK) TRACE("GMBUS init failed: %s
+", strerror(status));
+		if ((status = intel_i915_clocks_init(devInfo)) != B_OK) TRACE("Clocks init failed: %s
+", strerror(status));
+		if ((status = intel_i915_pm_init(devInfo)) != B_OK) TRACE("PM init failed: %s
+", strerror(status));
 		i915_gem_object_lru_init(devInfo);
 
 		devInfo->rcs0 = (struct intel_engine_cs*)malloc(sizeof(struct intel_engine_cs));
@@ -360,45 +401,41 @@ static status_t intel_i915_write(void* c, off_t p, const void* b, size_t* n) { *
 static status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) {
 	if (!devInfo) return B_BAD_VALUE;
 
-	// PCI revision is already in devInfo->runtime_caps.revision_id from init_driver
-	// Use PCI revision as a basic step indicator for now.
-	devInfo->runtime_caps.graphics_ip.step = devInfo->runtime_caps.revision_id;
-	devInfo->runtime_caps.media_ip.step = devInfo->runtime_caps.revision_id; // Assume same for media for now
+	// Basic IP version and stepping are set from gIntelPlatformData or PCI revision.
+	// This function can be expanded to read more precise info from registers if needed,
+	// especially for newer gens or when VBT/platform data is incomplete.
 
-	TRACE("Runtime Caps Init: DevID 0x%04x, RevID 0x%02x, Platform %d, GfxIP %d.%d.%d\n",
+	// Ensure graphics_ip.step is set from PCI revision if not overridden by GMD_ID later
+	if (devInfo->runtime_caps.graphics_ip.step == 0 && devInfo->runtime_caps.revision_id != 0) {
+		devInfo->runtime_caps.graphics_ip.step = devInfo->runtime_caps.revision_id;
+	}
+	// Assume media_ip.step matches graphics_ip.step if not set otherwise
+	if (devInfo->runtime_caps.media_ip.step == 0 && devInfo->runtime_caps.graphics_ip.step != 0) {
+		devInfo->runtime_caps.media_ip.step = devInfo->runtime_caps.graphics_ip.step;
+	}
+
+
+	TRACE("Runtime Caps Init: DevID 0x%04x, RevID 0x%02x, Platform %d, GfxIP %d.%d.%d
+",
 		devInfo->runtime_caps.device_id, devInfo->runtime_caps.revision_id,
 		devInfo->platform,
 		devInfo->runtime_caps.graphics_ip.ver,
 		devInfo->runtime_caps.graphics_ip.rel,
 		devInfo->runtime_caps.graphics_ip.step);
 
-	// TODO: Read GMD_ID for Gen12+ to get precise graphics_ip.ver, .rel, .step and media_ip.
-	// This requires GMD_ID register definitions and MMIO access to be safe here.
-	// Example:
+	// Example: For Gen12+, GMD_ID would be read here to refine IP versions.
 	// if (INTEL_GRAPHICS_VER(devInfo) >= 12 && devInfo->mmio_regs_addr != NULL) {
-	//    uint32_t gmd_id_reg = GMD_ID_REGISTER_OFFSET; // Needs actual definition
-	//    if (gmd_id_reg != 0) {
-	//        uint32_t gmd_id_val = intel_i915_read32(devInfo, gmd_id_reg);
-	//        devInfo->runtime_caps.graphics_ip.ver = EXTRACT_GMD_GRAPHICS_VER(gmd_id_val);
-	//        devInfo->runtime_caps.graphics_ip.rel = EXTRACT_GMD_GRAPHICS_REL(gmd_id_val);
-	//        // etc. for media IP and stepping
-	//    }
+	//    uint32_t gmd_id_val = intel_i915_read32(devInfo, GMD_ID_REG_OFFSET_GEN12); // Placeholder
+	//    devInfo->runtime_caps.graphics_ip.ver = /* extract from gmd_id_val */;
+	//    devInfo->runtime_caps.graphics_ip.rel = /* extract from gmd_id_val */;
+	//    devInfo->runtime_caps.graphics_ip.step = /* extract from gmd_id_val */;
+	//    // Similarly for media_ip if applicable
 	// }
 
-	// TODO: Read actual raw clock frequency from registers/PCODE if possible and if not already set from VBT.
+	// Raw clock frequency might be refined here if VBT didn't provide it or if a register read is more accurate.
 	// if (devInfo->runtime_caps.rawclk_freq_khz == 0) {
-	//    // Attempt to read from HW if a reliable method exists for the platform
+	//    devInfo->runtime_caps.rawclk_freq_khz = intel_get_rawclk_from_hw(devInfo); // Hypothetical
 	// }
-	// If still 0 after HW check, could use a platform-based default if necessary.
-	// devInfo->runtime_caps.rawclk_freq_khz = intel_get_rawclk(devInfo); // Hypothetical
-
-	// TODO: Detect EDRAM size if applicable and update static_caps or a runtime field.
-	// e.g., if ((devInfo->platform == INTEL_HASWELL && devInfo->static_caps.gt_type == 3) ||
-	//           (devInfo->platform == INTEL_BROADWELL && devInfo->static_caps.gt_type == 3)) {
-	//    uint32_t edram_cap = intel_i915_read32(devInfo, HSW_EDRAM_CAP); // Example, needs PRM check
-	//    // parse edram_cap to get size
-	// }
-
 	return B_OK;
 }
 
@@ -410,8 +447,19 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
 	switch (op) {
-		case B_GET_ACCELERANT_SIGNATURE: /* ... */ return B_OK;
-		case INTEL_I915_GET_SHARED_INFO: /* ... */ return B_OK;
+		case B_GET_ACCELERANT_SIGNATURE: {
+			const char* signature = DEVICE_NAME_PRIV;
+			if (user_strlcpy((char*)buffer, signature, length) < B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+		}
+		case INTEL_I915_GET_SHARED_INFO: {
+			if (devInfo == NULL || devInfo->shared_info_area < B_OK) return B_NO_INIT;
+			intel_i915_get_shared_area_info_args args;
+			args.shared_area = devInfo->shared_info_area;
+			if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
+			return B_OK;
+		}
 		case INTEL_I915_SET_DISPLAY_MODE: {
 			display_mode user_mode;
 			if (user_memcpy(&user_mode, buffer, sizeof(display_mode)) != B_OK)
@@ -428,10 +476,12 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			}
 
 			if (targetPipe == PRIV_PIPE_INVALID) {
-				TRACE("SET_DISPLAY_MODE IOCTL: Could not determine target pipe for devInfo %p\n", devInfo);
+				TRACE("SET_DISPLAY_MODE IOCTL: Could not determine target pipe for devInfo %p
+", devInfo);
 				return B_BAD_VALUE;
 			}
-			TRACE("SET_DISPLAY_MODE IOCTL: devInfo %p maps to targetPipe %d\n", devInfo, targetPipe);
+			// TRACE("SET_DISPLAY_MODE IOCTL: devInfo %p maps to targetPipe %d
+", devInfo, targetPipe); // Can be noisy
 			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode, targetPipe);
 		}
 		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);
@@ -483,8 +533,9 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				} else if (devInfo->cursor_width[args.pipe] <= 256 && devInfo->cursor_height[args.pipe] <= 256) {
 					cur_cntr_val |= MCURSOR_MODE_256_ARGB_AX;
 				} else {
-					TRACE("SetCursorState: Invalid cursor dimensions %ux%u for pipe %u. Disabling cursor.\n",
-						devInfo->cursor_width[args.pipe], devInfo->cursor_height[args.pipe], args.pipe);
+					// TRACE("SetCursorState: Invalid cursor dimensions %ux%u for pipe %u. Disabling cursor.
+",
+					//	devInfo->cursor_width[args.pipe], devInfo->cursor_height[args.pipe], args.pipe); // Can be noisy
 					cur_cntr_val |= MCURSOR_MODE_DISABLE;
 				}
 				if ((cur_cntr_val & MCURSOR_MODE_MASK) != MCURSOR_MODE_DISABLE) {
@@ -497,7 +548,8 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			devInfo->cursor_format[args.pipe] = cur_cntr_val & (MCURSOR_MODE_MASK | MCURSOR_GAMMA_ENABLE);
 
 			intel_i915_write32(devInfo, cursor_ctrl_reg, cur_cntr_val);
-			TRACE("SetCursorState: Pipe %u, CURxCNTR (0x%lx) = 0x%lx\n", args.pipe, cursor_ctrl_reg, cur_cntr_val);
+			// TRACE("SetCursorState: Pipe %u, CURxCNTR (0x%lx) = 0x%lx
+", args.pipe, cursor_ctrl_reg, cur_cntr_val); // Noisy
 
 			if ((cur_cntr_val & MCURSOR_MODE_MASK) != MCURSOR_MODE_DISABLE) {
 				effective_x = args.x - devInfo->cursor_hot_x[args.pipe];
@@ -516,17 +568,16 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				cur_pos_val |= (effective_y << CURSOR_POS_Y_SHIFT) & CURSOR_POS_Y_MASK;
 
 				intel_i915_write32(devInfo, cursor_pos_reg, cur_pos_val);
-				TRACE("SetCursorState: Pipe %u, CURxPOS (0x%lx) = 0x%lx (eff_x: %d, eff_y: %d)\n",
-					args.pipe, cursor_pos_reg, cur_pos_val,
-					args.x - devInfo->cursor_hot_x[args.pipe], args.y - devInfo->cursor_hot_y[args.pipe]);
-			} else {
-				TRACE("SetCursorState: Pipe %u, Cursor disabled, CURxPOS not updated.\n", args.pipe);
+				// TRACE("SetCursorState: Pipe %u, CURxPOS (0x%lx) = 0x%lx (eff_x: %d, eff_y: %d)
+", // Noisy
+				//	args.pipe, cursor_pos_reg, cur_pos_val,
+				//	args.x - devInfo->cursor_hot_x[args.pipe], args.y - devInfo->cursor_hot_y[args.pipe]);
 			}
 
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			return B_OK;
 		}
-		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
+		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP: {
 			intel_i915_set_cursor_bitmap_args args;
 			if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
 			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) return B_BAD_ADDRESS;
@@ -552,7 +603,9 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				devInfo->cursor_bo[args.pipe]->allocated_size < required_bo_size) {
 				intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
 				devInfo->cursor_bo[args.pipe] = NULL;
-				devInfo->cursor_gtt_offset_pages[args.pipe] = (uint32_t)-1;
+				if (devInfo->cursor_gtt_offset_pages[args.pipe] != (uint32_t)-1) {
+					devInfo->cursor_gtt_offset_pages[args.pipe] = (uint32_t)-1;
+				}
 			}
 
 			if (devInfo->cursor_bo[args.pipe] == NULL) {
@@ -561,14 +614,19 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 					args.width, args.height, 32, /*bpp*/
 					&devInfo->cursor_bo[args.pipe]);
 				if (status != B_OK) {
-					TRACE("SetCursorBitmap: Failed to create cursor BO: %s\n", strerror(status));
+					TRACE("SetCursorBitmap: Failed to create cursor BO: %s
+", strerror(status));
 					goto bitmap_ioctl_done;
 				}
+				devInfo->cursor_gtt_offset_pages[args.pipe] = (uint32_t)-1;
+			}
 
+			if (devInfo->cursor_gtt_offset_pages[args.pipe] == (uint32_t)-1) {
 				uint32_t gtt_page_offset;
 				status = intel_i915_gtt_alloc_space(devInfo, devInfo->cursor_bo[args.pipe]->num_phys_pages, &gtt_page_offset);
 				if (status != B_OK) {
-					TRACE("SetCursorBitmap: Failed to alloc GTT for cursor BO: %s\n", strerror(status));
+					TRACE("SetCursorBitmap: Failed to alloc GTT for cursor BO: %s
+", strerror(status));
 					intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
 					devInfo->cursor_bo[args.pipe] = NULL;
 					goto bitmap_ioctl_done;
@@ -578,7 +636,8 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				status = intel_i915_gem_object_map_gtt(devInfo->cursor_bo[args.pipe],
 					devInfo->cursor_gtt_offset_pages[args.pipe], GTT_CACHE_UNCACHED);
 				if (status != B_OK) {
-					TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s\n", strerror(status));
+					TRACE("SetCursorBitmap: Failed to map cursor BO to GTT: %s
+", strerror(status));
 					intel_i915_gtt_free_space(devInfo, devInfo->cursor_gtt_offset_pages[args.pipe], devInfo->cursor_bo[args.pipe]->num_phys_pages);
 					intel_i915_gem_object_put(devInfo->cursor_bo[args.pipe]);
 					devInfo->cursor_bo[args.pipe] = NULL;
@@ -589,7 +648,8 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 			status = intel_i915_gem_object_map_cpu(devInfo->cursor_bo[args.pipe], &bo_cpu_addr);
 			if (status != B_OK) {
-				TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s\n", strerror(status));
+				TRACE("SetCursorBitmap: Failed to map cursor BO to CPU: %s
+", strerror(status));
 				goto bitmap_ioctl_done;
 			}
 
@@ -607,12 +667,57 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 			uint32_t cursor_gtt_hw_addr = devInfo->cursor_gtt_offset_pages[args.pipe] * B_PAGE_SIZE;
 			intel_i915_write32(devInfo, cursor_base_reg, cursor_gtt_hw_addr);
-			TRACE("SetCursorBitmap: Pipe %u, CURxBASE (0x%lx) = 0x%lx (GTT page %u)\n",
-				args.pipe, cursor_base_reg, cursor_gtt_hw_addr, devInfo->cursor_gtt_offset_pages[args.pipe]);
+			// TRACE("SetCursorBitmap: Pipe %u, CURxBASE (0x%lx) = 0x%lx (GTT page %u)
+", // Noisy
+			//	args.pipe, cursor_base_reg, cursor_gtt_hw_addr, devInfo->cursor_gtt_offset_pages[args.pipe]);
 
 		bitmap_ioctl_done:
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			return status;
+		}
+		case INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY:
+		{
+			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_set_blitter_chroma_key_args))
+				return B_BAD_VALUE;
+
+			intel_i915_set_blitter_chroma_key_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			status_t status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+			if (status != B_OK) return status;
+
+			uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+
+			// IMPORTANT: The following register writes use conceptual registers defined in registers.h
+			// (BLITTER_CHROMAKEY_LOW_COLOR_REG, etc.). These are PLACEHOLDERS and must be
+			// replaced with actual, generation-specific MMIO register addresses and bit definitions
+			// after thorough PRM research for Gen7, Gen8, and Gen9.
+			// The current implementation is a stub for the IOCTL pathway.
+			if (gen >= 7) { // Example: Assuming these conceptual regs apply to Gen7+ RCS
+				if (args.enable) {
+					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_LOW_COLOR_REG, args.low_color);
+					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_HIGH_COLOR_REG, args.high_color);
+					uint32_t ckm_val = (args.mask & CHROMAKEY_MASK_RGB_BITS) | CHROMAKEY_ENABLE_BIT;
+					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG, ckm_val);
+					// TRACE("Chroma Key ENABLED: LOW=0x%lx, HIGH=0x%lx, MASK_CTL=0x%lx (GEN%u) - Placeholder MMIO
+",
+					//	args.low_color, args.high_color, ckm_val, gen); // Can be noisy
+				} else {
+					uint32_t ckm_val = intel_i915_read32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG);
+					ckm_val &= ~CHROMAKEY_ENABLE_BIT;
+					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG, ckm_val);
+					// TRACE("Chroma Key DISABLED (GEN%u) - Placeholder MMIO
+", gen); // Can be noisy
+				}
+			} else {
+				TRACE("Chroma keying IOCTL not supported or not implemented for Gen %u.
+", gen);
+				// Consider returning B_UNSUPPORTED if this path is not for older gens.
+			}
+
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return B_OK; // Return B_OK for now, actual hardware programming is a stub/placeholder.
 		}
 
 		case INTEL_I915_GET_DPMS_MODE: {
@@ -669,7 +774,3 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 	}
 	return B_DEV_INVALID_IOCTL; // Should not be reached
 }
-
-```
-
-This should correctly update `intel_i915.c`.

@@ -33,7 +33,16 @@ enum {
 	INTEL_I915_SET_INDEXED_COLORS,
 	INTEL_I915_IOCTL_SET_CURSOR_STATE,
 	INTEL_I915_IOCTL_SET_CURSOR_BITMAP,
+	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
 };
+
+// Args for INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY
+typedef struct {
+	uint32_t low_color;
+	uint32_t high_color;
+	uint32_t mask; // Which channels to compare
+	bool enable;
+} intel_i915_set_blitter_chroma_key_args;
 
 // Enum for accelerant-side pipe identification
 enum accel_pipe_id {
@@ -174,6 +183,7 @@ typedef struct {
 	display_mode	current_mode;
 	// Add tiling mode for current_mode's framebuffer:
 	enum i915_tiling_mode fb_tiling_mode; // Populated by kernel based on FB's properties
+	uint8_t			graphics_generation; // Populated by kernel (e.g., 7 for Gen7, 8 for Gen8)
 	area_id			mode_list_area;
 	uint32			mode_count;
 	sem_id			vblank_sem;

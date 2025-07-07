@@ -47,9 +47,7 @@
 	#define TRANSCONF_MSA_TIMING_DELAY_MASK		(3U << 14) // HSW: Bits 15:14
 
 #define _PIPE(pipe) ((pipe) == 0 ? _PIPE_A_BASE : ((pipe) == 1 ? _PIPE_B_BASE : _PIPE_C_BASE))
-#define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE : \
-                           ((trans) == 1 ? _PIPE_B_BASE : \
-                           ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
+#define _TRANSCODER(trans) ((trans) == 0 ? _PIPE_A_BASE :                            ((trans) == 1 ? _PIPE_B_BASE :                            ((trans) == 2 ? _PIPE_C_BASE : _TRANSCODER_EDP_BASE)))
 
 
 // --- Interrupt Registers ---
@@ -581,12 +579,8 @@
 
 // Generic macros to get register based on transcoder ID
 // These assume transcoder_id 0=A, 1=B, 2=C
-#define HSW_AUD_CFG(transcoder_id) \
-	( (transcoder_id == 0) ? _AUD_CONFIG_A_IVBHSW : \
-	  ((transcoder_id == 1) ? _AUD_CONFIG_B_IVBHSW : _AUD_CONFIG_C_HSW) )
-#define HSW_AUD_M_CTS_ENABLE(transcoder_id) \
-	( (transcoder_id == 0) ? _AUD_M_CTS_ENABLE_A_IVBHSW : \
-	  ((transcoder_id == 1) ? _AUD_M_CTS_ENABLE_B_IVBHSW : _AUD_M_CTS_ENABLE_C_HSW) )
+#define HSW_AUD_CFG(transcoder_id) 	( (transcoder_id == 0) ? _AUD_CONFIG_A_IVBHSW : 	  ((transcoder_id == 1) ? _AUD_CONFIG_B_IVBHSW : _AUD_CONFIG_C_HSW) )
+#define HSW_AUD_M_CTS_ENABLE(transcoder_id) 	( (transcoder_id == 0) ? _AUD_M_CTS_ENABLE_A_IVBHSW : 	  ((transcoder_id == 1) ? _AUD_M_CTS_ENABLE_B_IVBHSW : _AUD_M_CTS_ENABLE_C_HSW) )
 // AUD_CTL_ST already defined specifically
 
 	#define AUD_CTL_ST_ENABLE			(1U << 31)
@@ -606,8 +600,7 @@
 	#define AUD_CONFIG_UPPER_N_SHIFT		20
 	#define AUD_CONFIG_LOWER_N_MASK			(0xFFFFU << 4) // Check: PRM indicates N[19:4] for lower
 	#define AUD_CONFIG_LOWER_N_SHIFT		4
-	#define AUD_CONFIG_N(n_val)				(REG_FIELD_PREP(AUD_CONFIG_UPPER_N_MASK, ((n_val) >> 16) & 0xFF) | \
-											 REG_FIELD_PREP(AUD_CONFIG_LOWER_N_MASK, (n_val) & 0xFFFF))
+	#define AUD_CONFIG_N(n_val)				(REG_FIELD_PREP(AUD_CONFIG_UPPER_N_MASK, ((n_val) >> 16) & 0xFF) | 											 REG_FIELD_PREP(AUD_CONFIG_LOWER_N_MASK, (n_val) & 0xFFFF))
 	#define AUD_CONFIG_PIXEL_CLOCK_HDMI_MASK	(0xFU << 16)
 	#define AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT	16
 		#define AUD_CONFIG_HDMI_CLOCK_25200		(0x1U << AUD_CONFIG_PIXEL_CLOCK_HDMI_SHIFT)
@@ -777,5 +770,66 @@
 // Command is 3 DWords: CMD_DW, Address_DW, Value_DW. So Length = (3-2) = 1.
 #define MI_STORE_DATA_INDEX             (MI_COMMAND_TYPE_MI | (0x21U << MI_COMMAND_OPCODE_SHIFT) | 1U)
 	#define SDI_USE_GGTT                (1U << 22) // Use GGTT address space
+
+// Ring buffer control registers
+#define _RING_MMIO_BASE(engine_id)	((engine_id == RCS0) ? 0x2000 : 									 ((engine_id == BCS0) ? 0x22000 : 									 ((engine_id == VCS0) ? 0x12000 : 									 ((engine_id == VECS0) ? 0x1A000 : 0 )))) // Add other engines if needed
+
+#define RING_IMR(base)			_MMIO((base) + 0x20a8) // Interrupt Mask Register (Gen specific)
+#define RING_IER(base)			_MMIO((base) + 0x20a0) // Interrupt Enable Register (Gen specific)
+#define RING_IIR(base)			_MMIO((base) + 0x20a4) // Interrupt Identity Register (Gen specific)
+	#define USER_INTERRUPT_GEN7		(1U << 8)      // Bit for User Interrupt on Gen7+ RCS
+
+#define RING_TAIL(base)			_MMIO((base) + 0x30)
+#define TAIL_ADDR			0x001FFFFC
+#define RING_HEAD(base)			_MMIO((base) + 0x34)
+#define HEAD_WRAP_COUNT_SHIFT		21
+#define HEAD_WRAP_ONE			(1 << HEAD_WRAP_COUNT_SHIFT)
+#define HEAD_ADDR			0x001FFFFC
+#define RING_START(base)		_MMIO((base) + 0x38)
+#define RING_CTL(base)			_MMIO((base) + 0x3c)
+#define   RING_CTL_SIZE(size)		(((size) / B_PAGE_SIZE) -1)
+#define   RING_NR_PAGES			0x001FF000
+#define   RING_REPORT_MASK		0x00000006
+#define   RING_REPORT_64K		0x00000002
+#define   RING_REPORT_128K		0x00000004
+#define   RING_NO_REPORT		0x00000000
+#define   RING_VALID_MASK		0x00000001
+#define   RING_VALID			0x00000001
+#define   RING_INVALID			0x00000000
+#define RING_SYNC_0(base)		_MMIO((base) + 0x40)
+#define RING_SYNC_1(base)		_MMIO((base) + 0x44)
+#define RING_SYNC_2(base)		_MMIO((base) + 0x48) /* WaNotAllowedSymSrcForGFXBlt G4x / ILK */
+
+// Blitter Chroma Keying Registers (Gen specific - these are conceptual for RCS/Blitter context)
+// Actual register addresses and bitfields must be verified from Intel PRMs.
+// These are likely MMIO registers accessed by the kernel, not directly by command stream for setup.
+// The XY_SRC_COPY_BLT command itself has a bit to enable chroma keying.
+// For Gen4-Gen7, these registers were typically part of the blitter command stream setup
+// or global state. For Gen7+ with RCS, specific registers might be:
+//   - GFX_MODE (for general modes)
+//   - BLT_CCTL (Blit Color Control) for some color operations
+//   - Specific Chroma Key registers if available globally or per-context.
+// For simplicity in the IOCTL, we'll assume a conceptual model that the kernel can map
+// to the correct hardware registers for the generation.
+
+// Example conceptual register names and bits (verify with PRM):
+// These are often part of the 2D Blitter Engine registers (e.g. 0x22000 range for BCS)
+// or Render Engine if XY_BLT commands are used on RCS (e.g. 0x2000 range).
+// For Gen7+, the XY blits are on RCS.
+// Sandy Bridge (Gen6) had BLT_CHROMA_KEY_LOW (0x220A0), _HIGH (0x220A4), _MASK (0x220A8) for BCS.
+// For RCS on Gen7+, specific registers for this are less common; it's often part of surface state or command flags.
+// The command bit XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE (DW0, bit 19) is the primary enabler.
+// The actual color/mask might be taken from general color registers or specific BLT registers
+// if they exist for RCS context.
+// For the IOCTL, we'll assume a generic set for now.
+#define BLITTER_CHROMAKEY_LOW_COLOR_REG		_MMIO(0x2050) // Placeholder - Must be verified per-gen for RCS/XY_BLT
+#define BLITTER_CHROMAKEY_HIGH_COLOR_REG	_MMIO(0x2054) // Placeholder
+#define BLITTER_CHROMAKEY_MASK_ENABLE_REG	_MMIO(0x2058) // Placeholder
+	#define CHROMAKEY_ENABLE_BIT			(1U << 31)     // Example enable bit
+	#define CHROMAKEY_MASK_RGB_BITS			0x00FFFFFF     // Example: Compare R, G, B
+
+
+// TODO: add more registers!
+
 
 #endif /* INTEL_I915_REGISTERS_H */

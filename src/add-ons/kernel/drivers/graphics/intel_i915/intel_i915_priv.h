@@ -99,21 +99,27 @@ struct intel_static_caps { // Simplified from intel_device_info flags
 	bool is_lp; // Low Power platform
 
 	bool has_llc; // Has Last Level Cache shared with CPU
-	// bool has_snoop; // If GPU can snoop CPU cache (usually true for integrated)
+	bool has_snoop; // If GPU can snoop CPU cache (usually true for integrated)
 
 	bool has_logical_ring_contexts; // Execlists support (Gen8+)
 	bool has_gt_uc;                 // GuC support (Gen9+)
+	bool has_reset_engine;          // For Gen7+ usually
+	bool has_64bit_reloc;           // For Gen8+
 
 	bool gpu_reset_clobbers_display; // If a GPU reset affects display output
 	bool hws_needs_physical;         // If Hardware Status Page must be physical address
 	                                 // (True for older gens, false for Gen6+ with GGTT HWS)
 	uint8_t dma_mask_size;           // Bits for DMA addressing (e.g., 39, 40)
 	uint8_t gt_type;                 // GT1, GT2, GT3, etc. (0 if not applicable/known)
+	uint32_t platform_engine_mask;   // Bitmap of available engines (RCS0, BCS0, etc.)
 
 	// Add initial PPGTT info here as it's often static per PCI ID group
 	enum intel_ppgtt_type initial_ppgtt_type;
 	uint8_t initial_ppgtt_size_bits;
 	uint32_t initial_page_sizes_gtt; // GTT page sizes, not PPGTT
+
+	// L3 cache and parity
+	bool has_l3_dpf; // Dynamic Parity Feature for L3 cache
 };
 
 

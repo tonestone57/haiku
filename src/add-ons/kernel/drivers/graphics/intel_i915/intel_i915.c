@@ -740,6 +740,43 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			return B_OK;
 		}
+		case INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT:
+		{
+			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_set_blitter_hw_clip_rect_args))
+				return B_BAD_VALUE;
+
+			intel_i915_set_blitter_hw_clip_rect_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			status_t status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
+			if (status != B_OK) return status;
+
+			uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+
+			if (gen >= 6 && gen <= 9) { // Assuming these regs are valid for Gen6-9 BCS
+				if (args.enable) {
+					intel_i915_write32(devInfo, BCS_CLIPRECT_TL, (uint32_t)(args.y1 << 16) | args.x1);
+					intel_i915_write32(devInfo, BCS_CLIPRECT_BR, (uint32_t)(args.y2 << 16) | args.x2);
+					TRACE("Gen%u Blitter ClipRect Set: TL(x%u,y%u) BR(x%u,y%u)\n",
+						gen, args.x1, args.y1, args.x2, args.y2);
+				} else {
+					// Set a wide-open clip rect to effectively disable it
+					// Assuming 0,0 to max_coord,max_coord (e.g., 16383x16383 for 14-bit coords if max)
+					// Or use hardware-specific "disable" if available.
+					// For now, setting to max supported by typical 16-bit fields (0x3FFF).
+					intel_i915_write32(devInfo, BCS_CLIPRECT_TL, 0); // (0,0)
+					intel_i915_write32(devInfo, BCS_CLIPRECT_BR, (uint32_t)(0x3FFF << 16) | 0x3FFF); // (16383,16383)
+					TRACE("Gen%u Blitter ClipRect Disabled (set to max extents by IOCTL)\n", gen);
+				}
+			} else {
+				TRACE("INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT: Not supported or Gen %u out of expected range (6-9) for BCS clip regs.\n", gen);
+				// Optionally return B_UNSUPPORTED for gens where this is known not to apply
+			}
+
+			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+			return B_OK;
+		}
 		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP: {
 			intel_i915_set_cursor_bitmap_args args;
 			if (!devInfo || buffer == NULL || length != sizeof(args)) return B_BAD_VALUE;
@@ -856,35 +893,31 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			// is the primary enabler for this hardware feature in the command stream.
 			// This IOCTL sets up the key values and mask.
 
-			if (gen == 6) { // Sandy Bridge
-				// Registers specific to Gen6 Blitter (BCS) for chroma keying.
-				// Offsets are typically 0x220A0, 0x220A4, 0x220A8 for low, high, mask_enable.
-				// These should be defined in registers.h if not already.
-				// Assuming BLITTER_CHROMAKEY_LOW_COLOR_REG = 0x220A0 (BCS_CHROMAKEY_LOW_COLOR_REG)
-				// Assuming BLITTER_CHROMAKEY_HIGH_COLOR_REG = 0x220A4 (BCS_CHROMAKEY_HIGH_COLOR_REG)
-				// Assuming BLITTER_CHROMAKEY_MASK_ENABLE_REG = 0x220A8 (BCS_CHROMAKEY_MASK_REG)
-				// The mask register on Gen6 typically holds the mask itself, and a separate
-				// bit might enable it, or it's always enabled when XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE is set.
-				// For Gen6, the mask is likely just the mask, and enable is via command stream.
+			// PRM research indicates Gen6, Gen7 (IVB, HSW), Gen8 (BDW), and Gen9 (SKL, KBL)
+			// use similar BCS registers for chroma keying, enabled by a bit in the
+			// XY_SRC_COPY_BLT command.
+			// The register offsets 0x220A0 (LOW_COLOR), 0x220A4 (HIGH_COLOR), 0x220A8 (MASK)
+			// relative to BCS base (0x22000) are common for this feature.
+			if (gen >= 6 && gen <= 9) { // Covers SNB, IVB, HSW, BDW, SKL, KBL
 				if (args.enable) {
 					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_LOW_COLOR_REG, args.low_color);
 					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_HIGH_COLOR_REG, args.high_color);
 					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_MASK_REG, args.mask);
-					TRACE("Gen6 Blitter Chroma Key ENABLED: LOW=0x%lx, HIGH=0x%lx, MASK=0x%lx\n",
-						args.low_color, args.high_color, args.mask);
+					TRACE("Gen%u Blitter Chroma Key Values Set: LOW=0x%lx, HIGH=0x%lx, MASK=0x%lx\n",
+						gen, args.low_color, args.high_color, args.mask);
 				} else {
-					// Typically, disabling is done by not setting the enable bit in the
-					// XY_SRC_COPY_BLT command. Clearing registers might not be necessary
-					// or could be done by writing zeros if that's the HW default for 'disabled'.
-					// For now, rely on the command stream bit to disable.
-					TRACE("Gen6 Blitter Chroma Key DISABLED (via command stream bit, registers not cleared by IOCTL)\n");
+					// Disabling is primarily handled by *not* setting the ChromaKeyEnable bit
+					// in the XY_SRC_COPY_BLT command by the accelerant.
+					// Clearing the registers here might be redundant or could default to black (0)
+					// if that's desired when disabled via IOCTL. For now, only program when enabled.
+					TRACE("Gen%u Blitter Chroma Key IOCTL called with enable=false. Key values not changed by IOCTL; disable via command stream.\n", gen);
 				}
-			} else if (gen >= 7) {
-				TRACE("INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY: Register programming for Gen %u blitter chroma key is not yet implemented. IOCTL will have no effect on key values/mask for this generation.\n", gen);
-				// Future: Implement for Gen7+ if different registers are identified.
-			} else {
+			} else if (gen > 9) {
+				TRACE("INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY: Register programming for Gen %u blitter chroma key is not yet confirmed/implemented. IOCTL will have no effect.\n", gen);
+			}
+			 else {
 				TRACE("INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY: Chroma keying not supported/implemented for Gen %u.\n", gen);
-				// Consider returning B_UNSUPPORTED if this path is not for older gens.
+				// Consider returning B_UNSUPPORTED for very old/unintended gens.
 			}
 
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);

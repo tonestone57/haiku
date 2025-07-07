@@ -308,6 +308,82 @@ accel_fill_rect_clipped(engine_token* et, uint32 color, uint32 num_rects, void* 
 	}
 }
 
+// Helper for blit_params intersection (more complex than fill_rect_params)
+static bool
+intersect_blit_rect(const blit_params* op_rect, const fill_rect_params* clip_box, blit_params* result)
+{
+	uint16 op_dest_left = op_rect->dest_x;
+	uint16 op_dest_top = op_rect->dest_y;
+	// Assuming op_rect->width and op_rect->height are > 0
+	uint16 op_dest_right = op_rect->dest_x + op_rect->width - 1;
+	uint16 op_dest_bottom = op_rect->dest_y + op_rect->height - 1;
+
+	uint16 clip_left = min_c(clip_box->left, clip_box->right);
+	uint16 clip_right = max_c(clip_box->left, clip_box->right);
+	uint16 clip_top = min_c(clip_box->top, clip_box->bottom);
+	uint16 clip_bottom = max_c(clip_box->top, clip_box->bottom);
+
+	uint16 final_dest_left = max_c(op_dest_left, clip_left);
+	uint16 final_dest_top = max_c(op_dest_top, clip_top);
+	uint16 final_dest_right = min_c(op_dest_right, clip_right);
+	uint16 final_dest_bottom = min_c(op_dest_bottom, clip_bottom);
+
+	if (final_dest_left > final_dest_right || final_dest_top > final_dest_bottom) {
+		return false; // Clipped out
+	}
+
+	result->dest_x = final_dest_left;
+	result->dest_y = final_dest_top;
+	result->width = final_dest_right - final_dest_left + 1;
+	result->height = final_dest_bottom - final_dest_top + 1;
+
+	// Adjust source coordinates based on how much the dest_x/dest_y changed
+	result->src_x = op_rect->src_x + (final_dest_left - op_dest_left);
+	result->src_y = op_rect->src_y + (final_dest_top - op_dest_top);
+
+	return true;
+}
+
+static void
+accel_blit_clipped(engine_token* et, void* src_bitmap_token, void* dest_bitmap_token,
+	uint32 num_rects, void* list, void* clip_info_ptr)
+{
+	// Note: src_bitmap_token and dest_bitmap_token are not directly used by
+	// screen-to-screen blit functions in this accelerant as it assumes framebuffer.
+	// For screen-to-screen, they are effectively ignored by intel_i915_screen_to_screen_blit.
+
+	if (list == NULL || num_rects == 0 || gInfo == NULL || gInfo->device_fd < 0)
+		return;
+
+	graf_card_info* clip_info = (graf_card_info*)clip_info_ptr;
+	blit_params* rect_list = (blit_params*)list;
+
+	if (clip_info != NULL && clip_info->clipping_rect_count > 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args;
+		clip_args.x1 = clip_info->clip_left;
+		clip_args.y1 = clip_info->clip_top;
+		clip_args.x2 = clip_info->clip_right;
+		clip_args.y2 = clip_info->clip_bottom;
+		clip_args.enable = true;
+
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+
+		// The blit_params passed to intel_i915_screen_to_screen_blit already define
+		// the destination rectangles. The hardware clipper will AND these with the
+		// clip_args set by the IOCTL. No need to manually intersect here if using HW clipping.
+		intel_i915_screen_to_screen_blit(et, rect_list, num_rects, true); // Pass true for enable_hw_clip
+
+		clip_args.enable = false; // Reset HW clip
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+
+	} else { // No clipping info, behave as unclipped
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+		intel_i915_screen_to_screen_blit(et, rect_list, num_rects, false);
+	}
+}
+
+
 static void
 accel_invert_rect_clipped(engine_token* et, uint32 num_rects, void* list, void* clip_info_ptr)
 {
@@ -450,43 +526,117 @@ extern void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list
 extern void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
 extern void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count);
 extern void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count);
-// Note: intel_i915_draw_hv_lines is declared in accelerant_protos.h which should be included,
-// or declared extern here if accelerant_protos.h is not included in hooks.c.
-// Assuming accelerant_protos.h is included or it's made static in accel_2d.c and externed here.
-extern void intel_i915_draw_hv_lines(engine_token *et, uint32 color, uint16 *line_coords, uint32 num_lines);
+// Note: intel_i915_draw_hv_lines is declared in accelerant_protos.h
+extern void intel_i915_draw_hv_lines(engine_token *et, uint32 color, uint16 *line_coords, uint32 num_lines, bool enable_hw_clip);
 
 
+// --- Unclipped Hook Wrappers ---
+static void
+accel_fill_rectangle_unclipped(engine_token* et, uint32 color, uint32 num_rects, void* list)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_fill_rectangle(et, color, (fill_rect_params*)list, num_rects, false);
+}
+
+static void
+accel_invert_rectangle_unclipped(engine_token* et, uint32 num_rects, void* list)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_invert_rectangle(et, (fill_rect_params*)list, num_rects, false);
+}
+
+static void
+accel_screen_to_screen_blit_unclipped(engine_token* et, void* src_token, void* dst_token, uint32 num_rects, void* list)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_screen_to_screen_blit(et, (blit_params*)list, num_rects, false);
+}
+
+static void
+accel_fill_span_unclipped(engine_token* et, uint32 color, uint32 num_spans, void* list) // void* list for B_FILL_SPAN hook
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_fill_span(et, color, (uint16*)list, num_spans, false);
+}
+
+static void
+accel_s2s_transparent_blit_unclipped(engine_token* et, uint32 transparent_color, uint32 num_rects, void* list) // void* list for B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT hook
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_screen_to_screen_transparent_blit(et, transparent_color, (blit_params*)list, num_rects, false);
+}
+
+static void
+accel_s2s_scaled_filtered_blit_unclipped(engine_token* et, void* src_token, void* dst_token, uint32 num_rects, void* list)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_screen_to_screen_scaled_filtered_blit(et, (scaled_blit_params*)list, num_rects, false);
+}
+
+static void
+accel_draw_line_array_unclipped(engine_token* et, uint32 color, uint32 count, void* list)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	intel_i915_draw_hv_lines(et, color, (uint16*)list, count, false);
+}
+
+static void
+accel_draw_line_unclipped(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
+{
+	if (gInfo != NULL && gInfo->device_fd >= 0) {
+		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
+	}
+	if (pattern == 0xff) { // Solid pattern
+		uint16 line_coords[4] = {x1, y1, x2, y2};
+		if (x1 == x2 || y1 == y2) { // Only H/V lines
+			intel_i915_draw_hv_lines(et, color, line_coords, 1, false);
+		}
+	}
+}
+
+// --- Clipped Hook Implementations (accel_fill_rect_clipped, accel_invert_rect_clipped, accel_blit_clipped already added) ---
+
+// The accel_draw_line_array and accel_draw_line functions from the previous step
+// will now become the *clipped* versions by default if B_DRAW_LINE_ARRAY_CLIPPED existed,
+// or we make them the unclipped ones and add new _clipped variants if Haiku API has them.
+// For now, let's assume B_DRAW_LINE_ARRAY and B_DRAW_LINE are by default unclipped from hardware PoV.
+// If app_server wants them clipped, it should pass pre-clipped coordinates or use a
+// generic clipping mechanism if available for these specific hooks (unlikely for line array).
+
+// Re-defining accel_draw_line_array and accel_draw_line to be the "unclipped" ones
+// as per the new wrapper pattern.
 static void
 accel_draw_line_array(engine_token* et, uint32 color, uint32 count, void* list)
 {
-	// The 'list' parameter from B_DRAW_LINE_ARRAY hook in <Accelerant.h>
-	// is: void (*draw_line_array)(engine_token *et, uint32 color, uint32 count, void *list);
-	// The Haiku Book says this is an array of BPoint objects.
-	// However, the accelerant_info struct's hook is:
-	// void (*draw_line_array)(engine_token *et, uint32 count, uint32 color, uint16 *list);
-	// where list is uint16 x1,y1,x2,y2... This is what app_server typically passes.
-	if (list == NULL || count == 0)
-		return;
-
-	intel_i915_draw_hv_lines(et, color, (uint16*)list, count);
+	accel_draw_line_array_unclipped(et, color, count, list);
 }
 
 static void
 accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
 {
-	// B_DRAW_LINE hook signature from <Accelerant.h>:
-	// void (*draw_line)(engine_token *et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern);
-	if (pattern == 0xff) { // Solid pattern
-		uint16 line_coords[4] = {x1, y1, x2, y2};
-		// Only horizontal/vertical lines are HW accelerated by intel_i915_draw_hv_lines
-		if (x1 == x2 || y1 == y2) {
-			intel_i915_draw_hv_lines(et, color, line_coords, 1);
-		} else {
-			// TRACE("accel_draw_line: Diagonal lines not HW accelerated by this path.\n");
-		}
-	} else {
-		// TRACE("accel_draw_line: Patterned lines not HW accelerated.\n");
-	}
+	accel_draw_line_unclipped(et, x1, y1, x2, y2, color, pattern);
 }
 
 
@@ -524,21 +674,21 @@ get_accelerant_hook(uint32 feature, void *data)
 		case B_ACQUIRE_ENGINE: return (void*)intel_i915_acquire_engine;
 		case B_RELEASE_ENGINE: return (void*)intel_i915_release_engine;
 		case B_WAIT_ENGINE_IDLE: return (void*)intel_i915_wait_engine_idle;
-		case B_GET_SYNC_TOKEN: return (void*)intel_i915_get_sync_token; // Existing
+		case B_GET_SYNC_TOKEN: return (void*)intel_i915_get_sync_token;
 		case B_SYNC_TO_TOKEN: return (void*)intel_i915_sync_to_token;
 
-		case B_FILL_RECTANGLE: return (void*)intel_i915_fill_rectangle;
+		case B_FILL_RECTANGLE: return (void*)accel_fill_rectangle_unclipped;
 		case B_FILL_RECTANGLE_CLIPPED: return (void*)accel_fill_rect_clipped;
-		case B_SCREEN_TO_SCREEN_BLIT: return (void*)intel_i915_screen_to_screen_blit;
+		case B_SCREEN_TO_SCREEN_BLIT: return (void*)accel_screen_to_screen_blit_unclipped;
 		case B_BLIT_CLIPPED: return (void*)accel_blit_clipped;
-		case B_INVERT_RECTANGLE: return (void*)intel_i915_invert_rectangle;
+		case B_INVERT_RECTANGLE: return (void*)accel_invert_rectangle_unclipped;
 		case B_INVERT_RECTANGLE_CLIPPED: return (void*)accel_invert_rect_clipped;
-		case B_FILL_SPAN: return (void*)intel_i915_fill_span;
-		// B_FILL_SPAN_CLIPPED is not a standard hook, app_server likely handles span clipping.
-		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)intel_i915_screen_to_screen_transparent_blit;
-		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)intel_i915_screen_to_screen_scaled_filtered_blit; // Existing stub
-		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array; // New hook
-		case B_DRAW_LINE: return (void*)accel_draw_line;       // New hook
+		case B_FILL_SPAN: return (void*)accel_fill_span_unclipped;
+		// B_FILL_SPAN_CLIPPED is not a standard hook.
+		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)accel_s2s_transparent_blit_unclipped;
+		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
+		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array; // Will call unclipped internal version
+		case B_DRAW_LINE: return (void*)accel_draw_line;       // Will call unclipped internal version
 		default: TRACE("get_accelerant_hook: unknown feature 0x%lx\n", feature); return NULL;
 	}
 }

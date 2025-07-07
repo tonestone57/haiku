@@ -979,6 +979,17 @@
 #define GEN6_BCS_CHROMAKEY_HIGH_COLOR_REG _MMIO(0x220A4) // Blitter Chroma Key High Color
 #define GEN6_BCS_CHROMAKEY_MASK_REG       _MMIO(0x220A8) // Blitter Chroma Key Mask
 
+// Blitter Hardware Clip Rectangle Registers (Gen6+)
+// These define a single clip rectangle for the Blitter Command Streamer (BCS).
+// Enabled by BLT_CLIPPING_ENABLE in the blit command itself.
+#define BCS_CLIPRECT_TL                   _MMIO(0x22020) // Top-Left (X1, Y1)
+                                                       // DW: [31:16] Y1, [15:0] X1
+#define BCS_CLIPRECT_BR                   _MMIO(0x22024) // Bottom-Right (X2, Y2)
+                                                       // DW: [31:16] Y2, [15:0] X2
+
+// Clipping Enable bit for XY_COLOR_BLT_CMD and XY_SRC_COPY_BLT_CMD etc. (DW0, bit 30)
+#define BLT_CLIPPING_ENABLE               (1U << 30)
+
 // Blitter Chroma Keying Registers (Gen specific - these are conceptual for RCS/Blitter context)
 // Actual register addresses and bitfields must be verified from Intel PRMs.
 // These are likely MMIO registers accessed by the kernel, not directly by command stream for setup.

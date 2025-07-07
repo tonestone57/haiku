@@ -80,14 +80,11 @@ _log_tiling_generalization_status()
 // New function to handle drawing horizontal/vertical lines as thin rectangles
 void
 intel_i915_draw_hv_lines(engine_token *et, uint32 color,
-	uint16 *line_coords, uint32 num_lines)
+	uint16 *line_coords, uint32 num_lines, bool enable_hw_clip) // Added enable_hw_clip
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || num_lines == 0 || line_coords == NULL)
 		return;
 
-	// If memory is a concern, this could be batched like fill_span/fill_rectangle.
-	// For now, let's assume num_lines is manageable for a single batch for simplicity,
-	// or rely on fill_rectangle's existing batching.
 	fill_rect_params* rect_list = (fill_rect_params*)malloc(num_lines * sizeof(fill_rect_params));
 	if (rect_list == NULL) {
 		TRACE("draw_hv_lines: Failed to allocate memory for rect_list\n");
@@ -113,14 +110,12 @@ intel_i915_draw_hv_lines(engine_token *et, uint32 color,
 			rect_list[num_rects].right = x1;
 			rect_list[num_rects].bottom = max_c(y1, y2);
 			num_rects++;
-		} else {
-			// TRACE("draw_hv_lines: Skipping diagonal line (%u,%u)-(%u,%u)\n", x1,y1,x2,y2);
-			// Diagonal lines are not accelerated by this function.
-		}
+		} // Diagonal lines skipped by this function
 	}
 
 	if (num_rects > 0) {
-		intel_i915_fill_rectangle(et, color, rect_list, num_rects);
+		// Pass enable_hw_clip to the underlying fill_rectangle
+		intel_i915_fill_rectangle(et, color, rect_list, num_rects, enable_hw_clip);
 	}
 
 	free(rect_list);
@@ -192,7 +187,7 @@ destroy_cmd_buffer(uint32 handle, area_id cloned_cmd_area, void* cpu_addr)
 }
 
 void
-intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
+intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count, bool enable_hw_clip)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status(); // Logs generation-specific tiling info once
@@ -223,6 +218,9 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count)
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (enable_hw_clip) {
+				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
 				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
@@ -246,7 +244,7 @@ typedef struct { uint16 src_left, src_top, src_width, src_height, dest_left, des
 
 static void
 intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color,
-	blit_params *list, uint32 count)
+	blit_params *list, uint32 count, bool enable_hw_clip)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
@@ -291,6 +289,9 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 			if (gen >= 4) { // Chroma Key Enable bit (19) is documented for Gen4+ XY_SRC_COPY_BLT
 				cmd_dw0 |= XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE;
 			}
+			if (enable_hw_clip) {
+				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+			}
 
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
@@ -328,11 +329,13 @@ cleanup_chroma_key:
 }
 
 static void
-intel_i915_screen_to_screen_scaled_blit(engine_token* et, scaled_blit_params *list, uint32 count) {
+intel_i915_screen_to_screen_scaled_blit(engine_token* et, scaled_blit_params *list, uint32 count, bool enable_hw_clip) {
+	// enable_hw_clip is ignored for this stub
 	TRACE("s2s_scaled_blit: Stub, %lu ops. HW Accel N/A.\n", count);
 }
 
-void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count) {
+void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count,
+	bool enable_hw_clip) { // Added enable_hw_clip
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;
@@ -360,6 +363,9 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (enable_hw_clip) {
+				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
 				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
@@ -379,7 +385,7 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 	}
 }
 
-void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count) {
+void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count, bool enable_hw_clip) {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;
@@ -407,6 +413,9 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (enable_hw_clip) {
+				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
 				if (gen >= 7) cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
@@ -426,7 +435,7 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 	}
 }
 
-void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count) {
+void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count, bool enable_hw_clip) {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;
@@ -453,6 +462,9 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (enable_hw_clip) {
+				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
 				if (gen >= 7) {

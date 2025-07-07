@@ -35,6 +35,7 @@ enum {
 	INTEL_I915_IOCTL_SET_CURSOR_STATE,
 	INTEL_I915_IOCTL_SET_CURSOR_BITMAP,
 	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
+	INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT,
 	INTEL_I915_IOCTL_MODE_PAGE_FLIP,
 	INTEL_I915_IOCTL_GEM_GET_INFO,
 
@@ -115,6 +116,15 @@ typedef struct {
 	uint32_t mask; // Which channels to compare
 	bool enable;
 } intel_i915_set_blitter_chroma_key_args;
+
+// Args for INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT
+typedef struct {
+	uint16_t x1;
+	uint16_t y1;
+	uint16_t x2; // inclusive
+	uint16_t y2; // inclusive
+	bool enable; // If false, IOCTL might set a wide-open rect. Actual clipping is per-command.
+} intel_i915_set_blitter_hw_clip_rect_args;
 
 // Args for INTEL_I915_IOCTL_MODE_PAGE_FLIP
 /**

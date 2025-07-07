@@ -93,4 +93,26 @@ const bigtime_t IO_BOUND_BURST_THRESHOLD_US = 2000; // 2ms
 const uint32 IO_BOUND_MIN_TRANSITIONS = 5;
 
 
+// --- Work Stealing Constants ---
+// Max number of candidates to check in a victim's queue per steal attempt
+const int MAX_STEAL_CANDIDATES_TO_CHECK = 3;
+// Minimum positive lag (weighted time) for a task to be considered for stealing
+// (e.g., equivalent to 1ms of runtime for a normal priority thread)
+const bigtime_t kMinimumLagToSteal = (1000LL * SCHEDULER_WEIGHT_SCALE) / 1024; // Approx 1ms worth for nice 0
+// Cooldown period for a CPU after a task has been stolen from it
+const bigtime_t kVictimStealCooldownPeriod = 1000; // 1ms
+// Cooldown period for a thief CPU after a successful steal
+const bigtime_t kStealSuccessCooldownPeriod = 5000; // 5ms
+// Backoff interval for a thief CPU after a failed steal attempt
+const bigtime_t kStealFailureBackoffInterval = 1000;  // 1ms
+
+
+// --- Dynamic Load Balancer Interval Constants ---
+const bigtime_t kInitialLoadBalanceInterval = 100000; // Initial and default
+const bigtime_t kMinLoadBalanceInterval = 20000;     // e.g., 20ms
+const bigtime_t kMaxLoadBalanceInterval = 500000;     // e.g., 500ms
+const float kLoadBalanceIntervalIncreaseFactor = 1.25f;
+const float kLoadBalanceIntervalDecreaseFactor = 0.75f;
+
+
 #endif // _KERNEL_SCHEDULER_DEFS_H

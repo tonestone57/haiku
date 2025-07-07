@@ -109,6 +109,9 @@ public:
 						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
 	inline				bigtime_t		MinVirtualRuntime(); // Now non-const and calls _UpdateMinVirtualRuntime
 
+	// Work-stealing related fields
+	bigtime_t			fNextStealAttemptTime;
+	bigtime_t			fLastTimeTaskStolenFrom;
 
 private:
 						void			_UpdateMinVirtualRuntime(); // Ensures fMinVirtualRuntime >= gGlobalMinVirtualRuntime

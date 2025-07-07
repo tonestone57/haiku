@@ -106,6 +106,10 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
+
+	// Initialize work-stealing fields
+	fNextStealAttemptTime = 0;
+	fLastTimeTaskStolenFrom = 0;
 }
 
 

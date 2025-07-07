@@ -31,6 +31,16 @@ sem_id ACCELERANT_RETRACE_SEMAPHORE(void);
 // This header is more for completeness or if we decide to export them directly
 // (which is not the standard Haiku way for most hooks).
 
+// 2D Acceleration (prototypes for functions in accel_2d.c used by hooks.c)
+extern void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count);
+extern void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count);
+extern void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count);
+extern void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count);
+extern void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count);
+extern void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count);
+extern void intel_i915_draw_hv_lines(engine_token *et, uint32 color, uint16 *line_coords, uint32 num_lines);
+
+
 #ifdef __cplusplus
 }
 #endif

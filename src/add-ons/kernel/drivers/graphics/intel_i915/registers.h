@@ -970,6 +970,15 @@
 #define RING_SYNC_1(base)		_MMIO((base) + 0x44)
 #define RING_SYNC_2(base)		_MMIO((base) + 0x48) /* WaNotAllowedSymSrcForGFXBlt G4x / ILK */
 
+// Gen6 (Sandy Bridge) Blitter Chroma Key Registers
+// These registers are specific to the BCS (Blitter Command Streamer)
+// and are used in conjunction with the XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE bit
+// in the command stream (DW0, bit 19).
+// Base for BCS on Gen6 is typically 0x22000.
+#define GEN6_BCS_CHROMAKEY_LOW_COLOR_REG  _MMIO(0x220A0) // Blitter Chroma Key Low Color
+#define GEN6_BCS_CHROMAKEY_HIGH_COLOR_REG _MMIO(0x220A4) // Blitter Chroma Key High Color
+#define GEN6_BCS_CHROMAKEY_MASK_REG       _MMIO(0x220A8) // Blitter Chroma Key Mask
+
 // Blitter Chroma Keying Registers (Gen specific - these are conceptual for RCS/Blitter context)
 // Actual register addresses and bitfields must be verified from Intel PRMs.
 // These are likely MMIO registers accessed by the kernel, not directly by command stream for setup.

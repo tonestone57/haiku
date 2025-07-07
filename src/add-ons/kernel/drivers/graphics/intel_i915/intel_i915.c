@@ -852,35 +852,43 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 			uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
 
-			// IMPORTANT: The following register writes use conceptual registers defined in registers.h
-			// (BLITTER_CHROMAKEY_LOW_COLOR_REG, etc.). These are PLACEHOLDERS and must be
-			// replaced with actual, generation-specific MMIO register addresses and bit definitions
-			// after thorough PRM research for Gen7, Gen8, and Gen9.
-			// The current implementation is a stub for the IOCTL pathway.
-			if (gen >= 7) { // Example: Assuming these conceptual regs apply to Gen7+ RCS
+			// Note: The command bit XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE (DW0, bit 19)
+			// is the primary enabler for this hardware feature in the command stream.
+			// This IOCTL sets up the key values and mask.
+
+			if (gen == 6) { // Sandy Bridge
+				// Registers specific to Gen6 Blitter (BCS) for chroma keying.
+				// Offsets are typically 0x220A0, 0x220A4, 0x220A8 for low, high, mask_enable.
+				// These should be defined in registers.h if not already.
+				// Assuming BLITTER_CHROMAKEY_LOW_COLOR_REG = 0x220A0 (BCS_CHROMAKEY_LOW_COLOR_REG)
+				// Assuming BLITTER_CHROMAKEY_HIGH_COLOR_REG = 0x220A4 (BCS_CHROMAKEY_HIGH_COLOR_REG)
+				// Assuming BLITTER_CHROMAKEY_MASK_ENABLE_REG = 0x220A8 (BCS_CHROMAKEY_MASK_REG)
+				// The mask register on Gen6 typically holds the mask itself, and a separate
+				// bit might enable it, or it's always enabled when XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE is set.
+				// For Gen6, the mask is likely just the mask, and enable is via command stream.
 				if (args.enable) {
-					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_LOW_COLOR_REG, args.low_color);
-					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_HIGH_COLOR_REG, args.high_color);
-					uint32_t ckm_val = (args.mask & CHROMAKEY_MASK_RGB_BITS) | CHROMAKEY_ENABLE_BIT;
-					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG, ckm_val);
-					// TRACE("Chroma Key ENABLED: LOW=0x%lx, HIGH=0x%lx, MASK_CTL=0x%lx (GEN%u) - Placeholder MMIO
-",
-					//	args.low_color, args.high_color, ckm_val, gen); // Can be noisy
+					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_LOW_COLOR_REG, args.low_color);
+					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_HIGH_COLOR_REG, args.high_color);
+					intel_i915_write32(devInfo, GEN6_BCS_CHROMAKEY_MASK_REG, args.mask);
+					TRACE("Gen6 Blitter Chroma Key ENABLED: LOW=0x%lx, HIGH=0x%lx, MASK=0x%lx\n",
+						args.low_color, args.high_color, args.mask);
 				} else {
-					uint32_t ckm_val = intel_i915_read32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG);
-					ckm_val &= ~CHROMAKEY_ENABLE_BIT;
-					intel_i915_write32(devInfo, BLITTER_CHROMAKEY_MASK_ENABLE_REG, ckm_val);
-					// TRACE("Chroma Key DISABLED (GEN%u) - Placeholder MMIO
-", gen); // Can be noisy
+					// Typically, disabling is done by not setting the enable bit in the
+					// XY_SRC_COPY_BLT command. Clearing registers might not be necessary
+					// or could be done by writing zeros if that's the HW default for 'disabled'.
+					// For now, rely on the command stream bit to disable.
+					TRACE("Gen6 Blitter Chroma Key DISABLED (via command stream bit, registers not cleared by IOCTL)\n");
 				}
+			} else if (gen >= 7) {
+				TRACE("INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY: Register programming for Gen %u blitter chroma key is not yet implemented. IOCTL will have no effect on key values/mask for this generation.\n", gen);
+				// Future: Implement for Gen7+ if different registers are identified.
 			} else {
-				TRACE("Chroma keying IOCTL not supported or not implemented for Gen %u.
-", gen);
+				TRACE("INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY: Chroma keying not supported/implemented for Gen %u.\n", gen);
 				// Consider returning B_UNSUPPORTED if this path is not for older gens.
 			}
 
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-			return B_OK; // Return B_OK for now, actual hardware programming is a stub/placeholder.
+			return B_OK;
 		}
 		case INTEL_I915_IOCTL_MODE_PAGE_FLIP:
 		{

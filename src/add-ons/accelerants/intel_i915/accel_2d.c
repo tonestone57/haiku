@@ -77,6 +77,55 @@ _log_tiling_generalization_status()
 	}
 }
 
+// New function to handle drawing horizontal/vertical lines as thin rectangles
+void
+intel_i915_draw_hv_lines(engine_token *et, uint32 color,
+	uint16 *line_coords, uint32 num_lines)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || num_lines == 0 || line_coords == NULL)
+		return;
+
+	// If memory is a concern, this could be batched like fill_span/fill_rectangle.
+	// For now, let's assume num_lines is manageable for a single batch for simplicity,
+	// or rely on fill_rectangle's existing batching.
+	fill_rect_params* rect_list = (fill_rect_params*)malloc(num_lines * sizeof(fill_rect_params));
+	if (rect_list == NULL) {
+		TRACE("draw_hv_lines: Failed to allocate memory for rect_list\n");
+		return;
+	}
+
+	uint32 num_rects = 0;
+	for (uint32 i = 0; i < num_lines; i++) {
+		uint16 x1 = line_coords[i * 4 + 0];
+		uint16 y1 = line_coords[i * 4 + 1];
+		uint16 x2 = line_coords[i * 4 + 2];
+		uint16 y2 = line_coords[i * 4 + 3];
+
+		if (y1 == y2) { // Horizontal line
+			rect_list[num_rects].left = min_c(x1, x2);
+			rect_list[num_rects].top = y1;
+			rect_list[num_rects].right = max_c(x1, x2);
+			rect_list[num_rects].bottom = y1;
+			num_rects++;
+		} else if (x1 == x2) { // Vertical line
+			rect_list[num_rects].left = x1;
+			rect_list[num_rects].top = min_c(y1, y2);
+			rect_list[num_rects].right = x1;
+			rect_list[num_rects].bottom = max_c(y1, y2);
+			num_rects++;
+		} else {
+			// TRACE("draw_hv_lines: Skipping diagonal line (%u,%u)-(%u,%u)\n", x1,y1,x2,y2);
+			// Diagonal lines are not accelerated by this function.
+		}
+	}
+
+	if (num_rects > 0) {
+		intel_i915_fill_rectangle(et, color, rect_list, num_rects);
+	}
+
+	free(rect_list);
+}
+
 static uint32
 get_blit_colordepth_flags(uint16 bits_per_pixel, color_space format)
 {

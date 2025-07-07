@@ -414,6 +414,7 @@ typedef struct {
  *             either transfers this reference to devInfo->framebuffer_bo[pipe] or releases it.
  * @flags: Flags from the userspace page flip request (e.g., I915_PAGE_FLIP_EVENT).
  * @user_data: Userspace data to be returned with the completion event.
+ * @completion_sem: (Optional) Semaphore ID provided by userspace to be released on flip completion.
  */
 // Structure to hold information about a pending page flip
 struct intel_pending_flip {
@@ -421,6 +422,7 @@ struct intel_pending_flip {
 	struct intel_i915_gem_object* target_bo;
 	uint32_t flags;
 	uint64_t user_data;
+	sem_id   completion_sem; // Semaphore to release
 	// Consider adding a field for a target sequence number if explicit fence sync is needed before flip.
 };
 

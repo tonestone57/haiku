@@ -61,6 +61,7 @@ typedef struct {
 	uint32_t fb_handle;  // GEM handle of the framebuffer to scan out.
 	uint32_t flags;      // Flags for the flip (e.g., I915_PAGE_FLIP_EVENT).
 	uint64_t user_data;  // Userspace data for event correlation.
+	sem_id   completion_sem; // (Optional) Semaphore to release upon flip completion if I915_PAGE_FLIP_EVENT is set. Set to < 0 if not used.
 	// Reserved fields for future use (e.g., sync objects for explicit synchronization).
 	uint32_t reserved0;  // Unused, set to 0.
 	uint32_t reserved1;  // Unused, set to 0.

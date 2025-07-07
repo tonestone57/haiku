@@ -824,6 +824,11 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			pendingFlip->target_bo = targetBo; // _generic_handle_lookup already did a get
 			pendingFlip->flags = args.flags;
 			pendingFlip->user_data = args.user_data;
+			if ((args.flags & I915_PAGE_FLIP_EVENT) && args.completion_sem >= B_OK) {
+				pendingFlip->completion_sem = args.completion_sem;
+			} else {
+				pendingFlip->completion_sem = -1; // No valid semaphore for this flip event
+			}
 			// list_init_link(&pendingFlip->link); // list_add_item_to_tail will init the link
 
 			intel_pipe_hw_state* pipeState = &devInfo->pipes[args.pipe_id];
@@ -831,11 +836,12 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			// For this initial pass, let's assume only one is queued or we overwrite.
 			// A more robust implementation might return B_BUSY if a flip is already pending,
 			// or implement a deeper queue with sequence/fence synchronization.
+			// The current behavior is to replace any existing pending flip for this pipe.
 			struct intel_pending_flip* oldFlip = list_remove_head_item(&pipeState->pending_flip_queue);
 			if (oldFlip) {
-				TRACE("PAGE_FLIP: Warning - replacing an existing pending flip on pipe %u. Old BO handle (approx) %p put.
+				// TRACE("PAGE_FLIP: Warning - replacing an existing pending flip on pipe %u. Old BO handle (approx) %p put.
 ",
-					args.pipe_id, oldFlip->target_bo);
+				//	args.pipe_id, oldFlip->target_bo); // Can be verbose
 				intel_i915_gem_object_put(oldFlip->target_bo); // Release ref for the BO of the overwritten flip
 				free(oldFlip);                                // Free the old flip structure
 			}
@@ -847,8 +853,9 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		// If the pipe is currently off, the flip will be processed when the pipe is next enabled
 		// (assuming the VBLANK handler logic correctly processes any queued flips upon pipe enable).
 
-		// TRACE("PAGE_FLIP: Queued flip for pipe %u to BO handle %u
-", args.pipe_id, args.fb_handle); // Can be verbose
+		// TRACE("PAGE_FLIP: Queued flip for pipe %u to BO handle %u, sem %" B_PRId32 "
+",
+		//      args.pipe_id, args.fb_handle, pendingFlip->completion_sem); // Can be verbose
 			return B_OK;
 		}
 		case INTEL_I915_IOCTL_GEM_GET_INFO:

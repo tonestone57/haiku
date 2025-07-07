@@ -129,16 +129,34 @@ intel_i915_interrupt_handler(void* data)
 	// Check against cached enabled interrupts
 	uint32 active_de_irqs = de_iir & devInfo->cached_deier_val;
 
-	if (active_de_irqs & DE_PIPEA_VBLANK_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (active_de_irqs & DE_PIPEB_VBLANK_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (PRIV_MAX_PIPES > 2 && (active_de_irqs & DE_PIPEC_VBLANK_IVB)) { intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB); handledStatus = B_HANDLED_INTERRUPT; if(devInfo->vblank_sem_id>=B_OK)release_sem_etc(devInfo->vblank_sem_id,1,B_DO_NOT_RESCHEDULE); }
-	if (active_de_irqs & DE_PCH_EVENT_IVB) { intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); handledStatus = B_HANDLED_INTERRUPT; TRACE("IRQ: PCH Event\n");}
-	// Ack any other handled DE IRQs by writing them back to DEIIR
-	if (active_de_irqs & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB)) {
-		intel_i915_write32(devInfo, DEIIR, active_de_irqs & ~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB));
+	if (active_de_irqs & DE_PIPEA_VBLANK_IVB) {
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEA_VBLANK_IVB); // Ack VBLANK
+		intel_i915_handle_pipe_vblank(devInfo, PRIV_PIPE_A);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
+	if (active_de_irqs & DE_PIPEB_VBLANK_IVB) {
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); // Ack VBLANK
+		intel_i915_handle_pipe_vblank(devInfo, PRIV_PIPE_B);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
+	if (PRIV_MAX_PIPES > 2 && (active_de_irqs & DE_PIPEC_VBLANK_IVB)) {
+		intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB); // Ack VBLANK
+		intel_i915_handle_pipe_vblank(devInfo, PRIV_PIPE_C);
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
 
+	if (active_de_irqs & DE_PCH_EVENT_IVB) {
+		intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB);
+		handledStatus = B_HANDLED_INTERRUPT;
+		TRACE("IRQ: PCH Event\n");
+	}
+	// Ack any other potentially enabled DE IRQs that are not explicitly handled above
+	uint32 unhandled_de_irqs = active_de_irqs &
+		~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB);
+	if (unhandled_de_irqs) {
+		intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
 
 	// GT Interrupt Handling
 	gt_iir = intel_i915_read32(devInfo, GT_IIR);
@@ -196,4 +214,102 @@ intel_i915_interrupt_handler(void* data)
 	}
 
 	return handledStatus;
+}
+
+
+void
+intel_i915_handle_pipe_vblank(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
+{
+	if (pipe >= PRIV_MAX_PIPES)
+		return;
+
+	intel_pipe_hw_state* pipeState = &devInfo->pipes[pipe];
+	struct intel_pending_flip* flip = NULL;
+
+	mutex_lock(&pipeState->pending_flip_queue_lock);
+	if (!list_is_empty(&pipeState->pending_flip_queue)) {
+		flip = list_remove_head_item(&pipeState->pending_flip_queue);
+	}
+	mutex_unlock(&pipeState->pending_flip_queue_lock);
+
+	if (flip != NULL) {
+		struct intel_i915_gem_object* targetBo = flip->target_bo; // Ref was taken by IOCTL handler
+
+		// Critical: Ensure the target BO is still valid and mapped to GTT.
+		// A robust implementation might need to re-validate or even re-map if the BO
+		// could have been evicted. For this simplified version, we assume it's still valid
+		// and mapped. If not, the flip will likely fail or point to garbage.
+		// The `gtt_mapped` flag and `gtt_offset_pages` should be checked.
+		if (targetBo != NULL && targetBo->gtt_mapped && targetBo->gtt_offset_pages != (uint32_t)-1) {
+			status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Or FW_DOMAIN_DISPLAY
+			if (fw_status == B_OK) {
+				// Program DSPADDR to initiate the flip. This is the core hardware action.
+				intel_i915_write32(devInfo, DSPADDR(pipe), targetBo->gtt_offset_pages * B_PAGE_SIZE);
+				// A readback from DSPADDR can be used to ensure the write has posted before releasing forcewake,
+				// though often the VBLANK itself provides sufficient timing.
+				// intel_i915_read32(devInfo, DSPADDR(pipe));
+				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+
+				// Atomically update the driver's notion of the current framebuffer for this pipe.
+				// The old framebuffer_bo's refcount is decremented, new one's is effectively maintained.
+				struct intel_i915_gem_object* old_fb_bo = (struct intel_i915_gem_object*)
+					atomic_pointer_exchange((intptr_t*)&devInfo->framebuffer_bo[pipe], (intptr_t)targetBo);
+
+				if (old_fb_bo != NULL && old_fb_bo != targetBo) {
+					intel_i915_gem_object_put(old_fb_bo); // Release ref to the old framebuffer
+				}
+				// Note: `targetBo` reference from `flip->target_bo` is now owned by `devInfo->framebuffer_bo[pipe]`.
+				// We must not `put` `targetBo` here if the flip was successful and it's now the active scanout.
+				// The `flip->target_bo` pointer itself will be cleared when `flip` is freed.
+
+				// Update shared_info for the accelerant.
+				// This part needs care in a multi-head setup if shared_info is global vs. per-accelerant-instance.
+				// Assuming a single primary display context for shared_info updates for now.
+				if (pipe == PRIV_PIPE_A || devInfo->num_pipes_active <= 1) { // Heuristic for primary display
+					devInfo->shared_info->framebuffer_physical = targetBo->gtt_offset_pages * B_PAGE_SIZE;
+					devInfo->shared_info->bytes_per_row = targetBo->stride;
+					devInfo->shared_info->fb_tiling_mode = targetBo->actual_tiling_mode;
+					devInfo->shared_info->framebuffer_area = targetBo->backing_store_area;
+					// devInfo->shared_info->current_mode might not need full update if only buffer changes.
+				}
+				// Update internal pipe state (e.g., if it tracks the GTT address of its current surface).
+				pipeState->current_mode.display = targetBo->gtt_offset_pages * B_PAGE_SIZE;
+
+				// TRACE("VBLANK Pipe %d: Flipped to BO (handle approx %p), GTT offset 0x%lx
+",
+				//	pipe, targetBo, (uint32_t)targetBo->gtt_offset_pages * B_PAGE_SIZE); // Verbose
+
+				if (flip->flags & I915_PAGE_FLIP_EVENT) {
+					// TODO: Implement actual event signaling to userspace.
+					// This could involve a Haiku user_event, a message to a port, etc.
+					// For now, just a log message.
+					TRACE("VBLANK Pipe %d: Page flip event requested (user_data: 0x%llx) - Signaling STUBBED
+",
+						pipe, flip->user_data);
+				}
+				// If flip was successful, the `targetBo` reference is now held by `devInfo->framebuffer_bo[pipe]`.
+				// We only need to free the `flip` structure. The `put` for `targetBo` from the IOCTL
+				// is effectively transferred.
+			} else {
+				TRACE("VBLANK Pipe %d: Failed to get forcewake for page flip! Flip aborted for BO %p.
+", pipe, targetBo);
+				// Flip couldn't be performed. Re-queue? Drop?
+				// For now, drop the flip and release the targetBo's reference.
+				intel_i915_gem_object_put(targetBo); // Release ref from IOCTL as flip didn't happen.
+			}
+		} else {
+			TRACE("VBLANK Pipe %d: Target BO for flip (handle approx %p) is NULL or not GTT mapped. Flip aborted.
+", pipe, targetBo);
+			if (targetBo) {
+				intel_i915_gem_object_put(targetBo); // Release ref from IOCTL if targetBo was looked up but invalid.
+			}
+		}
+		free(flip); // Free the intel_pending_flip structure itself.
+	}
+
+	// Always release the generic VBLANK semaphore for this pipe,
+	// regardless of whether a flip occurred, to unblock general VBLANK waiters.
+	if (devInfo->vblank_sem_id >= B_OK) {
+		release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
+	}
 }

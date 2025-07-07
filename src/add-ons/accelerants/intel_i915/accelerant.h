@@ -34,6 +34,7 @@ enum {
 	INTEL_I915_IOCTL_SET_CURSOR_STATE,
 	INTEL_I915_IOCTL_SET_CURSOR_BITMAP,
 	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
+	INTEL_I915_IOCTL_MODE_PAGE_FLIP,
 };
 
 // Args for INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY
@@ -43,6 +44,56 @@ typedef struct {
 	uint32_t mask; // Which channels to compare
 	bool enable;
 } intel_i915_set_blitter_chroma_key_args;
+
+// Args for INTEL_I915_IOCTL_MODE_PAGE_FLIP
+/**
+ * @flags: Bitmask of flags for the page flip operation.
+ *         I915_PAGE_FLIP_EVENT: Request a notification event when the flip completes.
+ * @user_data: Arbitrary data passed by userspace, returned with the completion event.
+ *             Useful for correlating flips with userspace requests.
+ * @reserved0-3: Reserved for future extensions (e.g., sync fence FDs).
+ */
+#define I915_PAGE_FLIP_EVENT (1 << 0) // Request event upon flip completion
+
+typedef struct {
+	uint32_t pipe_id;    // Kernel's pipe_id_priv for the CRTC to flip.
+	uint32_t fb_handle;  // GEM handle of the framebuffer to scan out.
+	uint32_t flags;      // Flags for the flip (e.g., I915_PAGE_FLIP_EVENT).
+	uint64_t user_data;  // Userspace data for event correlation.
+	// Reserved fields for future use (e.g., sync objects for explicit synchronization).
+	uint32_t reserved0;  // Unused, set to 0.
+	uint32_t reserved1;  // Unused, set to 0.
+	uint64_t reserved2;  // Unused, set to 0.
+	uint64_t reserved3;  // Unused, set to 0.
+} intel_i915_page_flip_args;
+
+/**
+ * @event_type: Type of the event (e.g., a value indicating flip completion).
+ * @pipe_id: The pipe (CRTC) on which the flip occurred.
+ * @user_data: The user_data supplied in the flip request.
+ * @tv_sec, @tv_usec: Timestamp of when the flip physically occurred (scanout switched).
+ */
+// Event structure for page flip completion (if I915_PAGE_FLIP_EVENT is used).
+// This is a conceptual structure for the data that would be delivered.
+// The actual Haiku event delivery mechanism (e.g., user_event, message port)
+// would determine the final structure format readable by userspace.
+typedef struct {
+	// If using Haiku's generic user_event system:
+	// struct user_event base; // Would contain type, flags, etc.
+	// uint32_t user_token;   // Could map to pipe_id or a specific event sub-type.
+	// bigtime_t timestamp;    // Kernel timestamp.
+	// uint32_t what;         // Custom 'what' code for this event type.
+	// int32 int_val;          // Could be used for pipe_id.
+	// int64 long_val;         // Could be used for user_data.
+
+	// For a custom event structure more aligned with DRM:
+	uint32_t event_type; // Example: I915_EVENT_TYPE_FLIP_COMPLETE
+	uint32_t pipe_id;
+	uint64_t user_data;
+	uint32_t tv_sec;     // Timestamp of flip (seconds part of gettimeofday)
+	uint32_t tv_usec;    // Timestamp of flip (microseconds part of gettimeofday)
+} intel_i915_event_page_flip;
+
 
 // Enum for accelerant-side pipe identification
 enum accel_pipe_id {

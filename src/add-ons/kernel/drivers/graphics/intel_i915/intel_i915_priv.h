@@ -395,9 +395,34 @@ typedef struct {
 	enum pipe_id_priv id;
 	bool enabled;
 	display_mode current_mode;
-	uint32_t current_dpms_mode; // Current DPMS state for this pipe
-	intel_clock_params_t cached_clock_params; // Store clock params used for current mode
+	uint32_t current_dpms_mode; // Current DPMS state for this pipe.
+	intel_clock_params_t cached_clock_params; // Clock params for current mode, avoids recalculation for DPMS ON.
+
+	// Page Flipping Queue & Lock:
+	// Each pipe has a queue for pending page flip requests.
+	// The VBLANK interrupt handler for the pipe processes this queue.
+	// For simplicity, this queue currently holds at most one pending flip.
+	struct list pending_flip_queue;
+	mutex pending_flip_queue_lock;
+	// TODO: Event signaling for page flips (e.g., a list of event listeners or a dedicated semaphore per flip).
 } intel_pipe_hw_state;
+
+/**
+ * @link: List link for the per-pipe pending_flip_queue.
+ * @target_bo: The GEM buffer object to become the new scanout surface.
+ *             The page flip IOCTL handler takes a reference, and the VBLANK handler
+ *             either transfers this reference to devInfo->framebuffer_bo[pipe] or releases it.
+ * @flags: Flags from the userspace page flip request (e.g., I915_PAGE_FLIP_EVENT).
+ * @user_data: Userspace data to be returned with the completion event.
+ */
+// Structure to hold information about a pending page flip
+struct intel_pending_flip {
+	struct list_link link;
+	struct intel_i915_gem_object* target_bo;
+	uint32_t flags;
+	uint64_t user_data;
+	// Consider adding a field for a target sequence number if explicit fence sync is needed before flip.
+};
 
 typedef struct { /* ... intel_output_port_state fields ... */
 	enum intel_port_id_priv logical_port_id; enum intel_output_type_priv type;

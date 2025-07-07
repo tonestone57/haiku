@@ -191,6 +191,8 @@ extern "C" status_t init_driver(void) {
 			memset(&current_dev_info->pipes[pipe_idx].current_mode, 0, sizeof(display_mode));
 			current_dev_info->pipes[pipe_idx].current_dpms_mode = B_DPMS_ON;
 			memset(&current_dev_info->pipes[pipe_idx].cached_clock_params, 0, sizeof(intel_clock_params_t));
+			list_init_etc(&current_dev_info->pipes[pipe_idx].pending_flip_queue, offsetof(struct intel_pending_flip, link));
+			mutex_init_etc(&current_dev_info->pipes[pipe_idx].pending_flip_queue_lock, "i915 pipe flipq lock", MUTEX_FLAG_CLONE_NAME);
 		}
 
 		current_dev_info->mmio_area_id = -1;
@@ -439,6 +441,22 @@ static status_t intel_i915_free(void* cookie) {
 	}
 
 	intel_i915_gtt_cleanup(devInfo);
+
+	// Clean up pending page flips for all pipes
+	for (int i = 0; i < PRIV_MAX_PIPES; i++) {
+		intel_pipe_hw_state* pipeState = &devInfo->pipes[i];
+		mutex_lock(&pipeState->pending_flip_queue_lock);
+		struct intel_pending_flip* flip;
+		while ((flip = list_remove_head_item(&pipeState->pending_flip_queue)) != NULL) {
+			if (flip->target_bo) {
+				intel_i915_gem_object_put(flip->target_bo);
+			}
+			free(flip);
+		}
+		mutex_unlock(&pipeState->pending_flip_queue_lock);
+		mutex_destroy(&pipeState->pending_flip_queue_lock);
+	}
+
 	if (devInfo->shared_info_area >= B_OK) delete_area(devInfo->shared_info_area);
 	if (devInfo->gtt_mmio_area_id >= B_OK) delete_area(devInfo->gtt_mmio_area_id);
 	if (devInfo->mmio_area_id >= B_OK) delete_area(devInfo->mmio_area_id);
@@ -818,6 +836,75 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 			return intel_display_load_palette(devInfo, (enum pipe_id_priv)args.pipe,
 				args.first_color, args.count, kernel_color_data);
+		}
+		case INTEL_I915_IOCTL_MODE_PAGE_FLIP:
+		{
+			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_page_flip_args))
+				return B_BAD_VALUE;
+
+			intel_i915_page_flip_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			if (args.pipe_id >= PRIV_MAX_PIPES) {
+				TRACE("PAGE_FLIP: Invalid pipe_id %u\n", args.pipe_id);
+				return B_BAD_INDEX;
+			}
+
+			struct intel_i915_gem_object* targetBo =
+				(struct intel_i915_gem_object*)_generic_handle_lookup(args.fb_handle, HANDLE_TYPE_GEM_OBJECT);
+			if (targetBo == NULL) {
+				TRACE("PAGE_FLIP: Invalid fb_handle %u\n", args.fb_handle);
+				return B_BAD_VALUE;
+			}
+
+			// TODO: Validate targetBo properties (size, format) against current mode on pipe?
+			// For now, assume userspace provides a compatible buffer.
+
+			struct intel_pending_flip* pendingFlip =
+				(struct intel_pending_flip*)malloc(sizeof(struct intel_pending_flip));
+			if (pendingFlip == NULL) {
+				intel_i915_gem_object_put(targetBo);
+				return B_NO_MEMORY;
+			}
+
+			pendingFlip->target_bo = targetBo; // _generic_handle_lookup already did a get
+			pendingFlip->flags = args.flags;
+			pendingFlip->user_data = args.user_data;
+			// list_init_link(&pendingFlip->link); // Should be done by list_add_item
+
+			intel_pipe_hw_state* pipeState = &devInfo->pipes[args.pipe_id];
+			mutex_lock(&pipeState->pending_flip_queue_lock);
+			// TODO: Check if another flip is already pending? Some drivers allow queueing multiple.
+			// For simplicity, allow only one pending flip per pipe for now.
+			// If more complex queueing is needed, this logic would expand.
+			if (!list_is_empty(&pipeState->pending_flip_queue)) {
+				// Example: free the oldest one and replace, or return EBUSY.
+				// For now, let's just replace (leaking the old one if not careful)
+				// A better approach: if queue is not empty, maybe return B_BUSY or queue it.
+				// For this initial pass, let's assume only one is queued or we overwrite.
+			// A more robust implementation might return B_BUSY if a flip is already pending,
+			// or implement a deeper queue with sequence/fence synchronization.
+				struct intel_pending_flip* oldFlip = list_remove_head_item(&pipeState->pending_flip_queue);
+				if (oldFlip) {
+				TRACE("PAGE_FLIP: Warning - replacing an existing pending flip on pipe %u. Old BO handle (approx) %p put.
+",
+					args.pipe_id, oldFlip->target_bo);
+				intel_i915_gem_object_put(oldFlip->target_bo); // Release ref for the BO of the overwritten flip
+				free(oldFlip);                                // Free the old flip structure
+				}
+			}
+			list_add_item_to_tail(&pipeState->pending_flip_queue, pendingFlip);
+			mutex_unlock(&pipeState->pending_flip_queue_lock);
+
+			// The VBLANK interrupt handler for this pipe will pick up this request.
+		// VBLANK interrupts should be enabled if the pipe is active.
+		// If the pipe is currently off, the flip will be processed when the pipe is next enabled
+		// (assuming the VBLANK handler logic correctly processes any queued flips upon pipe enable).
+
+		// TRACE("PAGE_FLIP: Queued flip for pipe %u to BO handle %u
+", args.pipe_id, args.fb_handle); // Can be verbose
+			return B_OK;
 		}
 
 		default: return B_DEV_INVALID_IOCTL;

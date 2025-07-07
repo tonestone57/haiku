@@ -106,11 +106,11 @@ public:
 						// }
 						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
 						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
-	inline				bigtime_t		MinVirtualRuntime() const { return fMinVirtualRuntime; }
+	inline				bigtime_t		MinVirtualRuntime(); // Now non-const and calls _UpdateMinVirtualRuntime
 
 
 private:
-						void			_UpdateMinVirtualRuntime(); // New helper
+						void			_UpdateMinVirtualRuntime(); // Ensures fMinVirtualRuntime >= gGlobalMinVirtualRuntime
 						// void			_UpdateHighestMLFQLevel(); // Obsolete
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
@@ -333,6 +333,17 @@ CPUEntry::UnlockRunQueue()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	release_spinlock(&fQueueLock);
+}
+
+
+inline bigtime_t
+CPUEntry::MinVirtualRuntime()
+{
+	// This method is now defined in scheduler_cpu.cpp as it calls _UpdateMinVirtualRuntime.
+	// The declaration is non-const.
+	InterruptsSpinLocker _(fQueueLock);
+	_UpdateMinVirtualRuntime(); // Ensures fMinVirtualRuntime is up-to-date with global state
+	return fMinVirtualRuntime;
 }
 
 

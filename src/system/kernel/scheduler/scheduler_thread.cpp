@@ -5,6 +5,7 @@
  */
 
 #include "scheduler_thread.h"
+#include "scheduler_defs.h" // For latency_nice constants and factors
 #include <util/Random.h> // For get_random<T>()
 
 
@@ -163,8 +164,9 @@ ThreadData::ThreadData(Thread* thread)
 	fVirtualDeadline(0),
 	fLag(0),
 	fEligibleTime(0),
-	fSliceDuration(kBaseQuanta[NUM_MLFQ_LEVELS / 2]), // Default slice duration
-	fVirtualRuntime(0)
+	fSliceDuration(kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)]), // Default slice duration
+	fVirtualRuntime(0),
+	fLatencyNice(LATENCY_NICE_DEFAULT)
 {
 	// EEVDF specific initializations, if any, can go here.
 	// For example, a new thread might start with zero lag.
@@ -238,6 +240,7 @@ ThreadData::Dump() const
 	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", fEligibleTime);
 	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", fSliceDuration);
 	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", fVirtualRuntime);
+	kprintf("\t  latency_nice:\t\t%d\n", fLatencyNice);
 }
 
 
@@ -296,27 +299,48 @@ bigtime_t
 ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 {
 	SCHEDULER_ENTER_FUNCTION();
+
 	if (IsIdle()) {
-		// Idle threads get mode-adjusted base quantum.
-		return GetBaseQuantumForLevel(fCurrentMlfqLevel);
-	}
-	if (IsRealTime()) {
-		// Real-time threads get *raw* base quantum, not affected by gSchedulerBaseQuantumMultiplier.
-		ASSERT(fCurrentMlfqLevel >= 0 && fCurrentMlfqLevel < NUM_MLFQ_LEVELS);
-		return kBaseQuanta[fCurrentMlfqLevel];
+		// Idle threads have an infinite slice duration effectively, timer set differently.
+		return B_INFINITE_TIMEOUT;
 	}
 
-	// For non-RT, non-idle threads:
-	// With EEVDF, this function should just return the thread's assigned fSliceDuration.
-	// The complex DTQ logic based on gKernelKDistFactor and power saving mode
-	// is no longer applicable here. Slice duration for EEVDF is determined by
-	// fairness, nice levels, and latency-nice requirements.
-	// gKernelKDistFactor might be repurposed to influence slice duration calculation
-	// elsewhere, or removed if EEVDF's own mechanisms are sufficient.
-	if (IsIdle()) { // Should have been handled by caller, but for safety:
-		return B_INFINITE_TIMEOUT; // Or a very large value for periodic check
-	}
-	return SliceDuration();
+	// Base slice duration from priority using definitions from scheduler_defs.h
+	int effectivePriority = GetBasePriority();
+	// Clamp priority to valid range for safety, though ThreadData should maintain valid priority.
+	if (effectivePriority < 0) effectivePriority = 0;
+	if (effectivePriority >= B_MAX_PRIORITY) effectivePriority = B_MAX_PRIORITY -1;
+
+	int level = MapPriorityToEffectiveLevel(effectivePriority);
+	bigtime_t baseSlice = kBaseQuanta[level];
+
+	// Get latency_nice factor
+	// fLatencyNice is now a member of ThreadData
+	int latencyNiceIdx = latency_nice_to_index(fLatencyNice);
+	// gLatencyNiceFactors and LATENCY_NICE_FACTOR_SCALE_SHIFT are from scheduler_defs.h
+	int32 factor = gLatencyNiceFactors[latencyNiceIdx];
+
+	// Apply factor
+	// (baseSlice * factor) / SCALE can overflow if baseSlice is large.
+	// (baseSlice / SCALE) * factor loses precision.
+	// (baseSlice * factor) >> SHIFT is good for powers of 2.
+	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
+
+	// Clamp to system min/max defined in scheduler_defs.h
+	if (modulatedSlice < kMinSliceGranularity)
+		modulatedSlice = kMinSliceGranularity;
+	if (modulatedSlice > kMaxSliceDuration)
+		modulatedSlice = kMaxSliceDuration;
+
+	// Note: fSliceDuration will be set by the caller (e.g., in reschedule or enqueue)
+	// by calling SetSliceDuration(calculated_value). This function just calculates.
+
+	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: thread %" B_PRId32 ", prio %d, latency_nice %d, "
+		"baseSlice %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
+		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE,
+		modulatedSlice);
+
+	return modulatedSlice;
 }
 
 

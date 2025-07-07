@@ -18,6 +18,13 @@
 
 namespace Scheduler {
 
+// CONCEPTUAL: For Latency-Nice integration, 'struct thread' (in kernel/thread_types.h or thread.h)
+// would ideally gain a field like:
+//   int8 fLatencyNice; // e.g., -20 (latency-sensitive, shorter slice) to +19 (throughput-oriented, longer slice)
+// ThreadData would then access this via fThread->fLatencyNice.
+// New syscalls like _user_set_latency_nice() and _user_get_latency_nice() would be required.
+// The scheduler_calculate_eevdf_slice() function would use this fLatencyNice
+// to adjust the base slice duration.
 
 #include "EevdfRunQueue.h" // For EevdfRunQueueLink
 
@@ -90,6 +97,8 @@ public:
 	inline	bigtime_t	VirtualRuntime() const;
 	inline	void		SetVirtualRuntime(bigtime_t runtime);
 	inline	void		AddVirtualRuntime(bigtime_t runtimeAmount);
+	inline	int8		LatencyNice() const;
+	inline	void		SetLatencyNice(int8 nice);
 
 	// --- State and Lifecycle ---
 	// Called when a thread continues to be ready/running.
@@ -212,6 +221,7 @@ private:
 			bigtime_t	fEligibleTime;
 			bigtime_t	fSliceDuration;
 			bigtime_t	fVirtualRuntime;
+			int8		fLatencyNice;     // Latency preference (-20 to +19)
 			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue
 };
 
@@ -409,6 +419,8 @@ inline void ThreadData::SetSliceDuration(bigtime_t duration) { fSliceDuration = 
 inline bigtime_t ThreadData::VirtualRuntime() const { return fVirtualRuntime; }
 inline void ThreadData::SetVirtualRuntime(bigtime_t runtime) { fVirtualRuntime = runtime; }
 inline void ThreadData::AddVirtualRuntime(bigtime_t runtimeAmount) { fVirtualRuntime += runtimeAmount; }
+inline int8 ThreadData::LatencyNice() const { return fLatencyNice; }
+inline void ThreadData::SetLatencyNice(int8 nice) { fLatencyNice = nice; }
 
 
 // --- State and Lifecycle ---

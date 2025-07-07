@@ -70,7 +70,7 @@ CPUEntry::CPUEntry()
 	:
 	// fMlfqHighestNonEmptyLevel is removed.
 	fIdleThread(NULL), // Initialize fIdleThread
-	fMinVirtualRuntime(0), // Initialize fMinVirtualRuntime
+	fMinVirtualRuntime(0), // Initialize fMinVirtualRuntime. Will be updated by global_min_vruntime.
 	fLoad(0),
 	fInstantaneousLoad(0.0f),
 	fInstLoadLastUpdateTimeSnapshot(0),
@@ -142,26 +142,34 @@ CPUEntry::Stop()
 void
 CPUEntry::_UpdateMinVirtualRuntime()
 {
-	// SCHEDULER_ENTER_FUNCTION() // Already in a scheduler function
+	// Must be called with fQueueLock held.
 	ASSERT(fQueueLock.IsOwnedByCurrentThread());
-	ThreadData* currentMin = fEevdfRunQueue.PeekMinimum();
-	if (currentMin != NULL) {
-		fMinVirtualRuntime = currentMin->VirtualRuntime();
+
+	bigtime_t oldLocalMinVR = fMinVirtualRuntime; // For tracing and as the "sticky" value
+	bigtime_t localAnchorVR;
+
+	ThreadData* head = fEevdfRunQueue.PeekMinimum();
+	if (head != NULL && !head->IsIdle()) {
+		localAnchorVR = head->VirtualRuntime();
 	} else {
-		// When the queue is empty, how to set min_vruntime?
-		// Option 1: 0. New threads will start at 0 relative to this.
-		// Option 2: A global periodically advancing vruntime (like CFS's cfs_rq->min_vruntime).
-		// Option 3: Keep the last known min_vruntime.
-		// For now, using 0. This means a new thread on an idle CPU starts fresh.
-		// If a global base vruntime is introduced later, this could be set to that.
-		// It could also be set to a high value to ensure any new thread starts "before" it,
-		// or to the vruntime of the idle thread if that's meaningful.
-		// For now, 0 is simplest if new threads are max(thread_vruntime, queue_min_vruntime).
-		fMinVirtualRuntime = 0;
-		// Alternative: fMinVirtualRuntime = fIdleThread != NULL ? fIdleThread->VirtualRuntime() : 0;
-		// However, idle thread vruntime is usually not part of the main fair scheduling.
+		// Queue is empty or only has idle thread. The anchor is the vruntime
+		// of the last non-idle task that ran, which is already in fMinVirtualRuntime (oldLocalMinVR).
+		localAnchorVR = oldLocalMinVR;
 	}
-	TRACE_SCHED("CPUEntry %" B_PRId32 ": Updated fMinVirtualRuntime to %" B_PRId64 "\n", ID(), fMinVirtualRuntime);
+
+	// These are defined in scheduler.cpp
+	extern bigtime_t gGlobalMinVirtualRuntime;
+	extern spinlock gGlobalMinVRuntimeLock;
+
+	InterruptsSpinLocker globalLock(gGlobalMinVRuntimeLock);
+	bigtime_t currentGlobalMin = gGlobalMinVirtualRuntime;
+	globalLock.Unlock();
+
+	fMinVirtualRuntime = max_c(localAnchorVR, currentGlobalMin);
+
+	TRACE_SCHED_CPU("CPUEntry %" B_PRId32 ": _UpdateMinVirtualRuntime: new fMinVR %" B_PRId64
+		" (wasOldLocalMinVR %" B_PRId64 ", localAnchorVR %" B_PRId64 ", globalMin %" B_PRId64 ")\n",
+		ID(), fMinVirtualRuntime, oldLocalMinVR, localAnchorVR, currentGlobalMin);
 }
 
 
@@ -1031,9 +1039,12 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 /* static */ void
 DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 {
-	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInQueue: %" B_PRId32 ", MinVRuntime: %" B_PRId64 "):\n",
-		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetTotalThreadCount(), cpu->MinVirtualRuntime());
-	kprintf("  Idle Thread: %p (ID: %" B_PRId32 ")\n", cpu->fIdleThread ? cpu->fIdleThread->GetThread() : NULL, cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1);
+	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInRunQueue: %" B_PRId32 ", MinVRuntime: %" B_PRId64 "):\n",
+		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetEevdfRunQueue().Count(),
+		cpu->MinVirtualRuntime());
+	kprintf("  (CPU TotalReportedThreads: %" B_PRId32 ", Idle Thread ID: %" B_PRId32 ")\n",
+		cpu->GetTotalThreadCount(),
+		cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1);
 
 	cpu->LockRunQueue();
 	// Use a non-const reference to be able to PopMinimum
@@ -1041,16 +1052,21 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 	if (queue.IsEmpty()) {
 		kprintf("  Run queue is empty.\n");
 	} else {
-		kprintf("  thread      id      virt_deadline   lag         elig_time   slice_dur   virt_runtime name\n");
+		kprintf("  %-18s %-7s %-15s %-11s %-11s %-11s %-12s %s\n",
+			"Thread*", "ID", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Name");
+		kprintf("  ----------------------------------------------------------------------------------------------------------\n");
 
-		const int maxToDump = 5;
-		ThreadData* dumpedThreads[maxToDump];
-		int numDumped = 0;
+		const int MAX_THREADS_TO_DUMP_PER_CPU = 128; // Max threads we'll pull out for dumping
+		ThreadData* dumpedThreads[MAX_THREADS_TO_DUMP_PER_CPU];
+		int numActuallyDumped = 0;
+		int totalInQueueOriginally = queue.Count();
 
-		for (int i = 0; i < maxToDump && !queue.IsEmpty(); ++i) {
+		for (int i = 0; i < MAX_THREADS_TO_DUMP_PER_CPU && !queue.IsEmpty(); ++i) {
 			ThreadData* td = queue.PopMinimum();
-			if (td == NULL) break;
-			dumpedThreads[numDumped++] = td;
+			if (td == NULL) // Should not happen if IsEmpty() was false
+				break;
+
+			dumpedThreads[numActuallyDumped++] = td;
 
 			Thread* t = td->GetThread();
 			kprintf("  %p  %-7" B_PRId32 " %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %s\n",
@@ -1058,15 +1074,27 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 				td->SliceDuration(), td->VirtualRuntime(), t->name);
 		}
 
-		// Re-add popped threads
-		for (int i = 0; i < numDumped; ++i) {
+		// Re-add all popped threads
+		for (int i = 0; i < numActuallyDumped; ++i) {
 			queue.Add(dumpedThreads[i]);
 		}
-		// _UpdateMinVirtualRuntime will be called by Add if needed.
 
-		if (queue.Count() > numDumped) {
-			kprintf("  (... and %" B_PRId32 " more threads in queue ...)\n", queue.Count() - numDumped);
+		// After re-adding, ensure fMinVirtualRuntime is correct.
+		// EevdfRunQueue::Add calls _UpdateMinVirtualRuntime if the new item is the head
+		// or if the queue was empty. Calling it here ensures it's updated
+		// even if the re-additions didn't trigger it sufficiently (e.g. if multiple
+		// threads had same VD and heap order changed).
+		if (!queue.IsEmpty()) {
+			cpu->_UpdateMinVirtualRuntime();
 		}
+
+		if (totalInQueueOriginally > numActuallyDumped) {
+			kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
+				numActuallyDumped, totalInQueueOriginally);
+		}
+		kprintf("  ----------------------------------------------------------------------------------------------------------\n");
+		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ".\n",
+			numActuallyDumped, queue.Count());
 	}
 	cpu->UnlockRunQueue();
 }

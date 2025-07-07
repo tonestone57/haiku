@@ -236,6 +236,9 @@ _find_idle_cpu_on_core(CoreEntry* core)
 static timer sLoadBalanceTimer;
 static const bigtime_t kLoadBalanceCheckInterval = 100000;
 static const bigtime_t kMinTimeBetweenMigrations = 20000;
+// Factor by which the benefit score of a likely I/O-bound thread is divided,
+// making it more reluctant to migrate.
+static const int32 kIOBoundScorePenaltyFactor = 2;
 
 
 void
@@ -1720,9 +1723,9 @@ scheduler_perform_load_balance()
 		if (candidate->IsLikelyIOBound()) {
 			// Don't penalize if it has strong affinity to an idle core, let affinity win.
 			if (affinityBonus == 0) {
-				currentBenefitScore /= 2; // Example: Halve the benefit score
-				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 "\n",
-					candidate->GetThread()->id, currentBenefitScore);
+				currentBenefitScore /= kIOBoundScorePenaltyFactor;
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
+					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
 			} else {
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity, score not reduced.\n",
 					candidate->GetThread()->id);

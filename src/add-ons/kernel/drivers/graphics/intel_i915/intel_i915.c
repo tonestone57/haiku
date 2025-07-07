@@ -215,6 +215,20 @@ extern "C" status_t init_driver(void) {
 		current_dev_info->rcs0 = NULL;
 		current_dev_info->rps_state = NULL;
 
+		// Initialize DPLL states
+		for (int k = 0; k < MAX_HW_DPLLS; k++) {
+			current_dev_info->dplls[k].is_in_use = false;
+			current_dev_info->dplls[k].user_pipe = PRIV_PIPE_INVALID;
+			current_dev_info->dplls[k].user_port = PRIV_PORT_ID_NONE;
+			current_dev_info->dplls[k].programmed_freq_khz = 0;
+		}
+
+		// Initialize Transcoder states
+		for (int k = 0; k < PRIV_MAX_TRANSCODERS; k++) {
+			current_dev_info->transcoders[k].is_in_use = false;
+			current_dev_info->transcoders[k].user_pipe = PRIV_PIPE_INVALID;
+		}
+
 		for (int k = 0; k < PRIV_MAX_PIPES; ++k) {
 			current_dev_info->framebuffer_bo[k] = NULL;
 			current_dev_info->framebuffer_gtt_offset_pages[k] = (uint32_t)-1;

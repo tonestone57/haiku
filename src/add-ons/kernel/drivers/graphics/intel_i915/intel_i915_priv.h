@@ -616,8 +616,29 @@ typedef struct intel_i915_device_info {
 	int32					hpd_events_head;     // Index for next event to write
 	int32					hpd_events_tail;     // Index for next event to read
 	int32					hpd_queue_capacity;  // Max number of events in queue
-	// hotplug_work and hotplug_retry_timer are already part of i915_device_info (from FreeBSD)
-	// No separate HPD thread or semaphore; will use the existing work_arg system.
+	// Note: hotplug_work and hotplug_retry_timer are already part of this struct
+	// (likely via an embedded drm_device or similar structure from FreeBSD heritage).
+
+	// --- Resource Tracking for Multi-Monitor ---
+	#define MAX_HW_DPLLS 4 // Max DPLLs on typical relevant hardware (e.g., SKL/KBL often have DPLL0-3)
+	                        // Adjust if specific platforms have more/less (e.g. TGL has more Combo PHYs)
+	struct dpll_state {
+		bool			is_in_use;
+		enum pipe_id_priv user_pipe;      // Which logical pipe is currently using this DPLL.
+		enum intel_port_id_priv user_port; // Which logical port is associated with this DPLL usage.
+		uint32_t		programmed_freq_khz; // Current frequency it's programmed to.
+		// uint8_t		hw_dpll_id;       // Hardware ID if different from array index (e.g. DPLL_0, DPLL_1).
+		// bool			is_shared_dpll;   // If this DPLL can be shared under certain conditions.
+	} dplls[MAX_HW_DPLLS];
+
+	// Transcoders are typically one per pipe (A, B, C) plus dedicated ones (EDP, DSI).
+	// PRIV_MAX_TRANSCODERS is already defined and sized for this.
+	struct transcoder_state {
+		bool			is_in_use;
+		enum pipe_id_priv user_pipe; // Which logical pipe is currently using this transcoder.
+		// display_mode	current_mode; // Could store mode for which this transcoder is configured.
+	} transcoders[PRIV_MAX_TRANSCODERS];
+	// --- End Resource Tracking ---
 
 } intel_i915_device_info;
 
@@ -713,6 +734,79 @@ void i915_queue_hpd_event(struct i915_device* dev, i915_hpd_line_identifier hpd_
 // i915_handle_hotplug_event will be static within the HPD handling implementation file.
 status_t i915_init_hpd_handling(struct i915_device* dev);
 void i915_uninit_hpd_handling(struct i915_device* dev);
+
+// --- DPLL Management Function Declarations (for clocks.c) ---
+// Placeholder for SKL+ DPLL parameters. Actual struct needs PRM details.
+typedef struct skl_dpll_params {
+	uint32_t link_rate_idx; // Index into link rate tables (e.g., SKL_DPLL_CTRL1_xxx)
+	// Add other necessary parameters for CFGCR1/CFGCR2 for SKL,
+	// or different params for TGL combo PHYs.
+	uint32_t dco_integer;
+	uint32_t dco_fraction;
+	uint32_t qdiv_ratio;
+	uint32_t qdiv_mode; // bool: true for fractional
+	uint32_t kdiv;      // KDIV_1, _2, _3
+	uint32_t pdiv;      // PDIV_1, _2, _3, _5, _7
+	uint32_t central_freq; // Central frequency selection
+} skl_dpll_params;
+
+// Returns a hardware DPLL ID (0 to MAX_HW_DPLLS-1) or a negative error code.
+int i915_get_dpll_for_port(struct intel_i915_device_info* dev,
+                           enum intel_port_id_priv port_id,
+                           enum pipe_id_priv target_pipe,
+                           uint32_t required_freq_khz,
+                           const intel_clock_params_t* current_clock_params);
+
+// Releases a previously acquired DPLL.
+void i915_release_dpll(struct intel_i915_device_info* dev, int dpll_id, enum intel_port_id_priv port_id);
+
+// Programs a specific SKL+ style DPLL.
+status_t i915_program_skl_dpll(struct intel_i915_device_info* dev,
+                               int dpll_id, /* Hardware DPLL index: 0, 1, 2, 3 */
+                               const skl_dpll_params* params);
+
+// Enables or disables a SKL+ style DPLL and configures its routing to a DDI port.
+status_t i915_enable_skl_dpll(struct intel_i915_device_info* dev,
+                              int dpll_id, enum intel_port_id_priv port_id, bool enable);
+// TODO: Add similar function prototypes for TGL+ combo PHY PLLs.
+// --- End DPLL Management ---
+
+// --- Transcoder Management Function Declarations (for display.c) ---
+/**
+ * Selects and reserves a hardware transcoder for a given logical pipe.
+ * @param dev The i915 device structure.
+ * @param pipe The logical pipe_id_priv requesting a transcoder.
+ * @param selected_transcoder Output: The transcoder_id_priv assigned.
+ * @return B_OK on success, error code on failure (e.g., no available transcoder).
+ * TODO: Needs robust logic for GEN-specific mappings (Pipe->Trans, eDP/DSI transcoders)
+ *       and conflict resolution if a transcoder is already in use unexpectedly.
+ */
+status_t i915_get_transcoder_for_pipe(struct intel_i915_device_info* dev,
+                                      enum pipe_id_priv pipe,
+                                      enum transcoder_id_priv* selected_transcoder);
+
+/**
+ * Releases a previously acquired transcoder.
+ * @param dev The i915 device structure.
+ * @param transcoder_to_release The transcoder_id_priv to release.
+ */
+void i915_release_transcoder(struct intel_i915_device_info* dev,
+                                enum transcoder_id_priv transcoder_to_release);
+
+/**
+ * Checks if the proposed combination of active display modes exceeds known
+ * hardware bandwidth limitations (memory, DDI link, etc.).
+ * @param dev The i915 device structure.
+ * @param num_active_pipes The number of displays intended to be active.
+ * @param pipe_configs Array of per-pipe configurations from shared_info, containing target modes.
+ * @return B_OK if bandwidth seems sufficient, B_UNSUPPORTED or specific error if limits exceeded.
+ * TODO: This is a complex calculation requiring PRM data for each GEN. Currently a STUB.
+ */
+status_t i915_check_display_bandwidth(struct intel_i915_device_info* dev,
+                                      uint32 num_active_pipes,
+                                      const struct intel_i915_shared_info::per_pipe_display_info_accel pipe_configs[]);
+// --- End Transcoder Management ---
+
 
 // Structure for INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (add this IOCTL to enum in accelerant.h too)
 struct i915_display_change_event_ioctl_data {

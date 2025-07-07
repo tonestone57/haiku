@@ -291,6 +291,146 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	return B_OK;
 }
 
+
+// --- DPLL Management Stubs (SKL+ and newer) ---
+
+/**
+ * Finds and reserves an available hardware DPLL for a given DDI port and frequency.
+ * This is a complex function that needs to consider VBT data for port-DPLL compatibility,
+ * current DPLL usage, and whether DPLLs can be shared.
+ *
+ * TODO: Full implementation requires detailed PRM lookup for each platform (SKL, KBL, CFL, ICL, TGL etc.)
+ *       to understand DPLL capabilities, sharing rules, and VBT DDI-DPLL mapping.
+ *
+ * @param dev The i915 device private structure.
+ * @param port_id The logical DDI port (_PRIV_PORT_A, _B, etc.) needing the clock.
+ * @param target_pipe The logical pipe that will be driving this port.
+ * @param required_freq_khz The target pixel clock or symbol clock required.
+ * @param current_clock_params Provides context like if it's DP or HDMI.
+ * @return Hardware DPLL ID (0 to MAX_HW_DPLLS-1) on success, negative error code on failure.
+ */
+int
+i915_get_dpll_for_port(struct intel_i915_device_info* dev,
+	enum intel_port_id_priv port_id, enum pipe_id_priv target_pipe,
+	uint32_t required_freq_khz, const intel_clock_params_t* current_clock_params)
+{
+	TRACE("i915_get_dpll_for_port: Port %d, Pipe %d, Freq %u kHz (STUB)\n",
+		port_id, target_pipe, required_freq_khz);
+
+	// Extremely simplified stub: Try to find any unused DPLL.
+	// Real logic would check VBT for port-to-DPLL mapping, frequency capabilities of DPLL,
+	// and sharing possibilities.
+	if (INTEL_GRAPHICS_GEN(dev->runtime_caps.device_id) >= 9) { // SKL+
+		for (int i = 0; i < MAX_HW_DPLLS; i++) {
+			if (!dev->dplls[i].is_in_use) {
+				dev->dplls[i].is_in_use = true;
+				dev->dplls[i].user_pipe = target_pipe;
+				dev->dplls[i].user_port = port_id;
+				dev->dplls[i].programmed_freq_khz = 0; // Mark as not yet programmed
+				TRACE("i915_get_dpll_for_port: Assigning STUB DPLL ID %d to port %d\n", i, port_id);
+				return i; // Return array index as DPLL ID
+			}
+		}
+		ERROR("i915_get_dpll_for_port: No free DPLLs found (STUB logic)!\n");
+		return -1; // B_NO_MEMORY or B_ERROR or custom error
+	}
+	// For older gens like HSW/IVB, DPLLs are more fixed per pipe, handled by existing logic.
+	TRACE("i915_get_dpll_for_port: No SKL+ style DPLL management for this GEN (%d).\n", INTEL_GRAPHICS_GEN(dev->runtime_caps.device_id));
+	return -1; // Or return a specific DPLL based on pipe for older gens if needed here.
+}
+
+/**
+ * Releases a DPLL that was previously acquired by i915_get_dpll_for_port.
+ */
+void
+i915_release_dpll(struct intel_i915_device_info* dev, int dpll_id, enum intel_port_id_priv port_id)
+{
+	TRACE("i915_release_dpll: Releasing DPLL ID %d (used by port %d) (STUB)\n", dpll_id, port_id);
+	if (INTEL_GRAPHICS_GEN(dev->runtime_caps.device_id) >= 9) {
+		if (dpll_id >= 0 && dpll_id < MAX_HW_DPLLS) {
+			if (dev->dplls[dpll_id].is_in_use && dev->dplls[dpll_id].user_port == port_id) {
+				dev->dplls[dpll_id].is_in_use = false;
+				dev->dplls[dpll_id].user_pipe = PRIV_PIPE_INVALID;
+				dev->dplls[dpll_id].user_port = PRIV_PORT_ID_NONE;
+				dev->dplls[dpll_id].programmed_freq_khz = 0;
+				// TODO: Potentially power down the hardware DPLL if no other port shares it.
+			} else {
+				ERROR("i915_release_dpll: Attempt to release DPLL %d not in use by port %d or invalid.\n", dpll_id, port_id);
+			}
+		} else {
+			ERROR("i915_release_dpll: Invalid DPLL ID %d.\n", dpll_id);
+		}
+	}
+}
+
+/**
+ * Programs a specific SKL+ style DPLL with given parameters.
+ * TODO: Full implementation requires PRM details for SKL_DPLLx_CFGCR1, SKL_DPLLx_CFGCR2 registers.
+ */
+status_t
+i915_program_skl_dpll(struct intel_i915_device_info* dev,
+	int dpll_id, /* Hardware DPLL index: 0, 1, 2, 3 */
+	const skl_dpll_params* params)
+{
+	TRACE("i915_program_skl_dpll: Programming DPLL ID %d (STUB)\n", dpll_id);
+	if (INTEL_GRAPHICS_GEN(dev->runtime_caps.device_id) < 9)
+		return B_UNSUPPORTED;
+	if (dpll_id < 0 || dpll_id >= MAX_HW_DPLLS || params == NULL)
+		return B_BAD_VALUE;
+
+	// Example register access (actual registers are different for SKL DPLL0 vs DPLL1/2/3)
+	// uint32_t cfgcr1_reg = SKL_DPLL_CFGCR1(dpll_id); // Macro needed
+	// uint32_t cfgcr1_val = 0;
+	// cfgcr1_val |= params->dco_integer;
+	// cfgcr1_val |= (params->dco_fraction << SKL_DCO_FRACTION_SHIFT);
+	// ... other params for CFGCR1 and CFGCR2 ...
+	// intel_i915_write32(dev, cfgcr1_reg, cfgcr1_val);
+	// intel_i915_write32(dev, SKL_DPLL_CFGCR2(dpll_id), ...);
+
+	dev->dplls[dpll_id].programmed_freq_khz = 0; // TODO: Store actual freq based on params
+	TRACE("TODO: Actual SKL DPLL %d programming logic needed using PRM.\n", dpll_id);
+	return B_OK; // Placeholder
+}
+
+/**
+ * Enables or disables a SKL+ style DPLL and configures its routing to a DDI port.
+ * TODO: Full implementation requires PRM details for SKL_DPLL_ENABLE, SKL_DPLL_CTRL1/2 registers.
+ */
+status_t
+i915_enable_skl_dpll(struct intel_i915_device_info* dev,
+	int dpll_id, enum intel_port_id_priv port_id, bool enable)
+{
+	TRACE("i915_enable_skl_dpll: %s DPLL ID %d for Port %d (STUB)\n",
+		enable ? "Enabling" : "Disabling", dpll_id, port_id);
+	if (INTEL_GRAPHICS_GEN(dev->runtime_caps.device_id) < 9)
+		return B_UNSUPPORTED;
+	if (dpll_id < 0 || dpll_id >= MAX_HW_DPLLS)
+		return B_BAD_VALUE;
+
+	// 1. Program SKL_DPLL_CTRL1 to map this dpll_id to the target port_id's DDI.
+	//    This involves reading SKL_DPLL_CTRL1, clearing bits for the target port,
+	//    and setting new bits to link it to dpll_id.
+	//    Example: port_id PRIV_PORT_A maps to DDI A.
+	//    uint32_t ctrl1 = intel_i915_read32(dev, SKL_DPLL_CTRL1);
+	//    ctrl1 &= ~SKL_DPLL_CTRL1_DDI_A_MASK; // Mask for DDI A's DPLL select
+	//    if (enable) ctrl1 |= SKL_DPLL_CTRL1_DDI_A_MAP_DPLL(dpll_id);
+	//    intel_i915_write32(dev, SKL_DPLL_CTRL1, ctrl1);
+
+	// 2. Enable/Disable the DPLL itself via LCPLL_CTL like registers (e.g., DPLL_ENABLE(dpll_id))
+	//    uint32_t dpll_enable_reg = DPLL_ENABLE_REG(dpll_id); // Macro needed
+	//    uint32_t val = intel_i915_read32(dev, dpll_enable_reg);
+	//    if (enable) val |= DPLL_POWER_ON_BIT | DPLL_PLL_ON_BIT;
+	//    else val &= ~(DPLL_POWER_ON_BIT | DPLL_PLL_ON_BIT);
+	//    intel_i915_write32(dev, dpll_enable_reg, val);
+	//    if (enable) { /* ... poll for lock ... */ }
+
+	TRACE("TODO: Actual SKL DPLL %d enable/disable and routing for port %d logic needed using PRM.\n", dpll_id, port_id);
+	return B_OK; // Placeholder
+}
+
+// --- End DPLL Management Stubs ---
+
+
 status_t
 intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_params_t* clocks)
 {

@@ -25,7 +25,19 @@
 #define SCHEDULER_TARGET_LATENCY		20000		// Target latency for a scheduling period (e.g., 20ms)
 #define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs before preemption (e.g., 1ms)
 #define SCHEDULER_WEIGHT_SCALE			1024		// Scale factor for weights
-#define SCHEDULER_NICE_TO_WEIGHT(nice)	(SCHEDULER_WEIGHT_SCALE / (1 << (nice))) // Example mapping
+
+static inline int32 scheduler_priority_to_weight(int32 priority) {
+	if (priority < B_LOWEST_ACTIVE_PRIORITY) return SCHEDULER_WEIGHT_SCALE >> 4;
+	if (priority >= B_MAX_REAL_TIME_PRIORITY) return SCHEDULER_WEIGHT_SCALE << 2;
+
+	int relativePriority = priority - B_NORMAL_PRIORITY;
+	int shift = relativePriority / 5;
+
+	if (shift >= 0)
+		return SCHEDULER_WEIGHT_SCALE << shift;
+	else
+		return SCHEDULER_WEIGHT_SCALE >> (-shift);
+}
 
 
 #include <OS.h>
@@ -33,7 +45,7 @@
 #include <AutoDeleter.h>
 #include <cpu.h>
 #include <debug.h>
-#include <interrupts.h> // For assign_io_interrupt_to_cpu
+#include <interrupts.h>
 #include <kernel.h>
 #include <kscheduler.h>
 #include <listeners.h>
@@ -42,9 +54,8 @@
 #include <timer.h>
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
-#include <algorithm> // For std::swap (was <util/Algorithm.h>)
+#include <algorithm>
 
-// For strtod in debugger command
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -73,15 +84,11 @@ scheduler_mode_operations* gCurrentMode;
 bool gSingleCore;
 bool gTrackCoreLoad;
 bool gTrackCPULoad;
-float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // May become less relevant or repurposed
+float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
 
-// EEVDF does not use these MLFQ multipliers directly.
-// float gSchedulerBaseQuantumMultiplier = 1.0f;
-// float gSchedulerAgingThresholdMultiplier = 1.0f;
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
-// IRQ balancing parameters
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
 int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
@@ -108,24 +115,19 @@ static scheduler_mode_operations* sSchedulerModes[] = {
 static int32* sCPUToCore;
 static int32* sCPUToPackage;
 
-// Forward declaration for EEVDF enqueue helper
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
-
-static void scheduler_perform_load_balance(); // Load balancing logic will need EEVDF adaptation
+static void scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
 
-// Proactive IRQ balancing (can likely remain, may need tuning)
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
 static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad);
 
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
 
-// Debugger command forward declarations
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
 #endif
-// KDF might be less relevant or repurposed for EEVDF slice calculation
 static int cmd_scheduler_set_kdf(int argc, char** argv);
 static int cmd_scheduler_get_kdf(int argc, char** argv);
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
@@ -137,55 +139,36 @@ static const bigtime_t kLoadBalanceCheckInterval = 100000;
 static const bigtime_t kMinTimeBetweenMigrations = 20000;
 
 
-// These MLFQ specific functions are obsolete with EEVDF
-/*
-static inline bigtime_t
-get_mode_adjusted_base_quantum(int mlfqLevel) {
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	return (bigtime_t)(kBaseQuanta[mlfqLevel] * gSchedulerBaseQuantumMultiplier);
-}
-
-static inline bigtime_t
-get_mode_adjusted_aging_threshold(int mlfqLevel) {
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	if (mlfqLevel == 0) return 0;
-	return (bigtime_t)(kAgingThresholds[mlfqLevel] * gSchedulerAgingThresholdMultiplier);
-}
-*/
-
-
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
 {
 	Thread* t = thread->GetThread();
 	CPUEntry* targetCPU = NULL;
 	CoreEntry* targetCore = NULL;
-	thread->ChooseCoreAndCPU(targetCore, targetCPU); // This logic might need EEVDF adjustments later
+	thread->ChooseCoreAndCPU(targetCore, targetCPU);
 	ASSERT(targetCPU != NULL);
 	ASSERT(targetCore != NULL);
 
-	// TODO EEVDF: Initialize/update EEVDF parameters for the thread before enqueueing.
-	// This is similar to what scheduler_enqueue_in_run_queue will do.
-	// For ThreadEnqueuer (used by RemoveCPU), it's re-homing existing threads.
-	// Their existing EEVDF params might be largely valid, but vruntime might need
-	// adjustment relative to the new queue. For now, direct enqueue.
-	// A simplified parameter update for re-homed threads:
 	if (!thread->IsIdle()) {
-		// Recalculate slice duration based on current priority
 		thread->SetSliceDuration( ThreadData::GetBaseQuantumForLevel(
 			ThreadData::MapPriorityToMLFQLevel(thread->GetBasePriority())));
-			// Still using MLFQ mapping for slice duration approximation.
 
-		// VRuntime should ideally be adjusted based on new queue's min_vruntime.
-		// thread->SetVirtualRuntime(new_queue_min_vruntime); // Placeholder
+		targetCPU->LockRunQueue();
+		bigtime_t queueMinVruntime = targetCPU->MinVirtualRuntime();
+		targetCPU->UnlockRunQueue();
+		thread->SetVirtualRuntime(max_c(thread->VirtualRuntime(), queueMinVruntime));
 
-		// Lag might need recalculation if vruntime changes significantly.
-		// Eligible time and deadline depend on lag and slice duration.
+		int32 weight = scheduler_priority_to_weight(thread->GetBasePriority());
+		if (weight <= 0) weight = 1;
+		bigtime_t weightedSlice = (thread->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
+		thread->SetLag(weightedSlice - (thread->VirtualRuntime() - queueMinVruntime));
+
 		if (thread->Lag() >= 0) {
 			thread->SetEligibleTime(system_time());
 		} else {
-			// Placeholder: make eligible soon if lag is negative
-			thread->SetEligibleTime(system_time() + SCHEDULER_MIN_GRANULARITY);
+            bigtime_t delay = (-thread->Lag() * weight) / SCHEDULER_WEIGHT_SCALE;
+            delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+			thread->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 		}
 		thread->SetVirtualDeadline(thread->EligibleTime() + thread->SliceDuration());
 	}
@@ -207,15 +190,12 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core)
 	SCHEDULER_ENTER_FUNCTION();
 	ThreadData* threadData = thread->scheduler_data;
 
-	// MLFQ level is no longer relevant for EEVDF.
-	// int mlfqLevel = threadData->CurrentMLFQLevel();
-
-	T(EnqueueThread(thread, threadData->GetEffectivePriority())); // Trace with effective priority
+	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
 	TRACE("enqueue_thread_on_cpu_eevdf: thread %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ") onto CPU %" B_PRId32 "\n",
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->AddThread(threadData); // AddThread signature changed for EEVDF
+	cpu->AddThread(threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -224,15 +204,15 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core)
 	bool invokeScheduler = false;
 
 	if (currentThreadOnTarget == NULL || thread_is_idle_thread(currentThreadOnTarget)) {
-		// Target CPU is idle or running its idle thread, so a reschedule is needed.
 		invokeScheduler = true;
 	} else {
 		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
-		// EEVDF Preemption:
-		// Reschedule if the new thread has an earlier virtual deadline than the
-		// currently running thread on the target CPU, and the new thread is eligible.
-		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime() || threadData->Lag() >= 0);
+		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime());
 		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline()) {
+			TRACE("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
+				thread->id, threadData->VirtualDeadline(),
+				currentThreadOnTarget->id, currentThreadDataOnTarget->VirtualDeadline(),
+				cpu->ID());
 			invokeScheduler = true;
 		}
 	}
@@ -265,70 +245,53 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	ASSERT(threadData->Core() == targetCore && "ThreadData's core must match targetCore after ChooseCoreAndCPU");
 
 	if (thread_is_idle_thread(thread)) {
-		// Idle threads are special. They don't go into the EEVDF run queue in the same way.
-		// Their context (ThreadData) is primarily for tracking and being picked when no other work.
-		// CPUEntry::SetIdleThread should have been called during init.
-		// No further EEVDF param init needed here for idle threads.
-		// They don't get "enqueued" in the EEVDF sense.
 		TRACE("scheduler_enqueue_in_run_queue (EEVDF): idle thread %" B_PRId32 " not added to EEVDF queue.\n", thread->id);
-		// Ensure its state is B_THREAD_READY if it was, e.g., waiting for boot tasks.
-		if (thread->state != B_THREAD_RUNNING) // If it's already running, don't change state.
+		if (thread->state != B_THREAD_RUNNING)
 			thread->state = B_THREAD_READY;
 		return;
 	}
 
-
-	// Initialize/Update EEVDF parameters for the waking/new thread
-	// 1. Slice Duration: Based on priority/latency-nice.
-	//    TODO EEVDF: Introduce latency-nice and use it here.
-	//    For now, use a base quantum derived from priority.
 	threadData->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
 		ThreadData::MapPriorityToMLFQLevel(threadData->GetBasePriority())));
-		// Using MLFQ mapping temporarily for slice duration approximation.
 
-	// 2. Virtual Runtime:
-	//    Set relative to the target runqueue's state.
-	//    If the queue is empty, vruntime can start at 0 or a global base.
-	//    If not empty, set to current min_vruntime of the queue.
-	bigtime_t queueMinVruntime = 0;
+	bigtime_t queueMinVruntime;
 	targetCPU->LockRunQueue();
-	ThreadData* top = targetCPU->GetEevdfRunQueue().PeekMinimum();
-	if (top != NULL) {
-		// A common practice is to set new thread's vruntime to max of its current
-		// vruntime and queue's min_vruntime to prevent it from unfairly preempting
-		// everything if its vruntime was very low (e.g. long sleep).
-		// Or simply set to queue_min_vruntime if it was 0 (new thread).
-		queueMinVruntime = top->VirtualRuntime(); // This isn't strictly min_vruntime, but VD implies order
-												  // A better approach is to track min_vruntime per queue.
-												  // For now, use the vruntime of the earliest deadline thread.
-	}
+	queueMinVruntime = targetCPU->MinVirtualRuntime();
 	targetCPU->UnlockRunQueue();
 
-	// If threadData->VirtualRuntime() is 0, it's likely a new or long-slept thread.
-	// Otherwise, it might retain some vruntime.
-	if (threadData->VirtualRuntime() == 0) {
+	bool isNewToScheduler = (threadData->VirtualRuntime() == 0 && threadData->Lag() == 0); // Approximation
+
+	if (isNewToScheduler) {
 		threadData->SetVirtualRuntime(queueMinVruntime);
+		TRACE("scheduler_enqueue_in_run_queue: New thread %" B_PRId32 " vruntime set to queue min_vruntime %" B_PRId64 "\n",
+			thread->id, queueMinVruntime);
 	} else {
-		// For a waking thread, ensure its vruntime isn't too far behind.
-		threadData->SetVirtualRuntime(max_c(threadData->VirtualRuntime(), queueMinVruntime));
+		bigtime_t newVruntime = max_c(threadData->VirtualRuntime(), queueMinVruntime);
+		if (newVruntime != threadData->VirtualRuntime()) {
+			TRACE("scheduler_enqueue_in_run_queue: Waking thread %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (queue min %" B_PRId64 ")\n",
+				thread->id, threadData->VirtualRuntime(), newVruntime, queueMinVruntime);
+		}
+		threadData->SetVirtualRuntime(newVruntime);
 	}
 
+	int32 weight = scheduler_priority_to_weight(threadData->GetBasePriority());
+	if (weight <= 0) weight = 1;
+	bigtime_t weightedSliceDuration = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
 
-	// 3. Lag:
-	//    Lag = Entitlement - Service. Entitlement is related to (vruntime_now - vruntime_at_enqueue).
-	//    When a thread wakes up, its "ideal" position in virtual time needs to be established.
-	//    If we set vruntime to queueMinVruntime, its initial entitlement is small.
-	//    Reset lag to 0 for simplicity, meaning it starts with no debt or credit.
-	threadData->SetLag(0);
+	threadData->SetLag(weightedSliceDuration - (threadData->VirtualRuntime() - queueMinVruntime));
+	TRACE("scheduler_enqueue_in_run_queue: thread %" B_PRId32 " initial lag set to %" B_PRId64 " (wSlice %" B_PRId64 ", vruntime %" B_PRId64 ", qMinVRun %" B_PRId64 ")\n",
+		thread->id, threadData->Lag(), weightedSliceDuration, threadData->VirtualRuntime(), queueMinVruntime);
 
-	// 4. Eligible Time:
-	//    If lag is non-negative, eligible immediately.
-	//    If lag becomes negative (e.g., after service), EligibleTime = wall_time_now + (-Lag / ServiceRate)
-	//    Since we reset lag to 0, it's eligible now.
-	threadData->SetEligibleTime(system_time());
+	if (threadData->Lag() >= 0) {
+		threadData->SetEligibleTime(system_time());
+	} else {
+        bigtime_t delay = (-threadData->Lag() * weight) / SCHEDULER_WEIGHT_SCALE;
+        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+        TRACE("scheduler_enqueue_in_run_queue: Thread %" B_PRId32 " has negative lag %" B_PRId64 ", eligible time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
+            thread->id, threadData->Lag(), threadData->EligibleTime(), delay);
+	}
 
-	// 5. Virtual Deadline:
-	//    VirtualDeadline = EligibleTime + SliceDuration (for unweighted or weight-adjusted slice)
 	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
 
 	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
@@ -347,23 +310,14 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	TRACE("scheduler_set_thread_priority (EEVDF): thread %" B_PRId32 " to %" B_PRId32 " (old base: %" B_PRId32 ")\n",
 		thread->id, priority, oldBasePriority);
 
-	thread->priority = priority; // Update base priority
-
-	// EEVDF: Changing priority affects a thread's weight and thus its fair share.
-	// This impacts its slice_duration and how its virtual_runtime accumulates.
-	// If the thread is currently in a run queue, its position might need an update.
+	thread->priority = priority;
 
 	bool needsRequeue = false;
 	bigtime_t oldVirtualDeadline = threadData->VirtualDeadline();
 
-	// Recalculate slice_duration based on new priority.
-	// TODO EEVDF: This should also consider latency-nice.
 	threadData->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
 		ThreadData::MapPriorityToMLFQLevel(threadData->GetBasePriority())));
 
-	// Virtual deadline will change due to slice_duration change.
-	// Eligible time might also change if lag recalculation due to weight change is considered.
-	// For now, assume eligible_time is stable unless lag becomes negative.
 	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
 
 	if (threadData->VirtualDeadline() != oldVirtualDeadline) {
@@ -382,19 +336,13 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		return oldBasePriority;
 	}
 
-	// Thread is B_THREAD_READY and its EEVDF ordering key (VirtualDeadline) might have changed.
 	CPUEntry* cpu = NULL;
 	if (threadData->Core() != NULL && thread->previous_cpu != NULL
 		&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
 		cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	} else if (thread->cpu != NULL) { // Should not happen if B_THREAD_READY
+	} else if (thread->cpu != NULL) {
 		cpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
 	} else if (threadData->Core() != NULL) {
-		// If previous_cpu is NULL or on a different core, but threadData->Core() is set,
-		// it implies it was enqueued on some CPU of that core.
-		// This situation is tricky. A thread in B_THREAD_READY should normally have
-		// a valid previous_cpu that matches its core, or it's the current thread.
-		// For now, assume previous_cpu is the context if available and consistent.
 		panic("scheduler_set_thread_priority (EEVDF): Ready thread %" B_PRId32
 			" has inconsistent CPU/Core context for re-queue.", thread->id);
 	} else {
@@ -402,15 +350,11 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	}
 	ASSERT(cpu != NULL);
 
-	T(RemoveThread(thread)); // Trace event
+	T(RemoveThread(thread));
 
 	cpu->LockRunQueue();
-	if (threadData->IsEnqueued()) { // Check if it's in the EEVDF queue
-		// EevdfRunQueue::Update takes (thread, old_key_for_efficient_find_if_heap_supports_it)
-		// Our current EevdfRunQueue::Update is remove and re-add.
+	if (threadData->IsEnqueued()) {
 		cpu->GetEevdfRunQueue().Update(threadData, oldVirtualDeadline);
-		// MarkEnqueued/Dequeued are handled by CPUEntry's Add/RemoveThread if they manage it.
-		// Since EevdfRunQueue::Update does remove then add, it should be covered.
 	}
 	cpu->UnlockRunQueue();
 
@@ -506,42 +450,34 @@ reschedule(int32 nextState)
 	gCPU[thisCPUId].invoke_scheduler = false;
 
 	CPUEntry* cpu = CPUEntry::GetCPU(thisCPUId);
-	CoreEntry* core = cpu->Core(); // Will be NULL if CPUEntry not properly init'd to a core
+	CoreEntry* core = cpu->Core();
 
 	Thread* oldThread = thread_get_current_thread();
 	ThreadData* oldThreadData = oldThread->scheduler_data;
 
-	oldThreadData->StopCPUTime(); // Updates kernel_time from last_time
+	oldThreadData->StopCPUTime();
 
 	TRACE("reschedule (EEVDF): cpu %" B_PRId32 ", current thread %" B_PRId32 " (VD %" B_PRId64 ", state %s), next_state %" B_PRId32 "\n",
 		thisCPUId, oldThread->id, oldThreadData->VirtualDeadline(),
 		get_thread_state_name(oldThread->state), nextState);
 
 	oldThread->state = nextState;
-	oldThreadData->SetStolenInterruptTime(gCPU[thisCPUId].interrupt_time); // Updates fStolenTime
+	oldThreadData->SetStolenInterruptTime(gCPU[thisCPUId].interrupt_time);
 
-	// Update EEVDF parameters for oldThread based on time run
 	if (!oldThreadData->IsIdle()) {
-		// fTimeUsedInCurrentQuantum was updated by StopCPUTime via UpdateActivity called by TrackActivity
-		// and SetStolenInterruptTime.
-		// Calculate weighted runtime: actual_slice_duration * SCHEDULER_WEIGHT_SCALE / thread_weight
-		// Placeholder for weight calculation:
-		int32 weight = SCHEDULER_NICE_TO_WEIGHT(oldThreadData->GetBasePriority()); // Example
-		bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum; // This is raw time
-		bigtime_t weightedRuntime = actualRuntime; // Simplified: unweighted for now
-		if (weight > 0 && SCHEDULER_WEIGHT_SCALE > 0) {
-			// This would be the proper calculation if SCHEDULER_WEIGHT_SCALE and weight are defined
-			// weightedRuntime = (actualRuntime * SCHEDULER_WEIGHT_SCALE) / weight;
-		}
-		oldThreadData->AddVirtualRuntime(weightedRuntime);
+		bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum;
+		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+		if (weight <= 0)
+			weight = 1;
+		bigtime_t weightedRuntime = (actualRuntime * SCHEDULER_WEIGHT_SCALE) / weight;
 
-		// Update lag: Lag = Lag - ActualSliceDuration + IdealSliceDurationForPeriod
-		// ActualSliceDuration is actualRuntime.
-		// IdealSliceDurationForPeriod depends on how much its vruntime advanced compared to others.
-		// Simplified: Lag -= actualRuntime (service received)
-		//             Lag += IdealShareForThisSlice (entitlement for this slice)
-		// The entitlement part is tricky; it's tied to the slice_duration it was *supposed* to get.
-		oldThreadData->AddLag(-actualRuntime); // Subtract service received
+		oldThreadData->AddVirtualRuntime(weightedRuntime);
+		TRACE("reschedule: thread %" B_PRId32 " ran for %" B_PRId64 "us, vruntime advanced by %" B_PRId64 " (weight %" B_PRId32 ")\n",
+			oldThread->id, actualRuntime, weightedRuntime, weight);
+
+		oldThreadData->AddLag(-weightedRuntime);
+		TRACE("reschedule: thread %" B_PRId32 " lag reduced by %" B_PRId64 " (weighted actual), new lag %" B_PRId64 "\n",
+			oldThread->id, weightedRuntime, oldThreadData->Lag());
 	}
 
 
@@ -555,28 +491,33 @@ reschedule(int32 nextState)
 			bool useAffinity = !oldThreadAffinity.IsEmpty();
 
 			if (oldThreadData->IsIdle() || (useAffinity && !oldThreadAffinity.GetBit(thisCPUId))) {
-				shouldReEnqueueOldThread = false; // Idle not re-enqueued this way, or affinity mismatch
+				shouldReEnqueueOldThread = false;
 				if (!oldThreadData->IsIdle() && oldThreadData->Core() == core) {
 					oldThreadData->UnassignCore(false);
 				}
 			} else {
-				// Thread is runnable and on this CPU. Update its EEVDF params for re-queue.
-				oldThreadData->Continues(); // Updates fNeededLoad
+				oldThreadData->Continues();
 
-				// Recalculate slice_duration, add entitlement to lag, set new deadline
-				// TODO EEVDF: Proper slice duration based on latency-nice and priority.
 				oldThreadData->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
 					ThreadData::MapPriorityToMLFQLevel(oldThreadData->GetBasePriority())));
 
-				oldThreadData->AddLag(oldThreadData->SliceDuration()); // Add entitlement for next slice
+				int32 re_weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+				if (re_weight <= 0) re_weight = 1;
+				bigtime_t weightedSliceEntitlement = (oldThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / re_weight;
+				oldThreadData->AddLag(weightedSliceEntitlement);
+				TRACE("reschedule: thread %" B_PRId32 " re-enqueue, adding weighted slice %" B_PRId64 " to lag, new lag %" B_PRId64 "\n",
+					oldThread->id, weightedSliceEntitlement, oldThreadData->Lag());
 
 				if (oldThreadData->Lag() >= 0) {
 					oldThreadData->SetEligibleTime(system_time());
 				} else {
-					// TODO EEVDF: Proper eligible time for negative lag.
-					// eligible_time = now + (-lag / service_rate)
-					// service_rate is related to weight.
-					oldThreadData->SetEligibleTime(system_time() + SCHEDULER_MIN_GRANULARITY); // Placeholder
+					int32 weight_for_delay = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+					if (weight_for_delay <= 0) weight_for_delay = 1;
+					bigtime_t delay = (-oldThreadData->Lag() * weight_for_delay) / SCHEDULER_WEIGHT_SCALE;
+					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+					oldThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+					TRACE("reschedule: Thread %" B_PRId32 " re-enqueue has negative lag %" B_PRId64 ", eligible time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
+						oldThread->id, oldThreadData->Lag(), oldThreadData->EligibleTime(), delay);
 				}
 				oldThreadData->SetVirtualDeadline(oldThreadData->EligibleTime() + oldThreadData->SliceDuration());
 			}
@@ -586,53 +527,43 @@ reschedule(int32 nextState)
 			oldThreadData->Dies();
 			shouldReEnqueueOldThread = false;
 			break;
-		default: // Sleeping, waiting, etc.
+		default:
 			oldThreadData->GoesAway();
 			shouldReEnqueueOldThread = false;
 			break;
 	}
-	oldThread->has_yielded = false; // EEVDF doesn't use yield in the same way as MLFQ demotion
+	oldThread->has_yielded = false;
 
-	// MLFQ demotion logic is removed.
 
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue();
 
 	if (gCPU[thisCPUId].disabled) {
 		if (oldThread->cpu == &gCPU[thisCPUId] && oldThreadData->IsEnqueued() && !oldThreadData->IsIdle()) {
-			// oldThreadData->IsEnqueued() might be tricky with EEVDF queue
-			// This assumes RemoveThread handles the fEevdfRunQueue correctly
 			cpu->RemoveThread(oldThreadData);
-			oldThreadData->MarkDequeued(); // Ensure state is consistent
+			oldThreadData->MarkDequeued();
 		}
 		nextThreadData = cpu->PeekIdleThread();
 		if (nextThreadData == NULL)
 			panic("reschedule (EEVDF): No idle thread found on disabling CPU %" B_PRId32 "!", thisCPUId);
 	} else {
-		// Pass oldThreadData to ChooseNextThread. If shouldReEnqueueOldThread is true,
-		// ChooseNextThread will add it to the EEVDF queue.
 		ThreadData* oldThreadToConsider = (shouldReEnqueueOldThread && !oldThreadData->IsIdle())
 			? oldThreadData : NULL;
 
-		// ChooseNextThread for EEVDF will take oldThreadToConsider (if not NULL and not idle),
-		// add it to its EEVDF queue, then pick the best eligible thread.
-		// The boolean and int parameters are now ignored by the EEVDF version of ChooseNextThread.
 		nextThreadData = cpu->ChooseNextThread(oldThreadToConsider, false, 0);
 
 		if (nextThreadData != NULL && !nextThreadData->IsIdle()) {
-			// ChooseNextThread might return the oldThread itself if it's still best.
-			// If nextThreadData is different from oldThreadToConsider, or if oldThreadToConsider was NULL,
-			// and nextThreadData is not idle, it means it was picked from the queue.
-			// It should be removed from the queue by CPUEntry::ChooseNextThread or here.
-			// For now, assuming ChooseNextThread doesn't remove.
-			cpu->RemoveThread(nextThreadData); // Remove chosen from EEVDF queue
+			cpu->RemoveThread(nextThreadData);
 			nextThreadData->MarkDequeued();
-		} else { // No eligible thread from EEVDF queue, or ChooseNextThread decided on idle
+		} else {
 			nextThreadData = cpu->PeekIdleThread();
 			if (nextThreadData == NULL)
 				panic("reschedule (EEVDF): No idle thread available on CPU %" B_PRId32 " after ChooseNextThread!", thisCPUId);
 		}
 	}
+
+	if (!gCPU[thisCPUId].disabled)
+		cpu->_UpdateMinVirtualRuntime();
 	cpu->UnlockRunQueue();
 
 	Thread* nextThread = nextThreadData->GetThread();
@@ -656,27 +587,24 @@ reschedule(int32 nextState)
 
 	nextThread->state = B_THREAD_RUNNING;
 	nextThreadData->StartCPUTime();
-	cpu->TrackActivity(oldThreadData, nextThreadData); // Updates fTimeUsedInCurrentQuantum for oldThread
+	cpu->TrackActivity(oldThreadData, nextThreadData);
 
-	// Timer for EEVDF: Set to the thread's slice_duration.
-	// Preemption also occurs if a new thread with an earlier VD arrives.
 	bigtime_t sliceForTimer = 0;
 	if (!nextThreadData->IsIdle()) {
 		sliceForTimer = nextThreadData->SliceDuration();
-		// StartQuantum resets fTimeUsedInCurrentQuantum for the new slice
 		nextThreadData->StartQuantum(sliceForTimer);
 		TRACE("reschedule (EEVDF): thread %" B_PRId32 " starting EEVDF slice %" B_PRId64 " on CPU %" B_PRId32 "\n",
 			nextThread->id, sliceForTimer, thisCPUId);
 	} else {
-		sliceForTimer = kLoadMeasureInterval * 2; // For idle thread's periodic load update
-		nextThreadData->StartQuantum(B_INFINITE_TIMEOUT); // Idle effectively has infinite slice
+		sliceForTimer = kLoadMeasureInterval * 2;
+		nextThreadData->StartQuantum(B_INFINITE_TIMEOUT);
 	}
 
 	cpu->StartQuantumTimer(nextThreadData, gCPU[thisCPUId].preempted, sliceForTimer);
 	gCPU[thisCPUId].preempted = false;
 
 	if (!nextThreadData->IsIdle()) {
-		nextThreadData->Continues(); // Updates fNeededLoad
+		nextThreadData->Continues();
 	} else if (gCurrentMode != NULL) {
 		gCurrentMode->rebalance_irqs(true /* CPU is now idle */);
 	}
@@ -709,9 +637,6 @@ scheduler_on_thread_create(Thread* thread, bool idleThread)
 {
 	thread->scheduler_data = new(std::nothrow) ThreadData(thread);
 	if (thread->scheduler_data == NULL) return B_NO_MEMORY;
-
-	// For EEVDF, if it's an idle thread, CPUEntry::SetIdleThread will be called
-	// during scheduler_on_thread_init for that CPU.
 	return B_OK;
 }
 
@@ -723,48 +648,35 @@ scheduler_on_thread_init(Thread* thread)
 	ThreadData* threadData = thread->scheduler_data;
 
 	if (thread_is_idle_thread(thread)) {
-		static int32 sIdleThreadsCPUIDCounter; // Ensure this is initialized to 0 globally or in init()
-		int32 cpuID = atomic_add(&sIdleThreadsCPUIDCounter, 1) -1; // Make it 0-indexed
+		static int32 sIdleThreadsCPUIDCounter;
+		int32 cpuID = atomic_add(&sIdleThreadsCPUIDCounter, 1) -1;
 
 		if (cpuID < 0 || cpuID >= smp_get_num_cpus()) {
 			panic("scheduler_on_thread_init: Invalid cpuID %" B_PRId32 " for idle thread %" B_PRId32, cpuID, thread->id);
 		}
 
-		thread->previous_cpu = &gCPU[cpuID]; // Standard Haiku cpu_ent
-		thread->pinned_to_cpu = 1; // Idle threads are pinned
+		thread->previous_cpu = &gCPU[cpuID];
+		thread->pinned_to_cpu = 1;
 
-		// Initialize ThreadData for an idle thread
-		threadData->Init(CoreEntry::GetCore(cpuID)); // Associates with core
-		// threadData->SetMLFQLevel(NUM_MLFQ_LEVELS - 1); // MLFQ specific, not needed for EEVDF idle
-		threadData->SetSliceDuration(B_INFINITE_TIMEOUT); // Idle threads don't have finite slices
-		threadData->SetVirtualDeadline(B_INFINITE_TIMEOUT); // Effectively never picked by VD order
-		threadData->SetLag(0); // Lag is not very relevant for idle
-		threadData->SetEligibleTime(0); // Always eligible if picked
-		threadData->SetVirtualRuntime(0); // Vruntime also not very relevant
+		threadData->Init(CoreEntry::GetCore(cpuID));
+		threadData->SetSliceDuration(B_INFINITE_TIMEOUT);
+		threadData->SetVirtualDeadline(B_INFINITE_TIMEOUT);
+		threadData->SetLag(0);
+		threadData->SetEligibleTime(0);
+		threadData->SetVirtualRuntime(0);
 
-		// Store this idle thread in its CPUEntry
 		CPUEntry::GetCPU(cpuID)->SetIdleThread(threadData);
 		TRACE("scheduler_on_thread_init (EEVDF): Initialized idle thread %" B_PRId32 " for CPU %" B_PRId32 "\n", thread->id, cpuID);
 
 	} else {
-		threadData->Init(); // Normal thread initialization
-		// MLFQ level setting is removed. EEVDF params are set on first enqueue.
-		// threadData->SetMLFQLevel(ThreadData::MapPriorityToMLFQLevel(thread->priority));
-		// threadData->ResetTimeEnteredCurrentLevel(); // MLFQ specific
+		threadData->Init();
 	}
-	// ResetTimeEnteredCurrentLevel is MLFQ specific. EEVDF params like vruntime, deadline
-	// are initialized when the thread is first enqueued or woken up.
 }
 
 
 void
 scheduler_on_thread_destroy(Thread* thread)
 {
-	// TODO EEVDF: If the thread is in an EEVDF run queue, it should be removed.
-	// This is usually handled when the thread exits and its state changes,
-	// leading to reschedule() which should dequeue it.
-	// If it's destroyed by other means while still "in" a queue (should not happen),
-	// this would be a place for cleanup.
 	delete thread->scheduler_data;
 }
 
@@ -796,11 +708,9 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	gCurrentModeID = mode;
 	gCurrentMode = sSchedulerModes[mode];
 
-	gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // May be adjusted by mode
-	// gSchedulerBaseQuantumMultiplier = 1.0f; // Obsolete
-	// gSchedulerAgingThresholdMultiplier = 1.0f; // Obsolete
+	gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY; // Default, mode can override
+	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
 	if (gCurrentMode->switch_to_mode != NULL) {
 		gCurrentMode->switch_to_mode();
@@ -837,9 +747,9 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 	if (enabled) {
 		cpuEntry->Start();
 	} else {
-		cpuEntry->UpdatePriority(B_IDLE_PRIORITY); // Mark as idle for heap management
+		cpuEntry->UpdatePriority(B_IDLE_PRIORITY);
 		ThreadEnqueuer enqueuer;
-		core->RemoveCPU(cpuEntry, enqueuer); // Re-homes threads from this CPU
+		core->RemoveCPU(cpuEntry, enqueuer);
 	}
 
 	gCPU[cpuID].disabled = !enabled;
@@ -847,7 +757,7 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 	else gCPUEnabled.ClearBitAtomic(cpuID);
 
 	if (!enabled) {
-		cpuEntry->Stop(); // Migrates IRQs
+		cpuEntry->Stop();
 		if (smp_get_current_cpu() != cpuID)
 			smp_send_ici(cpuID, SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 	}
@@ -905,40 +815,39 @@ init()
 	gSingleCore = coreCount == 1;
 	scheduler_update_policy();
 	gCoreCount = coreCount;
-	gPackageCount = packageCount; // Use discovered packageCount
+	gPackageCount = packageCount;
 	gCPUEntries = new(std::nothrow) CPUEntry[cpuCount];
 	if (gCPUEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<CPUEntry> cpuEntriesDeleter(gCPUEntries);
 	gCoreEntries = new(std::nothrow) CoreEntry[coreCount];
 	if (gCoreEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<CoreEntry> coreEntriesDeleter(gCoreEntries);
-	gPackageEntries = new(std::nothrow) PackageEntry[packageCount]; // Use discovered packageCount
+	gPackageEntries = new(std::nothrow) PackageEntry[packageCount];
 	if (gPackageEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<PackageEntry> packageEntriesDeleter(gPackageEntries);
 
-	// Use actualCoreCount (which is just coreCount here)
 	new(&gCoreLoadHeap) CoreLoadHeap(coreCount);
 	new(&gCoreHighLoadHeap) CoreLoadHeap(coreCount);
 	new(&gIdlePackageList) IdlePackageList;
 
-	for (int32 i = 0; i < packageCount; ++i) { // Use discovered packageCount
+	for (int32 i = 0; i < packageCount; ++i) {
 		gPackageEntries[i].Init(i);
 	}
 
-	bool* coreHasRegisteredWithPackage = new(std::nothrow) bool[coreCount]; // Use discovered coreCount
+	bool* coreHasRegisteredWithPackage = new(std::nothrow) bool[coreCount];
 	if (coreHasRegisteredWithPackage == NULL) {
 		return B_NO_MEMORY;
 	}
 	ArrayDeleter<bool> coreRegisteredDeleter(coreHasRegisteredWithPackage);
-	for (int32 i = 0; i < coreCount; ++i) // Use discovered coreCount
+	for (int32 i = 0; i < coreCount; ++i)
 		coreHasRegisteredWithPackage[i] = false;
 
 	for (int32 i = 0; i < cpuCount; ++i) {
 		int32 coreIdx = sCPUToCore[i];
 		int32 packageIdx = sCPUToPackage[i];
 
-		ASSERT(coreIdx >= 0 && coreIdx < coreCount); // Use discovered coreCount
-		ASSERT(packageIdx >= 0 && packageIdx < packageCount); // Use discovered packageCount
+		ASSERT(coreIdx >= 0 && coreIdx < coreCount);
+		ASSERT(packageIdx >= 0 && packageIdx < packageCount);
 
 		CoreEntry* currentCore = &gCoreEntries[coreIdx];
 		PackageEntry* currentPackage = &gPackageEntries[packageIdx];
@@ -958,7 +867,7 @@ init()
 	for (int32 i = 0; i < cpuCount; i++) {
 		int32 coreIdx = sCPUToCore[i];
 		CoreEntry* currentCore = &gCoreEntries[coreIdx];
-		gCPUEntries[i].Init(i, currentCore); // CPUEntry::Init is EEVDF-aware
+		gCPUEntries[i].Init(i, currentCore);
 		currentCore->AddCPU(&gCPUEntries[i]);
 	}
 
@@ -1043,23 +952,13 @@ scheduler_init()
 	if (result != B_OK)
 		panic("scheduler_init: failed to initialize scheduler\n");
 
-	// Initialize idle threads for each CPU
-	// This is now handled by scheduler_on_thread_init calling CPUEntry::SetIdleThread
-	// for (int32 i = 0; i < cpuCount; i++) {
-	// 	Thread* idle = gCPU[i].idle_thread;
-	// 	if (idle == NULL || idle->scheduler_data == NULL) {
-	// 		panic("scheduler_init: idle thread or scheduler_data for CPU %" B_PRId32 " is NULL after init()", i);
-	// 	}
-	// }
-
 	scheduler_set_operation_mode(SCHEDULER_MODE_LOW_LATENCY);
-	// add_timer(&sAgingTimer, &scheduler_aging_event, kAgingCheckInterval, B_ONE_SHOT_RELATIVE_TIMER); // Aging obsolete
 	if (!gSingleCore) {
 		add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
-		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER); // IRQ balancing can remain
+		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	}
-	Scheduler::init_debug_commands(); // From scheduler_profiler.cpp
-	_scheduler_init_kdf_debug_commands(); // Local debug commands
+	Scheduler::init_debug_commands();
+	_scheduler_init_kdf_debug_commands();
 }
 
 
@@ -1289,33 +1188,15 @@ scheduler_remove_listener(struct SchedulerListener* listener)
 	gSchedulerListeners.Remove(listener);
 }
 
-
-// scheduler_perform_aging is obsolete with EEVDF
-/*
-static void
-scheduler_perform_aging(CPUEntry* cpu)
-{
-	// ... MLFQ aging logic removed ...
-}
-*/
-
 static CPUEntry*
 _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 	const ThreadData* affinityCheckThread)
 {
-	// This function's logic for SMT penalty and tie-breaking (using
-	// _get_cpu_high_priority_task_count_locked) was MLFQ-specific.
-	// It needs to be adapted for EEVDF if complex tie-breaking is required
-	// beyond simple load or if SMT penalties are calculated differently.
-	// For now, the core logic of iterating CPUs on a core and checking affinity
-	// remains, but the scoring might need EEVDF-aware refinement later.
-
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
 	CPUEntry* bestCPU = NULL;
 	float bestLoadScore = preferBusiest ? -1.0f : 2.0f;
-	// EEVDF Tie-breaking: could use lag, or number of threads with VD < now + X
 	int32 bestTieBreakScore = preferBusiest ? -1 : 0x7fffffff;
 
 
@@ -1359,18 +1240,15 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (effectiveLoad > bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// EEVDF Tie-breaker: Prefer CPU with more total threads (simple)
-					// A better EEVDF tie-breaker might be to check earliest VD if loads are same.
 					currentCPU->LockRunQueue();
 					int32 currentTotalTasks = currentCPU->GetTotalThreadCount();
 					currentCPU->UnlockRunQueue();
 					if (currentTotalTasks > bestTieBreakScore) isBetter = true;
 				}
-			} else { // Prefer least busy
+			} else {
 				if (effectiveLoad < bestLoadScore) {
 					isBetter = true;
 				} else if (effectiveLoad == bestLoadScore) {
-					// EEVDF Tie-breaker: Prefer CPU with fewer total threads (simple)
 					currentCPU->LockRunQueue();
 					int32 currentTotalTasks = currentCPU->GetTotalThreadCount();
 					currentCPU->UnlockRunQueue();
@@ -1382,7 +1260,7 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 		if (isBetter) {
 			bestLoadScore = effectiveLoad;
 			currentCPU->LockRunQueue();
-			bestTieBreakScore = currentCPU->GetTotalThreadCount(); // Update tie-break score
+			bestTieBreakScore = currentCPU->GetTotalThreadCount();
 			currentCPU->UnlockRunQueue();
 			bestCPU = currentCPU;
 		}
@@ -1394,11 +1272,6 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 static void
 scheduler_perform_load_balance()
 {
-	// This function's core logic for identifying source/target cores based on
-	// gCoreHighLoadHeap and gCoreLoadHeap can remain.
-	// However, the selection of a threadToMove and its subsequent enqueueing
-	// on the targetCPU needs to be EEVDF-aware.
-
 	SCHEDULER_ENTER_FUNCTION();
 
 	if (gCurrentMode != NULL && gCurrentMode->attempt_proactive_stc_designation != NULL
@@ -1407,7 +1280,6 @@ scheduler_perform_load_balance()
 		bool systemActive = gIdlePackageList.Count() < gPackageCount;
 		idlePackageLocker.Unlock();
 		if (systemActive) {
-			// ... (proactive STC designation logic remains same) ...
 			CoreEntry* designatedCore = gCurrentMode->attempt_proactive_stc_designation();
 			if (designatedCore != NULL) {
 				TRACE("scheduler_load_balance_event: Proactively designated core %" B_PRId32 " as STC.\n", designatedCore->ID());
@@ -1418,7 +1290,6 @@ scheduler_perform_load_balance()
 	}
 
 	if (gSingleCore || gCoreCount < 2) {
-		// add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER); // Timer added at end
 		return;
 	}
 
@@ -1446,7 +1317,6 @@ scheduler_perform_load_balance()
 	CPUEntry* targetCPU = NULL;
 	CoreEntry* finalTargetCore = NULL;
 
-	// ... (Logic for determining finalTargetCore based on gSchedulerLoadBalancePolicy remains similar) ...
 	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) {
 		CoreEntry* consolidationCore = NULL;
 		if (gCurrentMode != NULL && gCurrentMode->get_consolidation_target_core != NULL)
@@ -1486,7 +1356,7 @@ scheduler_perform_load_balance()
 		} else { return; }
 		if (finalTargetCore == NULL) { return; }
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
-	} else { // SCHED_LOAD_BALANCE_SPREAD
+	} else {
 		finalTargetCore = targetCoreCandidate;
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	}
@@ -1501,21 +1371,13 @@ scheduler_perform_load_balance()
 	bigtime_t now = system_time();
 
 	sourceCPU->LockRunQueue();
-	// EEVDF: Select a thread to migrate. This is complex.
-	// A simple heuristic: pick a thread that's not the one with earliest VD,
-	// is not pinned, and hasn't migrated recently.
-	// This needs a proper strategy for EEVDF (e.g., pick thread with largest positive lag,
-	// or one whose vruntime is high relative to its current queue).
-	// The MLFQ iteration is removed.
 	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
 	if (!sourceQueue.IsEmpty()) {
-		// Placeholder: Try to pick a thread that's not the absolute earliest deadline one, if possible.
-		// This is a very naive way to find a "less critical" thread.
 		ThreadData* firstCandidate = sourceQueue.PeekMinimum();
 		if (sourceQueue.Count() > 1) {
-			ThreadData* tempPopped = sourceQueue.PopMinimum(); // Temporarily remove earliest
-			ThreadData* secondCandidate = sourceQueue.PeekMinimum(); // Look at next
-			sourceQueue.Add(tempPopped); // Put first back
+			ThreadData* tempPopped = sourceQueue.PopMinimum();
+			ThreadData* secondCandidate = sourceQueue.PeekMinimum();
+			sourceQueue.Add(tempPopped);
 
 			if (secondCandidate != NULL
 				&& secondCandidate->GetThread() != gCPU[sourceCPU->ID()].running_thread
@@ -1524,7 +1386,6 @@ scheduler_perform_load_balance()
 				threadToMove = secondCandidate;
 			}
 		}
-		// If no second candidate or only one thread, consider the first one if it's not running
 		if (threadToMove == NULL && firstCandidate != NULL
 			&& firstCandidate->GetThread() != gCPU[sourceCPU->ID()].running_thread
 			&& firstCandidate->GetThread()->pinned_to_cpu == 0
@@ -1560,23 +1421,33 @@ scheduler_perform_load_balance()
 		threadToMove->UnassignCore(false);
 
 	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
-	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU); // Re-homes the thread to the new core
+	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU);
 	ASSERT(threadToMove->Core() == finalTargetCore);
 
-	// TODO EEVDF: Adjust threadToMove's vruntime, lag, deadline for the new queue.
-	// This is similar to scheduler_enqueue_in_run_queue's EEVDF param init.
-	// Placeholder:
 	threadToMove->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
 		ThreadData::MapPriorityToMLFQLevel(threadToMove->GetBasePriority())));
-	// threadToMove->SetVirtualRuntime(...); // Relative to targetCPU queue min_vruntime
-	threadToMove->SetLag(0); // Reset lag on migration for simplicity
+
+	targetCPU->LockRunQueue();
+	bigtime_t targetQueueMinVruntime = targetCPU->MinVirtualRuntime();
+	targetCPU->UnlockRunQueue();
+
+	threadToMove->SetVirtualRuntime(max_c(threadToMove->VirtualRuntime(), targetQueueMinVruntime));
+
+	int32 migratedWeight = scheduler_priority_to_weight(threadToMove->GetBasePriority());
+	if (migratedWeight <= 0) migratedWeight = 1;
+	bigtime_t migratedWeightedSlice = (threadToMove->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / migratedWeight;
+	threadToMove->SetLag(migratedWeightedSlice - (threadToMove->VirtualRuntime() - targetQueueMinVruntime));
+
 	if (threadToMove->Lag() >= 0) {
 		threadToMove->SetEligibleTime(system_time());
 	} else {
-		threadToMove->SetEligibleTime(system_time() + SCHEDULER_MIN_GRANULARITY);
+        bigtime_t delay = (-threadToMove->Lag() * migratedWeight) / SCHEDULER_WEIGHT_SCALE;
+        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+		threadToMove->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 	}
 	threadToMove->SetVirtualDeadline(threadToMove->EligibleTime() + threadToMove->SliceDuration());
-
+	TRACE("LoadBalance: Migrated thread %" B_PRId32 " EEVDF params updated: VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 "\n",
+		threadToMove->GetThread()->id, threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime());
 
 	targetCPU->LockRunQueue();
 	targetCPU->AddThread(threadToMove);
@@ -1605,14 +1476,9 @@ scheduler_perform_load_balance()
 bigtime_t
 _user_estimate_max_scheduling_latency(thread_id id)
 {
-	// TODO EEVDF: This estimation was based on MLFQ.
-	// For EEVDF, latency is related to a thread's slice_duration and its position
-	// in the virtual deadline queue. A worst-case might involve summing slice_durations
-	// of threads with earlier deadlines on the same CPU.
-	// This needs a complete rethink for EEVDF. Returning a placeholder.
 	if (gCurrentMode != NULL)
-		return gCurrentMode->maximum_latency; // Use mode's generic max latency
-	return SCHEDULER_TARGET_LATENCY * 5; // Placeholder: 5 * target latency
+		return gCurrentMode->maximum_latency;
+	return SCHEDULER_TARGET_LATENCY * 5;
 }
 
 
@@ -1634,8 +1500,4 @@ _user_get_scheduler_mode()
 	return gCurrentModeID;
 }
 
-// Private EEVDF helper definitions (if any) would go here or be static above.
-// For example, a function to calculate weight from priority:
-// static inline int32 scheduler_priority_to_weight(int32 priority) { ... }
-// Or constants for target latency, min granularity if not defined elsewhere.
-// These are currently at the top as #defines.
+[end of src/system/kernel/scheduler/scheduler.cpp]

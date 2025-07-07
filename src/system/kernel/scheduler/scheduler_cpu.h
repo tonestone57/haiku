@@ -106,9 +106,11 @@ public:
 						// }
 						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
 						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
+	inline				bigtime_t		MinVirtualRuntime() const { return fMinVirtualRuntime; }
 
 
 private:
+						void			_UpdateMinVirtualRuntime(); // New helper
 						// void			_UpdateHighestMLFQLevel(); // Obsolete
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
@@ -121,8 +123,9 @@ private:
 
 						EevdfRunQueue	fEevdfRunQueue; // Replaces fMlfq array
 						ThreadData*		fIdleThread;    // Explicitly store this CPU's idle thread
+						bigtime_t		fMinVirtualRuntime; // Minimum vruntime in fEevdfRunQueue
 						// int32			fMlfqHighestNonEmptyLevel; // Obsolete
-						spinlock		fQueueLock; // Protects fEevdfRunQueue and fTotalThreadCount
+						spinlock		fQueueLock; // Protects fEevdfRunQueue, fTotalThreadCount, and fMinVirtualRuntime
 
 						// Historical thread execution load on this CPU.
 						// See scheduler_common.h for detailed explanation of load metrics.

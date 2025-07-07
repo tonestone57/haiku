@@ -256,46 +256,83 @@ ThreadData::Dump() const
 bool
 ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 {
+	// This function determines the target core and CPU for a thread.
+	// It uses the mode-specific _ChooseCore() and _ChooseCPU() helpers.
+	// If the chosen core differs from the thread's current core (fCore),
+	// it handles updating load accounting on the old and new cores.
+	// Importantly, if the final chosenCore is different from the core the
+	// thread was associated with *before* this function call, it updates
+	// fLastMigrationTime to give the new placement a cooldown period against
+	// the periodic load balancer.
+
 	SCHEDULER_ENTER_FUNCTION();
 	bool rescheduleNeeded = false;
 	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 
-	CoreEntry* chosenCore = targetCore;
-	CPUEntry* chosenCPU = targetCPU;
+	CoreEntry* initialCoreForComparison = fCore; // Store current core before it's potentially changed by _ChooseCore
 
+	CoreEntry* chosenCore = targetCore; // Use provided targetCore if any
+	CPUEntry* chosenCPU = targetCPU;   // Use provided targetCPU if any
+
+	// Validate provided targetCore against affinity mask
 	if (chosenCore != NULL && useMask && !chosenCore->CPUMask().Matches(mask))
 		chosenCore = NULL;
 
 	if (chosenCore == NULL) {
-		if (chosenCPU != NULL && (!useMask || chosenCPU->Core()->CPUMask().Matches(mask))) {
+		// If no valid targetCore provided, or if provided chosenCPU is valid and matches mask, derive core from CPU
+		if (chosenCPU != NULL && chosenCPU->Core() != NULL
+			&& (!useMask || chosenCPU->Core()->CPUMask().Matches(mask))) {
 			chosenCore = chosenCPU->Core();
 		} else {
-			chosenCore = _ChooseCore();
+			// Otherwise, let the mode-specific logic choose a core
+			chosenCore = _ChooseCore(); // This calls the mode-specific choose_core
+			ASSERT(chosenCore != NULL && "Mode-specific _ChooseCore() returned NULL");
 			ASSERT(!useMask || mask.Matches(chosenCore->CPUMask()));
-			chosenCPU = NULL;
+			chosenCPU = NULL; // Reset chosenCPU as core has changed or was just chosen
 		}
 	}
 	ASSERT(chosenCore != NULL);
 
+	// Validate provided targetCPU against chosenCore and affinity mask
 	if (chosenCPU != NULL && (chosenCPU->Core() != chosenCore || (useMask && !mask.GetBit(chosenCPU->ID()))))
 		chosenCPU = NULL;
 
 	if (chosenCPU == NULL) {
+		// If no valid targetCPU, let mode-specific logic choose a CPU on the chosenCore
 		chosenCPU = _ChooseCPU(chosenCore, rescheduleNeeded);
 	}
 
 	ASSERT(chosenCPU != NULL);
 
+	// If the thread is being homed to a new core
 	if (fCore != chosenCore) {
-		if (fCore != NULL && fReady && !IsIdle())
+		if (fCore != NULL && fReady && !IsIdle()) {
+			// Remove load from the old core
 			fCore->RemoveLoad(fNeededLoad, true);
+		}
 
+		// Update core association and load measurement epoch for the new core
 		fLoadMeasurementEpoch = chosenCore->LoadMeasurementEpoch() - 1;
 		fCore = chosenCore;
 
-		if (fReady && !IsIdle())
+		if (fReady && !IsIdle()) {
+			// Add load to the new core
 			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, true);
+		}
+	}
+
+	// Set LastMigrationTime if the chosen core is different from the initial one,
+	// or if it's a new thread (initialCoreForComparison would be NULL).
+	// This gives the new placement some protection from immediate load balancing.
+	if (chosenCore != initialCoreForComparison) {
+		// Exclude idle threads from this, as their migration time isn't as relevant.
+		if (!IsIdle()) {
+			SetLastMigrationTime(system_time());
+			TRACE_SCHED_LB("ChooseCoreAndCPU: T %" B_PRId32 " placed on new core %" B_PRId32 " (was %" B_PRId32 "), setting LastMigrationTime.\n",
+				GetThread()->id, chosenCore->ID(),
+				initialCoreForComparison ? initialCoreForComparison->ID() : -1);
+		}
 	}
 
 	targetCore = chosenCore;

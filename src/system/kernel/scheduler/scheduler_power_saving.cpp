@@ -148,50 +148,168 @@ power_saving_designate_consolidation_core(const CPUSet* affinity_mask_or_null)
 static CoreEntry*
 power_saving_choose_core(const ThreadData* threadData)
 {
-	// In power saving mode with consolidation, try to use the sSmallTaskCore.
-	// If affinity prevents it, or no STC, fall back to other strategies.
+	// Chooses a core for a thread in power-saving mode. The strategy prioritizes
+	// consolidation to save power, while still considering cache affinity.
+	// 1. Strongly prefer the Small Task Consolidation (STC) core if one is
+	//    designated, active, and matches the thread's affinity.
+	// 2. If STC is not suitable, prefer the thread's previous core if its cache
+	//    is likely warm (time-based + instantaneous load check) and it matches affinity.
+	//    Power-saving mode is more tolerant of load on a cache-warm core.
+	// 3. If the previous core is unsuitable, try to find another core within the
+	//    same package. If the STC resides in this package, it's highly preferred.
+	//    Otherwise, a lightly loaded core is chosen.
+	// 4. If no suitable core is found locally (previous or same package),
+	//    attempt to designate or re-evaluate the STC. If an STC is identified
+	//    and matches affinity, it's chosen.
+	// 5. As a final fallback, search globally for an active core or one that
+	//    `should_wake_core_for_load` deems appropriate to activate, matching affinity.
+
 	const CPUSet& affinity = threadData != NULL ? threadData->GetCPUMask() : CPUSet();
 
-	CoreEntry* consolidationTarget = power_saving_get_consolidation_target_core(threadData);
-	if (consolidationTarget != NULL) {
-		// Already checked affinity in get_consolidation_target_core if threadData was provided
-		return consolidationTarget;
+	// 1. Check designated STC first
+	CoreEntry* stcTarget = power_saving_get_consolidation_target_core(threadData);
+	if (stcTarget != NULL) {
+		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> STC core %" B_PRId32 "\n",
+			threadData ? threadData->GetThread()->id : -1, stcTarget->ID());
+		return stcTarget;
 	}
 
-	// No STC, or STC not suitable due to affinity.
-	// Try previous core if cache is warm and it matches affinity.
 	CoreEntry* previousCore = NULL;
+	PackageEntry* lastPackage = NULL;
+
 	if (threadData != NULL && threadData->GetThread()->previous_cpu != NULL) {
 		CPUEntry* prevCpuEntry = CPUEntry::GetCPU(threadData->GetThread()->previous_cpu->cpu_num);
-		if (prevCpuEntry != NULL)
+		if (prevCpuEntry != NULL) {
 			previousCore = prevCpuEntry->Core();
+			if (previousCore != NULL && !previousCore->IsDefunct()) {
+				lastPackage = previousCore->Package();
+			} else {
+				previousCore = NULL; // Treat defunct previousCore as no previousCore
+			}
+		}
 	}
 
-	if (previousCore != NULL && !previousCore->IsDefunct()
-		&& (affinity.IsEmpty() || affinity.Matches(previousCore->CPUMask()))
-		&& !power_saving_has_cache_expired(threadData)) {
-		// Don't check load too strictly for previous core in power saving,
-		// as we might prefer to keep it active if it already is.
-		return previousCore;
+	// 2. Check Previous Core
+	if (previousCore != NULL) { // Already checked for !IsDefunct()
+		bool cacheIsLikelyWarm = !power_saving_has_cache_expired(threadData);
+		// Power saving is more tolerant of load if cache is warm
+		bool prevCoreNotTooBusy = previousCore->GetInstantaneousLoad() < 0.90f;
+
+		if ((affinity.IsEmpty() || affinity.Matches(previousCore->CPUMask()))
+			&& cacheIsLikelyWarm && prevCoreNotTooBusy) {
+			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> previousCore %" B_PRId32 " (STC unsuitable, cache warm)\n",
+				threadData->GetThread()->id, previousCore->ID());
+			return previousCore;
+		}
 	}
 
-	// Designate a new STC if none, or pick another suitable core.
-	// This might re-designate sSmallTaskCore if it was NULL.
-	CoreEntry* designated = power_saving_designate_consolidation_core(&affinity);
-	if (designated != NULL) return designated;
+	// 3. Check Same Package
+	if (lastPackage != NULL) {
+		CoreEntry* bestCoreInPackage = NULL;
+		float bestPackageCoreInstLoad = 2.0f; // Higher is worse
+		int32 bestPackageCoreHistLoad = 0x7fffffff;
+		bool stcIsInThisPackageAndViable = false;
 
+		SmallTaskCoreLocker stcLock; // Lock to check sSmallTaskCore
+		CoreEntry* currentSTC = sSmallTaskCore; // Get current STC under lock
+		stcLock.Unlock();
 
-	// Absolute fallback: first non-defunct core matching affinity (or any if no affinity).
-	// This is similar to low_latency_choose_core's fallback.
-	int startIndex = threadData != NULL ? threadData->GetThread()->id % gCoreCount : 0;
+		for (int32 i = 0; i < gCoreCount; i++) {
+			CoreEntry* coreInPackage = &gCoreEntries[i];
+			if (coreInPackage->IsDefunct() || coreInPackage->Package() != lastPackage || coreInPackage == previousCore)
+				continue;
+			if (!affinity.IsEmpty() && !affinity.Matches(coreInPackage->CPUMask()))
+				continue;
+
+			// If STC is in this package and matches, it's a very strong candidate
+			if (currentSTC != NULL && coreInPackage == currentSTC) {
+				stcIsInThisPackageAndViable = true;
+				bestCoreInPackage = coreInPackage; // Prefer STC
+				break;
+			}
+
+			float currentInstLoad = coreInPackage->GetInstantaneousLoad();
+			int32 currentHistLoad = coreInPackage->GetLoad();
+
+			if (currentInstLoad < bestPackageCoreInstLoad) {
+				bestPackageCoreInstLoad = currentInstLoad;
+				bestPackageCoreHistLoad = currentHistLoad;
+				bestCoreInPackage = coreInPackage;
+			} else if (currentInstLoad == bestPackageCoreInstLoad && currentHistLoad < bestPackageCoreHistLoad) {
+				bestPackageCoreHistLoad = currentHistLoad;
+				bestCoreInPackage = coreInPackage;
+			}
+		}
+
+		if (bestCoreInPackage != NULL && (stcIsInThisPackageAndViable || (bestPackageCoreInstLoad < 0.85f && bestPackageCoreHistLoad < kHighLoad))) {
+			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> same package core %" B_PRId32 "%s\n",
+				threadData->GetThread()->id, bestCoreInPackage->ID(), stcIsInThisPackageAndViable ? " (is STC)" : "");
+			return bestCoreInPackage;
+		}
+	}
+
+	// 4. Designate/Re-evaluate STC
+	// This will return an existing STC if it's still valid and matches affinity, or try to pick a new one.
+	CoreEntry* designatedSTC = power_saving_designate_consolidation_core(&affinity);
+	if (designatedSTC != NULL) {
+		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> designated/re-evaluated STC %" B_PRId32 "\n",
+			threadData ? threadData->GetThread()->id : -1, designatedSTC->ID());
+		return designatedSTC;
+	}
+
+	// 5. Absolute Fallback: Find globally least loaded, respecting power saving (e.g. should_wake_core_for_load)
+	// This is more complex than just picking the absolute least loaded.
+	// We need to find a core that is either already active or one that we are willing to wake.
+	CoreEntry* bestFallbackCore = NULL;
+	float bestFallbackInstLoad = 2.0f; // Higher is worse
+	// Iterate all cores, prefer active ones first or ones we'd wake.
+	for (int32 i = 0; i < gCoreCount; i++) {
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->IsDefunct() || (!affinity.IsEmpty() && !affinity.Matches(core->CPUMask())))
+			continue;
+
+		bool canUseCore = false;
+		if (core->GetLoad() > 0 || core->GetInstantaneousLoad() > 0.05f) { // Already somewhat active
+			canUseCore = true;
+		} else {
+			// Core is idle, check if we should wake it
+			// Estimate thread load (simplified: assume medium impact if unknown)
+			int32 estimatedThreadLoadImpact = kMaxLoad / 10; // Example: 10%
+			if (power_saving_should_wake_core_for_load(core, estimatedThreadLoadImpact)) {
+				canUseCore = true;
+			}
+		}
+
+		if (canUseCore) {
+			float currentInstLoad = core->GetInstantaneousLoad();
+			if (currentInstLoad < bestFallbackInstLoad) {
+				bestFallbackInstLoad = currentInstLoad;
+				bestFallbackCore = core;
+			}
+		}
+	}
+
+	if (bestFallbackCore != NULL) {
+		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> fallback global core %" B_PRId32 "\n",
+			threadData ? threadData->GetThread()->id : -1, bestFallbackCore->ID());
+		return bestFallbackCore;
+	}
+
+	// Very last resort (e.g. all cores idle, none met `should_wake_core_for_load` with generic estimate)
+	// Pick the first available core that matches affinity.
+	int startIndex = (threadData != NULL && threadData->GetThread() != NULL) ? threadData->GetThread()->id % gCoreCount : 0;
+	if (startIndex < 0) startIndex = 0;
 	for (int i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[(startIndex + i) % gCoreCount];
-		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask())))
+		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
+			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> absolute fallback core %" B_PRId32 "\n",
+				threadData ? threadData->GetThread()->id : -1, core->ID());
 			return core;
+		}
 	}
-	// Should not be reached if there's at least one active core.
+
 	panic("power_saving_choose_core: No suitable core found!");
-	return NULL;
+	return NULL; // Should not be reached
 }
 
 static bool

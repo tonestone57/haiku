@@ -200,9 +200,10 @@ extern int32 gModeMaxTargetCpuIrqLoad;
 
 // SMT (Simultaneous Multi-Threading) Conflict Factor.
 // This factor is set by scheduler modes and used in CPU selection logic
-// (e.g., Scheduler::SelectTargetCPUForIRQ, CPUEntry::_scheduler_select_cpu_on_core)
-// to quantify the undesirability of placing a task on a CPU whose SMT
-// sibling(s) are busy. The load of an SMT sibling is multiplied by this
+// (e.g., Scheduler::SelectTargetCPUForIRQ, ThreadData::_ChooseCPU,
+// and CPUEntry::_scheduler_select_cpu_on_core) to quantify the
+// undesirability of placing a task on a CPU whose SMT sibling(s) are busy.
+// The instantaneous load of an SMT sibling is multiplied by this
 // factor to calculate a penalty.
 // - A higher factor means stronger avoidance of busy SMT contexts.
 // - A lower factor means more willingness to utilize SMT siblings.

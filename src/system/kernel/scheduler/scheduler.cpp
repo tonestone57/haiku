@@ -723,16 +723,22 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
 	PackageEntry* thiefPackage = (thiefCore != NULL) ? thiefCore->Package() : NULL;
 
     // Stage 1: Same Core (SMT siblings / other logical CPUs on the same physical core)
+    // Try to steal from SMT siblings first due to cache proximity and potential
+    // to utilize otherwise idle execution units on the same physical core.
+    // Enhanced TRACE_SCHED_SMT_STEAL added for better observability.
     if (thiefCore != NULL) {
         CPUSet sameCoreCPUs = thiefCore->CPUMask();
-        // Iterate CPUs on the same core. Could randomize this inner loop too for fairness.
+        // Iterate CPUs on the same core.
         for (int32 victimCpuID = 0; victimCpuID < numCPUs; victimCpuID++) {
             if (!sameCoreCPUs.GetBit(victimCpuID) || victimCpuID == thiefCpuID)
                 continue;
 
+            TRACE_SCHED_SMT_STEAL("WorkSteal: CPU %" B_PRId32 " (thief) considering SMT sibling CPU %" B_PRId32 " as victim.\n",
+                thiefCpuID, victimCpuID);
             stolenTask = _attempt_one_steal(thiefCPU, victimCpuID);
             if (stolenTask != NULL) {
-                TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " stole from same core (CPU %" B_PRId32 ")\n", thiefCpuID, victimCpuID);
+                TRACE_SCHED_SMT_STEAL("WorkSteal: CPU %" B_PRId32 " STOLE task %" B_PRId32 " from SMT sibling CPU %" B_PRId32 "\n",
+                    thiefCpuID, stolenTask->GetThread()->id, victimCpuID);
                 return stolenTask;
             }
         }

@@ -74,73 +74,129 @@ ThreadData::_ChooseCore() const
 }
 
 
+/*! Chooses the best logical CPU (CPUEntry) on a given physical core for this thread.
+	This function is SMT-aware. It prioritizes the thread's previous CPU on this
+	core if its cache is likely warm and its SMT-aware effective load is low.
+	Otherwise, it iterates all enabled CPUs on the core, calculating an
+	SMT-aware "effective load" for each (own instantaneous load + penalty from
+	busy SMT siblings). It selects the CPU with the lowest effective load.
+	Affinity masks are respected.
+	\param core The physical core on which to choose a logical CPU.
+	\param rescheduleNeeded Output parameter; set to true if a reschedule is likely
+	       needed on the chosen CPU (e.g., if it's idle or thread moves to it).
+	\return The chosen CPUEntry.
+*/
 inline CPUEntry*
 ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	// int32 threadEffectivePriority = GetEffectivePriority(); // No longer used to update CPU heap key here
-
 	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 	ASSERT(!useMask || mask.Matches(core->CPUMask()));
 
 	rescheduleNeeded = false; // Default
+	CPUEntry* chosenCPU = NULL;
 
-	// Check previous CPU for cache affinity
+	// Check previous CPU for cache affinity first, only if it's on the chosen core.
 	cpu_ent* previousCpuEnt = fThread->previous_cpu;
 	if (previousCpuEnt != NULL && !gCPU[previousCpuEnt->cpu_num].disabled) {
 		CPUEntry* previousCPUEntry = CPUEntry::GetCPU(previousCpuEnt->cpu_num);
 		if (previousCPUEntry->Core() == core && (!useMask || mask.GetBit(previousCpuEnt->cpu_num))) {
-			// Previous CPU is on the chosen core and matches affinity.
-			// EEVDF: Decide if it's "good enough". For now, if it's available, prefer it.
-			// More advanced logic could compare its load to the core's average or best.
-			// If this CPU is idle, a reschedule will likely be needed.
-			if (gCPU[previousCPUEntry->ID()].running_thread == NULL
-				|| thread_is_idle_thread(gCPU[previousCPUEntry->ID()].running_thread)) {
-				rescheduleNeeded = true;
+			// Previous CPU is on the target core and matches affinity.
+			// Check its SMT-aware effective load.
+			float smtPenalty = 0.0f;
+			if (core->CPUCount() > 1) { // SMT is possible
+				int32 prevCpuID = previousCPUEntry->ID();
+				int32 prevCoreID = core->ID(); // Should be same as previousCPUEntry->Core()->ID()
+				int32 prevSMTID = gCPU[prevCpuID].topology_id[CPU_TOPOLOGY_SMT];
+				if (prevSMTID != -1) {
+					for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+						if (k == prevCpuID || gCPU[k].disabled || CPUEntry::GetCPU(k)->Core() != core)
+							continue;
+						if (gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == prevSMTID) {
+							smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+						}
+					}
+				}
 			}
-			// No need to call UpdatePriority on previousCPUEntry here based on the thread.
-			// The CPU's priority in the heap reflects its own load state.
-			return previousCPUEntry;
+			float effectiveLoad = previousCPUEntry->GetInstantaneousLoad() + smtPenalty;
+
+			// If previous CPU is not too loaded (SMT-aware), prefer it.
+			// Threshold here is arbitrary, e.g., less than 75% effective load.
+			if (effectiveLoad < 0.75f) {
+				chosenCPU = previousCPUEntry;
+				TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+					fThread->id, chosenCPU->ID(), core->ID(), effectiveLoad);
+			}
 		}
 	}
 
-	// Previous CPU not suitable, pick the best from the core's CPU heap.
-	// The heap is now ordered by a fitness score (higher score = less loaded = better for max-heap).
-	CoreCPUHeapLocker heapLocker(core); // Lock the heap for peeking/iteration
-	CPUEntry* chosenCPU = NULL;
-	int32 index = 0;
-	CPUEntry* cpuCandidate = NULL;
+	if (chosenCPU == NULL) {
+		// Previous CPU not suitable or not on this core.
+		// Iterate all enabled CPUs on the chosen core, select the one with the best SMT-aware effective load.
+		CPUEntry* bestCandidateOnCore = NULL;
+		float lowestEffectiveLoad = 2.0f; // Start high (max load is 1.0 + penalty)
 
-	// Iterate through the heap (which is ordered by fitness)
-	while ((cpuCandidate = core->CPUHeap()->PeekRoot(index++)) != NULL) {
-		if (gCPU[cpuCandidate->ID()].disabled)
-			continue;
-		if (useMask && !mask.GetBit(cpuCandidate->ID()))
-			continue;
+		CPUSet coreCPUs = core->CPUMask();
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
+				continue;
 
-		chosenCPU = cpuCandidate; // Found the fittest suitable CPU
-		break;
+			CPUEntry* candidateCPU = CPUEntry::GetCPU(i);
+			ASSERT(candidateCPU->Core() == core);
+
+			if (useMask && !mask.GetBit(i)) // Check affinity mask
+				continue;
+
+			float currentInstLoad = candidateCPU->GetInstantaneousLoad();
+			float smtPenalty = 0.0f;
+
+			if (core->CPUCount() > 1) { // SMT is possible
+				int32 candidateCpuID = candidateCPU->ID();
+				// int32 candidateCoreID = core->ID(); // Already known
+				int32 candidateSMTID = gCPU[candidateCpuID].topology_id[CPU_TOPOLOGY_SMT];
+
+				if (candidateSMTID != -1) {
+					for (int32 k = 0; k < smp_get_num_cpus(); k++) {
+						if (k == candidateCpuID || gCPU[k].disabled || CPUEntry::GetCPU(k)->Core() != core)
+							continue;
+						// Check if CPU 'k' is an SMT sibling of 'candidateCPU'
+						if (gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == candidateSMTID) {
+							smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+						}
+					}
+				}
+			}
+			float effectiveLoad = currentInstLoad + smtPenalty;
+
+			if (effectiveLoad < lowestEffectiveLoad) {
+				lowestEffectiveLoad = effectiveLoad;
+				bestCandidateOnCore = candidateCPU;
+			} else if (effectiveLoad == lowestEffectiveLoad) {
+				// Tie-breaking: prefer CPU with fewer total tasks (less contention for runqueue lock etc.)
+				if (bestCandidateOnCore == NULL || candidateCPU->GetTotalThreadCount() < bestCandidateOnCore->GetTotalThreadCount()) {
+					bestCandidateOnCore = candidateCPU;
+				}
+			}
+		}
+		chosenCPU = bestCandidateOnCore;
+		if (chosenCPU != NULL) {
+			TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+				fThread->id, chosenCPU->ID(), core->ID(), lowestEffectiveLoad);
+		}
 	}
-	heapLocker.Unlock(); // Unlock heap after selection
 
 	ASSERT(chosenCPU != NULL && "Could not find a schedulable CPU on the chosen core");
 
-	// If the chosen CPU is idle, or if we are choosing a CPU that is not the
-	// one currently running this thread (if any), a reschedule is likely.
-	// The precise check (new thread VD vs current thread VD) happens in enqueue_thread_on_cpu_eevdf.
 	if (gCPU[chosenCPU->ID()].running_thread == NULL
 		|| thread_is_idle_thread(gCPU[chosenCPU->ID()].running_thread)) {
 		rescheduleNeeded = true;
 	} else if (fThread->cpu != &gCPU[chosenCPU->ID()]) {
-		// If the thread was running on a different CPU, or not running,
-		// and we are placing it on an active chosenCPU, a reschedule might be needed.
 		rescheduleNeeded = true;
 	}
 
-	// No need to call UpdatePriority on chosenCPU here based on the thread.
 	return chosenCPU;
 }
 

@@ -1652,9 +1652,34 @@ scheduler_perform_load_balance()
 
 	SCHEDULER_ENTER_FUNCTION();
 
-	if (gSingleCore || gCoreCount < 2)
-		return; // No load balancing needed for single core or less than 2 cores.
+	// Perform proactive STC designation if in PS mode, STC is NULL, and system is active.
+	// This runs regardless of whether core-to-core load balancing will occur.
+	if (gCurrentMode != NULL && gCurrentMode->attempt_proactive_stc_designation != NULL
+		&& Scheduler::sSmallTaskCore == NULL) {
+		// Check if system is not completely idle.
+		// Read gIdlePackageLock to safely access gIdlePackageList.Count().
+		ReadSpinLocker idlePackageLocker(gIdlePackageLock);
+		bool systemActive = gIdlePackageList.Count() < gPackageCount;
+		idlePackageLocker.Unlock();
 
+		if (systemActive) {
+			TRACE("scheduler_load_balance_event: Proactive STC designation attempt (STC is NULL, system active).\n");
+			CoreEntry* designatedCore = gCurrentMode->attempt_proactive_stc_designation();
+			if (designatedCore != NULL) {
+				TRACE("scheduler_load_balance_event: Proactively designated core %" B_PRId32 " as STC.\n", designatedCore->ID());
+			} else {
+				TRACE("scheduler_load_balance_event: Proactive STC designation attempt did not set an STC.\n");
+			}
+		}
+	}
+
+	// If system is single core or has insufficient cores for balancing, just reschedule timer and exit.
+	if (gSingleCore || gCoreCount < 2) {
+		add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, kLoadBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
+		return;
+	}
+
+	// Proceed with multi-core load balancing logic...
 	ReadSpinLocker globalCoreHeapsLock(gCoreHeapsLock);
 	CoreEntry* sourceCoreCandidate = NULL;
 	for (int32 i = 0; (sourceCoreCandidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {

@@ -48,6 +48,7 @@ struct scheduler_mode_operations {
 	bool					(*should_wake_core_for_load)(
 								Scheduler::CoreEntry* core,
 								int32 thread_load_estimate);
+	Scheduler::CoreEntry*	(*attempt_proactive_stc_designation)();
 };
 
 extern struct scheduler_mode_operations gSchedulerLowLatencyMode;

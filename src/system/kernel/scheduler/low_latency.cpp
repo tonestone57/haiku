@@ -359,4 +359,5 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_get_consolidation_target_core,
 	low_latency_designate_consolidation_core,
 	low_latency_should_wake_core_for_load,
+	NULL, // attempt_proactive_stc_designation
 };

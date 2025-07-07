@@ -599,4 +599,5 @@ scheduler_mode_operations gSchedulerPowerSavingMode = {
 	power_saving_get_consolidation_target_core,
 	power_saving_designate_consolidation_core,
 	power_saving_should_wake_core_for_load,
+	power_saving_attempt_proactive_stc_designation,
 };

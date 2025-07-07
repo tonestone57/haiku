@@ -108,6 +108,7 @@ public:
 						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
 						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
 	inline				bigtime_t		MinVirtualRuntime(); // Now non-const and calls _UpdateMinVirtualRuntime
+	inline				bigtime_t		GetCachedMinVirtualRuntime() const; // New lock-free getter
 
 	// Work-stealing related fields
 	bigtime_t			fNextStealAttemptTime;
@@ -356,6 +357,15 @@ CPUEntry::GetCPU(int32 cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	return &gCPUEntries[cpu];
+}
+
+
+inline bigtime_t
+CPUEntry::GetCachedMinVirtualRuntime() const
+{
+	// Atomically read the current value of fMinVirtualRuntime.
+	// This value is updated by _UpdateMinVirtualRuntime under fQueueLock.
+	return atomic_get64((const int64*)&fMinVirtualRuntime);
 }
 
 

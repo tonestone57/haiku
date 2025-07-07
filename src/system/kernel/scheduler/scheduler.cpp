@@ -1782,7 +1782,8 @@ scheduler_perform_load_balance()
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
 		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
 
-		bigtime_t targetQueueMinVruntime = representativeTargetCPU->MinVirtualRuntime();
+		// Use the cached, lock-free getter for estimation
+		bigtime_t targetQueueMinVruntime = representativeTargetCPU->GetCachedMinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
 
 		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetBasePriority());

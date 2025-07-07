@@ -402,21 +402,21 @@ device_ioctl(void* data, uint32 op, void* buffer, size_t bufferLength)
 			if (params.magic != INTEL_PRIVATE_DATA_MAGIC)
 				return B_BAD_VALUE;
 
-			uint32 pipeIndex = params.id.pipe_index;
-			if (pipeIndex >= MAX_PIPES)
-				return B_BAD_INDEX; // Or a more specific error
+			uint32 arrayIndex = PipeEnumToArrayIndex( (pipe_index)params.id.pipe_index );
+			if (arrayIndex >= MAX_PIPES)
+				return B_BAD_INDEX;
 
 			// Populate params from shared_info
-			params.is_connected = info->shared_info->pipe_display_configs[pipeIndex].is_active; // Approximation
-			params.is_currently_active = info->shared_info->pipe_display_configs[pipeIndex].is_active;
-			params.has_edid = info->shared_info->has_edid[pipeIndex];
+			params.is_connected = info->shared_info->pipe_display_configs[arrayIndex].is_active; // Approximation
+			params.is_currently_active = info->shared_info->pipe_display_configs[arrayIndex].is_active;
+			params.has_edid = info->shared_info->has_edid[arrayIndex];
 			if (params.has_edid) {
-				memcpy(&params.edid_data, &info->shared_info->edid_infos[pipeIndex], sizeof(edid1_info));
+				memcpy(&params.edid_data, &info->shared_info->edid_infos[arrayIndex], sizeof(edid1_info));
 			} else {
 				memset(&params.edid_data, 0, sizeof(edid1_info));
 			}
 			if (params.is_currently_active) {
-				params.current_mode = info->shared_info->pipe_display_configs[pipeIndex].current_mode;
+				params.current_mode = info->shared_info->pipe_display_configs[arrayIndex].current_mode;
 			} else {
 				memset(&params.current_mode, 0, sizeof(display_mode));
 			}
@@ -452,31 +452,37 @@ device_ioctl(void* data, uint32 op, void* buffer, size_t bufferLength)
 			}
 
 			for (uint32 i = 0; i < multi_config.display_count; i++) {
-				uint32 pipeIdx = multi_config.configs[i].id.pipe_index;
-				if (pipeIdx < MAX_PIPES) {
-					info->shared_info->pipe_display_configs[pipeIdx].current_mode = multi_config.configs[i].mode; // This is the TARGET mode
-					info->shared_info->pipe_display_configs[pipeIdx].is_active = multi_config.configs[i].is_active;
+				uint32 arrayIndex = PipeEnumToArrayIndex( (pipe_index)multi_config.configs[i].id.pipe_index );
+				if (arrayIndex < MAX_PIPES) {
+					info->shared_info->pipe_display_configs[arrayIndex].current_mode = multi_config.configs[i].mode; // This is the TARGET mode
+					info->shared_info->pipe_display_configs[arrayIndex].is_active = multi_config.configs[i].is_active;
 					// TODO: Store pos_x, pos_y if layout manager is in kernel/shared_info
 					if (multi_config.configs[i].is_active) {
 						info->shared_info->active_display_count++;
 						// Logic to set primary_pipe_index if this display is primary
-						// For now, user-space should ensure one primary or driver picks first active.
-						// if (multi_config.configs[i].is_primary)
-						// info->shared_info->primary_pipe_index = pipeIdx;
+						// User-space can indicate primary, or we default.
+						// For now, if a config marks itself primary (new field in intel_single_display_config needed), use it.
+						// Otherwise, the first active one found will become primary.
+						// if (multi_config.configs[i].is_primary) // Requires is_primary field
+						// info->shared_info->primary_pipe_index = arrayIndex;
 					}
 				}
 			}
-			// If no primary was explicitly set, default logic in accelerant might pick one.
-			// Or, ensure primary_pipe_index is valid among active displays.
-			bool primaryStillActive = false;
+
+			// Determine and set primary_pipe_index (stores array index)
+			bool primarySet = false;
+			// First check if the existing primary_pipe_index points to a newly active pipe
 			if (info->shared_info->primary_pipe_index < MAX_PIPES &&
 				info->shared_info->pipe_display_configs[info->shared_info->primary_pipe_index].is_active) {
-				primaryStillActive = true;
+				primarySet = true;
 			}
-			if (!primaryStillActive && info->shared_info->active_display_count > 0) {
-				for(uint32 i=0; i < MAX_PIPES; ++i) {
-					if (info->shared_info->pipe_display_configs[i].is_active) {
-						info->shared_info->primary_pipe_index = i;
+			// If not, find the first active pipe from the new config and set it as primary
+			if (!primarySet && info->shared_info->active_display_count > 0) {
+				for (uint32 i = 0; i < multi_config.display_count; i++) {
+					uint32 arrayIndex = PipeEnumToArrayIndex( (pipe_index)multi_config.configs[i].id.pipe_index );
+					if (arrayIndex < MAX_PIPES && info->shared_info->pipe_display_configs[arrayIndex].is_active) {
+						info->shared_info->primary_pipe_index = arrayIndex;
+						primarySet = true;
 						break;
 					}
 				}
@@ -509,14 +515,14 @@ device_ioctl(void* data, uint32 op, void* buffer, size_t bufferLength)
 
 			acquire_sem(info->shared_info->accelerant_lock_sem); // Protect shared_info access
 
-			for (uint32 i = 0; i < MAX_PIPES; i++) {
-				if (info->shared_info->pipe_display_configs[i].is_active) {
+			for (uint32 arrayIndex = 0; arrayIndex < MAX_PIPES; arrayIndex++) {
+				if (info->shared_info->pipe_display_configs[arrayIndex].is_active) {
 					uint32 cfgIdx = multi_config.display_count++;
-					multi_config.configs[cfgIdx].id.pipe_index = i;
-					multi_config.configs[cfgIdx].mode = info->shared_info->pipe_display_configs[i].current_mode;
+					multi_config.configs[cfgIdx].id.pipe_index = (uint32)ArrayToPipeEnum(arrayIndex);
+					multi_config.configs[cfgIdx].mode = info->shared_info->pipe_display_configs[arrayIndex].current_mode;
 					multi_config.configs[cfgIdx].is_active = true;
 					// TODO: Populate pos_x, pos_y if stored
-					// multi_config.configs[cfgIdx].is_primary = (i == info->shared_info->primary_pipe_index);
+					// multi_config.configs[cfgIdx].is_primary = (arrayIndex == info->shared_info->primary_pipe_index);
 				}
 			}
 			release_sem(info->shared_info->accelerant_lock_sem);

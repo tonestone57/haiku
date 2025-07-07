@@ -744,18 +744,18 @@ intel_configure_overlay(overlay_token overlayToken,
 	// registers->select_pipe = 0; // Original: This likely defaults to Pipe A
 
 	// Set overlay pipe to the primary display pipe
-	uint32 primaryPipeHardwareIdx = 0; // 0 for Pipe A, 1 for Pipe B, etc.
-	                                   // This needs mapping from sharedInfo.primary_pipe_index (enum)
-	                                   // to the hardware value for OCONFIG's select_pipe field.
-	                                   // Assuming 0 = Pipe A, 1 = Pipe B for OCONFIG for now.
-	if (sharedInfo.primary_pipe_index == INTEL_PIPE_B) // INTEL_PIPE_B is typically enum value 2
-		primaryPipeHardwareIdx = 1;
-	// Add more cases if overlay can be on Pipe C/D and OCONFIG supports it.
+	uint32 primaryPipeHwValue = 0; // Hardware value for OCONFIG select_pipe (0 for Pipe A, 1 for Pipe B)
+	pipe_index primaryPipeEnum = ArrayToPipeEnum(sharedInfo.primary_pipe_index);
 
-	registers->select_pipe = primaryPipeHardwareIdx;
+	if (primaryPipeEnum == INTEL_PIPE_B)
+		primaryPipeHwValue = 1;
+	// else if (primaryPipeEnum == INTEL_PIPE_C) { ... } // Add if overlay supports Pipe C/D
+	// Default is 0 (Pipe A)
 
+	registers->select_pipe = primaryPipeHwValue;
 
 	// Clipping and scaling should be relative to the primary display's mode
+	// sharedInfo.primary_pipe_index is already the array index.
 	display_mode &primary_display_mode = sharedInfo.pipe_display_configs[sharedInfo.primary_pipe_index].current_mode;
 
 	// program buffer

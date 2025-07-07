@@ -526,6 +526,30 @@ enum pipe_index {
     INTEL_PIPE_D
 };
 
+// Helper functions for mapping between pipe_index enum and 0-based array indices
+// for accessing per-pipe data structures like pipe_display_configs, edid_infos, etc.
+// Assumes INTEL_PIPE_A corresponds to array index 0, INTEL_PIPE_B to 1, and so on.
+// INTEL_PIPE_ANY is not a valid array index.
+inline uint32 PipeEnumToArrayIndex(pipe_index gfxCorePipeID) {
+	if (gfxCorePipeID >= INTEL_PIPE_A && gfxCorePipeID <= INTEL_PIPE_D) {
+		// Example: INTEL_PIPE_A (enum 1) -> array index 0
+		//          INTEL_PIPE_B (enum 2) -> array index 1
+		return (uint32)(gfxCorePipeID - INTEL_PIPE_A);
+	}
+	// Return an out-of-bounds index for INTEL_PIPE_ANY or other invalid values
+	return MAX_PIPES;
+}
+
+inline pipe_index ArrayToPipeEnum(uint32 arrayIndex) {
+	if (arrayIndex < MAX_PIPES) {
+		// Example: array index 0 -> INTEL_PIPE_A (enum 1)
+		//          array index 1 -> INTEL_PIPE_B (enum 2)
+		return (pipe_index)(INTEL_PIPE_A + arrayIndex);
+	}
+	return INTEL_PIPE_ANY; // Return invalid enum for out-of-bounds array index
+}
+
+
 class pipes {
 public:
 	pipes() : bitmask(0) {}

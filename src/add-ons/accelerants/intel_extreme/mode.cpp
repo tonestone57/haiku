@@ -132,18 +132,12 @@ static void
 set_frame_buffer_registers(pipe_index actualPipeIndex, uint32 hardwarePlaneOffset)
 {
 	intel_shared_info &sharedInfo = *gInfo->shared_info;
-	// actualPipeIndex is the enum (INTEL_PIPE_A, _B, etc)
-	// We need to map this to an array index for pipe_display_configs
-	// This simple direct mapping assumes INTEL_PIPE_A is 0, INTEL_PIPE_B is 1 etc.
-	// and that pipe_display_configs is indexed 0 for A, 1 for B ...
-	// A more robust mapping will be implemented when intel_shared_info is modified.
-	// For now, assume actualPipeIndex can be used as an index directly if less than MAX_PIPES.
-	uint32 configArrayIndex = actualPipeIndex;
+	uint32 arrayIndex = PipeEnumToArrayIndex(actualPipeIndex);
 
-	if (configArrayIndex >= MAX_PIPES || !sharedInfo.pipe_display_configs[configArrayIndex].is_active)
+	if (arrayIndex >= MAX_PIPES || !sharedInfo.pipe_display_configs[arrayIndex].is_active)
 		return;
 
-	struct intel_shared_info::per_pipe_display_info &pipeConfig = sharedInfo.pipe_display_configs[configArrayIndex];
+	struct intel_shared_info::per_pipe_display_info &pipeConfig = sharedInfo.pipe_display_configs[arrayIndex];
 	display_mode &mode = pipeConfig.current_mode;
 	uint32 bytes_per_pixel = (pipeConfig.bits_per_pixel + 7) / 8;
 
@@ -179,32 +173,39 @@ void
 set_frame_buffer_base()
 {
 	intel_shared_info &sharedInfo = *gInfo->shared_info;
-	for (uint32 i = 0; i < MAX_PIPES; i++) { // Iterate up to MAX_PIPES
-		if (sharedInfo.pipe_display_configs[i].is_active) {
-			// Assuming 'i' is the configArrayIndex, and can be cast to pipe_index for actualPipe
-			// This is a simplification; a proper mapping from config index to pipe_index enum is better.
-			pipe_index actualPipe = (pipe_index)i;
-			uint32 hardwarePlaneOffset = 0;
+	for (uint32 arrayIndex = 0; arrayIndex < MAX_PIPES; arrayIndex++) {
+		if (sharedInfo.pipe_display_configs[arrayIndex].is_active) {
+			pipe_index actualPipeEnum = ArrayToPipeEnum(arrayIndex);
+			if (actualPipeEnum == INTEL_PIPE_ANY) // Invalid mapping
+				continue;
 
-			switch (actualPipe) {
+			uint32 hardwarePlaneOffset = 0;
+			bool supportedPipe = true;
+
+			switch (actualPipeEnum) {
 				case INTEL_PIPE_A: hardwarePlaneOffset = 0; break;
 				case INTEL_PIPE_B: hardwarePlaneOffset = INTEL_DISPLAY_OFFSET; break;
 				case INTEL_PIPE_C:
-					// Ensure Pipe C registers are defined and appropriate for this generation
-					if (sharedInfo.device_type.Generation() >= 7)
-						hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET; // Must be defined in intel_extreme_reg.h
-					else continue; // Skip if not applicable
+					if (sharedInfo.device_type.Generation() >= 7) // Example condition
+						hardwarePlaneOffset = INTEL_DISPLAY_C_OFFSET; // Must be defined
+					else supportedPipe = false;
 					break;
 				case INTEL_PIPE_D:
-					// Ensure Pipe D registers are defined and appropriate for this generation
-					// if (sharedInfo.device_type.Generation() >= 12) // Example
-					//	hardwarePlaneOffset = INTEL_DISPLAY_D_OFFSET; // Must be defined
-					// else
-					continue; // Skip if not applicable
+					 // Example: Gen >= 12 might have PIPE D registers at a specific offset
+					 // This needs to be defined based on actual hardware docs.
+					 // if (sharedInfo.device_type.Generation() >= 12)
+					 //	hardwarePlaneOffset = INTEL_DISPLAY_D_OFFSET; // Must be defined
+					 // else
+					supportedPipe = false;
 					break;
-				default: continue;
+				default: supportedPipe = false; break;
 			}
-			set_frame_buffer_registers(actualPipe, hardwarePlaneOffset);
+
+			if (supportedPipe) {
+				set_frame_buffer_registers(actualPipeEnum, hardwarePlaneOffset);
+			} else {
+				TRACE("%s: Pipe enum %d (array index %d) not supported for plane offset mapping.\n", __func__, actualPipeEnum, arrayIndex);
+			}
 		}
 	}
 }

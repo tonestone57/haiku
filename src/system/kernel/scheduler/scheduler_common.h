@@ -141,6 +141,7 @@ class ThreadData; // Forward declaration
 
 // Base time quanta for each MLFQ level (in microseconds)
 // Level 0 (highest priority) to NUM_MLFQ_LEVELS - 1 (lowest priority)
+// Kept for now as ThreadData::GetBaseQuantumForLevel uses it for SliceDuration.
 static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {
 	2000,   // Level 0
 	3000,   // Level 1
@@ -160,8 +161,8 @@ static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {
 	50000   // Level 15 (lowest priority)
 };
 
-// Aging thresholds (in system_time units - microseconds) for each MLFQ level
-// Time a thread can wait in a queue (levels 1 to NUM_MLFQ_LEVELS-1) before promotion
+// Aging thresholds (REMOVED - MLFQ specific)
+/*
 static const bigtime_t kAgingThresholds[NUM_MLFQ_LEVELS] = {
 	0,      // Level 0 doesn't age up (highest)
 	50000,  // Level 1
@@ -180,8 +181,10 @@ static const bigtime_t kAgingThresholds[NUM_MLFQ_LEVELS] = {
 	1500000, // Level 14
 	2000000  // Level 15
 };
+*/
 
 // Global minimum and maximum effective quantum
+// These might be repurposed for EEVDF slice duration limits.
 static const bigtime_t kMinEffectiveQuantum = 500;     // 0.5 ms
 static const bigtime_t kMaxEffectiveQuantum = 100000;  // 100 ms
 
@@ -192,9 +195,9 @@ static const float kInstantLoadEWMAAlpha = 0.4f;
 
 // --- Mode-Settable Global Parameters ---
 // These are set by scheduler_set_operation_mode via mode's switch_to_mode
-extern float gKernelKDistFactor; // Already declared as extern
-extern float gSchedulerBaseQuantumMultiplier;
-extern float gSchedulerAgingThresholdMultiplier;
+extern float gKernelKDistFactor; // TODO EEVDF: Re-evaluate usefulness or repurpose. Currently no direct effect.
+extern float gSchedulerBaseQuantumMultiplier; // Affects SliceDuration via GetBaseQuantumForLevel
+// extern float gSchedulerAgingThresholdMultiplier; // Aging is obsolete with EEVDF
 enum SchedulerLoadBalancePolicy {
 	SCHED_LOAD_BALANCE_SPREAD,
 	SCHED_LOAD_BALANCE_CONSOLIDATE

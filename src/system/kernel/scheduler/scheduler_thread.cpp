@@ -39,8 +39,8 @@ ThreadData::_InitBase()
 	fEnqueued = false;
 	fReady = false;
 
-	// MLFQ specific
-	fTimeEnteredCurrentLevel = 0;
+	// MLFQ specific (REMOVED)
+	// fTimeEnteredCurrentLevel = 0;
 
 
 	// Load estimation
@@ -73,46 +73,67 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	int32 threadEffectivePriority = GetEffectivePriority();
+	// int32 threadEffectivePriority = GetEffectivePriority(); // No longer used to update CPU heap key here
 
 	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 	ASSERT(!useMask || mask.Matches(core->CPUMask()));
 
-	if (fThread->previous_cpu != NULL && !gCPU[fThread->previous_cpu->cpu_num].disabled
-		&& CPUEntry::GetCPU(fThread->previous_cpu->cpu_num)->Core() == core
-		&& (!useMask || mask.GetBit(fThread->previous_cpu->cpu_num))) {
-		CPUEntry* previousCPU = CPUEntry::GetCPU(fThread->previous_cpu->cpu_num);
-		CoreCPUHeapLocker _(core);
-		if (CPUPriorityHeap::GetKey(previousCPU) < threadEffectivePriority) {
-			previousCPU->UpdatePriority(threadEffectivePriority);
-			rescheduleNeeded = true;
-		} else {
-			rescheduleNeeded = false;
+	rescheduleNeeded = false; // Default
+
+	// Check previous CPU for cache affinity
+	cpu_ent* previousCpuEnt = fThread->previous_cpu;
+	if (previousCpuEnt != NULL && !gCPU[previousCpuEnt->cpu_num].disabled) {
+		CPUEntry* previousCPUEntry = CPUEntry::GetCPU(previousCpuEnt->cpu_num);
+		if (previousCPUEntry->Core() == core && (!useMask || mask.GetBit(previousCpuEnt->cpu_num))) {
+			// Previous CPU is on the chosen core and matches affinity.
+			// EEVDF: Decide if it's "good enough". For now, if it's available, prefer it.
+			// More advanced logic could compare its load to the core's average or best.
+			// If this CPU is idle, a reschedule will likely be needed.
+			if (gCPU[previousCPUEntry->ID()].running_thread == NULL
+				|| thread_is_idle_thread(gCPU[previousCPUEntry->ID()].running_thread)) {
+				rescheduleNeeded = true;
+			}
+			// No need to call UpdatePriority on previousCPUEntry here based on the thread.
+			// The CPU's priority in the heap reflects its own load state.
+			return previousCPUEntry;
 		}
-		return previousCPU;
 	}
 
-	CoreCPUHeapLocker _(core);
-	int32 index = 0;
+	// Previous CPU not suitable, pick the best from the core's CPU heap.
+	// The heap is now ordered by a fitness score (higher score = less loaded = better for max-heap).
+	CoreCPUHeapLocker heapLocker(core); // Lock the heap for peeking/iteration
 	CPUEntry* chosenCPU = NULL;
+	int32 index = 0;
 	CPUEntry* cpuCandidate = NULL;
+
+	// Iterate through the heap (which is ordered by fitness)
 	while ((cpuCandidate = core->CPUHeap()->PeekRoot(index++)) != NULL) {
 		if (gCPU[cpuCandidate->ID()].disabled)
 			continue;
 		if (useMask && !mask.GetBit(cpuCandidate->ID()))
 			continue;
-		chosenCPU = cpuCandidate;
+
+		chosenCPU = cpuCandidate; // Found the fittest suitable CPU
 		break;
 	}
+	heapLocker.Unlock(); // Unlock heap after selection
+
 	ASSERT(chosenCPU != NULL && "Could not find a schedulable CPU on the chosen core");
 
-	if (CPUPriorityHeap::GetKey(chosenCPU) < threadEffectivePriority) {
-		chosenCPU->UpdatePriority(threadEffectivePriority);
+	// If the chosen CPU is idle, or if we are choosing a CPU that is not the
+	// one currently running this thread (if any), a reschedule is likely.
+	// The precise check (new thread VD vs current thread VD) happens in enqueue_thread_on_cpu_eevdf.
+	if (gCPU[chosenCPU->ID()].running_thread == NULL
+		|| thread_is_idle_thread(gCPU[chosenCPU->ID()].running_thread)) {
 		rescheduleNeeded = true;
-	} else {
-		rescheduleNeeded = false;
+	} else if (fThread->cpu != &gCPU[chosenCPU->ID()]) {
+		// If the thread was running on a different CPU, or not running,
+		// and we are placing it on an active chosenCPU, a reschedule might be needed.
+		rescheduleNeeded = true;
 	}
+
+	// No need to call UpdatePriority on chosenCPU here based on the thread.
 	return chosenCPU;
 }
 
@@ -127,8 +148,8 @@ ThreadData::ThreadData(Thread* thread)
 	fEnqueued(false),
 	fReady(false),
 	fThread(thread),
-	fCurrentMlfqLevel(NUM_MLFQ_LEVELS - 1),
-	fTimeEnteredCurrentLevel(0),
+	// fCurrentMlfqLevel(NUM_MLFQ_LEVELS - 1), // REMOVED
+	// fTimeEnteredCurrentLevel(0), // REMOVED
 	fEffectivePriority(0),
 	fTimeUsedInCurrentQuantum(0),
 	fCurrentEffectiveQuantum(0),
@@ -138,8 +159,20 @@ ThreadData::ThreadData(Thread* thread)
 	fNeededLoad(0),
 	fLoadMeasurementEpoch(0),
 	fLastMigrationTime(0),
-	fCore(NULL)
+	fCore(NULL),
+	fVirtualDeadline(0),
+	fLag(0),
+	fEligibleTime(0),
+	fSliceDuration(kBaseQuanta[NUM_MLFQ_LEVELS / 2]), // Default slice duration
+	fVirtualRuntime(0)
 {
+	// EEVDF specific initializations, if any, can go here.
+	// For example, a new thread might start with zero lag.
+	// Virtual runtime typically starts at a value relative to the current
+	// minimum vruntime in the system or its target runqueue to ensure fairness.
+	// This will need more elaborate initialization when integrated with the
+	// EEVDF runqueue logic. For now, 0 is a placeholder.
+	// fEevdfLink is implicitly default-constructed.
 }
 
 
@@ -161,8 +194,8 @@ ThreadData::Init()
 		// fNeededLoad adapts over time based on actual thread activity.
 		fNeededLoad = kMaxLoad / 10;
 	}
-	fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority());
-	ResetTimeEnteredCurrentLevel();
+	// fCurrentMlfqLevel = MapPriorityToMLFQLevel(GetBasePriority()); // REMOVED
+	// ResetTimeEnteredCurrentLevel(); // REMOVED
 	_ComputeEffectivePriority();
 }
 
@@ -174,8 +207,8 @@ ThreadData::Init(CoreEntry* core)
 	fCore = core;
 	fReady = true;
 	fNeededLoad = 0;
-	fCurrentMlfqLevel = NUM_MLFQ_LEVELS - 1;
-	ResetTimeEnteredCurrentLevel();
+	// fCurrentMlfqLevel = NUM_MLFQ_LEVELS - 1; // REMOVED
+	// ResetTimeEnteredCurrentLevel(); // REMOVED
 	_ComputeEffectivePriority();
 }
 
@@ -184,8 +217,8 @@ void
 ThreadData::Dump() const
 {
 	kprintf("\teffective_priority:\t%" B_PRId32 "\n", GetEffectivePriority());
-	kprintf("\tcurrent_mlfq_level:\t%d\n", fCurrentMlfqLevel);
-	kprintf("\ttime_in_level:\t\t%" B_PRId64 " us\n", system_time() - fTimeEnteredCurrentLevel);
+	// kprintf("\tcurrent_mlfq_level:\t%d\n", fCurrentMlfqLevel); // REMOVED
+	// kprintf("\ttime_in_level:\t\t%" B_PRId64 " us\n", system_time() - fTimeEnteredCurrentLevel); // REMOVED
 	kprintf("\ttime_used_in_quantum:\t%" B_PRId64 " us (of %" B_PRId64 " us)\n",
 		fTimeUsedInCurrentQuantum, fCurrentEffectiveQuantum);
 	kprintf("\tstolen_time:\t\t%" B_PRId64 " us\n", fStolenTime);
@@ -198,6 +231,13 @@ ThreadData::Dump() const
 		fCore != NULL ? fCore->ID() : -1);
 	if (fCore != NULL && HasCacheExpired())
 		kprintf("\tcache affinity has expired\n");
+
+	kprintf("\tEEVDF specific:\n");
+	kprintf("\t  virtual_deadline:\t%" B_PRId64 "\n", fVirtualDeadline);
+	kprintf("\t  lag:\t\t\t%" B_PRId64 "\n", fLag);
+	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", fEligibleTime);
+	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", fSliceDuration);
+	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", fVirtualRuntime);
 }
 
 
@@ -267,35 +307,16 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	}
 
 	// For non-RT, non-idle threads:
-	bigtime_t baseQuantum = GetBaseQuantumForLevel(fCurrentMlfqLevel);
-	if (cpu == NULL || !gTrackCPULoad)
-		return baseQuantum;
-
-	float cpuLoad = cpu->GetInstantaneousLoad();
-	float multiplier = 1.0f + (gKernelKDistFactor * (1.0f - cpuLoad));
-
-	// Additional refinement for Power Saving mode
-	if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING) {
-		// If this CPU is part of the designated consolidation core (sSmallTaskCore)
-		// and that core is very lightly loaded, give a further small boost to encourage
-		// task completion on this core.
-		if (cpu->Core() == sSmallTaskCore && sSmallTaskCore != NULL
-			&& sSmallTaskCore->GetLoad() < kLowLoad) {
-			multiplier *= POWER_SAVING_DTQ_STC_BOOST_FACTOR;
-		} else if (cpuLoad < POWER_SAVING_DTQ_IDLE_CPU_THRESHOLD) {
-			// Fallback: If not on STC or STC is more loaded,
-			// still give a boost if *this specific CPU* is almost idle.
-			// This helps very short tasks complete quickly if they land on an idle SMT thread.
-			multiplier *= POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR;
-		}
+	// With EEVDF, this function should just return the thread's assigned fSliceDuration.
+	// The complex DTQ logic based on gKernelKDistFactor and power saving mode
+	// is no longer applicable here. Slice duration for EEVDF is determined by
+	// fairness, nice levels, and latency-nice requirements.
+	// gKernelKDistFactor might be repurposed to influence slice duration calculation
+	// elsewhere, or removed if EEVDF's own mechanisms are sufficient.
+	if (IsIdle()) { // Should have been handled by caller, but for safety:
+		return B_INFINITE_TIMEOUT; // Or a very large value for periodic check
 	}
-
-	if (multiplier < 0.1f) multiplier = 0.1f;
-
-	bigtime_t dynamicQuantum = (bigtime_t)(baseQuantum * multiplier);
-	dynamicQuantum = std::max(kMinEffectiveQuantum, dynamicQuantum);
-	dynamicQuantum = std::min(kMaxEffectiveQuantum, dynamicQuantum);
-	return dynamicQuantum;
+	return SliceDuration();
 }
 
 
@@ -339,6 +360,14 @@ ThreadData::_ComputeNeededLoad()
 
 	fLastMeasureAvailableTime = fMeasureAvailableTime;
 	fMeasureAvailableActiveTime = 0;
+
+	// EEVDF
+	fVirtualDeadline = 0;
+	fLag = 0;
+	fEligibleTime = 0;
+	fSliceDuration = kBaseQuanta[NUM_MLFQ_LEVELS / 2]; // Default slice
+	fVirtualRuntime = 0;
+	// fEevdfLink is implicitly default-constructed.
 }
 
 

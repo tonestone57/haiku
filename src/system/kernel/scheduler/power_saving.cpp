@@ -395,17 +395,17 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 static void
 power_saving_switch_to_mode()
 {
-	gKernelKDistFactor = 0.5f;
-	gSchedulerBaseQuantumMultiplier = 1.5f;
-	gSchedulerAgingThresholdMultiplier = 1.5f;
+	gKernelKDistFactor = 0.5f; // TODO EEVDF: Re-evaluate usefulness or repurpose for slice calculation. Currently no direct effect.
+	gSchedulerBaseQuantumMultiplier = 1.5f; // Affects SliceDuration via GetBaseQuantumForLevel
+	// gSchedulerAgingThresholdMultiplier = 1.5f; // Aging is obsolete with EEVDF
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 	Scheduler::sSmallTaskCore = NULL;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
 	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
-	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f, BaseQuantumMult: %.2f, AgingMult: %.2f, LB Policy: CONSOLIDATE, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
+	dprintf("scheduler: Power Saving mode activated. DTQ Factor: %.2f (EEVDF: effect TBD), BaseQuantumMult: %.2f, LB Policy: CONSOLIDATE, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 

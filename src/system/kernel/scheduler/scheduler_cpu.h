@@ -17,9 +17,9 @@
 
 #include <cpufreq.h>
 
-#include "RunQueue.h"
 #include "scheduler_common.h"
 #include "scheduler_modes.h"
+#include "EevdfRunQueue.h" // Changed from RunQueue.h
 #include "scheduler_profiler.h"
 
 
@@ -35,10 +35,11 @@ class CPUEntry;
 class CoreEntry;
 class PackageEntry;
 
-class ThreadRunQueue : public RunQueue<ThreadData, THREAD_MAX_SET_PRIORITY> {
-public:
-						void			Dump() const;
-};
+// Remove ThreadRunQueue typedef as it's MLFQ specific.
+// class ThreadRunQueue : public RunQueue<ThreadData, THREAD_MAX_SET_PRIORITY> {
+// public:
+//						void			Dump() const;
+// };
 
 class CPUEntry : public HeapLinkImpl<CPUEntry, int32> {
 public:
@@ -55,16 +56,21 @@ public:
 	inline				void			LockRunQueue();
 	inline				void			UnlockRunQueue();
 
-						void			AddThread(ThreadData* thread, int mlfqLevel, bool addToFront);
+						// Modified for EEVDF: mlfqLevel and addToFront are no longer relevant here.
+						void			AddThread(ThreadData* thread);
 						void			RemoveThread(ThreadData* thread);
-						void			RemoveFromQueue(ThreadData* thread, int mlfqLevel);
+						// RemoveFromQueue might be obsolete or just call RemoveThread.
 
-						ThreadData*		PeekNextThread() const;
-	inline				int				HighestMLFQLevel() const { return fMlfqHighestNonEmptyLevel; }
+						// Renamed and functionality will change for EEVDF (eligibility check).
+						ThreadData*		PeekEligibleNextThread() const;
+	//inline				int				HighestMLFQLevel() const { return fMlfqHighestNonEmptyLevel; } // Obsolete
 	inline				int32			GetTotalThreadCount() const { return fTotalThreadCount; }
 
 
-						ThreadData*		PeekIdleThread() const;
+						ThreadData*		PeekIdleThread() const; // May need adjustment for how idle threads are handled.
+										// Idle thread might not be in EevdfRunQueue.
+						void			SetIdleThread(ThreadData* idleThread);
+
 
 						void			UpdatePriority(int32 priority);
 
@@ -89,16 +95,21 @@ public:
 						int32			CalculateTotalIrqLoad() const;
 
 						// Public accessor for MLFQ levels (caller must hold fQueueLock)
-						const ThreadRunQueue& GetMLFQLevel(int level) const {
-#if KDEBUG
-							ASSERT(are_interrupts_enabled() == false);
-#endif
-							ASSERT(level >= 0 && level < NUM_MLFQ_LEVELS);
-							return fMlfq[level];
-						}
+						// Public accessor for MLFQ levels (caller must hold fQueueLock)
+						// This is now obsolete with EEVDF.
+						// const ThreadRunQueue& GetMLFQLevel(int level) const {
+						// #if KDEBUG
+						//	ASSERT(are_interrupts_enabled() == false);
+						// #endif
+						//	ASSERT(level >= 0 && level < NUM_MLFQ_LEVELS);
+						//	return fMlfq[level];
+						// }
+						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
+						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
+
 
 private:
-						void			_UpdateHighestMLFQLevel();
+						// void			_UpdateHighestMLFQLevel(); // Obsolete
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
 
@@ -108,10 +119,10 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						ThreadRunQueue	fMlfq[NUM_MLFQ_LEVELS];
-						// bool			fUpdateLoadEvent; // Moved down
-						int32			fMlfqHighestNonEmptyLevel;
-						spinlock		fQueueLock;
+						EevdfRunQueue	fEevdfRunQueue; // Replaces fMlfq array
+						ThreadData*		fIdleThread;    // Explicitly store this CPU's idle thread
+						// int32			fMlfqHighestNonEmptyLevel; // Obsolete
+						spinlock		fQueueLock; // Protects fEevdfRunQueue and fTotalThreadCount
 
 						// Historical thread execution load on this CPU.
 						// See scheduler_common.h for detailed explanation of load metrics.

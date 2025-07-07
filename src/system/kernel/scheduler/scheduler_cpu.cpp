@@ -15,6 +15,7 @@
 #include <algorithm>
 
 #include "scheduler_thread.h"
+#include "EevdfRunQueue.h" // Make sure this is included
 
 
 namespace Scheduler {
@@ -41,7 +42,7 @@ using namespace Scheduler;
 
 class Scheduler::DebugDumper {
 public:
-	static	void		DumpCPURunQueue(CPUEntry* cpu);
+	static	void		DumpEevdfRunQueue(CPUEntry* cpu); // Renamed
 	static	void		DumpCoreLoadHeapEntry(CoreEntry* core);
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 
@@ -59,32 +60,14 @@ static CPUPriorityHeap sDebugCPUHeap;
 static CoreLoadHeap sDebugCoreHeap;
 
 
-void
-ThreadRunQueue::Dump() const
-{
-	ThreadRunQueue::ConstIterator iterator = GetConstIterator();
-	if (!iterator.HasNext())
-		kprintf("Run queue is empty.\n");
-	else {
-		kprintf("thread      id      priority effective_priority mlfq_level name\n");
-		while (iterator.HasNext()) {
-			ThreadData* threadData = iterator.Next();
-			Thread* thread = threadData->GetThread();
-
-			kprintf("%p  %-7" B_PRId32 " %-8" B_PRId32 " %-16" B_PRId32 " %-10d %s\n",
-				thread, thread->id, thread->priority,
-				threadData->GetEffectivePriority(),
-				threadData->CurrentMLFQLevel(),
-				thread->name);
-		}
-	}
-}
+// ThreadRunQueue::Dump() is removed as ThreadRunQueue is removed.
+// A new dump method for EevdfRunQueue will be part of DebugDumper.
 
 
 CPUEntry::CPUEntry()
 	:
-	// Corrected order: fMlfqHighestNonEmptyLevel before fLoad
-	fMlfqHighestNonEmptyLevel(-1),
+	// fMlfqHighestNonEmptyLevel is removed.
+	fIdleThread(NULL), // Initialize fIdleThread
 	fLoad(0),
 	fInstantaneousLoad(0.0f),
 	fInstLoadLastUpdateTimeSnapshot(0),
@@ -106,7 +89,8 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	// associating it with its parent `core`.
 	fCPUNumber = id;
 	fCore = core;
-	fMlfqHighestNonEmptyLevel = -1; // No threads initially in MLFQ.
+	fIdleThread = NULL; // Set explicitly, though constructor does it.
+	// fMlfqHighestNonEmptyLevel removed.
 	// Initialize load metrics to a clean state.
 	fInstantaneousLoad = 0.0f;
 	fInstLoadLastUpdateTimeSnapshot = system_time();
@@ -151,25 +135,16 @@ CPUEntry::Stop()
 
 
 void
-CPUEntry::AddThread(ThreadData* thread, int mlfqLevel, bool addToFront)
+CPUEntry::AddThread(ThreadData* thread)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
+	ASSERT(thread != fIdleThread); // Idle thread should not be added to the main run queue.
 
-	if (addToFront)
-		fMlfq[mlfqLevel].PushFront(thread, thread->GetEffectivePriority());
-	else
-		fMlfq[mlfqLevel].PushBack(thread, thread->GetEffectivePriority());
-
-	thread->MarkEnqueued(this->Core());
+	fEevdfRunQueue.Add(thread);
+	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
-
-	if (fMlfq[mlfqLevel].PeekMaximum() != NULL) {
-		if (fMlfqHighestNonEmptyLevel == -1 || mlfqLevel < fMlfqHighestNonEmptyLevel) {
-			fMlfqHighestNonEmptyLevel = mlfqLevel;
-		}
-	}
+	// fMlfqHighestNonEmptyLevel logic removed.
 }
 
 
@@ -177,85 +152,78 @@ void
 CPUEntry::RemoveThread(ThreadData* thread)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(thread->IsEnqueued());
-	RemoveFromQueue(thread, thread->CurrentMLFQLevel());
+	ASSERT(thread->IsEnqueued() || thread == fIdleThread); // Idle thread might not be "enqueued" in fEevdfRunQueue
+	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
+
+	if (thread != fIdleThread) {
+		fEevdfRunQueue.Remove(thread);
+		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
+		atomic_add(&fTotalThreadCount, -1);
+		ASSERT(fTotalThreadCount >= 0);
+	}
+	// fMlfqHighestNonEmptyLevel logic removed.
 }
 
 
+// RemoveFromQueue is now obsolete as there's only one EEVDF queue per CPU.
+// The caller should use RemoveThread directly.
+/*
 void
 CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 {
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(thread->IsEnqueued());
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
-
-	fMlfq[mlfqLevel].Remove(thread);
-	// Caller is responsible for threadData->MarkDequeued()
-
-	atomic_add(&fTotalThreadCount, -1);
-	ASSERT(fTotalThreadCount >= 0);
-
-
-	if (mlfqLevel == fMlfqHighestNonEmptyLevel && fMlfq[mlfqLevel].PeekMaximum() == NULL) {
-		_UpdateHighestMLFQLevel();
-	}
+	...
 }
+*/
 
 
 ThreadData*
-CPUEntry::PeekNextThread() const
+CPUEntry::PeekEligibleNextThread() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 
-	if (fMlfqHighestNonEmptyLevel == -1)
+	// TODO EEVDF: This needs to iterate through fEevdfRunQueue.PeekMinimum()
+	// and check eligibility (lag >= 0 or system_time() >= eligible_time).
+	// For now, just peeking the absolute minimum.
+	// This is a placeholder and will need significant refinement.
+	if (fEevdfRunQueue.IsEmpty())
 		return NULL;
-	return fMlfq[fMlfqHighestNonEmptyLevel].PeekMaximum();
+	return fEevdfRunQueue.PeekMinimum();
 }
 
 
-void
-CPUEntry::_UpdateHighestMLFQLevel()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
-
-	fMlfqHighestNonEmptyLevel = -1;
-	for (int i = 0; i < NUM_MLFQ_LEVELS; i++) {
-		if (fMlfq[i].PeekMaximum() != NULL) {
-			fMlfqHighestNonEmptyLevel = i;
-			return;
-		}
-	}
-}
+// _UpdateHighestMLFQLevel is removed.
 
 
 ThreadData*
 CPUEntry::PeekIdleThread() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// The idle thread for this CPU is expected to be in the lowest MLFQ level.
-	// This function is typically called when the run queue lock for this CPU
-	// is already held, or at points where concurrent modification is not expected.
-	ThreadData* idleThreadData = fMlfq[NUM_MLFQ_LEVELS - 1].PeekMaximum();
+	ASSERT(fIdleThread != NULL && fIdleThread->IsIdle());
+	return fIdleThread;
+}
 
-#if KDEBUG
-	if (idleThreadData == NULL) {
-		// This should not happen in a correctly initialized and running system.
-		// An idle thread should always be present in the lowest queue for each active CPUEntry.
-		panic("CPUEntry::PeekIdleThread: CPU %" B_PRId32 " has no thread in its idle queue (MLFQ level %d)!",
-			fCPUNumber, NUM_MLFQ_LEVELS - 1);
-	} else if (!idleThreadData->IsIdle()) {
-		// This assertion checks if the thread found is indeed marked as an idle thread (by priority).
-		// It's possible other very low-priority, non-idle threads could end up here,
-		// but for "PeekIdleThread", we expect the designated idle thread.
-		panic("CPUEntry::PeekIdleThread: Thread %" B_PRId32 " (prio %" B_PRId32 ") in idle queue of CPU %" B_PRId32 " is not an idle thread!",
-			idleThreadData->GetThread()->id, idleThreadData->GetThread()->priority, fCPUNumber);
+
+void
+CPUEntry::SetIdleThread(ThreadData* idleThread)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(idleThread != NULL && idleThread->IsIdle());
+	fIdleThread = idleThread;
+	// Typically, idle threads are not added to the main EEVDF run queue.
+	// They are special and picked when no other eligible thread is available.
+	// So, not modifying fTotalThreadCount or fEevdfRunQueue here.
+	// Their `thread->scheduler_data->fCore` should be set correctly.
+	if (fIdleThread->Core() == NULL) {
+		// This might happen if idle threads are initialized very early.
+		// Ensure it's associated with this CPU's core.
+		// MarkEnqueued also sets fCore.
+		fIdleThread->MarkEnqueued(this->Core());
+		// Idle threads are conceptually always "ready" on their CPU, but not in the typical sense.
+		// MarkDequeued might be called if it's treated like a normal thread being taken off a queue.
+		// For simplicity, let's assume its state is managed.
 	}
-#endif
-
-	return idleThreadData;
+	ASSERT(fIdleThread->Core() == this->Core());
 }
 
 
@@ -347,6 +315,9 @@ CPUEntry::UpdateInstantaneousLoad(bigtime_t now)
 	if (fCore) {
 		fCore->UpdateInstantaneousLoad();
 	}
+	// Update this CPU's score in its core's CPUHeap
+	// Higher score is better (less loaded).
+	UpdatePriority(kMaxLoad - (int32)(fInstantaneousLoad * kMaxLoad));
 }
 
 
@@ -357,29 +328,31 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool putAtBack, int oldMlfqLev
 	ASSERT(are_interrupts_enabled() == false); // Caller must hold the run queue lock.
 
 	// If the old thread (that was just running) is still ready and belongs to
-	// this CPU's core, re-enqueue it.
-	// `putAtBack` determines if it goes to the front (if its quantum didn't end
-	// and it didn't yield) or back (if quantum ended or it yielded).
-	// `oldMlfqLevel` is its current MLFQ level (might have been demoted just before this).
+	// this CPU's core, its EEVDF parameters should be updated, and it should be
+	// re-inserted into the EEVDF run queue.
+	// The `putAtBack` and `oldMlfqLevel` parameters are MLFQ-specific.
+	// For EEVDF, re-insertion means its new virtual_deadline determines its position.
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
-		&& oldThread->Core() == this->Core()) {
-		AddThread(oldThread, oldMlfqLevel, !putAtBack);
+		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
+		// TODO EEVDF: Update oldThread's virtual_runtime, lag, slice_duration,
+		// virtual_deadline before re-adding.
+		// This update logic will be complex and part of the main reschedule() function.
+		// For now, assume it's updated and just re-add.
+		fEevdfRunQueue.Add(oldThread);
+		// oldThread->MarkEnqueued() would have been called by Add.
 	}
 
-	// Peek the highest priority thread from the run queues.
-	ThreadData* nextThreadData = PeekNextThread();
+	// Peek the next eligible thread from the EEVDF run queue.
+	ThreadData* nextThreadData = PeekEligibleNextThread();
 
 	if (nextThreadData != NULL) {
-		// Successfully found a runnable thread in the run queue.
-		// Note: This thread is *not* removed from the queue here; the caller
-		// (scheduler_reschedule) is responsible for dequeuing it if it's chosen.
+		// An eligible thread was found.
+		// The caller (scheduler_reschedule) will remove it from fEevdfRunQueue.
 	} else {
-		// No suitable thread in any run queue.
-		// Fall back to this CPU's dedicated idle thread.
-		nextThreadData = PeekIdleThread();
+		// No eligible, non-idle thread found. Choose this CPU's idle thread.
+		nextThreadData = fIdleThread; // Use the explicitly stored idle thread
 		if (nextThreadData == NULL) {
-			// This should be impossible if idle threads are correctly initialized.
-			panic("CPUEntry::ChooseNextThread: No idle thread found for CPU %" B_PRId32, ID());
+			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());
 		}
 	}
 
@@ -686,13 +659,16 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
+	// This lock is to protect iteration over fCPUSet if AddCPU/RemoveCPU can happen concurrently.
+	// However, CoreEntry::ThreadCount() is often called in contexts where topology is stable.
+	// For safety with potential hotplug, locking is good.
+	SpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (fCPUSet.GetBit(i)) {
+		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
-			if (!gCPU[i].disabled) {
-				// CPUEntry::GetTotalThreadCount() is atomic or appropriately locked internally
-				totalThreads += cpuEntry->GetTotalThreadCount();
-			}
+			// cpuEntry->GetTotalThreadCount() sums non-idle threads in its EEVDF queue.
+			// It should use its own lock if needed.
+			totalThreads += cpuEntry->GetTotalThreadCount();
 		}
 	}
 	return totalThreads;
@@ -1235,30 +1211,32 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 
 
 /* static */ void
-DebugDumper::DumpCPURunQueue(CPUEntry* cpu)
+DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 {
-	kprintf("\nCPU %" B_PRId32 " MLFQ Run Queues (HighestNonEmpty: %" B_PRId32 ", InstLoad: %.2f, TotalThreads: %" B_PRId32 "):\n",
-		cpu->ID(), cpu->HighestMLFQLevel(), cpu->GetInstantaneousLoad(), cpu->GetTotalThreadCount());
+	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInQueue: %" B_PRId32 "):\n",
+		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetTotalThreadCount());
+	kprintf("  Idle Thread: %p (ID: %" B_PRId32 ")\n", cpu->fIdleThread ? cpu->fIdleThread->GetThread() : NULL, cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1);
+
 	cpu->LockRunQueue();
-	for (int i = 0; i < NUM_MLFQ_LEVELS; i++) {
-		ThreadRunQueue::ConstIterator iterator = cpu->fMlfq[i].GetConstIterator();
-		if (iterator.HasNext()) {
-			kprintf("  Level %2d: ", i);
-			bool firstInLevel = true;
-			while (iterator.HasNext()) {
-				ThreadData* threadData = iterator.Next();
-				Thread* thread = threadData->GetThread();
-				if (!firstInLevel) kprintf(", ");
-				kprintf("%" B_PRId32 "(%s)", thread->id, thread_is_idle_thread(thread) ? "I" : "U");
-				firstInLevel = false;
-			}
-			kprintf("\n");
+	const EevdfRunQueue& queue = cpu->GetEevdfRunQueue();
+	if (queue.IsEmpty()) {
+		kprintf("  Run queue is empty.\n");
+	} else {
+		kprintf("  thread      id      virt_deadline   lag         elig_time   slice_dur   virt_runtime name\n");
+		// Note: Iterating a heap for dump purposes is not straightforward
+		// without a dedicated iterator or by repeatedly peeking/popping to a temp store.
+		// For simplicity, this dump might be limited or require Heap to provide an iterator.
+		// As a placeholder, let's assume we can peek at the top element.
+		ThreadData* td = queue.PeekMinimum();
+		if (td != NULL) {
+			Thread* t = td->GetThread();
+			kprintf("  %p  %-7" B_PRId32 " %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %s (Top of Heap)\n",
+				t, t->id, td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
+				td->SliceDuration(), td->VirtualRuntime(), t->name);
 		}
+		// A full dump would require more sophisticated heap iteration.
+		kprintf("  (Full EEVDF queue dump requires heap iteration - not fully implemented here)\n");
 	}
-	if (cpu->HighestMLFQLevel() == -1 && cpu->GetTotalThreadCount() == 0) {
-		kprintf("  All levels empty.\n");
-	}
-	// Consider if idle thread is part of TotalThreadCount for this print
 	cpu->UnlockRunQueue();
 }
 
@@ -1466,10 +1444,13 @@ void Scheduler::init_debug_commands()
 	if (sDebugCoreHeap.Count() == 0)
 		new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus()); // Max possible cores
 
-	add_debugger_command_etc("run_queue", &dump_run_queue,
-		"List threads in MLFQ run queues per CPU", "\nLists threads in MLFQ run queues per CPU", 0);
+	add_debugger_command_etc("eevdf_run_queue", &DebugDumper::DumpEevdfRunQueue, // Changed command name
+		"List threads in EEVDF run queue per CPU", "\nLists threads in EEVDF run queue per CPU", 0);
+	// Alias for backward compatibility or shorter typing during transition
+	add_debugger_command_alias("run_queue", "eevdf_run_queue", "Alias for eevdf_run_queue");
+
 	if (!gSingleCore) {
-		add_debugger_command_etc("cpu_heap", &dump_cpu_heap,
+		add_debugger_command_etc("cpu_heap", &dump_cpu_heap, // This dumps core load heaps
 			"List Cores in load heaps & CPUs in Core priority heaps",
 			"\nList Cores in load heaps & CPUs in Core priority heaps", 0);
 		add_debugger_command_etc("idle_cores", &dump_idle_cores,

@@ -29,9 +29,9 @@ const bigtime_t kLowLatencyCacheExpire = 30000;  // 30ms (New Value)
 static void
 low_latency_switch_to_mode()
 {
-	gKernelKDistFactor = 0.3f;
-	gSchedulerBaseQuantumMultiplier = 1.0f;
-	gSchedulerAgingThresholdMultiplier = 1.0f;
+	gKernelKDistFactor = 0.3f; // TODO EEVDF: Re-evaluate usefulness or repurpose for slice calculation. Currently no direct effect.
+	gSchedulerBaseQuantumMultiplier = 1.0f; // Affects SliceDuration via GetBaseQuantumForLevel
+	// gSchedulerAgingThresholdMultiplier = 1.0f; // Aging is obsolete with EEVDF
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 
 	// Set SMT conflict factor for low latency mode.
@@ -47,8 +47,8 @@ low_latency_switch_to_mode()
 	gModeIrqTargetFactor = 0.4f;
 	gModeMaxTargetCpuIrqLoad = 600;
 
-	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f, BaseQuantumMult: %.2f, AgingMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerAgingThresholdMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
+	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f (EEVDF: effect TBD), BaseQuantumMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
+		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 

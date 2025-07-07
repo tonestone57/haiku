@@ -19,8 +19,11 @@
 namespace Scheduler {
 
 
+#include "EevdfRunQueue.h" // For EevdfRunQueueLink
+
 struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData>,
-	RunQueueLinkImpl<ThreadData> {
+	RunQueueLinkImpl<ThreadData> { // Keep existing RunQueueLink for now, might remove later
+friend class Scheduler::EevdfGetLink; // Allow EevdfGetLink to access fEevdfLink
 private:
 	inline	void		_InitBase();
 
@@ -65,15 +68,28 @@ public:
 	inline	void		StartQuantum(bigtime_t effectiveQuantum);
 	inline	bool		HasQuantumEnded(bool wasPreempted, bool hasYielded);
 
-	// --- MLFQ Specific ---
+	// --- MLFQ Specific --- (REMOVED)
+	/*
 	inline	int			CurrentMLFQLevel() const;
 	inline	void		SetMLFQLevel(int level);
-	inline	bigtime_t	TimeEnteredCurrentLevel() const;
-	inline	void		ResetTimeEnteredCurrentLevel();
-
+	*/
 	// --- Load Balancing Specific ---
 	inline	bigtime_t	LastMigrationTime() const;
 	inline	void		SetLastMigrationTime(bigtime_t time);
+
+	// --- EEVDF Specific ---
+	inline	bigtime_t	VirtualDeadline() const;
+	inline	void		SetVirtualDeadline(bigtime_t deadline);
+	inline	bigtime_t	Lag() const;
+	inline	void		SetLag(bigtime_t lag);
+	inline	void		AddLag(bigtime_t lagAmount);
+	inline	bigtime_t	EligibleTime() const;
+	inline	void		SetEligibleTime(bigtime_t time);
+	inline	bigtime_t	SliceDuration() const;
+	inline	void		SetSliceDuration(bigtime_t duration);
+	inline	bigtime_t	VirtualRuntime() const;
+	inline	void		SetVirtualRuntime(bigtime_t runtime);
+	inline	void		AddVirtualRuntime(bigtime_t runtimeAmount);
 
 	// --- State and Lifecycle ---
 	// Called when a thread continues to be ready/running.
@@ -154,11 +170,9 @@ private:
 			// Pointer to the kernel Thread object this scheduler data belongs to.
 			Thread*		fThread;
 
-	// MLFQ specific fields
-			// Current Multi-Level Feedback Queue level (0 is highest non-RT).
-			int			fCurrentMlfqLevel;
-			// Wall time when the thread last entered its fCurrentMlfqLevel. Used for aging.
-			bigtime_t	fTimeEnteredCurrentLevel;
+	// MLFQ specific fields (REMOVED)
+			// int			fCurrentMlfqLevel;
+			// bigtime_t	fTimeEnteredCurrentLevel;
 
 	// Cached effective priority. Recalculated by _ComputeEffectivePriority().
 	mutable	int32		fEffectivePriority;
@@ -191,6 +205,14 @@ private:
 			// The physical core this thread is currently primarily associated with (homed to).
 			// Threads contribute their fNeededLoad to their fCore.
 			CoreEntry*	fCore;
+
+	// EEVDF specific fields
+			bigtime_t	fVirtualDeadline;
+			bigtime_t	fLag;
+			bigtime_t	fEligibleTime;
+			bigtime_t	fSliceDuration;
+			bigtime_t	fVirtualRuntime;
+			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue
 };
 
 class ThreadProcessing {
@@ -201,6 +223,20 @@ public:
 
 
 // --- Inlined Method Implementations ---
+
+// Definition for EevdfGetLink now that ThreadData is defined with fEevdfLink
+inline HeapLink*
+Scheduler::EevdfGetLink::operator()(ThreadData* element) const
+{
+	return &element->fEevdfLink.fHeapLink;
+}
+
+inline const HeapLink*
+Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
+{
+	return &element->fEevdfLink.fHeapLink;
+}
+
 
 inline bool
 ThreadData::IsRealTime() const
@@ -316,7 +352,8 @@ ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
 	return fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum;
 }
 
-// --- MLFQ Specific ---
+// --- MLFQ Specific --- (REMOVED)
+/*
 inline int
 ThreadData::CurrentMLFQLevel() const
 {
@@ -344,6 +381,7 @@ ThreadData::ResetTimeEnteredCurrentLevel()
 {
 	fTimeEnteredCurrentLevel = system_time();
 }
+*/
 
 // --- Load Balancing Specific ---
 inline bigtime_t
@@ -357,6 +395,20 @@ ThreadData::SetLastMigrationTime(bigtime_t time)
 {
 	fLastMigrationTime = time;
 }
+
+// --- EEVDF Specific ---
+inline bigtime_t ThreadData::VirtualDeadline() const { return fVirtualDeadline; }
+inline void ThreadData::SetVirtualDeadline(bigtime_t deadline) { fVirtualDeadline = deadline; }
+inline bigtime_t ThreadData::Lag() const { return fLag; }
+inline void ThreadData::SetLag(bigtime_t lag) { fLag = lag; }
+inline void ThreadData::AddLag(bigtime_t lagAmount) { fLag += lagAmount; }
+inline bigtime_t ThreadData::EligibleTime() const { return fEligibleTime; }
+inline void ThreadData::SetEligibleTime(bigtime_t time) { fEligibleTime = time; }
+inline bigtime_t ThreadData::SliceDuration() const { return fSliceDuration; }
+inline void ThreadData::SetSliceDuration(bigtime_t duration) { fSliceDuration = duration; }
+inline bigtime_t ThreadData::VirtualRuntime() const { return fVirtualRuntime; }
+inline void ThreadData::SetVirtualRuntime(bigtime_t runtime) { fVirtualRuntime = runtime; }
+inline void ThreadData::AddVirtualRuntime(bigtime_t runtimeAmount) { fVirtualRuntime += runtimeAmount; }
 
 
 // --- State and Lifecycle ---

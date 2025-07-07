@@ -212,6 +212,27 @@ static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
 
+// Helper function to find an idle CPU on a given core
+static CPUEntry*
+_find_idle_cpu_on_core(CoreEntry* core)
+{
+	if (core == NULL || core->IsDefunct())
+		return NULL;
+
+	CPUSet coreCPUs = core->CPUMask();
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (coreCPUs.GetBit(i) && !gCPU[i].disabled) {
+			Thread* runningThread = gCPU[i].running_thread;
+			if (runningThread != NULL && runningThread->scheduler_data != NULL
+				&& runningThread->scheduler_data->IsIdle()) {
+				return CPUEntry::GetCPU(i);
+			}
+		}
+	}
+	return NULL;
+}
+
+
 static timer sLoadBalanceTimer;
 static const bigtime_t kLoadBalanceCheckInterval = 100000;
 static const bigtime_t kMinTimeBetweenMigrations = 20000;
@@ -1544,12 +1565,20 @@ scheduler_perform_load_balance()
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
 		return;
 
-	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " TargetCore %" B_PRId32 "\n",
-		sourceCoreCandidate->ID(), targetCoreCandidate->ID());
+	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 ")\n",
+		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
+		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad());
 
 	CPUEntry* sourceCPU = NULL;
-	CPUEntry* targetCPU = NULL;
-	CoreEntry* finalTargetCore = NULL;
+	CPUEntry* targetCPU = NULL; // This will be the ultimate target CPU for the chosen thread
+	CoreEntry* finalTargetCore = NULL; // This will be the core of targetCPU
+
+	// Check if the targetCoreCandidate has an idle CPU for wake-affine pulling
+	CPUEntry* idleTargetCPUOnTargetCore = _find_idle_cpu_on_core(targetCoreCandidate);
+	if (idleTargetCPUOnTargetCore != NULL) {
+		TRACE_SCHED("LoadBalance: TargetCore %" B_PRId32 " has an idle CPU: %" B_PRId32 "\n",
+			targetCoreCandidate->ID(), idleTargetCPUOnTargetCore->ID());
+	}
 
 	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) {
 		CoreEntry* consolidationCore = NULL;
@@ -1673,16 +1702,35 @@ scheduler_perform_load_balance()
 		// Prioritize eligibility improvement more by weighting it higher.
 		currentBenefitScore = currentLagOnSource + (2 * eligibilityImprovement);
 
-		// If the candidate is likely I/O bound, reduce its benefit score
-		// to make it more reluctant to migrate.
-		if (candidate->IsLikelyIOBound()) {
-			currentBenefitScore /= 2; // Example: Halve the benefit score
-			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound, reducing benefit score to %" B_PRId64 "\n",
-				candidate->GetThread()->id, currentBenefitScore);
+		// Apply wake-affinity bonus if applicable
+		bigtime_t affinityBonus = 0;
+		if (idleTargetCPUOnTargetCore != NULL
+			&& candidate->GetThread()->previous_cpu == &gCPU[idleTargetCPUOnTargetCore->ID()]) {
+			// This thread last ran on the currently idle target CPU. Give it a large bonus.
+			// The magnitude of the bonus should be significant enough to outweigh
+			// typical benefit scores, e.g., comparable to a large lag or eligibility improvement.
+			affinityBonus = SCHEDULER_TARGET_LATENCY * 2; // Example bonus value
+			currentBenefitScore += affinityBonus;
+			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " gets wake-affinity bonus %" B_PRId64 " for CPU %" B_PRId32 "\n",
+				candidate->GetThread()->id, affinityBonus, idleTargetCPUOnTargetCore->ID());
 		}
 
-		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), benefitScore %" B_PRId64 "\n",
-			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), currentBenefitScore);
+		// If the candidate is likely I/O bound, reduce its benefit score
+		// to make it more reluctant to migrate (after affinity bonus, so affinity can still win).
+		if (candidate->IsLikelyIOBound()) {
+			// Don't penalize if it has strong affinity to an idle core, let affinity win.
+			if (affinityBonus == 0) {
+				currentBenefitScore /= 2; // Example: Halve the benefit score
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 "\n",
+					candidate->GetThread()->id, currentBenefitScore);
+			} else {
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity, score not reduced.\n",
+					candidate->GetThread()->id);
+			}
+		}
+
+		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), affinityBonus %" B_PRId64 ", final benefitScore %" B_PRId64 "\n",
+			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), affinityBonus, currentBenefitScore);
 
 		if (currentBenefitScore > maxBenefitScore) {
 			maxBenefitScore = currentBenefitScore;

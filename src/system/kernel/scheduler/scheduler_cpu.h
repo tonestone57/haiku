@@ -52,12 +52,6 @@ public:
 						void			Start();
 						void			Stop();
 
-	inline				void			EnterScheduler();
-	inline				void			ExitScheduler();
-
-	inline				void			LockScheduler();
-	inline				void			UnlockScheduler();
-
 	inline				void			LockRunQueue();
 	inline				void			UnlockRunQueue();
 
@@ -113,8 +107,6 @@ private:
 
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
-
-						rw_spinlock 	fSchedulerModeLock;
 
 						ThreadRunQueue	fMlfq[NUM_MLFQ_LEVELS];
 						// bool			fUpdateLoadEvent; // Moved down
@@ -286,7 +278,6 @@ private:
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
-typedef DoublyLinkedList<PackageEntry> IdlePackageList;
 
 
 inline CoreEntry*
@@ -313,38 +304,6 @@ extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
-
-
-inline void
-CPUEntry::EnterScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	acquire_read_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::ExitScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	release_read_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::LockScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	acquire_write_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::UnlockScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	release_write_spinlock(&fSchedulerModeLock);
-}
 
 
 inline void

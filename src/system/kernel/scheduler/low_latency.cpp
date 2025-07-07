@@ -189,6 +189,60 @@ low_latency_choose_core(const ThreadData* threadData)
 		}
 	}
 
+	// Cache-aware bonus logic begins
+	CoreEntry* initialChosenCore = chosenCore; // Save the choice from load-based heuristics
+	Thread* thread = threadData->GetThread();
+	CoreEntry* prevCore = (thread->previous_cpu != NULL)
+		? CoreEntry::GetCore(thread->previous_cpu->cpu_num)
+		: NULL;
+
+	if (prevCore != NULL && prevCore != initialChosenCore
+		&& !threadData->HasCacheExpired() /* Assumes HasCacheExpired context is prevCore */
+		&& !prevCore->IsDefunct()
+		&& (affinityMask.IsEmpty() || prevCore->CPUMask().Matches(affinityMask))
+		&& prevCore->GetLoad() < kMaxLoadForWarmCorePreference) {
+
+		TRACE("LL ChooseCore: Thread %" B_PRId32 ", prevCore %" B_PRId32 " (load %" B_PRId32 ") is warm. Initial chosenCore %" B_PRId32 " (load %" B_PRId32 ").\n",
+			thread->id, prevCore->ID(), prevCore->GetLoad(),
+			initialChosenCore ? initialChosenCore->ID() : -1, initialChosenCore ? initialChosenCore->GetLoad() : -1);
+
+		bool preferPrevCore = false;
+		if (initialChosenCore != NULL && initialChosenCore->GetLoad() == 0
+			&& initialChosenCore->GetActiveTime() == 0 && prevCore->GetLoad() > 0) {
+			// Initial choice is completely idle, previous core is active but warm.
+			// Only prefer the warm active core if it's very lightly loaded.
+			if (prevCore->GetLoad() < kLowLoad) {
+				preferPrevCore = true;
+				TRACE("LL ChooseCore: Preferring warm prevCore %" B_PRId32 " (load %" B_PRId32 ") over idle initialChosenCore %" B_PRId32 " because prevCore load < kLowLoad.\n",
+					prevCore->ID(), prevCore->GetLoad(), initialChosenCore->ID());
+			} else {
+				TRACE("LL ChooseCore: Sticking with idle initialChosenCore %" B_PRId32 " over warm prevCore %" B_PRId32 " (load %" B_PRId32 ") because prevCore load >= kLowLoad.\n",
+					initialChosenCore->ID(), prevCore->ID(), prevCore->GetLoad());
+			}
+		} else if (initialChosenCore != NULL) {
+			// Initial choice is active, or both are idle (though prevCore != initialChosenCore implies not both idle if one is prevCore)
+			// or prevCore is idle and initialChosenCore is active.
+			if (prevCore->GetLoad() <= initialChosenCore->GetLoad() + kCacheWarmCoreLoadBonus) {
+				preferPrevCore = true;
+				TRACE("LL ChooseCore: Preferring warm prevCore %" B_PRId32 " (load %" B_PRId32 ") over initialChosenCore %" B_PRId32 " (load %" B_PRId32 ") due to bonus (allowance %" B_PRId32 ").\n",
+					prevCore->ID(), prevCore->GetLoad(), initialChosenCore->ID(), initialChosenCore->GetLoad(), kCacheWarmCoreLoadBonus);
+			} else {
+				TRACE("LL ChooseCore: Sticking with initialChosenCore %" B_PRId32 " (load %" B_PRId32 "). Warm prevCore %" B_PRId32 " (load %" B_PRId32 ") too loaded even with bonus.\n",
+					initialChosenCore->ID(), initialChosenCore->GetLoad(), prevCore->ID(), prevCore->GetLoad());
+			}
+		} else {
+			// initialChosenCore was NULL (should not happen due to fallback logic), but prevCore is a valid candidate.
+			preferPrevCore = true;
+			TRACE("LL ChooseCore: initialChosenCore was NULL, choosing warm prevCore %" B_PRId32 " (load %" B_PRId32 ").\n",
+				prevCore->ID(), prevCore->GetLoad());
+		}
+
+		if (preferPrevCore) {
+			chosenCore = prevCore;
+		}
+	}
+	// Cache-aware bonus logic ends
+
 	ASSERT(chosenCore != NULL && "Could not choose a core in low_latency_choose_core");
 	return chosenCore;
 }

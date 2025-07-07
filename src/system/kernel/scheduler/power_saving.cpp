@@ -23,6 +23,7 @@ using namespace Scheduler;
 
 //const bigtime_t kPowerSavingCacheExpire = 100000;
 const bigtime_t kPowerSavingCacheExpire = 250000; // 250ms (New Value)
+const bigtime_t kPowerSavingCoreWorkCacheExpire = 100000; // 100ms of other core work
 CoreEntry* Scheduler::sSmallTaskCore = NULL; // Define the global variable
 // const int32 kConsolidationScoreHysteresisMargin = kMaxLoad / 10; // Replaced by adaptive margin
 const int32 kReducedHysteresisMargin_PS = kMaxLoad / 25;  // Approx 4%
@@ -442,10 +443,60 @@ static bool
 power_saving_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	if (threadData == NULL || threadData->WentSleep() == 0) {
+	if (threadData == NULL) {
+		TRACE("PS CacheExpiry: threadData NULL, expired.\n");
 		return true;
 	}
-	return system_time() - threadData->WentSleep() > kPowerSavingCacheExpire;
+	if (threadData->WentSleep() == 0) {
+		// Never went to sleep or no valid timestamp, assume cache is cold/irrelevant
+		TRACE("PS CacheExpiry: Thread %" B_PRId32 " WentSleep is 0, expired.\n", threadData->GetThread()->id);
+		return true;
+	}
+
+	// 1. Original wall time check
+	bigtime_t timeSinceSleep = system_time() - threadData->WentSleep();
+	if (timeSinceSleep > kPowerSavingCacheExpire) {
+		TRACE("PS CacheExpiry: Thread %" B_PRId32 " expired by wall time (%.1fms > %.1fms).\n",
+			threadData->GetThread()->id, timeSinceSleep / 1000.0, kPowerSavingCacheExpire / 1000.0);
+		return true;
+	}
+
+	// 2. New core work check
+	CoreEntry* core = threadData->Core();
+	if (core == NULL) {
+		// Not currently associated with a specific core, so no specific core cache to be warm on.
+		// Or, if WentSleep() was set but Core() is NULL now, it implies it was unassigned
+		// while sleeping or its previous core context is lost.
+		TRACE("PS CacheExpiry: Thread %" B_PRId32 " has no assigned core, expired.\n", threadData->GetThread()->id);
+		return true;
+	}
+
+	bigtime_t coreWorkDone;
+	if (threadData->WentSleepActive() > 0) {
+		// Thread had an active session on this core before sleeping.
+		// Measure how much work the core did *since this thread was last active on it*.
+		coreWorkDone = core->GetActiveTime() - threadData->WentSleepActive();
+		if (coreWorkDone < 0) coreWorkDone = 0; // Time shouldn't go backwards
+	} else {
+		// Thread has no prior recorded active session on this core (fWentSleepActive is 0),
+		// or the core itself was idle when the thread last ran on it and then slept.
+		// In this case, any significant work done by the core *at all* since the thread
+		// was associated with it (approximated by WentSleep time) makes the cache cold.
+		// If WentSleep is very recent, GetActiveTime might be small.
+		// This logic prioritizes the idea that if a thread didn't establish a "hot" cache footprint
+		// (fWentSleepActive == 0), then any substantial core activity means it's cold.
+		coreWorkDone = core->GetActiveTime();
+	}
+
+	if (coreWorkDone > kPowerSavingCoreWorkCacheExpire) {
+		TRACE("PS CacheExpiry: Thread %" B_PRId32 " expired by core work on core %" B_PRId32 " (%.1fms > %.1fms).\n",
+			threadData->GetThread()->id, core->ID(), coreWorkDone / 1000.0, kPowerSavingCoreWorkCacheExpire / 1000.0);
+		return true;
+	}
+
+	TRACE("PS CacheExpiry: Thread %" B_PRId32 " cache considered WARM on core %" B_PRId32 " (wall time %.1fms, core work %.1fms).\n",
+		threadData->GetThread()->id, core->ID(), timeSinceSleep / 1000.0, coreWorkDone / 1000.0);
+	return false; // Cache considered warm
 }
 
 

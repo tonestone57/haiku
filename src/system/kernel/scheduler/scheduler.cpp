@@ -852,7 +852,7 @@ reschedule(int32 nextState)
 				}
 				// Increment total thread count as we are replacing an idle thread with a non-idle one.
 				atomic_add(&cpu->fTotalThreadCount, 1);
-				// _UpdateMinVirtualRuntime will be called below anyway.
+				// _UpdateMinVirtualRuntime will be called below.
 			} else {
 				// Steal failed
 				cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
@@ -1188,7 +1188,7 @@ spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER; // Used by writer
 
 // Array for CPUs to proactively report their local MinVirtualRuntime
 // Accessed via atomic_get64/set64. MAX_CPUS is defined in <smp.h>
-#include <smp.h> // For MAX_CPUS
+// #include <smp.h> // For MAX_CPUS (already included above)
 int64 gReportedCpuMinVR[MAX_CPUS];
 
 
@@ -1217,10 +1217,9 @@ scheduler_update_global_min_vruntime()
 	if (calculatedNewGlobalMin != -1LL) {
 		InterruptsSpinLocker locker(gGlobalMinVRuntimeLock); // Lock for final RMW update
 		// gGlobalMinVirtualRuntime should only advance.
-		bigtime_t currentGlobalVal = atomic_get64((int64*)&gGlobalMinVirtualRuntime); // Read current value atomically even under lock for consistency
+		bigtime_t currentGlobalVal = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			// gGlobalMinVirtualRuntime = calculatedNewGlobalMin; // Direct assignment under lock is fine
-			atomic_set64((int64*)&gGlobalMinVirtualRuntime, calculatedNewGlobalMin); // Or atomic_set64 for explicitness
+			atomic_set64((int64*)&gGlobalMinVirtualRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED("GlobalMinVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -1230,18 +1229,16 @@ scheduler_update_global_min_vruntime()
 static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore) {
-		scheduler_update_global_min_vruntime(); // Keep this
+		scheduler_update_global_min_vruntime();
 
 		bool migrationOccurred = scheduler_perform_load_balance();
 
 		if (migrationOccurred) {
-			// Imbalance was addressed, or system is active - check more frequently
 			gDynamicLoadBalanceInterval = (bigtime_t)(gDynamicLoadBalanceInterval * kLoadBalanceIntervalDecreaseFactor);
 			if (gDynamicLoadBalanceInterval < kMinLoadBalanceInterval)
 				gDynamicLoadBalanceInterval = kMinLoadBalanceInterval;
 			TRACE_SCHED("LoadBalanceEvent: Migration occurred. New interval: %" B_PRId64 "us\n", gDynamicLoadBalanceInterval);
 		} else {
-			// No migration, system might be balanced or no good moves - check less frequently
 			gDynamicLoadBalanceInterval = (bigtime_t)(gDynamicLoadBalanceInterval * kLoadBalanceIntervalIncreaseFactor);
 			if (gDynamicLoadBalanceInterval > kMaxLoadBalanceInterval)
 				gDynamicLoadBalanceInterval = kMaxLoadBalanceInterval;
@@ -1776,18 +1773,8 @@ scheduler_perform_load_balance()
 			continue;
 		}
 
-		// Estimate benefit of moving to targetCPU - targetCPU is not known yet.
-		// We need a candidate targetCPU on finalTargetCore to estimate.
-		// For now, let's assume a generic targetCPU on finalTargetCore for estimation.
-		// This part of benefit score might need refinement if targetCPU properties vary a lot.
-		// A simpler approach: base benefit on source lag and eligibility improvement to *any* cpu on target core.
-		// The current code uses `targetCPU->MinVirtualRuntime()` which implies targetCPU is known.
-		// However, targetCPU is selected *after* threadToMove is chosen.
-		// This seems like a circular dependency or needs clarification.
-		// For now, assume targetCPU is a placeholder for any CPU on finalTargetCore for this estimation.
-		// Let's use finalTargetCore to find a representative (e.g. least loaded) CPU for estimation.
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
-		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU; // fallback if no other CPU on target core
+		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
 
 		bigtime_t targetQueueMinVruntime = representativeTargetCPU->MinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
@@ -1857,7 +1844,7 @@ scheduler_perform_load_balance()
 
 	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
 	if (targetCPU == NULL || targetCPU == sourceCPU) {
-		if (threadToMove != NULL) { // If a thread was popped but no target found, re-add it
+		if (threadToMove != NULL) {
 			sourceQueue.Add(threadToMove);
 		}
 		sourceCPU->UnlockRunQueue();
@@ -1868,10 +1855,10 @@ scheduler_perform_load_balance()
 
 	atomic_add(&sourceCPU->fTotalThreadCount, -1);
 	ASSERT(sourceCPU->fTotalThreadCount >=0);
-	sourceCPU->_UpdateMinVirtualRuntime(); // Source queue changed
+	sourceCPU->_UpdateMinVirtualRuntime();
 
 	threadToMove->MarkDequeued();
-	sourceCPU->UnlockRunQueue(); // sourceCPU's queue lock released
+	sourceCPU->UnlockRunQueue();
 
 	TRACE("LoadBalance (EEVDF): Migrating thread %" B_PRId32 " (Lag %" B_PRId64 ", VD %" B_PRId64 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
 		threadToMove->GetThread()->id, threadToMove->Lag(), threadToMove->VirtualDeadline(), sourceCPU->ID(), targetCPU->ID());
@@ -1880,9 +1867,7 @@ scheduler_perform_load_balance()
 		threadToMove->UnassignCore(false);
 
 	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
-	// ChooseCoreAndCPU will set the new core and update load accounting correctly.
-	// We pass the specific targetCPU to ensure it lands there.
-	CoreEntry* actualFinalTargetCore = targetCPU->Core(); // Get core from actual targetCPU
+	CoreEntry* actualFinalTargetCore = targetCPU->Core();
 	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU);
 	ASSERT(threadToMove->Core() == actualFinalTargetCore);
 
@@ -1913,12 +1898,12 @@ scheduler_perform_load_balance()
 	TRACE_SCHED("LoadBalance: Migrated T %" B_PRId32 " to CPU %" B_PRId32 ", new VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 "\n",
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
-	targetCPU->AddThread(threadToMove); // AddThread handles fTotalThreadCount and _UpdateMinVirtualRuntime for target
+	targetCPU->AddThread(threadToMove);
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(now);
 	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
-	migrationPerformed = true; // Set flag
+	migrationPerformed = true;
 
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
@@ -2042,7 +2027,5 @@ _user_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
-
-[end of src/system/kernel/scheduler/scheduler.cpp]
 
 [end of src/system/kernel/scheduler/scheduler.cpp]

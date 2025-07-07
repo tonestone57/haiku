@@ -245,7 +245,10 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 		thread->SetLag(weightedSlice - (thread->VirtualRuntime() - queueMinVruntime));
 		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", lag calc %" B_PRId64 "\n", t->id, thread->Lag());
 
-		if (thread->Lag() >= 0) {
+		if (thread->IsRealTime()) {
+			thread->SetEligibleTime(system_time());
+			TRACE_SCHED("ThreadEnqueuer: RT T %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", t->id, thread->Lag());
+		} else if (thread->Lag() >= 0) {
 			thread->SetEligibleTime(system_time());
 		} else {
             // Convert negative lag (debt of weighted time) to wall time delay.
@@ -365,7 +368,10 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	TRACE_SCHED("enqueue: T %" B_PRId32 ", lag calc %" B_PRId64 " (wSlice %" B_PRId64 ", vR %" B_PRId64 ", qMinVR %" B_PRId64 ")\n",
 		thread->id, threadData->Lag(), weightedSliceDuration, threadData->VirtualRuntime(), queueMinVruntime);
 
-	if (threadData->Lag() >= 0) {
+	if (threadData->IsRealTime()) {
+		threadData->SetEligibleTime(system_time());
+		TRACE_SCHED("enqueue: RT T %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", thread->id, threadData->Lag());
+	} else if (threadData->Lag() >= 0) {
 		threadData->SetEligibleTime(system_time());
 	} else {
         // Convert negative lag (debt of weighted time) to wall time delay.
@@ -478,10 +484,16 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	// If it was adjusted, it's now the new value.
 	threadData->SetLag(newWeightedSlice - (threadData->VirtualRuntime() - reference_min_v));
 
-	if (threadData->Lag() >= 0) {
+	if (threadData->IsRealTime()) {
+		threadData->SetEligibleTime(system_time());
+		TRACE_SCHED("set_prio: RT T %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", thread->id, threadData->Lag());
+	} else if (threadData->Lag() >= 0) {
 		threadData->SetEligibleTime(system_time());
 	} else {
 		bigtime_t delay = (-threadData->Lag() * SCHEDULER_WEIGHT_SCALE) / newWeight;
+		// newWeight should be >0 if not RT; if RT, this path isn't taken.
+		// Add safeguard for newWeight == 0 if it could somehow happen for non-RT.
+		if (newWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
 		delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
 		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
 	}
@@ -675,7 +687,10 @@ reschedule(int32 nextState)
 				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, lag increased by %" B_PRId64 " (wSlice) to %" B_PRId64 "\n",
 					oldThread->id, weightedSliceEntitlement, oldThreadData->Lag());
 
-				if (oldThreadData->Lag() >= 0) {
+				if (oldThreadData->IsRealTime()) {
+					oldThreadData->SetEligibleTime(system_time());
+					TRACE_SCHED("reschedule: RT oldT %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", oldThread->id, oldThreadData->Lag());
+				} else if (oldThreadData->Lag() >= 0) {
 					oldThreadData->SetEligibleTime(system_time());
 				} else {
 					int32 weight_for_delay = scheduler_priority_to_weight(oldThreadData->GetBasePriority());

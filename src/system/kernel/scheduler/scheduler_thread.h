@@ -225,6 +225,15 @@ private:
 			bigtime_t	fVirtualRuntime;
 			int8		fLatencyNice;     // Latency preference (-20 to +19)
 			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue
+
+	// I/O-bound detection heuristic fields
+			bigtime_t	fAverageRunBurstTimeEWMA;	// EWMA of runtime before voluntary sleep
+			uint32		fVoluntarySleepTransitions;	// Count of voluntary sleeps, for EWMA stability
+
+public:
+	// I/O-bound detection heuristic methods
+	bool IsLikelyIOBound() const;
+	void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
 };
 
 class ThreadProcessing {

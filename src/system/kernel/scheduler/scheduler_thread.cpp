@@ -25,6 +25,12 @@ static const float POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR = 1.2f;
 void
 ThreadData::_InitBase()
 {
+	// I/O-bound heuristic
+	// Initialize to a value that doesn't immediately classify as I/O bound.
+	// A typical slice duration might be a good start.
+	fAverageRunBurstTimeEWMA = SCHEDULER_TARGET_LATENCY / 2;
+	fVoluntarySleepTransitions = 0;
+
 	// Fields related to a specific quantum slice, reset when a new quantum starts
 	fTimeUsedInCurrentQuantum = 0;
 	fCurrentEffectiveQuantum = 0;
@@ -166,7 +172,10 @@ ThreadData::ThreadData(Thread* thread)
 	fEligibleTime(0),
 	fSliceDuration(kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)]), // Default slice duration
 	fVirtualRuntime(0),
-	fLatencyNice(LATENCY_NICE_DEFAULT)
+	fLatencyNice(LATENCY_NICE_DEFAULT),
+	// I/O-bound heuristic
+	fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
+	fVoluntarySleepTransitions(0)
 {
 	// EEVDF specific initializations, if any, can go here.
 	// For example, a new thread might start with zero lag.
@@ -435,4 +444,59 @@ ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
 
 ThreadProcessing::~ThreadProcessing()
 {
+}
+
+
+// #pragma mark - I/O Bound Heuristic Methods
+
+void
+ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	if (IsIdle()) // Don't track for idle threads
+		return;
+
+	// Basic EWMA: new_avg = (sample / N) + ((N-1)/N * old_avg)
+	// where N = IO_BOUND_EWMA_ALPHA_RECIPROCAL
+	// To avoid floating point, this is:
+	// new_avg = (sample + (N-1)*old_avg) / N
+	// Ensure actualRuntimeInSlice is positive to avoid skewing average downwards unexpectedly
+	if (actualRuntimeInSlice < 0) actualRuntimeInSlice = 0;
+
+	if (fVoluntarySleepTransitions < IO_BOUND_MIN_TRANSITIONS) {
+		// For the first few samples, do a simple arithmetic average or prime the EWMA.
+		// Priming with the first sample, then EWMA.
+		if (fVoluntarySleepTransitions == 0) {
+			fAverageRunBurstTimeEWMA = actualRuntimeInSlice;
+		} else {
+			fAverageRunBurstTimeEWMA = (actualRuntimeInSlice + (IO_BOUND_EWMA_ALPHA_RECIPROCAL - 1) * fAverageRunBurstTimeEWMA)
+				/ IO_BOUND_EWMA_ALPHA_RECIPROCAL;
+		}
+		fVoluntarySleepTransitions++;
+	} else {
+		// Stable EWMA
+		fAverageRunBurstTimeEWMA = (actualRuntimeInSlice + (IO_BOUND_EWMA_ALPHA_RECIPROCAL - 1) * fAverageRunBurstTimeEWMA)
+			/ IO_BOUND_EWMA_ALPHA_RECIPROCAL;
+	}
+
+	TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " RecordVoluntarySleep: ran %" B_PRId64 "us, new avgBurst %" B_PRId64 "us, transitions %" B_PRIu32 "\n",
+		fThread->id, actualRuntimeInSlice, fAverageRunBurstTimeEWMA, fVoluntarySleepTransitions);
+}
+
+
+bool
+ThreadData::IsLikelyIOBound() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	if (IsIdle())
+		return false;
+
+	// Consider the heuristic stable only after a few transitions.
+	if (fVoluntarySleepTransitions < IO_BOUND_MIN_TRANSITIONS)
+		return false; // Not enough data yet, assume not I/O bound for reluctance purposes
+
+	bool isIOBound = fAverageRunBurstTimeEWMA < IO_BOUND_BURST_THRESHOLD_US;
+	TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " IsLikelyIOBound: avgBurst %" B_PRId64 "us, threshold %" B_PRId64 "us => %s\n",
+		fThread->id, fAverageRunBurstTimeEWMA, IO_BOUND_BURST_THRESHOLD_US, isIOBound ? "true" : "false");
+	return isIOBound;
 }

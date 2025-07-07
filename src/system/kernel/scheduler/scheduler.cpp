@@ -566,8 +566,14 @@ reschedule(int32 nextState)
 	oldThread->state = nextState;
 	oldThreadData->SetStolenInterruptTime(gCPU[thisCPUId].interrupt_time);
 
+	bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum; // Get runtime before it's reset
+
 	if (!oldThreadData->IsIdle()) {
-		bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum;
+		// If the thread is voluntarily going to sleep, record its run burst duration.
+		if (nextState == THREAD_STATE_WAITING || nextState == THREAD_STATE_SLEEPING) {
+			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
+		}
+
 		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
 		if (weight <= 0)
 			weight = 1;
@@ -1592,6 +1598,13 @@ scheduler_perform_load_balance()
 		// Prioritize eligibility improvement more by weighting it higher.
 		currentBenefitScore = currentLagOnSource + (2 * eligibilityImprovement);
 
+		// If the candidate is likely I/O bound, reduce its benefit score
+		// to make it more reluctant to migrate.
+		if (candidate->IsLikelyIOBound()) {
+			currentBenefitScore /= 2; // Example: Halve the benefit score
+			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound, reducing benefit score to %" B_PRId64 "\n",
+				candidate->GetThread()->id, currentBenefitScore);
+		}
 
 		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), benefitScore %" B_PRId64 "\n",
 			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), currentBenefitScore);

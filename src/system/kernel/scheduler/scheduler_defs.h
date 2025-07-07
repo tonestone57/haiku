@@ -82,5 +82,15 @@ MapPriorityToEffectiveLevel(int32 priority)
 	return 7; // RT_FINAL (Covers Real-time and Urgent Priority)
 }
 
+// --- Heuristics for I/O-Bound Task Detection ---
+// For EWMA: new_avg = (sample / N) + ((N-1)/N * old_avg)
+// We use N = IO_BOUND_EWMA_ALPHA_RECIPROCAL.
+const uint32 IO_BOUND_EWMA_ALPHA_RECIPROCAL = 4;
+// If average run burst time before voluntary sleep is less than this,
+// the thread is considered likely I/O-bound (microseconds).
+const bigtime_t IO_BOUND_BURST_THRESHOLD_US = 2000; // 2ms
+// Minimum number of voluntary sleep transitions before the heuristic is considered stable.
+const uint32 IO_BOUND_MIN_TRANSITIONS = 5;
+
 
 #endif // _KERNEL_SCHEDULER_DEFS_H

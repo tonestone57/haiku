@@ -338,17 +338,18 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 
 		// Max surface dimensions: These are typical for Gen7-9. Precise values can vary by SKU.
 		// Refer to PRMs for exact limits if critical. 8192 is a common texture limit.
-		devInfo->shared_info->max_texture_2d_width = 8192;
-		devInfo->shared_info->max_texture_2d_height = 8192;
+		devInfo->shared_info->max_texture_2d_width = 8192; // TODO: Verify with PRM for target gens
+		devInfo->shared_info->max_texture_2d_height = 8192; // TODO: Verify with PRM for target gens
 
 		// Max Buffer Object size: Heuristic, could be limited by GTT size or system memory.
 		// Initial default, updated after GTT init.
-		devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024; // 128MB default
+		devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024; // 128MB default, updated post GTT init
 
 		// Alignment requirements
 		devInfo->shared_info->base_address_alignment_bytes = B_PAGE_SIZE; // BOs are page-aligned.
 		devInfo->shared_info->pitch_alignment_bytes = 64; // Common minimum for linear surfaces.
-		                                                 // Tiled surfaces have stricter alignment handled by stride calculation.
+		                                                 // Tiled surfaces have stricter alignment (e.g. tile width),
+		                                                 // which GEM object creation should handle. This is a general hint.
 
 		// Copy core capabilities from kernel structures
 		devInfo->shared_info->platform_engine_mask = devInfo->static_caps.platform_engine_mask;
@@ -373,16 +374,16 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 
 		if ((status = intel_i915_gtt_init(devInfo)) != B_OK) TRACE("GTT init failed: %s
 ", strerror(status));
-		// Update max_bo_size_bytes again now that GTT is initialized
+		// Update max_bo_size_bytes again now that GTT actual aperture size is known.
+		// This ensures a more accurate (though still heuristic) limit.
 		if (devInfo->gtt_aperture_actual_size > 0) {
-			// A heuristic: max BO size could be half the GTT aperture, or a fixed large value.
-			// Mesa might have its own limits or query OS for available memory.
-			// For now, let's cap at 2GB or half GTT, whichever is smaller.
 			uint64_t half_gtt = devInfo->gtt_aperture_actual_size / 2;
-			uint64_t two_gb = 2ULL * 1024 * 1024 * 1024;
+			uint64_t two_gb = 2ULL * 1024 * 1024 * 1024; // Cap at 2GB as a general upper limit for single BOs.
 			devInfo->shared_info->max_bo_size_bytes = min_c(half_gtt, two_gb);
-			if (devInfo->shared_info->max_bo_size_bytes == 0) // if GTT was tiny
-				devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024; // ensure a fallback
+			// Ensure a reasonable minimum if GTT aperture is unexpectedly small.
+			if (devInfo->shared_info->max_bo_size_bytes < (128 * 1024 * 1024)) {
+				devInfo->shared_info->max_bo_size_bytes = 128 * 1024 * 1024;
+			}
 		}
 
 
@@ -787,6 +788,111 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			return B_OK; // Return B_OK for now, actual hardware programming is a stub/placeholder.
 		}
+		case INTEL_I915_IOCTL_MODE_PAGE_FLIP:
+		{
+			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_page_flip_args))
+				return B_BAD_VALUE;
+
+			intel_i915_page_flip_args args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			if (args.pipe_id >= PRIV_MAX_PIPES) {
+				TRACE("PAGE_FLIP: Invalid pipe_id %u
+", args.pipe_id);
+				return B_BAD_INDEX;
+			}
+
+			struct intel_i915_gem_object* targetBo =
+				(struct intel_i915_gem_object*)_generic_handle_lookup(args.fb_handle, HANDLE_TYPE_GEM_OBJECT);
+			if (targetBo == NULL) {
+				TRACE("PAGE_FLIP: Invalid fb_handle %u
+", args.fb_handle);
+				return B_BAD_VALUE;
+			}
+
+			// TODO: Validate targetBo properties (size, format) against current mode on pipe?
+			// For now, assume userspace provides a compatible buffer.
+
+			struct intel_pending_flip* pendingFlip =
+				(struct intel_pending_flip*)malloc(sizeof(struct intel_pending_flip));
+			if (pendingFlip == NULL) {
+				intel_i915_gem_object_put(targetBo);
+				return B_NO_MEMORY;
+			}
+
+			pendingFlip->target_bo = targetBo; // _generic_handle_lookup already did a get
+			pendingFlip->flags = args.flags;
+			pendingFlip->user_data = args.user_data;
+			// list_init_link(&pendingFlip->link); // list_add_item_to_tail will init the link
+
+			intel_pipe_hw_state* pipeState = &devInfo->pipes[args.pipe_id];
+			mutex_lock(&pipeState->pending_flip_queue_lock);
+			// For this initial pass, let's assume only one is queued or we overwrite.
+			// A more robust implementation might return B_BUSY if a flip is already pending,
+			// or implement a deeper queue with sequence/fence synchronization.
+			struct intel_pending_flip* oldFlip = list_remove_head_item(&pipeState->pending_flip_queue);
+			if (oldFlip) {
+				TRACE("PAGE_FLIP: Warning - replacing an existing pending flip on pipe %u. Old BO handle (approx) %p put.
+",
+					args.pipe_id, oldFlip->target_bo);
+				intel_i915_gem_object_put(oldFlip->target_bo); // Release ref for the BO of the overwritten flip
+				free(oldFlip);                                // Free the old flip structure
+			}
+			list_add_item_to_tail(&pipeState->pending_flip_queue, pendingFlip);
+			mutex_unlock(&pipeState->pending_flip_queue_lock);
+
+		// The VBLANK interrupt handler for this pipe will pick up this request.
+		// VBLANK interrupts should be enabled if the pipe is active.
+		// If the pipe is currently off, the flip will be processed when the pipe is next enabled
+		// (assuming the VBLANK handler logic correctly processes any queued flips upon pipe enable).
+
+		// TRACE("PAGE_FLIP: Queued flip for pipe %u to BO handle %u
+", args.pipe_id, args.fb_handle); // Can be verbose
+			return B_OK;
+		}
+		case INTEL_I915_IOCTL_GEM_GET_INFO:
+		{
+			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_gem_info_args))
+				return B_BAD_VALUE;
+
+			intel_i915_gem_info_args args;
+			// Only copy in the handle initially
+			if (copy_from_user(&args.handle, &((intel_i915_gem_info_args*)buffer)->handle, sizeof(args.handle)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			struct intel_i915_gem_object* obj =
+				(struct intel_i915_gem_object*)_generic_handle_lookup(args.handle, HANDLE_TYPE_GEM_OBJECT);
+
+			if (obj == NULL) {
+				// TRACE("GEM_GET_INFO: Invalid handle %u
+", args.handle); // Can be noisy if userspace probes handles
+				return B_BAD_VALUE;
+			}
+
+			// Populate the output structure with information from the GEM object.
+			// Lock the object to ensure consistent read of its state.
+			mutex_lock(&obj->lock);
+			args.size = obj->allocated_size;
+			args.tiling_mode = obj->actual_tiling_mode;
+			args.stride = obj->stride;
+			args.bits_per_pixel = obj->obj_bits_per_pixel;
+			args.width_px = obj->obj_width_px;
+			args.height_px = obj->obj_height_px;
+			args.cpu_caching = obj->cpu_caching;
+			args.gtt_mapped = obj->gtt_mapped;
+			args.gtt_offset_pages = obj->gtt_mapped ? obj->gtt_offset_pages : 0; // Only valid if mapped
+			args.creation_flags = obj->flags;
+			mutex_unlock(&obj->lock);
+
+			// Release the reference obtained by _generic_handle_lookup
+			intel_i915_gem_object_put(obj);
+
+			if (copy_to_user(buffer, &args, sizeof(intel_i915_gem_info_args)) != B_OK)
+				return B_BAD_ADDRESS;
+
+			return B_OK;
+		}
 
 		case INTEL_I915_GET_DPMS_MODE: {
 			if (buffer == NULL || length != sizeof(intel_i915_get_dpms_mode_args))
@@ -836,75 +942,6 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 			return intel_display_load_palette(devInfo, (enum pipe_id_priv)args.pipe,
 				args.first_color, args.count, kernel_color_data);
-		}
-		case INTEL_I915_IOCTL_MODE_PAGE_FLIP:
-		{
-			if (!devInfo || buffer == NULL || length != sizeof(intel_i915_page_flip_args))
-				return B_BAD_VALUE;
-
-			intel_i915_page_flip_args args;
-			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
-				return B_BAD_ADDRESS;
-
-			if (args.pipe_id >= PRIV_MAX_PIPES) {
-				TRACE("PAGE_FLIP: Invalid pipe_id %u\n", args.pipe_id);
-				return B_BAD_INDEX;
-			}
-
-			struct intel_i915_gem_object* targetBo =
-				(struct intel_i915_gem_object*)_generic_handle_lookup(args.fb_handle, HANDLE_TYPE_GEM_OBJECT);
-			if (targetBo == NULL) {
-				TRACE("PAGE_FLIP: Invalid fb_handle %u\n", args.fb_handle);
-				return B_BAD_VALUE;
-			}
-
-			// TODO: Validate targetBo properties (size, format) against current mode on pipe?
-			// For now, assume userspace provides a compatible buffer.
-
-			struct intel_pending_flip* pendingFlip =
-				(struct intel_pending_flip*)malloc(sizeof(struct intel_pending_flip));
-			if (pendingFlip == NULL) {
-				intel_i915_gem_object_put(targetBo);
-				return B_NO_MEMORY;
-			}
-
-			pendingFlip->target_bo = targetBo; // _generic_handle_lookup already did a get
-			pendingFlip->flags = args.flags;
-			pendingFlip->user_data = args.user_data;
-			// list_init_link(&pendingFlip->link); // Should be done by list_add_item
-
-			intel_pipe_hw_state* pipeState = &devInfo->pipes[args.pipe_id];
-			mutex_lock(&pipeState->pending_flip_queue_lock);
-			// TODO: Check if another flip is already pending? Some drivers allow queueing multiple.
-			// For simplicity, allow only one pending flip per pipe for now.
-			// If more complex queueing is needed, this logic would expand.
-			if (!list_is_empty(&pipeState->pending_flip_queue)) {
-				// Example: free the oldest one and replace, or return EBUSY.
-				// For now, let's just replace (leaking the old one if not careful)
-				// A better approach: if queue is not empty, maybe return B_BUSY or queue it.
-				// For this initial pass, let's assume only one is queued or we overwrite.
-			// A more robust implementation might return B_BUSY if a flip is already pending,
-			// or implement a deeper queue with sequence/fence synchronization.
-				struct intel_pending_flip* oldFlip = list_remove_head_item(&pipeState->pending_flip_queue);
-				if (oldFlip) {
-				TRACE("PAGE_FLIP: Warning - replacing an existing pending flip on pipe %u. Old BO handle (approx) %p put.
-",
-					args.pipe_id, oldFlip->target_bo);
-				intel_i915_gem_object_put(oldFlip->target_bo); // Release ref for the BO of the overwritten flip
-				free(oldFlip);                                // Free the old flip structure
-				}
-			}
-			list_add_item_to_tail(&pipeState->pending_flip_queue, pendingFlip);
-			mutex_unlock(&pipeState->pending_flip_queue_lock);
-
-			// The VBLANK interrupt handler for this pipe will pick up this request.
-		// VBLANK interrupts should be enabled if the pipe is active.
-		// If the pipe is currently off, the flip will be processed when the pipe is next enabled
-		// (assuming the VBLANK handler logic correctly processes any queued flips upon pipe enable).
-
-		// TRACE("PAGE_FLIP: Queued flip for pipe %u to BO handle %u
-", args.pipe_id, args.fb_handle); // Can be verbose
-			return B_OK;
 		}
 
 		default: return B_DEV_INVALID_IOCTL;

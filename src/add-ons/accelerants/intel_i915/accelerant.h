@@ -35,6 +35,7 @@ enum {
 	INTEL_I915_IOCTL_SET_CURSOR_BITMAP,
 	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
 	INTEL_I915_IOCTL_MODE_PAGE_FLIP,
+	INTEL_I915_IOCTL_GEM_GET_INFO,
 };
 
 // Args for INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY
@@ -93,6 +94,41 @@ typedef struct {
 	uint32_t tv_sec;     // Timestamp of flip (seconds part of gettimeofday)
 	uint32_t tv_usec;    // Timestamp of flip (microseconds part of gettimeofday)
 } intel_i915_event_page_flip;
+
+/**
+ * Arguments for INTEL_I915_IOCTL_GEM_GET_INFO.
+ * Used to query properties of a GEM buffer object.
+ *
+ * @handle: (Input) Handle of the GEM object to query.
+ * @size: (Output) Total allocated size of the object in bytes (page-aligned, tile-geometry-aligned).
+ * @tiling_mode: (Output) Current tiling mode (see enum i915_tiling_mode in intel_i915_priv.h).
+ * @stride: (Output) Stride (pitch) of the buffer in bytes. Valid for dimensioned buffers.
+ * @bits_per_pixel: (Output) Bits per pixel if created as a dimensioned buffer, otherwise 0.
+ * @width_px: (Output) Width in pixels if created as a dimensioned buffer, otherwise 0.
+ * @height_px: (Output) Height in pixels if created as a dimensioned buffer, otherwise 0.
+ * @cpu_caching: (Output) Requested CPU caching mode for the object (see enum i915_caching_mode).
+ * @gtt_mapped: (Output) True if the object is currently mapped into the GTT.
+ * @gtt_offset_pages: (Output) GTT page offset if gtt_mapped is true, otherwise undefined.
+ * @creation_flags: (Output) Original flags used when the object was created.
+ * @reserved0, @reserved1: Reserved for future use, set to 0.
+ */
+typedef struct {
+	// Input
+	uint32_t handle;
+	// Output
+	uint64_t size;
+	uint32_t tiling_mode;
+	uint32_t stride;
+	uint32_t bits_per_pixel;
+	uint32_t width_px;
+	uint32_t height_px;
+	uint32_t cpu_caching;
+	bool     gtt_mapped;
+	uint32_t gtt_offset_pages;
+	uint32_t creation_flags;
+	uint32_t reserved0;
+	uint32_t reserved1;
+} intel_i915_gem_info_args;
 
 
 // Enum for accelerant-side pipe identification

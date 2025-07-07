@@ -27,53 +27,47 @@
 #define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
 
 // Corresponds to nice levels -20 to +19 (Linux CFS compatible)
+// SCHEDULER_WEIGHT_SCALE (1024) is the weight for nice 0.
 static const int32 gNiceToWeight[40] = {
-	/* -20 */ 88761, 71755, 56483, 46273, 36291,
-	/* -15 */ 29154, 22382, 18705, 14949, 11916,
-	/* -10 */  9548,  7620,  6100,  4867,  3906,
-	/*  -5 */  3121,  2501,  1991,  1586,  1277,
-	/*   0 */  1024,   820,   655,   526,   423, // Nice 0 maps to SCHEDULER_WEIGHT_SCALE
-	/*   5 */   335,   272,   215,   172,   137,
-	/*  10 */   110,    87,    70,    56,    45,
-	/*  15 */    36,    29,    23,    18,    15
+	/* nice -20 -> index 0 */ 88761, 71755, 56483, 46273, 36291,
+	/* nice -15 -> index 5 */ 29154, 22382, 18705, 14949, 11916,
+	/* nice -10 -> index 10 */  9548,  7620,  6100,  4867,  3906,
+	/*  -5 -> index 15 */  3121,  2501,  1991,  1586,  1277,
+	/*   0 -> index 20 */  1024,   820,   655,   526,   423, // Nice 0 maps to SCHEDULER_WEIGHT_SCALE
+	/*  +5 -> index 25 */   335,   272,   215,   172,   137,
+	/* +10 -> index 30 */   110,    87,    70,    56,    45,
+	/* +15 -> index 35 */    36,    29,    23,    18,    15
+	/* nice +19 -> index 39 */
 };
 
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
-// Nice 0 (index 20) corresponds to B_NORMAL_PRIORITY.
+// B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
 static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
 	int effNice;
+	int relativePriority = priority - B_NORMAL_PRIORITY;
 
-	// Crude linear mapping: B_NORMAL_PRIORITY (10) -> nice 0.
-	// Higher Haiku prio -> lower (more negative) nice value.
-	// Lower Haiku prio -> higher (more positive) nice value.
-	effNice = B_NORMAL_PRIORITY - priority;
+	// Scale so that 2.5 Haiku priority points roughly equals 1 nice level step.
+	effNice = -((relativePriority * 2) / 5);
 
-	// Clamp effNice to the typical nice value range [-20, 19]
-	effNice = max_c(-20, min_c(effNice, 19));
+	// Clamp effNice to a typical range used by the table, e.g., -15 to +15 for most app priorities.
+	effNice = max_c(-15, min_c(effNice, 15));
 
-	// Convert nice value to an index (nice -20 is index 0, nice 0 is index 20, nice 19 is index 39)
-	return effNice + 20;
+	return effNice + 20; // Convert nice value to an index (nice -20 is index 0, nice 0 is index 20)
 }
 
 static inline int32 scheduler_priority_to_weight(int32 priority) {
-	// TODO EEVDF: This priority-to-weight mapping is crucial and needs extensive tuning
-	// based on desired Haiku behavior across its priority spectrum.
-	if (priority < B_LOWEST_ACTIVE_PRIORITY) { // Typically idle/background tasks
-		return gNiceToWeight[39]; // nice +19, minimum weight from table
+	if (priority < B_LOWEST_ACTIVE_PRIORITY) {
+		return gNiceToWeight[39];
 	}
-
-	// Real-time priorities: These should dominate non-real-time.
-	// How they integrate into EEVDF (or if they bypass it for strict priority) is a key design point.
-	// For now, assign very high weights if managed by EEVDF.
-	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) { // e.g. Media Kit (100)
-		if (priority >= B_URGENT_PRIORITY) { // e.g. Important Kernel Threads (110)
-			// Significantly higher than max normal weight (gNiceToWeight[0] is for nice -20)
-			return gNiceToWeight[0] * 4;
-		}
-		return gNiceToWeight[0] * 2;
+	if (priority >= B_MAX_REAL_TIME_PRIORITY) {
+		return gNiceToWeight[0] * 16;
 	}
-
-	// Normal application and UI priorities
+	if (priority >= B_URGENT_PRIORITY) {
+		return gNiceToWeight[0] * 8;
+	}
+	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
+		return gNiceToWeight[0] * 4;
+	}
 	int niceIndex = scheduler_haiku_priority_to_nice_index(priority);
 	return gNiceToWeight[niceIndex];
 }
@@ -202,7 +196,7 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 			t->id, thread->VirtualRuntime(), oldVruntime, queueMinVruntime);
 
 		int32 weight = scheduler_priority_to_weight(thread->GetBasePriority());
-		if (weight <= 0) weight = 1;
+		// No need for `if (weight <= 0) weight = 1;` as scheduler_priority_to_weight ensures positive.
 		bigtime_t weightedSlice = (thread->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
 		thread->SetLag(weightedSlice - (thread->VirtualRuntime() - queueMinVruntime));
 		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", lag calc %" B_PRId64 "\n", t->id, thread->Lag());
@@ -318,7 +312,7 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 
 
 	int32 weight = scheduler_priority_to_weight(threadData->GetBasePriority());
-	if (weight <= 0) weight = 1;
+	// No need for `if (weight <= 0) weight = 1;` as scheduler_priority_to_weight ensures positive.
 	bigtime_t weightedSliceDuration = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
 
 	threadData->SetLag(weightedSliceDuration - (threadData->VirtualRuntime() - queueMinVruntime));
@@ -365,10 +359,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 	// TODO EEVDF: A change in priority (weight) should ideally adjust current lag
 	// to reflect the change in entitlement rate relative to its current fVirtualRuntime.
-	// This is complex as it interacts with fVirtualRuntime.
-	// For now, we only adjust future slice duration and deadline based on current EligibleTime.
-	// This simplification means the primary effect of priority change is on future vruntime
-	// accumulation rate and future slice durations.
+	// For now, only future slice duration and deadline are affected.
 	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
 	TRACE_SCHED("set_prio: T %" B_PRId32 " new slice %" B_PRId64 ", new VD %" B_PRId64 "\n",
 		thread->id, threadData->SliceDuration(), threadData->VirtualDeadline());
@@ -1561,9 +1552,82 @@ scheduler_perform_load_balance()
 bigtime_t
 _user_estimate_max_scheduling_latency(thread_id id)
 {
-	if (gCurrentMode != NULL)
-		return gCurrentMode->maximum_latency;
-	return SCHEDULER_TARGET_LATENCY * 5;
+	syscall_64_bit_return_value();
+
+	Thread* currentThread = thread_get_current_thread();
+	Thread* thread;
+	bool isCurrentThread = (id < 0 || id == currentThread->id);
+
+	if (isCurrentThread) {
+		thread = currentThread;
+		thread->AcquireReference();
+	} else {
+		thread = Thread::Get(id);
+		if (thread == NULL)
+			return B_BAD_THREAD_ID; // Syscalls can return errors
+	}
+	BReference<Thread> threadReference(thread, true);
+
+	ThreadData* threadData = thread->scheduler_data;
+	if (threadData == NULL || threadData->IsIdle())
+		return 0; // Idle or no scheduler data means effectively zero or undefined latency here
+
+	bigtime_t now = system_time();
+	bigtime_t estimatedLatency = max_c(0, threadData->EligibleTime() - now);
+
+	CPUEntry* cpu = NULL;
+	// Determine the CPU this thread is associated with or would likely run on
+	if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL) {
+		cpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
+		if (isCurrentThread) {
+			// If it's the current thread and already eligible, its immediate "wait to start" is 0.
+			if (now >= threadData->EligibleTime())
+				estimatedLatency = 0;
+			// else, estimatedLatency is already EligibleTime - now.
+
+			// Cap with mode's max latency or a generic one
+			bigtime_t modeMaxLatency = SCHEDULER_TARGET_LATENCY; // Use a smaller cap for running thread
+			if (gCurrentMode != NULL && gCurrentMode->maximum_latency > 0)
+				modeMaxLatency = min_c(modeMaxLatency, gCurrentMode->maximum_latency);
+			return min_c(estimatedLatency, modeMaxLatency);
+		}
+	} else if (threadData->IsEnqueued() && thread->previous_cpu != NULL) {
+		// Thread is in a run queue, consider its current CPU context
+		CPUEntry* prevCpuEntry = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
+		if (prevCpuEntry->Core() == threadData->Core()) // Check consistency
+			cpu = prevCpuEntry;
+	} else if (threadData->Core() != NULL) {
+		// Has a core, but not clearly on a CPU queue (e.g. just woken, ChooseCoreAndCPU not yet run by enqueue)
+		// This makes estimation hard. We'll use a generic estimate later if cpu remains NULL.
+	}
+
+
+	if (cpu != NULL) {
+		cpu->LockRunQueue();
+		ThreadData* headOfQueue = cpu->GetEevdfRunQueue().PeekMinimum();
+		if (headOfQueue != NULL && headOfQueue != threadData) {
+			// If our thread is not at the head, it waits at least for the head.
+			if (now >= headOfQueue->EligibleTime()) { // If head is eligible
+				estimatedLatency = max_c(estimatedLatency, headOfQueue->SliceDuration());
+			} else { // If head is not yet eligible
+				estimatedLatency = max_c(estimatedLatency,
+					(headOfQueue->EligibleTime() - now) + headOfQueue->SliceDuration());
+			}
+		} else if (headOfQueue == threadData) {
+			// It's at the head, initialWait is its latency to start.
+		}
+		// If queue is empty and this thread is considered for it, initialWait is the value.
+		cpu->UnlockRunQueue();
+	} else {
+		// No specific CPU context, add a generic target latency to its eligibility wait.
+		estimatedLatency += SCHEDULER_TARGET_LATENCY;
+	}
+
+	bigtime_t modeMaxLatency = SCHEDULER_TARGET_LATENCY * 5; // Default cap
+	if (gCurrentMode != NULL && gCurrentMode->maximum_latency > 0) {
+		modeMaxLatency = gCurrentMode->maximum_latency;
+	}
+	return min_c(estimatedLatency, modeMaxLatency);
 }
 
 

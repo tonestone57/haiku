@@ -13,6 +13,7 @@
 #include <util/atomic.h> // For atomic_add
 
 #include <algorithm>
+#include <stdlib.h> // For abs()
 
 #include "scheduler_thread.h"
 #include "EevdfRunQueue.h" // Make sure this is included
@@ -58,6 +59,11 @@ private:
 
 static CPUPriorityHeap sDebugCPUHeap;
 static CoreLoadHeap sDebugCoreHeap;
+
+
+// Threshold for CoreEntry load changes to trigger global heap updates.
+// kMaxLoad is 1000, so 50 is 5%.
+static const int32 CORE_LOAD_UPDATE_DELTA_THRESHOLD = kMaxLoad / 20;
 
 
 // ThreadRunQueue::Dump() is removed as ThreadRunQueue is removed.
@@ -849,29 +855,31 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	SCHEDULER_ENTER_FUNCTION();
 
 	if (this->fDefunct) {
-		WriteSpinLocker loadLocker(fLoadLock);
+		// Defunct logic: always update global heaps to remove the core
+		WriteSpinLocker localDefunctLock(fLoadLock);
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
-		bool wasInHighLoadHeap = fHighLoad;
+		bool wasDefunctHighLoad = fHighLoad;
 		fHighLoad = false;
-		loadLocker.Unlock();
+		localDefunctLock.Unlock();
 
-		WriteSpinLocker heapsLock(gCoreHeapsLock);
-		if (this->GetMinMaxHeapLink()->fIndex != -1) {
-			if (wasInHighLoadHeap) {
+		WriteSpinLocker globalHeapsDefunctLock(gCoreHeapsLock);
+		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If in a heap
+			if (wasDefunctHighLoad)
 				gCoreHighLoadHeap.Remove(this);
-			} else {
+			else
 				gCoreLoadHeap.Remove(this);
-			}
 		}
+		// globalHeapsDefunctLock released by destructor
 		return;
 	}
 
+	// 1. Calculate newAverageLoad for the core
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;
 	{
-		SpinLocker cpuListLock(fCPULock);
+		SpinLocker cpuListLock(fCPULock); // Protects fCPUSet iteration
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -880,59 +888,69 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 			}
 		}
 	}
-
-	if (activeCPUsOnCore > 0) {
+	if (activeCPUsOnCore > 0)
 		newAverageLoad /= activeCPUsOnCore;
-	} else {
+	else
 		newAverageLoad = 0;
-	}
-	newAverageLoad = std::min(newAverageLoad, kMaxLoad);
+	newAverageLoad = std::min(newAverageLoad, kMaxLoad); // Clamp
 
+	// 2. Determine timing info
 	bigtime_t now = system_time();
-	bool intervalEnded = now >= kLoadMeasureInterval + fLastLoadUpdate;
+	bool intervalEnded; // Will be used to update epoch and lastUpdate locally
 
-	if (!intervalEnded && !forceUpdate)
-		return;
+	// 3. Read current state from heap link and local fHighLoad (protected by local fLoadLock)
+	//    And then update local state.
+	int32 keyCurrentlyInHeap;
+	bool wasInAHeap;
+	bool highLoadStatusWhenLastInHeap; // The fHighLoad status that corresponds to keyCurrentlyInHeap
 
-	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
-	WriteSpinLocker loadLocker(fLoadLock);
+	WriteSpinLocker localStateLock(fLoadLock);
+	keyCurrentlyInHeap = this->GetMinMaxHeapLink()->fKey;
+	wasInAHeap = (this->GetMinMaxHeapLink()->fIndex != -1);
+	highLoadStatusWhenLastInHeap = fHighLoad; // This is the state associated with keyCurrentlyInHeap
 
-	int32 oldKeyInHeap = this->GetMinMaxHeapLink()->fKey;
-	bool wasInAHeap = this->GetMinMaxHeapLink()->fIndex != -1;
-	bool wasPreviouslyHighLoad = fHighLoad;
+	intervalEnded = now >= kLoadMeasureInterval + fLastLoadUpdate;
 
+	// Update internal fLoad, fHighLoad, epoch, lastUpdate *first*
 	fLoad = newAverageLoad;
-
+	bool isNowEffectivelyHighLoad = fLoad > kHighLoad; // Based on the NEW fLoad
+	fHighLoad = isNowEffectivelyHighLoad; // Update internal fHighLoad
 	if (intervalEnded) {
 		fLoadMeasurementEpoch++;
 		fLastLoadUpdate = now;
 	}
+	localStateLock.Unlock(); // CoreEntry's internal state (fLoad, fHighLoad, etc.) is now up-to-date.
 
-	loadLocker.Unlock();
-
-	bool isNowHighLoad = fLoad > kHighLoad;
-
-	if (wasInAHeap && oldKeyInHeap == fLoad && wasPreviouslyHighLoad == isNowHighLoad) {
-		coreHeapsLocker.Unlock();
+	// 4. Decide if global heap update is needed
+	if (!forceUpdate && wasInAHeap
+		&& abs(newAverageLoad - keyCurrentlyInHeap) < CORE_LOAD_UPDATE_DELTA_THRESHOLD
+		&& highLoadStatusWhenLastInHeap == isNowEffectivelyHighLoad) {
+		// Change is small, and it doesn't cross the high/low load boundary relative to its last heap status.
+		// Internal state (fLoad, fHighLoad, epoch) already updated. Nothing more to do for global heaps.
 		return;
 	}
 
+	// 5. If significant change or forceUpdate, update global heaps
+	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
+
 	if (wasInAHeap) {
-		if (wasPreviouslyHighLoad)
+		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
+		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
+		if (highLoadStatusWhenLastInHeap)
 			gCoreHighLoadHeap.Remove(this);
 		else
 			gCoreLoadHeap.Remove(this);
 	}
 
-	if (isNowHighLoad) {
-		gCoreHighLoadHeap.Insert(this, fLoad);
-		SpinLocker fHighLoadSetter(fLoadLock);
-		fHighLoad = true;
+	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.
+	// The heap insertion will use the CoreEntry's current fLoad (which is newAverageLoad) as the key.
+	// The fHighLoad field (which is isNowEffectivelyHighLoad) determines which heap.
+	if (fHighLoad) { // Use the just-updated fHighLoad from internal state
+		gCoreHighLoadHeap.Insert(this, fLoad); // Insert with current fLoad
 	} else {
-		gCoreLoadHeap.Insert(this, fLoad);
-		SpinLocker fHighLoadSetter(fLoadLock);
-		fHighLoad = false;
+		gCoreLoadHeap.Insert(this, fLoad); // Insert with current fLoad
 	}
+	// coreHeapsLocker releases gCoreHeapsLock at end of scope
 }
 
 

@@ -51,12 +51,30 @@ static status_t intel_i915_get_mode_list(display_mode *dm) {
 	memcpy(dm, gInfo->mode_list, gInfo->shared_info->mode_count * sizeof(display_mode));
 	return B_OK;
 }
-static status_t intel_i915_propose_display_mode(display_mode *t, const display_mode *l, const display_mode *h) {
-	return PROPOSE_DISPLAY_MODE(t, l, h);
+static status_t intel_i915_propose_display_mode(display_mode *target, const display_mode *low, const display_mode *high) {
+	if (!gInfo || gInfo->device_fd < 0 || !target || !low || !high)
+		return B_BAD_VALUE;
+
+	intel_i915_propose_specific_mode_args args;
+	args.target_mode = *target;
+	args.low_bound = *low;
+	args.high_bound = *high;
+	// args.magic = INTEL_I915_PRIVATE_DATA_MAGIC; // If using magic
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_PROPOSE_SPECIFIC_MODE, &args, sizeof(args));
+	if (status == B_OK) {
+		*target = args.result_mode; // Copy back the potentially modified mode
+	}
+	return status;
 }
 static status_t intel_i915_set_display_mode(display_mode *mode_to_set) {
-	// Kernel must infer target pipe for this IOCTL based on the calling fd's association.
-	return SET_DISPLAY_MODE(mode_to_set);
+	// This hook now primarily signals the kernel to apply the configuration
+	// staged in shared_info by the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+	// The mode_to_set parameter might be used by the kernel as a hint for
+	// the primary display in a single-head fallback scenario if no config
+	// was previously staged by an ioctl.
+	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	return ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
 }
 static status_t intel_i915_get_display_mode(display_mode *current_mode) {
 	if (!gInfo || !gInfo->shared_info || !current_mode) return B_BAD_VALUE;

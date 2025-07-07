@@ -601,8 +601,45 @@ typedef struct intel_i915_device_info {
 	struct intel_i915_gem_object* framebuffer_bo[PRIV_MAX_PIPES];
 	uint32_t framebuffer_gtt_offset_pages[PRIV_MAX_PIPES]; // GTT page offset for each pipe's FB
 
+	// HPD Event Handling (using the existing hotplug_work)
+	spinlock_t				hpd_events_lock;
+	struct hpd_event_data*	hpd_events_queue;    // Dynamically allocated array
+	int32					hpd_events_head;     // Index for next event to write
+	int32					hpd_events_tail;     // Index for next event to read
+	int32					hpd_queue_capacity;  // Max number of events in queue
+	// hotplug_work and hotplug_retry_timer are already part of i915_device_info (from FreeBSD)
+	// No separate HPD thread or semaphore; will use the existing work_arg system.
+
 } intel_i915_device_info;
 
+
+// HPD Line Identifiers / Port Enums for Hotplug
+// These should align with HPD interrupt sources and connector types from registers.h (e.g., HPD_PIN)
+// If registers.h HPD_PIN is not comprehensive or suitable, define a specific i915 enum.
+// For now, using a new enum for clarity, assuming it can be mapped from HW bits.
+typedef enum {
+	I915_HPD_PORT_A = 0, // Example, map to actual HW HPD source (e.g., HPD_PIN_A from registers.h)
+	I915_HPD_PORT_B,
+	I915_HPD_PORT_C,
+	I915_HPD_PORT_D,
+	I915_HPD_PORT_E,
+	I915_HPD_PORT_F,
+	I915_HPD_PORT_TC1, // Type-C Port 1
+	I915_HPD_PORT_TC2,
+	I915_HPD_PORT_TC3,
+	I915_HPD_PORT_TC4,
+	I915_HPD_PORT_TC5,
+	I915_HPD_PORT_TC6,
+	I915_HPD_MAX_LINES, // Number of distinct HPD lines tracked
+	I915_HPD_INVALID = 0xff
+} i915_hpd_line_identifier;
+
+#define MAX_HPD_EVENTS_QUEUE_SIZE 8 // Max events to buffer before work function runs
+
+struct hpd_event_data {
+	i915_hpd_line_identifier hpd_line; // Identifies the HPD source
+	bool connected;     // True for connect, false for disconnect.
+};
 
 // GEM object structure (typically in a gem_object.h or gem.h, but placed here for context if not separate)
 // This is a forward declaration if it's in another header included by gem_object.c
@@ -659,6 +696,24 @@ struct intel_i915_gem_object {
 
 
 // MMIO Access (Forcewake must be handled by caller)
+
+// HPD Function Declarations (to be implemented in e.g. irq.c or a new i915_hpd.c)
+// These will use the existing dev->hotplug_work infrastructure.
+void i915_hotplug_work_func(struct work_arg *work); // The work function called by the workqueue
+void i915_queue_hpd_event(struct i915_device* dev, i915_hpd_line_identifier hpd_line, bool connected);
+// i915_handle_hotplug_event will be static within the HPD handling implementation file.
+status_t i915_init_hpd_handling(struct i915_device* dev);
+void i915_uninit_hpd_handling(struct i915_device* dev);
+
+// Structure for INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (add this IOCTL to enum in accelerant.h too)
+struct i915_display_change_event_ioctl_data {
+	uint32 version; // For future expansion, user sets to 0
+	uint32 changed_hpd_mask; // Output: Bitmask of i915_hpd_line_identifier that had events
+	uint64 timeout_us; // Input: Timeout for waiting, 0 for no timeout (indefinite wait if supported)
+	// Add other fields if more detailed event data is passed, e.g. connect/disconnect flags per port
+};
+
+
 static inline uint32
 intel_i915_read32(intel_i915_device_info* devInfo, uint32 offset)
 {

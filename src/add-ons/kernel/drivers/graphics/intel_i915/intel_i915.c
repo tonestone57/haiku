@@ -953,6 +953,73 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				args.first_color, args.count, kernel_color_data);
 		}
 
+		case INTEL_I915_WAIT_FOR_DISPLAY_CHANGE:
+		{
+			if (buffer == NULL || length < sizeof(struct i915_display_change_event_ioctl_data))
+				return B_BAD_VALUE;
+
+			struct i915_display_change_event_ioctl_data event_data_from_user;
+			if (user_memcpy(&event_data_from_user, buffer, sizeof(event_data_from_user)) < B_OK)
+				return B_BAD_ADDRESS;
+
+			// Data to return to user
+			struct i915_display_change_event_ioctl_data return_event_data;
+			return_event_data.version = 0; // Initialize
+			return_event_data.changed_hpd_mask = 0;
+
+			// Atomically get and clear the global changed HPD lines mask before waiting
+			cpu_status lock_status = disable_interrupts();
+			acquire_spinlock(&sChangedHpdLinesMaskLock); // Assumes sChangedHpdLinesMaskLock is global in i915_hpd.c
+			return_event_data.changed_hpd_mask = sChangedHpdLinesMask;
+			sChangedHpdLinesMask = 0; // Clear it after reading
+			release_spinlock(&sChangedHpdLinesMaskLock);
+			restore_interrupts(lock_status);
+
+			status_t status;
+			// sDisplayChangeEventSem is assumed global from i915_hpd.c
+			if (sDisplayChangeEventSem < B_OK) {
+				ERROR("INTEL_I915_WAIT_FOR_DISPLAY_CHANGE: HPD semaphore not initialized.\n");
+				return B_NO_INIT;
+			}
+
+			if (event_data_from_user.timeout_us == 0) {
+				// Indefinite wait, but only if no changes were pending before the wait.
+				if (return_event_data.changed_hpd_mask != 0) {
+					// Changes were already pending, return immediately.
+					status = B_OK;
+				} else {
+					status = acquire_sem(sDisplayChangeEventSem);
+				}
+			} else {
+				// Timed wait, but only if no changes were pending.
+				if (return_event_data.changed_hpd_mask != 0) {
+					status = B_OK; // Effectively a poll if changes were pending
+				} else {
+					status = acquire_sem_etc(sDisplayChangeEventSem, 1,
+						B_ABSOLUTE_TIMEOUT | B_CAN_INTERRUPT, event_data_from_user.timeout_us);
+				}
+			}
+
+			// If woken up (B_OK), or timed out with already pending changes,
+			// re-fetch the mask in case more HPD events occurred while preparing to return or during a brief sleep.
+			if (status == B_OK) {
+				lock_status = disable_interrupts();
+				acquire_spinlock(&sChangedHpdLinesMaskLock);
+				return_event_data.changed_hpd_mask |= sChangedHpdLinesMask; // OR with any new changes
+				sChangedHpdLinesMask = 0; // Clear again
+				release_spinlock(&sChangedHpdLinesMaskLock);
+				restore_interrupts(lock_status);
+			}
+			// If timed out (status == B_TIMED_OUT), return_event_data.changed_hpd_mask contains what was there before the wait.
+
+			if (status == B_OK || status == B_TIMED_OUT) {
+				if (user_memcpy(buffer, &return_event_data, sizeof(return_event_data)) < B_OK)
+					return B_BAD_ADDRESS;
+				return B_OK; // Return B_OK for both successful acquire and timeout
+			}
+			return status; // Other errors from acquire_sem_etc (e.g., B_INTERRUPTED, B_BAD_SEM_ID)
+		}
+
 		default: return B_DEV_INVALID_IOCTL;
 	}
 	return B_DEV_INVALID_IOCTL; // Should not be reached

@@ -27,6 +27,7 @@ enum {
 	INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY,
 	INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO,
 
+	// Display and Mode Setting IOCTLs
 	INTEL_I915_GET_DPMS_MODE,
 	INTEL_I915_SET_DPMS_MODE,
 	INTEL_I915_MOVE_DISPLAY_OFFSET,
@@ -36,7 +37,76 @@ enum {
 	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
 	INTEL_I915_IOCTL_MODE_PAGE_FLIP,
 	INTEL_I915_IOCTL_GEM_GET_INFO,
+
+	// Multi-monitor and Hotplug IOCTLs (from intel_extreme adaptation)
+	// Note: These were previously defined for intel_extreme.
+	// Re-using numbers here, ensure they are unique if both drivers can be present.
+	// Or, better, use a distinct base for i915 specific multi-monitor ioctls if needed.
+	// For now, assuming these numbers are available under INTEL_I915_IOCTL_BASE.
+	INTEL_I915_GET_DISPLAY_COUNT,      // = INTEL_I915_IOCTL_BASE + 100 (example)
+	INTEL_I915_GET_DISPLAY_INFO,       // = INTEL_I915_IOCTL_BASE + 101
+	INTEL_I915_SET_DISPLAY_CONFIG,     // = INTEL_I915_IOCTL_BASE + 102
+	INTEL_I915_GET_DISPLAY_CONFIG,
+	INTEL_I915_PROPOSE_DISPLAY_CONFIG,    // User-space might call this to validate a whole setup
+	INTEL_I915_SET_EDID_FOR_PROPOSAL,
+	INTEL_I915_WAIT_FOR_DISPLAY_CHANGE,
+	INTEL_I915_PROPOSE_SPECIFIC_MODE // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
 };
+
+// Args for INTEL_I915_PROPOSE_SPECIFIC_MODE
+typedef struct {
+	display_mode target_mode; // Input: mode to propose
+	display_mode low_bound;   // Input: lower bound for proposal
+	display_mode high_bound;  // Input: upper bound for proposal
+	display_mode result_mode; // Output: proposed/sanitized mode
+	// magic number can be added if desired for validation
+} intel_i915_propose_specific_mode_args;
+
+
+// Structures for the new multi-monitor IOCTLs
+// (These mirror structures in intel_i915_priv.h for user-kernel boundary)
+
+struct intel_i915_display_identifier {
+	uint32		pipe_index; // Refers to pipe_index enum (e.g. INTEL_PIPE_A from intel_extreme.h, or a new i915 specific one)
+};
+
+struct intel_i915_single_display_config {
+	intel_i915_display_identifier	id;
+	display_mode					mode;
+	bool							is_active;
+	int32							pos_x;
+	int32							pos_y;
+	// bool						is_primary; // Optional
+};
+
+struct intel_i915_multi_display_config {
+	uint32								magic; // Should be INTEL_I915_PRIVATE_DATA_MAGIC or similar
+	uint32								display_count;
+	intel_i915_single_display_config	configs[MAX_PIPES_I915]; // Use consistent MAX_PIPES define
+};
+
+struct intel_i915_display_info_params {
+	uint32							magic;
+	intel_i915_display_identifier	id;
+	bool							is_connected;
+	bool							is_currently_active;
+	bool							has_edid;
+	edid1_info						edid_data; // From <edid.h>
+	display_mode					current_mode;
+};
+
+struct intel_i915_set_edid_for_proposal_params {
+	uint32		magic;
+	edid1_info	edid;
+	bool		use_it;
+};
+
+struct i915_display_change_event_ioctl_data {
+	uint32 version;
+	uint32 changed_hpd_mask; // Bitmask of i915_hpd_line_identifier that had events
+	uint64 timeout_us;
+};
+
 
 // Args for INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY
 typedef struct {
@@ -321,6 +391,35 @@ typedef struct {
 	// uint32_t max_render_targets;
 	// uint32_t max_threads_per_eu;
 	// etc.
+
+	// --- Multi-monitor and Hotplug related fields ---
+	// Note: MAX_PIPES_I915 should be defined (e.g. in intel_i915_priv.h or here)
+	// to match the number of pipes the driver attempts to manage (e.g., 3 or 4).
+	// For now, assume it's defined elsewhere, defaulting to 4 if not.
+	#ifndef MAX_PIPES_I915
+	#define MAX_PIPES_I915 4 // Default if not defined by kernel side
+	#endif
+	struct per_pipe_display_info_accel { // Renamed to avoid conflict if kernel has identical name
+		addr_t		frame_buffer_base;
+		uint32		frame_buffer_offset;
+		display_mode current_mode;
+		uint32		bytes_per_row;
+		uint16		bits_per_pixel;
+		bool		is_active;
+	} pipe_display_configs[MAX_PIPES_I915];
+	uint32			active_display_count;
+	uint32			primary_pipe_index; // Array index (0-based)
+
+	edid1_info		edid_infos[MAX_PIPES_I915];
+	bool			has_edid[MAX_PIPES_I915];
+	bool			pipe_needs_edid_reprobe[MAX_PIPES_I915]; // True if HPD occurred and EDID should be re-read
+	uint32			ports_connected_status_mask;         // Bitmask indicating live hardware connection status per HPD line
+	                                                     // (e.g., (1 << I915_HPD_PORT_A) if connected)
+
+	edid1_info		temp_edid_for_proposal;
+	bool			use_temp_edid_for_proposal;
+	// End Multi-monitor and Hotplug fields
+
 } intel_i915_shared_info;
 
 typedef struct {

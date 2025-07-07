@@ -312,7 +312,9 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	if (effectivePriority >= B_MAX_PRIORITY) effectivePriority = B_MAX_PRIORITY -1;
 
 	int level = MapPriorityToEffectiveLevel(effectivePriority);
-	bigtime_t baseSlice = kBaseQuanta[level];
+	// Use kBaseQuanta from scheduler_defs.h (NUM_PRIORITY_LEVELS)
+	// and apply gSchedulerBaseQuantumMultiplier here.
+	bigtime_t baseSliceWithMultiplier = (bigtime_t)(kBaseQuanta[level] * gSchedulerBaseQuantumMultiplier);
 
 	// Get latency_nice factor
 	// fLatencyNice is now a member of ThreadData
@@ -321,10 +323,10 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	int32 factor = gLatencyNiceFactors[latencyNiceIdx];
 
 	// Apply factor
-	// (baseSlice * factor) / SCALE can overflow if baseSlice is large.
-	// (baseSlice / SCALE) * factor loses precision.
-	// (baseSlice * factor) >> SHIFT is good for powers of 2.
-	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
+	// (baseSliceWithMultiplier * factor) / SCALE can overflow if baseSlice is large.
+	// (baseSliceWithMultiplier / SCALE) * factor loses precision.
+	// (baseSliceWithMultiplier * factor) >> SHIFT is good for powers of 2.
+	bigtime_t modulatedSlice = (baseSliceWithMultiplier * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
 
 	// Clamp to system min/max defined in scheduler_defs.h
 	if (modulatedSlice < kMinSliceGranularity)
@@ -336,8 +338,8 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	// by calling SetSliceDuration(calculated_value). This function just calculates.
 
 	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: thread %" B_PRId32 ", prio %d, latency_nice %d, "
-		"baseSlice %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
-		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE,
+		"baseSliceWithMultiplier %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
+		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSliceWithMultiplier, factor, (int)LATENCY_NICE_FACTOR_SCALE,
 		modulatedSlice);
 
 	return modulatedSlice;
@@ -417,42 +419,19 @@ ThreadData::_ComputeEffectivePriority() const
 }
 
 
-/* static */ int
+/* static int
 ThreadData::MapPriorityToMLFQLevel(int32 priority)
 {
-	SCHEDULER_ENTER_FUNCTION();
-	if (priority >= B_URGENT_PRIORITY) return 0;
-	if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) return 1;
-	if (priority >= B_URGENT_DISPLAY_PRIORITY) return 2;
-	if (priority >= B_DISPLAY_PRIORITY + 5) return 3;
-	if (priority >= B_DISPLAY_PRIORITY) return 4;
-	if (priority >= B_NORMAL_PRIORITY + 5) return 5;
-	if (priority >= B_NORMAL_PRIORITY) return 6;
-	if (priority >= B_LOW_PRIORITY + 5) return 7;
-	if (priority >= B_LOW_PRIORITY) return 8;
-
-	if (priority < B_LOWEST_ACTIVE_PRIORITY) return NUM_MLFQ_LEVELS - 2;
-
-	int range = B_LOW_PRIORITY - B_LOWEST_ACTIVE_PRIORITY;
-	int levelsToSpread = (NUM_MLFQ_LEVELS - 1 - 1) - 9 + 1;
-	if (range <= 0 || levelsToSpread <=0) return 9;
-
-	int levelOffset = ((B_LOW_PRIORITY - 1 - priority) * levelsToSpread) / range;
-	int mappedLevel = 9 + levelOffset;
-
-	return std::min(NUM_MLFQ_LEVELS - 2, std::max(9, mappedLevel));
+	// ... implementation ...
 }
+*/
 
-/* static */ bigtime_t
+/* static bigtime_t
 ThreadData::GetBaseQuantumForLevel(int mlfqLevel)
 {
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(mlfqLevel >= 0 && mlfqLevel < NUM_MLFQ_LEVELS);
-	// Apply the global scheduler base quantum multiplier
-	bigtime_t adjustedQuantum = (bigtime_t)(kBaseQuanta[mlfqLevel] * gSchedulerBaseQuantumMultiplier);
-	return adjustedQuantum;
+	// ... implementation ...
 }
-
+*/
 
 ThreadProcessing::~ThreadProcessing()
 {

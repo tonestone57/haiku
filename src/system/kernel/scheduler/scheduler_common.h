@@ -122,7 +122,6 @@ class CoreEntry;
 class ThreadData; // Forward declaration
 
 // --- MLFQ and DTQ Definitions ---
-#define NUM_MLFQ_LEVELS 16
 #define DEFAULT_K_DIST_FACTOR 0.25f // Start with a conservative value
 
 // SMT Conflict Factor Defaults
@@ -139,27 +138,9 @@ class ThreadData; // Forward declaration
 #define DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING 0.5f
 #define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING 500
 
-// Base time quanta for each MLFQ level (in microseconds)
-// Level 0 (highest priority) to NUM_MLFQ_LEVELS - 1 (lowest priority)
-// Kept for now as ThreadData::GetBaseQuantumForLevel uses it for SliceDuration.
-static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = {
-	2000,   // Level 0
-	3000,   // Level 1
-	4000,   // Level 2
-	5000,   // Level 3
-	6000,   // Level 4
-	7000,   // Level 5
-	8000,   // Level 6
-	10000,  // Level 7
-	12000,  // Level 8
-	15000,  // Level 9
-	18000,  // Level 10
-	22000,  // Level 11
-	26000,  // Level 12
-	30000,  // Level 13
-	40000,  // Level 14
-	50000   // Level 15 (lowest priority)
-};
+// Base time quanta for MLFQ (REMOVED - EEVDF uses kBaseQuanta from scheduler_defs.h)
+// static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = { ... };
+// #define NUM_MLFQ_LEVELS 16 // REMOVED
 
 // Aging thresholds (REMOVED - MLFQ specific)
 /*

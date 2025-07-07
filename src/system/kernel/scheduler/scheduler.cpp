@@ -1527,10 +1527,11 @@ scheduler_perform_load_balance()
 	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
 
 	ThreadData* bestCandidateToMove = NULL;
-	bigtime_t maxPositiveLag = 0;
-	bigtime_t latestEligibleVDForCandidate = 0;
+	// bigtime_t maxPositiveLag = 0; // Replaced by benefit score logic
+	// bigtime_t latestEligibleVDForCandidate = 0; // Replaced by benefit score logic
+	bigtime_t maxBenefitScore = -1; // Initialize to a value that any valid score will beat
 
-	const int MAX_LB_CANDIDATES_TO_CHECK = 5;
+	const int MAX_LB_CANDIDATES_TO_CHECK = 10; // Increased from 5
 	const bigtime_t MIN_POSITIVE_LAG_FOR_MIGRATION = SCHEDULER_MIN_GRANULARITY * 2;
 
 	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK];
@@ -1548,25 +1549,59 @@ scheduler_perform_load_balance()
 			continue;
 		}
 
-		bigtime_t currentLag = candidate->Lag();
-		if (currentLag < MIN_POSITIVE_LAG_FOR_MIGRATION) {
+		bigtime_t currentLagOnSource = candidate->Lag();
+		if (currentLagOnSource < MIN_POSITIVE_LAG_FOR_MIGRATION) {
 			continue;
 		}
 
-		if (bestCandidateToMove == NULL || currentLag > maxPositiveLag) {
+		// Estimate benefit of moving to targetCPU
+		bigtime_t targetQueueMinVruntime = targetCPU->MinVirtualRuntime();
+		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
+
+		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetBasePriority());
+		if (candidateWeight <= 0) candidateWeight = 1; // Safeguard
+
+		// Use current slice duration of the candidate for estimation
+		bigtime_t candidateSliceDuration = candidate->SliceDuration();
+		// Or, could recalculate for targetCPU context if significantly different:
+		// bigtime_t candidateSliceDuration = scheduler_calculate_eevdf_slice(candidate, targetCPU);
+
+		bigtime_t candidateWeightedSlice = (candidateSliceDuration * SCHEDULER_WEIGHT_SCALE) / candidateWeight;
+		bigtime_t estimatedLagOnTarget = candidateWeightedSlice - (estimatedVRuntimeOnTarget - targetQueueMinVruntime);
+
+		bigtime_t estimatedEligibleTimeOnTarget;
+		if (estimatedLagOnTarget >= 0) {
+			estimatedEligibleTimeOnTarget = now;
+		} else {
+			bigtime_t delay = (-estimatedLagOnTarget * SCHEDULER_WEIGHT_SCALE) / candidateWeight;
+			if (candidateWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
+			delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+			estimatedEligibleTimeOnTarget = now + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY);
+		}
+
+		// Benefit Score: Higher is better.
+		// Combines how much lag it has on source (higher = more starved)
+		// and how much earlier it would become eligible on target.
+		// eligibilityGain is positive if it becomes eligible sooner than 'now' on target,
+		// or zero if its eligibility is still in the future on target.
+		// A simpler metric could be just (-estimatedEligibleTimeOnTarget) if we assume 'now' is 0.
+		bigtime_t eligibilityImprovement = candidate->EligibleTime() - estimatedEligibleTimeOnTarget;
+		bigtime_t currentBenefitScore = currentLagOnSource + eligibilityImprovement;
+		// Alternative score: Focus purely on how much sooner it runs
+		// currentBenefitScore = eligibilityImprovement;
+
+		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), benefitScore %" B_PRId64 "\n",
+			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), currentBenefitScore);
+
+		if (currentBenefitScore > maxBenefitScore) {
+			maxBenefitScore = currentBenefitScore;
 			bestCandidateToMove = candidate;
-			maxPositiveLag = currentLag;
-			latestEligibleVDForCandidate = candidate->VirtualDeadline();
-		} else if (currentLag == maxPositiveLag) {
-			if (candidate->VirtualDeadline() > latestEligibleVDForCandidate) {
-				bestCandidateToMove = candidate;
-				latestEligibleVDForCandidate = candidate->VirtualDeadline();
-			}
 		}
 	}
 
+	// Re-add non-chosen candidates
 	for (int i = 0; i < checkedCount; ++i) {
-		if (tempStorage[i] != bestCandidateToMove) {
+		if (tempStorage[i] != bestCandidateToMove) { // if tempStorage[i] was not chosen
 			sourceQueue.Add(tempStorage[i]);
 		}
 	}
@@ -1606,9 +1641,10 @@ scheduler_perform_load_balance()
 	threadToMove->ChooseCoreAndCPU(finalTargetCore, targetCPU);
 	ASSERT(threadToMove->Core() == finalTargetCore);
 
-	// Use MapPriorityToEffectiveLevel for consistency with CalculateDynamicQuantum
-	threadToMove->SetSliceDuration(ThreadData::GetBaseQuantumForLevel(
-		ThreadData::MapPriorityToEffectiveLevel(threadToMove->GetBasePriority())));
+	// Calculate slice duration using the standard EEVDF helper, then set it.
+	// scheduler_calculate_eevdf_slice calls threadToMove->CalculateDynamicQuantum(targetCPU).
+	bigtime_t newSliceDuration = scheduler_calculate_eevdf_slice(threadToMove, targetCPU);
+	threadToMove->SetSliceDuration(newSliceDuration);
 
 	targetCPU->LockRunQueue();
 	bigtime_t targetQueueMinVruntime = targetCPU->MinVirtualRuntime();

@@ -27,9 +27,11 @@ namespace Scheduler {
 // to adjust the base slice duration.
 
 #include "EevdfRunQueue.h" // For EevdfRunQueueLink
+// RunQueue.h and RunQueueLinkImpl are likely no longer needed for EEVDF.
+// #include "RunQueue.h"
 
-struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData>,
-	RunQueueLinkImpl<ThreadData> { // Keep existing RunQueueLink for now, might remove later
+struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData> {
+	// Removed: , RunQueueLinkImpl<ThreadData>
 friend class Scheduler::EevdfGetLink; // Allow EevdfGetLink to access fEevdfLink
 private:
 	inline	void		_InitBase();
@@ -145,8 +147,8 @@ public:
 
 
 	// Static utility methods
-	static	int			MapPriorityToMLFQLevel(int32 priority);
-	static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel);
+	// static	int			MapPriorityToMLFQLevel(int32 priority); // Obsolete
+	// static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel); // Obsolete
 
 
 private:

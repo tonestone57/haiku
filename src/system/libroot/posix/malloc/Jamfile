@@ -47,7 +47,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 
 			# Merge the specifically compiled object into the final target name
 			MergeObject <$(architecture)>posix_malloc.o :
-				<$(architecture)>snmalloc_hooks.o // Use the intermediate object
+				<$(architecture)>snmalloc_hooks.o  #Use the intermediate object
 			;
 
 		} else if $(HAIKU_LIBROOT_ALLOCATOR) = hoard2 {

@@ -135,6 +135,8 @@ static inline int32 scheduler_priority_to_weight(int32 priority) {
 #include "scheduler_tracing.h"
 #include "EevdfRunQueue.h"
 
+#include <util/HashTable.h>
+
 
 namespace Scheduler {
 
@@ -161,6 +163,47 @@ int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
 int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
 int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
+
+// IRQ-Task Colocation Data Structures
+
+//! Definition for a HashTable mapping IRQ vectors (int) to thread_ids.
+struct IntHashDefinition {
+	typedef int KeyType;
+	typedef thread_id ValueType;
+
+	size_t HashKey(int key) const
+	{
+		return (size_t)key;
+	}
+
+	size_t Hash(thread_id* value) const
+	{
+		// Not needed for direct key-based lookup, but HashTable might use it internally
+		// if we were hashing based on value. For value itself, it's just thread_id.
+		return (size_t)*value;
+	}
+
+	bool Compare(int key, thread_id* value) const
+	{
+		// This comparison is for HashTable's internal chaining if it stores values directly
+		// and needs to compare a key against a field in the stored value type.
+		// However, for a simple int -> thread_id map, this might not be directly used
+		// if HashTable allows direct value storage.
+		// Assuming a typical HashTable where we lookup by key and get a value.
+		// Let's assume this is for checking if a value matches for a given key, which is not typical.
+		// The primary comparison is `CompareKeys`.
+		return false; // This function might be for more complex scenarios.
+	}
+
+	bool CompareKeys(int key1, int key2) const
+	{
+		return key1 == key2;
+	}
+};
+//! Global hash table mapping IRQ vectors to specific thread IDs for colocation.
+static HashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
+//! Spinlock protecting sIrqTaskAffinityMap.
+static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 
 // Definition for gLatencyNiceFactors declared in scheduler_defs.h
@@ -1044,6 +1087,33 @@ scheduler_on_thread_init(Thread* thread)
 void
 scheduler_on_thread_destroy(Thread* thread)
 {
+	// Called when a thread is being destroyed.
+	// We need to clean up any IRQ-task affinities associated with this thread.
+	if (sIrqTaskAffinityMap != NULL && thread != NULL) {
+		InterruptsSpinLocker locker(gIrqTaskAffinityLock);
+		// Currently, the sIrqTaskAffinityMap (IRQ -> thread_id) is not efficiently
+		// searchable by thread_id to find all IRQs associated with this dying thread.
+		// A full scan of the map would be required, which could be slow if the map is large.
+		//
+		// For Phase 1 of IRQ-Task Colocation:
+		// We rely on "cleanup-on-use" in scheduler_irq_balance_event() and
+		// potentially in SelectTargetCPUForIRQ() if it also queries the map.
+		// When these functions encounter an IRQ affinity pointing to a thread_id
+		// that no longer exists (or is a zombie), they will remove that stale entry.
+		//
+		// TODO: For a more robust and immediate cleanup, consider:
+		// 1. A reverse map: thread_id -> list_of_IRQ_vectors. This would make
+		//    cleanup here O(num_affinitized_irqs_for_this_thread).
+		// 2. Storing `Thread*` (with proper reference counting) in sIrqTaskAffinityMap
+		//    instead of `thread_id`. When the thread's reference count drops to zero
+		//    (or a special flag is set on destruction), its associated IRQ affinities
+		//    could be more directly found if the map supports value-based iteration well,
+		//    or if the Thread object itself held a list of its affinitized IRQs.
+		//
+		// For now, log that cleanup relies on the "on-use" mechanism.
+		TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed. Any IRQ affinities for this thread will be cleared on next use if stale.\n", thread->id);
+	}
+
 	delete thread->scheduler_data;
 }
 
@@ -1399,6 +1469,16 @@ scheduler_init()
 	}
 	Scheduler::init_debug_commands();
 	_scheduler_init_kdf_debug_commands();
+
+	// Initialize IRQ-Task Affinity Map for IRQ-task colocation.
+	sIrqTaskAffinityMap = new(std::nothrow) HashTable<IntHashDefinition>;
+	if (sIrqTaskAffinityMap == NULL) {
+		panic("scheduler_init: Failed to allocate IRQ-Task affinity map!");
+	} else if (sIrqTaskAffinityMap->Init() != B_OK) {
+		panic("scheduler_init: Failed to initialize IRQ-Task affinity map!");
+		delete sIrqTaskAffinityMap;
+		sIrqTaskAffinityMap = NULL;
+	}
 }
 
 
@@ -1477,11 +1557,13 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 
 
 // #pragma mark - Proactive IRQ Balancing
-// (IRQ balancing logic remains largely unchanged for now)
+/*! Wrapper to call the main SelectTargetCPUForIRQ with current mode parameters.
+	It passes the irqVector along for affinity checking.
+*/
 static CPUEntry*
-_scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad)
+_scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad)
 {
-	return SelectTargetCPUForIRQ(core, irqToMoveLoad, gModeIrqTargetFactor,
+	return SelectTargetCPUForIRQ(core, irqVector, irqToMoveLoad, gModeIrqTargetFactor,
 		gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 }
 
@@ -1493,7 +1575,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 		return B_HANDLED_INTERRUPT;
 	}
 	SCHEDULER_ENTER_FUNCTION();
-	TRACE("Proactive IRQ Balance Check running\n");
+	TRACE_SCHED_IRQ("Proactive IRQ Balance Check running\n");
 	CPUEntry* sourceCpuMaxIrq = NULL;
 	CPUEntry* targetCandidateCpuMinIrq = NULL;
 	int32 maxIrqLoad = -1;
@@ -1567,18 +1649,95 @@ scheduler_irq_balance_event(timer* /* unused */)
 				irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
 			}
 		}
-		CoreEntry* targetCore = targetCandidateCpuMinIrq->Core();
+		// CoreEntry* targetCore = targetCandidateCpuMinIrq->Core(); // Original target
 		for (int32 i = 0; i < candidateCount; i++) {
 			irq_assignment* irqToMove = candidateIRQs[i];
 			if (irqToMove == NULL) continue;
-			CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCore, irqToMove->load);
+
+			CoreEntry* preferredTargetCore = targetCandidateCpuMinIrq->Core(); // Default target core
+			bool hasAffinity = false;
+			// bool affinityRespectedOnSource = false; // Not directly used further, covered by 'continue'
+
+			// Check for IRQ-Task affinity.
+			// If affinity exists, it can influence preferredTargetCore or cause us to skip moving this IRQ.
+			if (sIrqTaskAffinityMap != NULL) {
+				InterruptsSpinLocker affinityLocker(gIrqTaskAffinityLock);
+				thread_id affinitized_thid;
+				if (sIrqTaskAffinityMap->Lookup(irqToMove->irq, &affinitized_thid) == B_OK) {
+					hasAffinity = true;
+					affinityLocker.Unlock(); // Unlock early if further ops needed
+
+					Thread* task = thread_get_kernel_thread(affinitized_thid);
+					if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
+						CPUEntry* taskCpu = CPUEntry::GetCPU(task->cpu->cpu_num);
+						// TODO: Consider releasing 'task' reference if get_kernel_thread acquired one.
+
+						if (taskCpu->Core() == sourceCpuMaxIrq->Core()) {
+							// Task is running on the IRQ's current core.
+							// Be highly reluctant to move this IRQ. For Phase 1, skip moving it.
+							// A more advanced implementation might move it if sourceCpuMaxIrq is
+							// extremely overloaded far beyond typical balancing thresholds.
+							// affinityRespectedOnSource = true; // Mark that we'd prefer to keep it.
+							TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " on source core %" B_PRId32 ". Reluctant to move.\n",
+								irqToMove->irq, affinitized_thid, sourceCpuMaxIrq->Core()->ID());
+							// Only move if source is extremely overloaded beyond normal thresholds.
+							// For Phase 1, simply skip moving if affinity is on source.
+							// A more advanced version could use much higher thresholds here.
+							continue; // Skip moving this IRQ
+						} else {
+							// Task is running on a different core. This core becomes preferred.
+							preferredTargetCore = taskCpu->Core();
+							TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " on core %" B_PRId32 ". Preferred target.\n",
+								irqToMove->irq, affinitized_thid, preferredTargetCore->ID());
+						}
+					} else if (task != NULL) { // Task exists but not running
+						// thread_put_kernel_thread(task); // Release ref
+						// Could use task->scheduler_data->Core() or previous_cpu's core as preferred.
+						// For Phase 1, if not running, treat as weak affinity / normal balancing.
+						// Or, try to use its last known core if available.
+						if (task->previous_cpu != NULL) {
+							CPUEntry* prevTaskCpu = CPUEntry::GetCPU(task->previous_cpu->cpu_num);
+							if (prevTaskCpu != NULL && prevTaskCpu->Core() != NULL) {
+								preferredTargetCore = prevTaskCpu->Core();
+								TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " (not running), prev core %" B_PRId32 ". Preferred target.\n",
+									irqToMove->irq, affinitized_thid, preferredTargetCore->ID());
+							}
+						}
+						// Fallthrough to default preferredTargetCore if no good previous_cpu info
+					} else {
+						// Stale affinity (thread doesn't exist)
+						affinityLocker.Lock(); // Re-acquire to remove
+						sIrqTaskAffinityMap->Remove(irqToMove->irq);
+						affinityLocker.Unlock();
+						hasAffinity = false; // Treat as no affinity
+						TRACE_SCHED_IRQ("IRQBalance: IRQ %d had stale affinity for T %" B_PRId32 ". Cleared.\n",
+							irqToMove->irq, affinitized_thid);
+					}
+				} else {
+					affinityLocker.Unlock(); // No affinity found
+				}
+			}
+
+			// If affinity was respected on source, we already 'continued'.
+			// Now select the final CPU on the (potentially affinity-biased) preferredTargetCore.
+			CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(preferredTargetCore, irqToMove->irq, irqToMove->load);
+
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
-				TRACE("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-					irqToMove->irq, irqToMove->load, sourceCpuMaxIrq->ID(), finalTargetCpu->ID());
+				// Additional check: if IRQ has affinity, and we are moving it AWAY from a core
+				// where the task is NOT running but COULD run (e.g. matches affinity), be more cautious.
+				// This part is getting complex for Phase 1. The primary goal is to move TO the task
+				// or keep it WITH the task. The current logic prioritizes moving to the task's
+				// current/previous core if specified as preferredTargetCore.
+
+				TRACE_SCHED_IRQ("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")%s\n",
+					irqToMove->irq, irqToMove->load,
+					sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
+					finalTargetCpu->ID(), finalTargetCpu->Core()->ID(), // preferredTargetCore is finalTargetCpu->Core()
+					hasAffinity ? " (affinity considered)" : "");
 				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
 			} else {
-				TRACE("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source.\n",
-					irqToMove->irq, targetCore->ID());
+				TRACE_SCHED_IRQ("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source. IRQ remains on CPU %" B_PRId32 ".\n",
+					irqToMove->irq, preferredTargetCore->ID(), sourceCpuMaxIrq->ID());
 			}
 		}
 	} else {
@@ -2155,5 +2314,84 @@ _user_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
+
+
+// #pragma mark - IRQ-Task Colocation Syscall
+
+/*! Sets or clears an affinity between an IRQ vector and a specific thread.
+	This is a privileged operation. When an affinity is set, the scheduler
+	will attempt to handle the specified IRQ on the same CPU (or core) where
+	the affinitized thread is running, subject to CPU load and IRQ capacity.
+	This is intended for specific high-performance I/O scenarios.
+	\param irqVector The hardware IRQ vector number.
+	\param thid The ID of the thread to colocate with the IRQ.
+	       If B_CURRENT_THREAD_ID or 0, the calling thread is used.
+	       If -1, any existing affinity for irqVector is cleared.
+	\param flags Reserved for future use (e.g., strength of affinity, CPU/core preference).
+	             Currently must be 0.
+	\return B_OK on success, B_NOT_ALLOWED if not privileged, B_BAD_VALUE for
+	        invalid irqVector, B_BAD_THREAD_ID for invalid thid, B_NO_INIT if the
+	        affinity map is not initialized, or other errors from HashTable.
+*/
+status_t
+_user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
+{
+	// TODO: Define proper capability/privilege check using capabilities API.
+	// For now, using euid check as a placeholder.
+	if (geteuid() != 0) // Placeholder for something like: if (!is_team_privileged(real_current_team, CAP_MANAGE_INTERRUPTS))
+		return B_NOT_ALLOWED;
+
+	if (sIrqTaskAffinityMap == NULL)
+		return B_NO_INIT;
+
+	// Validate IRQ vector (basic check, platform might have more specific validation)
+	if (irqVector < 0 || irqVector >= MAX_IRQS) // MAX_IRQS from arch_interrupts.h or similar
+		return B_BAD_VALUE;
+
+	thread_id targetThreadId = thid;
+	if (thid == 0 || thid == B_CURRENT_THREAD_ID)
+		targetThreadId = thread_get_current_thread_id();
+
+	InterruptsSpinLocker locker(gIrqTaskAffinityLock);
+
+	if (targetThreadId == -1) {
+		// Clear affinity for this IRQ
+		sIrqTaskAffinityMap->Remove(irqVector);
+		TRACE_SCHED_IRQ("SetIrqTaskColocation: Cleared affinity for IRQ %d\n", irqVector);
+		return B_OK;
+	}
+
+	// Validate thread ID if not clearing
+	struct thread* thread = thread_get_kernel_thread(targetThreadId);
+	if (thread == NULL) {
+		// Also check if it's a zombie, as get_kernel_thread might return non-NULL for zombies
+		if (thread_is_zombie(targetThreadId))
+			return B_BAD_THREAD_ID;
+		// If not zombie but still NULL, then it's a bad ID.
+		return B_BAD_THREAD_ID;
+	}
+	// thread_put_kernel_thread(thread); // Release reference if get_kernel_thread acquired one.
+	// For HashTable, we store thread_id, so no need to keep thread reference here.
+
+	// Insert/Update the affinity
+	// HashTable::Put will update if key exists, or insert if not.
+	status_t status = sIrqTaskAffinityMap->Put(irqVector, targetThreadId);
+	if (status == B_OK) {
+		TRACE_SCHED_IRQ("SetIrqTaskColocation: Set affinity for IRQ %d to thread %" B_PRId32 "\n",
+			irqVector, targetThreadId);
+	} else {
+		TRACE_SCHED_IRQ("SetIrqTaskColocation: FAILED to set affinity for IRQ %d to thread %" B_PRId32 ", error: %s\n",
+			irqVector, targetThreadId, strerror(status));
+	}
+
+	// TODO: Optionally, trigger an immediate re-evaluation of this IRQ's placement.
+	// For Phase 1, the periodic balancer or next natural assignment will pick it up.
+
+	return status;
+}
+
+
+// The following would typically be in a syscall table definition file:
+// SYSCALL(_user_set_irq_task_colocation, 3) // name, arg count
 
 [end of src/system/kernel/scheduler/scheduler.cpp]

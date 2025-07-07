@@ -69,6 +69,11 @@ static CoreLoadHeap sDebugCoreHeap;
 // kMaxLoad is 1000, so 50 is 5%.
 static const int32 CORE_LOAD_UPDATE_DELTA_THRESHOLD = kMaxLoad / 20;
 
+// Constants for Dynamic IRQ Target Load calculation
+static const float kDynamicIrqLoadMinFactor = 0.25f; // Min % of base load for a fully thread-busy CPU
+static const float kDynamicIrqLoadMaxFactor = 1.25f; // Max % of base load for a fully idle CPU
+static const int32 kDynamicIrqLoadAbsoluteMin = 50;  // Absolute minimum IRQ load capacity
+
 
 // ThreadRunQueue::Dump() is removed as ThreadRunQueue is removed.
 // A new dump method for EevdfRunQueue will be part of DebugDumper.
@@ -1251,16 +1256,96 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 // #pragma mark - Unified IRQ Target CPU Selection
 
 
+/*! Calculates a dynamic maximum IRQ load for a given CPU.
+	The capacity is reduced if the CPU is busy with thread execution,
+	and slightly increased if the CPU is idle. This allows busier CPUs to
+	offload IRQs to idler ones more effectively.
+	\param cpu The CPU for which to calculate the dynamic IRQ target load.
+	\param baseMaxIrqLoadFromMode The baseline maximum IRQ load defined by the
+	       current scheduler mode.
+	\return The calculated dynamic maximum IRQ load for the CPU.
+*/
+static int32
+scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
+{
+	if (cpu == NULL || cpu->Core() == NULL || gCPU[cpu->ID()].disabled)
+		return 0; // Disabled CPU cannot take IRQs
+
+	float cpuInstantLoad = cpu->GetInstantaneousLoad(); // 0.0 (idle) to 1.0 (busy)
+
+	// Calculate effective factor: idle CPUs get maxFactor, busy CPUs get minFactor.
+	float effectiveFactor = kDynamicIrqLoadMaxFactor
+		- (cpuInstantLoad * (kDynamicIrqLoadMaxFactor - kDynamicIrqLoadMinFactor));
+
+	int32 dynamicTargetLoad = (int32)(baseMaxIrqLoadFromMode * effectiveFactor);
+
+	// Clamp to absolute minimum and a scaled version of the mode's base maximum.
+	dynamicTargetLoad = max_c(kDynamicIrqLoadAbsoluteMin, dynamicTargetLoad);
+	dynamicTargetLoad = min_c(dynamicTargetLoad, (int32)(baseMaxIrqLoadFromMode * kDynamicIrqLoadMaxFactor * 1.1f)); // Allow slightly above baseMax * maxFactor as a hard cap
+	dynamicTargetLoad = min_c(dynamicTargetLoad, DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD * 2); // Overall sanity cap
+
+	TRACE_SCHED_IRQ("GetDynamicMaxIrqTarget: CPU %" B_PRId32 ", instLoad %.2f, baseMode %" B_PRId32 ", effFactor %.2f -> dynamicTarget %" B_PRId32 "\n",
+		cpu->ID(), cpuInstantLoad, baseMaxIrqLoadFromMode, effectiveFactor, dynamicTargetLoad);
+
+	return dynamicTargetLoad;
+}
+
+
+// These are defined in scheduler.cpp
+extern HashTable<IntHashDefinition>* sIrqTaskAffinityMap;
+extern spinlock gIrqTaskAffinityLock;
+
+// These are defined in scheduler.cpp
+extern HashTable<IntHashDefinition>* sIrqTaskAffinityMap;
+extern spinlock gIrqTaskAffinityLock;
+
+/*! Selects the best CPU on a given target core to receive an IRQ.
+	This function considers the dynamic IRQ capacity of each CPU on the core,
+	the current thread load on those CPUs, and any explicit IRQ-task affinity.
+	\param targetCore The core on which to find a target CPU.
+	\param irqVector The IRQ vector being placed. Used to check for task affinity.
+	\param irqLoadToMove The estimated load of the IRQ.
+	\param irqTargetFactor A weighting factor (0-1) to balance preference between
+	       low thread load and low existing IRQ load on candidate CPUs.
+	\param smtConflictFactor Penalty factor for SMT siblings' thread load.
+	\param baseMaxIrqLoadFromMode The baseline maximum IRQ load for a CPU,
+	       as defined by the current scheduler mode. This is used as input
+	       for calculating the dynamic IRQ capacity of each CPU.
+	\return The selected CPUEntry, or NULL if no suitable CPU is found.
+*/
 Scheduler::CPUEntry*
-Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
+Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 irqLoadToMove,
 	float irqTargetFactor, float smtConflictFactor,
-	int32 maxTotalIrqLoadOnTargetCPU)
+	int32 baseMaxIrqLoadFromMode)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(targetCore != NULL);
 
 	CPUEntry* bestCPU = NULL;
-	float bestScore = 1e9;
+	float bestScore = 1e9; // Lower is better
+	CPUEntry* affinitizedTaskRunningCPU = NULL;
+
+	// Check if this IRQ has a task affinity and if that task is running on this targetCore
+	if (sIrqTaskAffinityMap != NULL) {
+		InterruptsSpinLocker affinityLocker(gIrqTaskAffinityLock);
+		thread_id thid;
+		if (sIrqTaskAffinityMap->Lookup(irqVector, &thid) == B_OK) {
+			affinityLocker.Unlock(); // Unlock early
+
+			Thread* task = thread_get_kernel_thread(thid);
+			if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
+				CPUEntry* taskCpuEntry = CPUEntry::GetCPU(task->cpu->cpu_num);
+				if (taskCpuEntry->Core() == targetCore) {
+					affinitizedTaskRunningCPU = taskCpuEntry;
+					TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: IRQ %d has affinity with T %" B_PRId32 " running on CPU %" B_PRId32 " (on targetCore %" B_PRId32 ")\n",
+						irqVector, thid, taskCpuEntry->ID(), targetCore->ID());
+				}
+			}
+			// if (task != NULL) thread_put_kernel_thread(task); // Release ref if acquired by get_kernel_thread
+		} else {
+			affinityLocker.Unlock();
+		}
+	}
 
 	CPUSet coreCPUs = targetCore->CPUMask();
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
@@ -1270,10 +1355,12 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
 		CPUEntry* currentCPU = CPUEntry::GetCPU(i);
 		ASSERT(currentCPU->Core() == targetCore);
 
+		int32 dynamicMaxForThisCpu = scheduler_get_dynamic_max_irq_target_load(currentCPU, baseMaxIrqLoadFromMode);
 		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
-		if (maxTotalIrqLoadOnTargetCPU > 0 && currentCpuExistingIrqLoad + irqLoadToMove >= maxTotalIrqLoadOnTargetCPU) {
-			TRACE("SelectTargetCPUForIRQ: CPU %" B_PRId32 " fails IRQ capacity (curr:%" B_PRId32 ", add:%" B_PRId32 ", max:%" B_PRId32 ")\n",
-				currentCPU->ID(), currentCpuExistingIrqLoad, irqLoadToMove, maxTotalIrqLoadOnTargetCPU);
+
+		if (dynamicMaxForThisCpu > 0 && currentCpuExistingIrqLoad + irqLoadToMove >= dynamicMaxForThisCpu) {
+			TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: CPU %" B_PRId32 " fails dynamic IRQ capacity (curr:%" B_PRId32 ", add:%" B_PRId32 ", dynMax:%" B_PRId32 ")\n",
+				currentCPU->ID(), currentCpuExistingIrqLoad, irqLoadToMove, dynamicMaxForThisCpu);
 			continue;
 		}
 
@@ -1281,14 +1368,13 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
 		float smtPenalty = 0.0f;
 		if (targetCore->CPUCount() > 1) {
 			int32 currentCPUID = currentCPU->ID();
-			int32 currentCoreID = targetCore->ID();
+			int32 currentCoreID = targetCore->ID(); // Should be same as targetCore->ID()
 			int32 currentSMTID = gCPU[currentCPUID].topology_id[CPU_TOPOLOGY_SMT];
 
 			if (currentSMTID != -1) {
 				for (int32 k = 0; k < smp_get_num_cpus(); k++) {
 					if (k == currentCPUID || gCPU[k].disabled)
 						continue;
-
 					if (gCPU[k].topology_id[CPU_TOPOLOGY_CORE] == currentCoreID &&
 						gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == currentSMTID) {
 						smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * smtConflictFactor;
@@ -1298,16 +1384,22 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
 		}
 		float threadEffectiveLoad = threadInstantLoad + smtPenalty;
 
-		float denominator = (maxTotalIrqLoadOnTargetCPU - irqLoadToMove + 1);
+		float denominator = (dynamicMaxForThisCpu - irqLoadToMove + 1);
 		if (denominator <= 0) denominator = 1.0f;
 
-		float normalizedExistingIrqLoad = (maxTotalIrqLoadOnTargetCPU > 0)
+		float normalizedExistingIrqLoad = (dynamicMaxForThisCpu > 0)
 			? std::min(1.0f, (float)currentCpuExistingIrqLoad / denominator)
-			: ( (maxTotalIrqLoadOnTargetCPU == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
-
+			: ((dynamicMaxForThisCpu == 0 && currentCpuExistingIrqLoad == 0) ? 0.0f : 1.0f);
 
 		float score = (1.0f - irqTargetFactor) * threadEffectiveLoad
 						   + irqTargetFactor * normalizedExistingIrqLoad;
+
+		// If this CPU is where the affinitized task is running, give it a significant bonus
+		if (currentCPU == affinitizedTaskRunningCPU) {
+			score *= 0.1f; // Strong preference (e.g., reduce score by 90%)
+			TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: CPU %" B_PRId32 " is affinitized task CPU for IRQ %d. Score boosted to %f.\n",
+				currentCPU->ID(), irqVector, score);
+		}
 
 		if (bestCPU == NULL || score < bestScore) {
 			bestScore = score;
@@ -1316,11 +1408,12 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
 	}
 
 	if (bestCPU != NULL) {
-		 TRACE("SelectTargetCPUForIRQ: Selected CPU %" B_PRId32 " on core %" B_PRId32 " with score %f\n",
-			bestCPU->ID(), targetCore->ID(), bestScore);
+		 TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: Selected CPU %" B_PRId32 " on core %" B_PRId32 " for IRQ %d (load %" B_PRId32 ") with score %f%s\n",
+			bestCPU->ID(), targetCore->ID(), irqVector, irqLoadToMove, bestScore,
+			(affinitizedTaskRunningCPU != NULL && bestCPU == affinitizedTaskRunningCPU) ? " (colocated with task)" : "");
 	} else {
-		 TRACE("SelectTargetCPUForIRQ: No suitable CPU found on core %" B_PRId32 " for IRQ (load %" B_PRId32 ")\n",
-			targetCore->ID(), irqLoadToMove);
+		 TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: No suitable CPU found on core %" B_PRId32 " for IRQ %d (load %" B_PRId32 ")\n",
+			targetCore->ID(), irqVector, irqLoadToMove);
 	}
 	return bestCPU;
 }

@@ -152,9 +152,12 @@ private:
 
 
 // Unified IRQ target selection function
-CPUEntry* SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqLoadToMove,
+/*!
+	\param irqVector The IRQ vector being placed; used for checking task affinity.
+*/
+CPUEntry* SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 irqLoadToMove,
 	float irqTargetFactor, float smtConflictFactor,
-	int32 maxTotalIrqLoadOnTargetCPU);
+	int32 baseMaxIrqLoadFromMode);
 
 
 class CPUPriorityHeap : public Heap<CPUEntry, int32> {

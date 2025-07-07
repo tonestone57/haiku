@@ -94,7 +94,7 @@ CPUEntry::CPUEntry()
 	fMeasureTime(0),
 	fUpdateLoadEvent(false)
 {
-	B_INITIALIZE_RW_SPINLOCK(&fSchedulerModeLock);
+	// fSchedulerModeLock was removed.
 	B_INITIALIZE_SPINLOCK(&fQueueLock);
 }
 
@@ -908,55 +908,87 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	SCHEDULER_ENTER_FUNCTION();
 
 	if (this->fDefunct) {
-		// If the core is defunct, ensure its load metrics are zeroed and remove from heaps.
+		// If the core is defunct (no enabled CPUs), its load is effectively zero,
+		// and it should not participate in load balancing heaps.
 		WriteSpinLocker loadLocker(fLoadLock);
 		fLoad = 0;
-		fCurrentLoad = 0;
+		fCurrentLoad = 0; // No threads should be homed here anymore.
 		fInstantaneousLoad = 0.0f;
 		bool wasInHighLoadHeap = fHighLoad;
-		fHighLoad = false;
+		fHighLoad = false; // A defunct core is not considered high load.
 		loadLocker.Unlock();
 
 		WriteSpinLocker heapsLock(gCoreHeapsLock);
-		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If it's in a heap
+		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If it's in any heap
 			if (wasInHighLoadHeap) {
 				gCoreHighLoadHeap.Remove(this);
 			} else {
 				gCoreLoadHeap.Remove(this);
 			}
-			// MinMaxHeap::Remove sets fIndex to -1.
+			// After MinMaxHeap::Remove, fIndex is -1, so it's out of heaps.
 		}
-		// Defunct core is now fully removed from load balancing heaps.
+		// Defunct core is now fully removed from load balancing consideration.
 		return;
 	}
 
-	// This function updates the core's average historical execution load (`fLoad`)
-	// based on the current historical loads (`CPUEntry::fLoad`) of its
-	// constituent, enabled CPUs. The core's `fLoad` is then used as the key for
-	// placing/updating this `CoreEntry` in the global load balancing heaps
-	// (`gCoreLoadHeap`, `gCoreHighLoadHeap`).
+	// This function is responsible for several key aspects of CoreEntry's load metrics:
 	//
-	// It also manages `fLoadMeasurementEpoch`. This epoch is used by
-	// `CoreEntry::AddLoad()` and `CoreEntry::RemoveLoad()` to determine if a
-	// thread's `fNeededLoad` (demand-based load) should directly influence
-	// `CoreEntry::fLoad` (execution-based load) when a thread is homed to or
-	// removed from a core. If the thread's load epoch (captured when its
-	// `fNeededLoad` was last significantly updated) differs from the core's
-	// current epoch, it implies a potentially stale `CoreEntry::fLoad` with
-	// respect to this thread's demand, so `fLoad` is adjusted directly.
-	// Otherwise, only `fCurrentLoad` (sum of demands) is adjusted, and `fLoad`
-	// is expected to catch up via this `_UpdateLoad` function reflecting actual
-	// CPU execution. The epoch is advanced here if `kLoadMeasureInterval` has passed.
+	// 1. Calculating `fLoad` (Historical Execution Load):
+	//    `fLoad` represents the average historical execution load across all *enabled*
+	//    CPUs belonging to this physical core. It's derived from the `CPUEntry::fLoad`
+	//    of its constituent CPUs. This metric is crucial for long-term load balancing
+	//    decisions, as it determines the core's placement in `gCoreLoadHeap` or
+	//    `gCoreHighLoadHeap`.
 	//
-	// `forceUpdate` allows bypassing the `kLoadMeasureInterval` check, typically
-	// used when a core's CPU membership changes or a thread is forcefully
-	// unassigned, requiring an immediate re-evaluation of the core's load.
+	// 2. Managing `fLoadMeasurementEpoch` and its Interaction with Demand-Based Load:
+	//    - `fLoadMeasurementEpoch` is a counter that advances periodically
+	//      (every `kLoadMeasureInterval` or when `forceUpdate` is true).
+	//    - `CoreEntry::fCurrentLoad` tracks the sum of `ThreadData::fNeededLoad`
+	//      (demand-based estimates) for threads homed to this core.
+	//    - When a thread is added to (`AddLoad`) or removed from (`RemoveLoad`) this
+	//      core:
+	//        - If the thread's own `fLoadMeasurementEpoch` (captured when its
+	//          `fNeededLoad` was last significantly updated) is different from the
+	//          core's current `fLoadMeasurementEpoch`, it signifies that the core's
+	//          `fLoad` might be stale with respect to this thread's demand.
+	//          In this case, the thread's `fNeededLoad` *directly adjusts* the
+	//          core's `fLoad` (in addition to `fCurrentLoad`). This makes `fLoad`
+	//          more immediately responsive to significant changes in thread demand,
+	//          rather than waiting for those changes to be reflected purely through
+	//          CPU execution time measurements.
+	//        - If the epochs match, it's assumed the thread's demand is (or will soon
+	//          be) accounted for in the normal execution-based update cycle of `fLoad`,
+	//          so only `fCurrentLoad` is adjusted by `AddLoad`/`RemoveLoad`.
+	//    - This function (`_UpdateLoad`) is where `fLoad` is primarily updated based
+	//      on actual CPU execution, and where `fLoadMeasurementEpoch` is advanced.
 	//
-	// Locking:
-	// - Acquires `gCoreHeapsLock` (write) before modifying heaps.
-	// - Acquires `fLoadLock` (write) for updating `fLoad`, `fLoadMeasurementEpoch`,
-	//   `fLastLoadUpdate`, and `fHighLoad`.
-	// - Acquires `fCPULock` (read/spin) when iterating its CPUs to sum their loads.
+	// 3. Updating Heap Placement:
+	//    Based on the recalculated `fLoad`, this function ensures the `CoreEntry` is
+	//    in the correct global heap (`gCoreLoadHeap` for loads <= `kHighLoad`, or
+	//    `gCoreHighLoadHeap` for loads > `kHighLoad`).
+	//
+	// Parameters:
+	//   - `forceUpdate`: If true, bypasses the `kLoadMeasureInterval` check and
+	//     forces a recalculation and potential epoch advancement. This is used
+	//     when CPU membership of the core changes or a thread is forcefully
+	//     unassigned, requiring immediate load re-evaluation.
+	//
+	// Locking Considerations:
+	//   - `fCPULock` (spinlock, member of CoreEntry): Acquired to safely iterate
+	//     the core's `CPUSet` and access `CPUEntry::GetLoad()` for its CPUs.
+	//     This protects against concurrent modification of the core's CPU list
+	//     (e.g., by CPU hotplug if `RemoveCPU` is called).
+	//   - `fLoadLock` (rw_spinlock, member of CoreEntry): Acquired with a write lock
+	//     to update `fLoad`, `fLoadMeasurementEpoch`, `fLastLoadUpdate`, and `fHighLoad`.
+	//     This protects these fields from concurrent access by `AddLoad`, `RemoveLoad`,
+	//     `ChangeLoad`, and other readers like `GetLoad()`.
+	//   - `gCoreHeapsLock` (global rw_spinlock): Acquired with a write lock before
+	//     modifying the global `gCoreLoadHeap` or `gCoreHighLoadHeap`. This protects
+	//     the heaps from concurrent modification by other cores also updating their loads.
+	//     The lock order is `gCoreHeapsLock` then `fLoadLock` to avoid AB-BA deadlocks
+	//     if another path were to lock them in reverse (though `fLoadLock` is typically
+	//     taken by methods that don't also take `gCoreHeapsLock` directly, `_UpdateLoad`
+	//     is the main interaction point).
 
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;
@@ -979,63 +1011,82 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	}
 	newAverageLoad = std::min(newAverageLoad, kMaxLoad); // Cap at kMaxLoad.
 
-	bigtime_t now = system_time();
 	// Check if the load measurement interval has passed or if a forced update is requested.
+	bigtime_t now = system_time();
 	bool intervalEnded = now >= kLoadMeasureInterval + fLastLoadUpdate;
 
 	if (!intervalEnded && !forceUpdate)
 		return; // No update needed yet unless forced.
 
-	// Lock order: gCoreHeapsLock (global) then fLoadLock (per-core).
+	// Acquire global heap lock first, then the core-specific load lock.
 	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
 	WriteSpinLocker loadLocker(fLoadLock);
 
-	int32 oldKey = this->GetMinMaxHeapLink()->fKey; // Current key in heap, if linked.
+	// Capture current state before modification for heap management logic
+	int32 oldKeyInHeap = this->GetMinMaxHeapLink()->fKey;
 	bool wasInAHeap = this->GetMinMaxHeapLink()->fIndex != -1;
-	bool wasInHighLoadHeap = fHighLoad;
+	bool wasPreviouslyHighLoad = fHighLoad; // The core's fHighLoad flag before this update
 
-	fLoad = newAverageLoad; // Update the core's official fLoad.
+	// Update the core's official execution-based load (fLoad).
+	fLoad = newAverageLoad;
 
 	if (intervalEnded) {
-		// If the interval ended, advance the measurement epoch. This is used by
-		// AddLoad/RemoveLoad to determine if a thread's fNeededLoad should
-		// directly impact fLoad (if epochs differ) or just fCurrentLoad (if same epoch).
+		// The measurement interval has ended, so advance the core's epoch.
+		// This signals to AddLoad/RemoveLoad that direct adjustments to fLoad
+		// might be needed for threads whose own load estimates are from a
+		// previous core epoch.
 		fLoadMeasurementEpoch++;
 		fLastLoadUpdate = now;
 	}
 
-	// fCurrentLoad (sum of thread fNeededLoads) is managed separately by AddLoad/RemoveLoad.
-	// fLoad (this function's concern) is what's used for heap placement in load balancing.
+	// Note: fCurrentLoad (demand-based load) is updated by AddLoad/RemoveLoad/ChangeLoad.
+	// This function focuses on updating fLoad (execution-based) and heap placement.
 
-	loadLocker.Unlock(); // Release fLoadLock before potentially modifying heaps.
+	loadLocker.Unlock(); // Release core's fLoadLock. Global gCoreHeapsLock is still held.
 
-	// Determine target heap state
-	bool targetIsHighLoad = fLoad > kHighLoad;
+	// Determine if the core should now be classified as high load.
+	bool isNowHighLoad = fLoad > kHighLoad;
 
-	// If the load value hasn't changed AND the core is already in the correct heap type,
-	// no need to re-heap.
-	if (wasInAHeap && oldKey == fLoad && wasInHighLoadHeap == targetIsHighLoad) {
+	// If the core's load value hasn't changed AND its high-load status (and thus target heap)
+	// also hasn't changed, then no heap modification is needed.
+	if (wasInAHeap && oldKeyInHeap == fLoad && wasPreviouslyHighLoad == isNowHighLoad) {
+		// fHighLoad already reflects the correct state based on the new fLoad,
+		// but it's good practice to ensure it's explicitly set if logic changes.
+		// Since loadLocker was released, re-acquire if fHighLoad needs setting here.
+		// However, fHighLoad is set when inserting into heaps below, so this is okay.
 		coreHeapsLocker.Unlock();
 		return;
 	}
 
-	// Remove from old heap (if it was in one).
+	// If the core was in a heap, remove it from its old heap.
 	if (wasInAHeap) {
-		if (wasInHighLoadHeap)
+		if (wasPreviouslyHighLoad)
 			gCoreHighLoadHeap.Remove(this);
 		else
 			gCoreLoadHeap.Remove(this);
+		// After Remove(), this->GetMinMaxHeapLink()->fIndex will be -1.
 	}
 
-	// Insert into the appropriate new heap based on the updated fLoad.
-	if (targetIsHighLoad) {
+	// Insert the core into the appropriate new heap based on its updated fLoad.
+	// Also update the fHighLoad flag for the core.
+	// Re-acquire fLoadLock briefly to set fHighLoad if it wasn't already done
+	// or if there's a concern about racing with GetLoad() if it used fHighLoad.
+	// However, fHighLoad is primarily for heap selection here.
+	if (isNowHighLoad) {
 		gCoreHighLoadHeap.Insert(this, fLoad);
+		// Safe to set fHighLoad here as gCoreHeapsLock is held, preventing
+		// another _UpdateLoad on this core, and fLoadLock is not needed
+		// just to set fHighLoad if its only reader under contention is GetLoad,
+		// which takes fLoadLock. For simplicity and safety if other readers exist:
+		SpinLocker fHighLoadSetter(fLoadLock); // Protect fHighLoad write
 		fHighLoad = true;
 	} else {
 		gCoreLoadHeap.Insert(this, fLoad);
+		SpinLocker fHighLoadSetter(fLoadLock); // Protect fHighLoad write
 		fHighLoad = false;
 	}
-	// coreHeapsLocker unlocks on destruction.
+
+	// coreHeapsLocker (for gCoreHeapsLock) unlocks on destruction.
 }
 
 
@@ -1425,3 +1476,5 @@ void Scheduler::init_debug_commands()
 			"List idle cores per package", "\nList idle cores per package", 0);
 	}
 }
+
+[end of src/system/kernel/scheduler/scheduler_cpu.cpp]

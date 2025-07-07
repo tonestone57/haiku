@@ -1018,75 +1018,81 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (!intervalEnded && !forceUpdate)
 		return; // No update needed yet unless forced.
 
-	// Acquire global heap lock first, then the core-specific load lock.
-	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
-	WriteSpinLocker loadLocker(fLoadLock);
+	// --- Step 1: Update core-local state and decide if heap ops are needed (outside gCoreHeapsLock) ---
+	int32 previousLoadValue;
+	bool wasHighLoadBeforeUpdate;
+	bool wasInAHeapBeforeUpdate;
+	bool needsHeapUpdate = false;
+	bool targetIsHighLoadHeap; // True if the core should end up in gCoreHighLoadHeap
 
-	// Capture current state before modification for heap management logic
-	int32 oldKeyInHeap = this->GetMinMaxHeapLink()->fKey;
-	bool wasInAHeap = this->GetMinMaxHeapLink()->fIndex != -1;
-	bool wasPreviouslyHighLoad = fHighLoad; // The core's fHighLoad flag before this update
+	{ // Scope for fLoadLock
+		WriteSpinLocker loadLocker(fLoadLock);
 
-	// Update the core's official execution-based load (fLoad).
-	fLoad = newAverageLoad;
+		previousLoadValue = fLoad; // Capture fLoad *before* it's updated
+		wasInAHeapBeforeUpdate = GetMinMaxHeapLink()->fIndex != -1;
+		wasHighLoadBeforeUpdate = fHighLoad;
 
-	if (intervalEnded) {
-		// The measurement interval has ended, so advance the core's epoch.
-		// This signals to AddLoad/RemoveLoad that direct adjustments to fLoad
-		// might be needed for threads whose own load estimates are from a
-		// previous core epoch.
-		fLoadMeasurementEpoch++;
-		fLastLoadUpdate = now;
+		fLoad = newAverageLoad; // Update the core's official execution-based load
+		if (intervalEnded) {
+			fLoadMeasurementEpoch++;
+			fLastLoadUpdate = now;
+		}
+
+		targetIsHighLoadHeap = fLoad > kHighLoad;
+
+		if (wasInAHeapBeforeUpdate) {
+			// Needs update if key changed OR target heap type changed
+			if (fLoad != previousLoadValue || wasHighLoadBeforeUpdate != targetIsHighLoadHeap) {
+				needsHeapUpdate = true;
+			}
+		} else {
+			// Was not in a heap, should be added (unless defunct, which is handled at the start of _UpdateLoad)
+			needsHeapUpdate = true;
+		}
+		// fLoadLock is released by SpinLocker destructor
 	}
 
-	// Note: fCurrentLoad (demand-based load) is updated by AddLoad/RemoveLoad/ChangeLoad.
-	// This function focuses on updating fLoad (execution-based) and heap placement.
-
-	loadLocker.Unlock(); // Release core's fLoadLock. Global gCoreHeapsLock is still held.
-
-	// Determine if the core should now be classified as high load.
-	bool isNowHighLoad = fLoad > kHighLoad;
-
-	// If the core's load value hasn't changed AND its high-load status (and thus target heap)
-	// also hasn't changed, then no heap modification is needed.
-	if (wasInAHeap && oldKeyInHeap == fLoad && wasPreviouslyHighLoad == isNowHighLoad) {
-		// fHighLoad already reflects the correct state based on the new fLoad,
-		// but it's good practice to ensure it's explicitly set if logic changes.
-		// Since loadLocker was released, re-acquire if fHighLoad needs setting here.
-		// However, fHighLoad is set when inserting into heaps below, so this is okay.
-		coreHeapsLocker.Unlock();
+	// --- Step 2: Perform heap operations if needed (conditionally under gCoreHeapsLock) ---
+	if (!needsHeapUpdate) {
+		TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 ", load %" B_PRId32 ", no heap modification needed.\n", ID(), fLoad);
 		return;
 	}
 
-	// If the core was in a heap, remove it from its old heap.
-	if (wasInAHeap) {
-		if (wasPreviouslyHighLoad)
+	TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 ", new load %" B_PRId32 ", old load %" B_PRId32 ", wasInHeap %d, wasHigh %d, targetHigh %d. Heap update required.\n",
+		ID(), fLoad, previousLoadValue, wasInAHeapBeforeUpdate, wasHighLoadBeforeUpdate, targetIsHighLoadHeap);
+
+	WriteSpinLocker coreHeapsLocker(gCoreHeapsLock);
+
+	// It's possible another thread modified this core's heap status between releasing fLoadLock
+	// and acquiring gCoreHeapsLock if _UpdateLoad could be called re-entrantly for the same core
+	// or if other functions directly modify these heaps for this core.
+	// However, _UpdateLoad is the primary function doing this.
+	// We use the captured wasInAHeapBeforeUpdate and wasHighLoadBeforeUpdate for removal logic.
+	if (wasInAHeapBeforeUpdate) {
+		if (wasHighLoadBeforeUpdate) {
+			TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 " removing from gCoreHighLoadHeap.\n", ID());
 			gCoreHighLoadHeap.Remove(this);
-		else
+		} else {
+			TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 " removing from gCoreLoadHeap.\n", ID());
 			gCoreLoadHeap.Remove(this);
-		// After Remove(), this->GetMinMaxHeapLink()->fIndex will be -1.
+		}
 	}
 
-	// Insert the core into the appropriate new heap based on its updated fLoad.
-	// Also update the fHighLoad flag for the core.
-	// Re-acquire fLoadLock briefly to set fHighLoad if it wasn't already done
-	// or if there's a concern about racing with GetLoad() if it used fHighLoad.
-	// However, fHighLoad is primarily for heap selection here.
-	if (isNowHighLoad) {
+	// Update fHighLoad under fLoadLock, ensuring consistency with the target heap.
+	// This is done while gCoreHeapsLock is held.
+	{
+		WriteSpinLocker fHighLoadSetter(fLoadLock);
+		fHighLoad = targetIsHighLoadHeap;
+	}
+
+	if (targetIsHighLoadHeap) {
+		TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 " inserting into gCoreHighLoadHeap with load %" B_PRId32 ".\n", ID(), fLoad);
 		gCoreHighLoadHeap.Insert(this, fLoad);
-		// Safe to set fHighLoad here as gCoreHeapsLock is held, preventing
-		// another _UpdateLoad on this core, and fLoadLock is not needed
-		// just to set fHighLoad if its only reader under contention is GetLoad,
-		// which takes fLoadLock. For simplicity and safety if other readers exist:
-		SpinLocker fHighLoadSetter(fLoadLock); // Protect fHighLoad write
-		fHighLoad = true;
 	} else {
+		TRACE_SCHEDULER_CPU("_UpdateLoad: Core %" B_PRId32 " inserting into gCoreLoadHeap with load %" B_PRId32 ".\n", ID(), fLoad);
 		gCoreLoadHeap.Insert(this, fLoad);
-		SpinLocker fHighLoadSetter(fLoadLock); // Protect fHighLoad write
-		fHighLoad = false;
 	}
-
-	// coreHeapsLocker (for gCoreHeapsLock) unlocks on destruction.
+	// coreHeapsLocker unlocks automatically
 }
 
 

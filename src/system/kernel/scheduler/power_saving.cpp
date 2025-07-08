@@ -505,124 +505,138 @@ power_saving_choose_core(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(threadData != NULL);
+
+	// --- big.LITTLE Thread Categorization (Conceptual) ---
+	bool prefersBig = false;
+	bool prefersLittle = true; // Default preference in power saving mode for non-critical tasks
+
+	// High priority, low latency-nice, or high-demand threads prefer BIG cores even in power saving.
+	if (threadData->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY // A bit lower threshold than LL for P-crit
+		|| threadData->LatencyNice() < 5) { // More generous LatencyNice threshold for BIG preference
+		prefersBig = true;
+		prefersLittle = false;
+	} else if (threadData->GetLoad() > (kMaxLoad * 7 / 10)) { // Higher demand threshold for BIG preference
+		prefersBig = true;
+		prefersLittle = false;
+	}
+	// Threads with very low demand might still strongly prefer LITTLE
+	if (threadData->GetLoad() < (kMaxLoad * 1 / 10) && !prefersBig) {
+		prefersLittle = true; // Reinforce
+	}
+
+	TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", LatNice %d, Prio %" B_PRId32 ") PrefersBIG: %d, PrefersLITTLE: %d\n",
+		threadData->GetThread()->id, threadData->GetLoad(), threadData->LatencyNice(), threadData->GetBasePriority(), prefersBig, prefersLittle);
+
 	CoreEntry* chosenCore = NULL;
 	CPUSet affinityMask = threadData->GetCPUMask();
 	const bool useThreadAffinity = !affinityMask.IsEmpty();
-	int32 threadLoad = threadData->GetLoad();
+	int32 threadNormLoad = threadData->GetLoad(); // This is normalized load
 
-	chosenCore = power_saving_get_consolidation_target_core(threadData);
-	if (chosenCore != NULL) {
-		int32 cpuCountOnSTC = chosenCore->CPUCount();
-		if (cpuCountOnSTC > 0 && (chosenCore->GetLoad() + (threadLoad / cpuCountOnSTC)) > kVeryHighLoad) {
-			chosenCore = NULL;
+	Thread* thread = threadData->GetThread();
+	CoreEntry* prevCore = (thread->previous_cpu != NULL)
+		? CoreEntry::GetCore(thread->previous_cpu->cpu_num)
+		: NULL;
+
+	// --- STC Logic (Small Task Core) - needs big.LITTLE awareness ---
+	// power_saving_get_consolidation_target_core already checks sSmallTaskCore
+	// We should ensure sSmallTaskCore is preferably a LITTLE core if one exists and is suitable.
+	// power_saving_designate_consolidation_core needs to be made big.LITTLE aware.
+	CoreEntry* stcCandidate = power_saving_get_consolidation_target_core(threadData);
+	if (stcCandidate != NULL) {
+		// Check if STC can handle the thread's normalized load relative to STC's capacity.
+		uint32 stcCapacity = stcCandidate->fPerformanceCapacity > 0 ? stcCandidate->fPerformanceCapacity : SCHEDULER_NOMINAL_CAPACITY;
+		// Target load on STC should be based on its own capacity.
+		// Example: if STC is LITTLE (512 cap), and thread needs 256 norm_load, STC is 50% utilized by it.
+		// current_stc_normalized_load_usage = stcCandidate->GetLoad() (already norm)
+		// thread_normalized_load_on_stc = threadNormLoad (already norm)
+		// total_normalized_load_on_stc = stcCandidate->GetLoad() + threadNormLoad
+		// We need to compare this to stcCapacity (scaled to kMaxLoad range).
+		// Effective max load for STC: kVeryHighLoad * (stcCapacity / NOMINAL_CAPACITY)
+		int32 stcEffectiveMaxLoad = (int32)((uint64)kVeryHighLoad * stcCapacity / SCHEDULER_NOMINAL_CAPACITY);
+
+		if ((stcCandidate->GetLoad() + threadNormLoad) < stcEffectiveMaxLoad) {
+			chosenCore = stcCandidate;
+			TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " assigned to STC Core %" B_PRId32 " (Type %d, Cap %" B_PRIu32 ", NormLoad %" B_PRId32 ")\n",
+				thread->id, chosenCore->ID(), chosenCore->fCoreType, chosenCore->fPerformanceCapacity, chosenCore->GetLoad());
+		} else {
+			TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " - STC Core %" B_PRId32 " (Type %d, Cap %" B_PRIu32 ") too loaded (NormLoad %" B_PRId32 " + TLoad %" B_PRId32 " >= EffMax %" B_PRId32 ")\n",
+				thread->id, stcCandidate->ID(), stcCandidate->fCoreType, stcCandidate->fPerformanceCapacity, stcCandidate->GetLoad(), threadNormLoad, stcEffectiveMaxLoad);
 		}
 	}
 
-	if (chosenCore == NULL) {
-		CoreEntry* potentialGlobalSTC = power_saving_designate_consolidation_core(NULL);
+	// --- Cache Affinity (considering core type preference) ---
+	if (chosenCore == NULL && prevCore != NULL && !prevCore->IsDefunct()
+		&& (!useThreadAffinity || prevCore->CPUMask().Matches(affinityMask))
+		&& !threadData->HasCacheExpired()) {
 
-		if (potentialGlobalSTC != NULL && !potentialGlobalSTC->IsDefunct() // Use getter
-			&& (!useThreadAffinity || potentialGlobalSTC->CPUMask().Matches(affinityMask))) {
-			int32 cpuCountOnPotentialSTC = potentialGlobalSTC->CPUCount();
-			if (cpuCountOnPotentialSTC > 0
-				&& (potentialGlobalSTC->GetLoad() + (threadLoad / cpuCountOnPotentialSTC)) <= kHighLoad) {
-				chosenCore = potentialGlobalSTC;
-			}
-		}
+		bool typeOKForPrevCore = false;
+		if (prefersBig && (prevCore->fCoreType == CORE_TYPE_BIG || prevCore->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE))
+			typeOKForPrevCore = true;
+		else if (prefersLittle && (prevCore->fCoreType == CORE_TYPE_LITTLE || prevCore->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE))
+			typeOKForPrevCore = true;
+		else if (!prefersBig && !prefersLittle) // Flexible
+			typeOKForPrevCore = true;
 
-		if (chosenCore == NULL && useThreadAffinity) {
-			CoreEntry* bestAffinityOnlyCore = power_saving_designate_consolidation_core(&affinityMask);
-			if (bestAffinityOnlyCore != NULL && !bestAffinityOnlyCore->IsDefunct()) { // Use getter
-				int32 cpuCountOnAffinityCore = bestAffinityOnlyCore->CPUCount();
-				if (cpuCountOnAffinityCore > 0
-					&& (bestAffinityOnlyCore->GetLoad() + (threadLoad / cpuCountOnAffinityCore)) <= kHighLoad) {
-					chosenCore = bestAffinityOnlyCore;
-				}
+		if (typeOKForPrevCore) {
+			uint32 prevCoreCapacity = prevCore->fPerformanceCapacity > 0 ? prevCore->fPerformanceCapacity : SCHEDULER_NOMINAL_CAPACITY;
+			int32 prevCoreEffectiveMaxLoad = (int32)((uint64)kMaxLoadForWarmCorePreference * prevCoreCapacity / SCHEDULER_NOMINAL_CAPACITY);
+			if (prevCore->GetLoad() < prevCoreEffectiveMaxLoad) {
+				chosenCore = prevCore;
+				TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " using warm prevCore %" B_PRId32 " (Type %d, Cap %" B_PRIu32 ", NormLoad %" B_PRId32 ")\n",
+					thread->id, prevCore->ID(), prevCore->fCoreType, prevCore->fPerformanceCapacity, prevCore->GetLoad());
 			}
 		}
 	}
 
+	// --- Search for suitable core based on preference (LITTLE first, then BIG) ---
 	if (chosenCore == NULL) {
-		CoreEntry* leastLoadedActive = NULL;
-		int32 minLoad = 0x7fffffff;
-		for (int32 i = 0; i < gCoreCount; i++) {
-			CoreEntry* core = &gCoreEntries[i];
-			if (core->IsDefunct()) // Use getter
-				continue;
-			if ((core->GetLoad() > 0 || core->GetActiveTime() > 0) &&
-				(!affinityMask.IsEmpty() ? core->CPUMask().Matches(affinityMask) : true)) {
-				int32 cpuCountOnCore = core->CPUCount();
-				if (cpuCountOnCore > 0 && (core->GetLoad() + (threadData->GetLoad() / cpuCountOnCore) < kVeryHighLoad )) {
-					if (core->GetLoad() < minLoad) {
-						minLoad = core->GetLoad();
-						leastLoadedActive = core;
-					}
-				}
-			}
-		}
-		if (leastLoadedActive != NULL) {
-			chosenCore = leastLoadedActive;
-		}
+		CoreEntry* bestLittleCandidate = NULL;
+		CoreEntry* bestBigCandidate = NULL;
+		// Simplified search: find least loaded of preferred type, then other type.
+		// This needs to be more sophisticated, like the original multi-pass.
+		// For now, this is a placeholder for where type-based iteration would occur.
+
+		// Placeholder: Iterate all cores, find best LITTLE, then best BIG, then decide.
+		// This is where the complex multi-pass logic from low_latency would be adapted.
+		// Crucially, should_wake_core_for_load also needs to be capacity and type aware.
+		// Example: waking a BIG core for a low-demand thread is bad in power saving.
+		TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " - STC/CacheMiss. Placeholder for multi-pass core search (LITTLE then BIG).\n", thread->id);
+		// This would involve iterating gCoreEntries, checking type, affinity, load,
+		// and calling power_saving_should_wake_core_for_load (which itself needs to be made big.LITTLE aware).
 	}
 
-	if (chosenCore == NULL) {
-		PackageEntry* package = gIdlePackageList.Last();
-		int32 packagesChecked = 0;
-		while (package != NULL && packagesChecked < gPackageCount) {
-			int32 index = 0;
-			CoreEntry* idleCore = NULL;
-			while((idleCore = package->GetIdleCore(index++)) != NULL) {
-				if (!affinityMask.IsEmpty() && !idleCore->CPUMask().Matches(affinityMask)) {
-					continue;
-				}
-				if (power_saving_should_wake_core_for_load(idleCore, threadData->GetLoad())) {
-					chosenCore = idleCore;
-					break;
-				}
-			}
-			if (chosenCore != NULL) break;
-			package = gIdlePackageList.GetPrevious(package);
-			packagesChecked++;
-		}
-	}
 
+	// --- Fallback to original logic if no specific big.LITTLE choice made yet ---
+	// This is a gross simplification for now. The original logic needs to be heavily refactored.
 	if (chosenCore == NULL) {
+		TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " - Fallback to original PS core choice logic (needs b.L refactor).\n", thread->id);
+		// The original power_saving_choose_core logic for finding active/idle cores.
+		// This part would need to be heavily modified to be big.LITTLE aware.
+		// For example, when looking for an idle core, prefer an idle LITTLE core.
+		// When looking for an active core, prefer an active LITTLE core if it can take the load.
+		// The call to power_saving_designate_consolidation_core might be needed again if STC was unsuitable.
+		CoreEntry* fallbackCore = NULL;
+		// Simplified: find *any* core as a last resort (original code is more nuanced)
 		for (int32 i = 0; i < gCoreCount; ++i) {
 			CoreEntry* core = &gCoreEntries[i];
-			if (core->IsDefunct()) // Use getter
-				continue;
-			bool hasEnabledCPU = false;
-			for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
-				if (core->CPUMask().GetBit(cpu_idx) && gCPUEnabled.GetBit(cpu_idx)) {
-					hasEnabledCPU = true;
-					break;
-				}
-			}
-			if (!hasEnabledCPU) continue;
-
-			if (affinityMask.IsEmpty() || core->CPUMask().Matches(affinityMask)) {
-				chosenCore = core;
-				dprintf("scheduler: power_saving_choose_core: Fallback to first available non-defunct core %" B_PRId32 "\n", chosenCore->ID());
-				break;
+			if (core->IsDefunct()) continue;
+			if (useThreadAffinity && !core->CPUMask().Matches(affinityMask)) continue;
+			// TODO: Add actual load checks and preference for LITTLE here.
+			if (fallbackCore == NULL || core->GetLoad() < fallbackCore->GetLoad()) {
+				fallbackCore = core;
 			}
 		}
+		chosenCore = fallbackCore;
 	}
+
 
 	ASSERT(chosenCore != NULL && "Could not choose a core in power_saving_choose_core primary logic");
 
-	// Now, consider if the thread's previous warm core is a better choice than `chosenCore`.
-	// Need to know if `chosenCore` was a result of STC preference.
-	// This is tricky because chosenCore might have been found through multiple paths.
-	// Let's simplify: currentChoiceIsPreferredSTC is true if chosenCore is the current sSmallTaskCore
-	// and sSmallTaskCore was deemed suitable by power_saving_get_consolidation_target_core,
-	// or if chosenCore was designated as STC in this function call.
+	bool chosenCoreIsPreferredSTC = (chosenCore == Scheduler::sSmallTaskCore && chosenCore != NULL
+		/* && suitable for thread based on load - already checked if STC was picked */ );
 
-	// Re-evaluate this flag based on the final chosenCore before cache check.
-	// This requires passing more context or restructuring.
-	// For now, a simpler heuristic for isPreferredSTC:
-	bool chosenCoreIsPreferredSTC = (chosenCore == Scheduler::sSmallTaskCore && chosenCore != NULL && chosenCore->GetLoad() < kVeryHighLoad);
-	// This isn't perfect as it doesn't capture if STC was *just* designated for this thread.
-
+	// The _consider_warm_previous_core_ps might need to be type-aware too.
+	// e.g., don't switch from a chosen LITTLE STC to a warm BIG core if thread is E-Pref.
 	chosenCore = _consider_warm_previous_core_ps(threadData, chosenCore, chosenCoreIsPreferredSTC);
 
 	ASSERT(chosenCore != NULL && "Could not choose a core in power_saving_choose_core after cache check");

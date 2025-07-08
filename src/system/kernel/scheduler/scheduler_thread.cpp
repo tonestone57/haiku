@@ -272,6 +272,15 @@ ThreadData::_ChooseCore() const
 inline CPUEntry*
 ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 {
+	// This function selects the best logical CPU (SMT sibling) on an *already chosen* CoreEntry.
+	// The decision of which CoreEntry (e.g., BIG vs. LITTLE) to use should have been made
+	// by the caller (e.g., mode-specific choose_core functions).
+	//
+	// Load metrics used herein (GetInstantaneousLoad()) are wall-clock self-utilization
+	// of individual SMT siblings, which is appropriate for determining current SMT-level contention.
+	// The core's overall capacity (fPerformanceCapacity) does not directly factor into this
+	// SMT selection logic, as all SMT siblings on a given core share that core's type/capacity.
+
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 

@@ -103,207 +103,175 @@ low_latency_has_cache_expired(const ThreadData* threadData)
 }
 
 
+// Define score component values (tunable)
+#define LL_SCORE_PPREF_ON_BIG (1000)
+#define LL_SCORE_PPREF_ON_LITTLE (-500)
+#define LL_SCORE_OTHER_ON_BIG (200)
+#define LL_SCORE_OTHER_ON_LITTLE (100)
+#define LL_SCORE_CAPACITY_ADEQUACY_FACTOR (10) // Divisor for headroom
+#define LL_SCORE_IDLE_BONUS (2000)
+#define LL_SCORE_CACHE_AFFINITY_BONUS (300)
+
+// Define weights for Low Latency mode
+#define W_M1_LL (1.0f)  // Core Type Match
+#define W_M2_LL (0.5f)  // Capacity Adequacy
+#define W_M3_LL (1.0f)  // Current Load/Idle
+#define W_M4_LL (0.8f)  // Cache Affinity
+// M5 (STC) is not used in LL mode.
+
 static CoreEntry*
 low_latency_choose_core(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(threadData != NULL);
 
-	// --- big.LITTLE Thread Categorization (Conceptual) ---
-	// Determine thread's preference based on fNeededLoad, fLatencyNice, priority.
-	// This is a simplified categorization for demonstration.
-	bool prefersBig = false;
-	bool prefersLittle = false; // Not typically a strong preference in low_latency mode
+	// 1. Thread Type Inference
+	bool threadIsPCritical = (threadData->GetBasePriority() >= B_REAL_TIME_DISPLAY_PRIORITY
+								|| threadData->LatencyNice() < -5 // More sensitive LatencyNice for P-Crit
+								|| threadData->GetLoad() > (kMaxLoad * 7 / 10)); // Higher demand threshold
+	// In LL mode, we are less concerned about explicitly identifying E-Preferential.
+	// Non-P-Critical threads are treated as flexible but will still prefer higher capacity/idle cores.
+	// bool threadIsEPreferential = (!threadIsPCritical && (threadData->GetBasePriority() < B_NORMAL_PRIORITY
+	// 								|| threadData->LatencyNice() > 5
+	// 								|| threadData->GetLoad() < (kMaxLoad * 3 / 10)));
+	// For LL, let's simplify: if not P-Critical, it's "other".
 
-	if (threadData->GetBasePriority() >= B_REAL_TIME_DISPLAY_PRIORITY
-		|| threadData->LatencyNice() < 0) {
-		prefersBig = true;
-	} else if (threadData->GetLoad() > (kMaxLoad * 6 / 10)) { // Example: >60% of nominal capacity demand
-		prefersBig = true;
-	}
-	// In low latency, few threads would actively prefer LITTLE unless explicitly hinted.
-	// Most 'general' threads might still try BIG cores first if available.
+	TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", LatNice %d, Prio %" B_PRId32 ") IsPCritical: %d\n",
+		threadData->GetThread()->id, threadData->GetLoad(), threadData->LatencyNice(),
+		threadData->GetBasePriority(), threadIsPCritical);
 
-	TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", LatNice %d, Prio %" B_PRId32 ") PrefersBIG: %d\n",
-		threadData->GetThread()->id, threadData->GetLoad(), threadData->LatencyNice(), threadData->GetBasePriority(), prefersBig);
+	// 2. Initialization
+	CoreEntry* bestCore = NULL;
+	int32 highestScore = -0x7fffffff; // Using int32 for scores
 
-	CoreEntry* chosenCore = NULL;
-	CPUSet affinityMask = threadData->GetCPUMask();
-	const bool useAffinityMask = !affinityMask.IsEmpty();
 	Thread* thread = threadData->GetThread();
 	CoreEntry* prevCore = (thread->previous_cpu != NULL)
 		? CoreEntry::GetCore(thread->previous_cpu->cpu_num)
 		: NULL;
+	CPUSet affinityMask = threadData->GetCPUMask();
+	const bool useAffinityMask = !affinityMask.IsEmpty();
 
-	// --- Pass 1: Cache Affinity (considering core type) ---
-	if (prevCore != NULL && !prevCore->IsDefunct()
-		&& (!useAffinityMask || prevCore->CPUMask().Matches(affinityMask))
-		&& !threadData->HasCacheExpired()) {
-		bool typeMatch = true;
-		if (prefersBig && prevCore->fCoreType != CORE_TYPE_BIG && prevCore->fCoreType != CORE_TYPE_UNIFORM_PERFORMANCE) {
-			typeMatch = false; // Wants BIG, prevCore is LITTLE
-		}
-		// If prefersLittle was a concept, add check here.
+	// 3. Iterate Through All Cores
+	for (int32 i = 0; i < gCoreCount; ++i) {
+		CoreEntry* currentCore = &gCoreEntries[i];
+		int32 currentTotalScore = 0;
 
-		if (typeMatch && prevCore->GetLoad() < kMaxLoadForWarmCorePreference) {
-			chosenCore = prevCore;
-			TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " using warm prevCore %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
-				thread->id, prevCore->ID(), prevCore->fCoreType, prevCore->GetLoad());
-		}
-	}
+		// Skip unsuitable cores
+		if (currentCore->IsDefunct())
+			continue;
+		if (useAffinityMask && !currentCore->CPUMask().Matches(affinityMask))
+			continue;
 
-	// --- Pass 2: Ideal Core Type (BIG if preferred, then any if not chosen yet) ---
-	if (chosenCore == NULL) {
-		CoreEntry* bestCandidateInPass = NULL;
-		int32 bestCandidateLoad = 0x7fffffff;
-
-		// First try preferred core type (BIG if prefersBig, otherwise any)
-		for (int32 i = 0; i < gCoreCount; ++i) {
-			CoreEntry* core = &gCoreEntries[i];
-			if (core->IsDefunct() || (useAffinityMask && !core->CPUMask().Matches(affinityMask)))
-				continue;
-
-			bool typeSuitable = false;
-			if (prefersBig) {
-				if (core->fCoreType == CORE_TYPE_BIG || core->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE)
-					typeSuitable = true;
-			} else {
-				// In low_latency, if not strongly preferring BIG, any core type is initially okay.
-				// We'd prefer BIG or UNIFORM if available and not loaded.
-				if (core->fCoreType == CORE_TYPE_BIG || core->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE)
-					typeSuitable = true;
-				else if (core->fCoreType == CORE_TYPE_LITTLE) // Consider LITTLE only if others are worse
-					typeSuitable = true; // Placeholder, scoring will differentiate
-			}
-			if (!typeSuitable && !(prefersBig && core->fCoreType == CORE_TYPE_LITTLE)) {
-				// If it prefersBig, don't consider LITTLE in this primary pass unless it's the only option later
-				// If it doesn't preferBig, and this core is not BIG/UNIFORM, only consider it if it's LITTLE (as a lesser option)
-				// This logic needs refinement with scoring. For now, if P-Crit, only BIG/UNI. Else, consider all.
-				if(prefersBig && !(core->fCoreType == CORE_TYPE_BIG || core->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE))
-					continue;
-			}
-
-
-			int32 currentCoreLoad = core->GetLoad(); // Normalized load
-			// Simple "least loaded" among preferred/suitable type.
-			// TODO: A more sophisticated scoring would be better here, factoring capacity vs neededLoad.
-			if (bestCandidateInPass == NULL || currentCoreLoad < bestCandidateLoad) {
-				// If this core is idle, strongly prefer it.
-				if (core->GetActiveTime() == 0 && core->GetLoad() == 0) {
-					bestCandidateInPass = core;
-					bestCandidateLoad = -1; // Make idle score best
-					TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " found idle candidate Core %" B_PRId32 " (Type %d)\n",
-						thread->id, core->ID(), core->fCoreType);
-					// break; // Found an idle preferred type, good enough
-				} else if (currentCoreLoad < bestCandidateLoad) {
-					bestCandidateInPass = core;
-					bestCandidateLoad = currentCoreLoad;
-				}
-			}
-		}
-		chosenCore = bestCandidateInPass;
-
-		// Fallback if prefersBig and no BIG/UNIFORM core was found suitable
-		if (chosenCore == NULL && prefersBig) {
-			TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " prefers BIG, but none suitable/available. Trying LITTLE cores.\n", thread->id);
-			// Fallback to any core (including LITTLE), least loaded
-			bestCandidateLoad = 0x7fffffff;
-			for (int32 i = 0; i < gCoreCount; ++i) {
-				CoreEntry* core = &gCoreEntries[i];
-				if (core->IsDefunct() || (useAffinityMask && !core->CPUMask().Matches(affinityMask)))
-					continue;
-				// Now consider LITTLE cores too
-				if (core->fCoreType == CORE_TYPE_LITTLE) {
-					int32 currentCoreLoad = core->GetLoad();
-					if (bestCandidateInPass == NULL || currentCoreLoad < bestCandidateLoad) {
-						if (core->GetActiveTime() == 0 && core->GetLoad() == 0) {
-							bestCandidateInPass = core;
-							bestCandidateLoad = -1; // Make idle score best
-							// break; // Found an idle one
-						} else if (currentCoreLoad < bestCandidateLoad) {
-							bestCandidateInPass = core;
-							bestCandidateLoad = currentCoreLoad;
-						}
-					}
-				}
-			}
-			chosenCore = bestCandidateInPass;
-		}
-	}
-
-
-	// --- Pass 3: Fallback to any core if still not chosen (e.g. all preferred types full) ---
-	// This part of the original logic (iterating gCoreLoadHeap, then gCoreHighLoadHeap, then all cores)
-	// can be retained as a final fallback but should ideally also be type-aware if possible.
-	// For simplicity in this conceptual change, if chosenCore is still NULL, we use the original fallback.
-	if (chosenCore == NULL) {
-		TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " - No ideal/preferred type core found, using original fallback logic.\n", thread->id);
-		// Original fallback logic (slightly simplified here for brevity)
-		// This part needs to be made big.LITTLE aware too, e.g. by preferring
-		// to overload a BIG core before a LITTLE core for a P-Crit thread.
-		// For now, just finding *any* core.
-		PackageEntry* package = NULL;
-		{
-			ReadSpinLocker globalIdlePackageListLocker(gIdlePackageLock);
-			package = gIdlePackageList.Last();
-		}
-		if (package != NULL) { /* ... original idle core logic ... */ }
-		if (chosenCore == NULL) { /* ... original GetMostIdlePackage logic ... */ }
-		if (chosenCore == NULL) { /* ... original gCoreLoadHeap/gCoreHighLoadHeap logic ... */ }
-		if (chosenCore == NULL) { // Absolute fallback
-			for (int32 i = 0; i < gCoreCount; ++i) {
-				CoreEntry* core = &gCoreEntries[i];
-				if (core->IsDefunct()) continue;
-				bool hasEnabledCPU = false;
-				for(int32 cpu_idx=0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
-					if (core->CPUMask().GetBit(cpu_idx) && gCPUEnabled.GetBit(cpu_idx)) {
-						hasEnabledCPU = true; break;
-					}
-				}
-				if (!hasEnabledCPU) continue;
-				if (useAffinityMask && !core->CPUMask().Matches(affinityMask)) continue;
-				chosenCore = core;
+		bool hasEnabledCPU = false;
+		CPUSet coreCPUs = currentCore->CPUMask();
+		for (int32 cpuIdx = 0; cpuIdx < smp_get_num_cpus(); ++cpuIdx) {
+			if (coreCPUs.GetBit(cpuIdx) && gCPUEnabled.GetBit(cpuIdx)) {
+				hasEnabledCPU = true;
 				break;
 			}
 		}
-	}
+		if (!hasEnabledCPU)
+			continue;
 
-	// --- Cache-aware bonus logic (original logic retained, but might need type-awareness) ---
-	// If chosenCore is LITTLE and prevCore is BIG (and warm), the bonus might need adjustment.
-	CoreEntry* initialChosenCore = chosenCore;
-	if (prevCore != NULL && prevCore != initialChosenCore
-		&& !threadData->HasCacheExpired()
-		&& !prevCore->IsDefunct()
-		&& (affinityMask.IsEmpty() || prevCore->CPUMask().Matches(affinityMask))) {
-
-		bool typesAreCompatibleOrPreferred = true;
-		if (prefersBig && !(prevCore->fCoreType == CORE_TYPE_BIG || prevCore->fCoreType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-			typesAreCompatibleOrPreferred = false; // Don't switch to a warm LITTLE if BIG is preferred and initial choice was BIG/UNI
+		// --- Calculate Metric Scores for currentCore ---
+		int32 m1_typeMatchScore = 0;
+		scheduler_core_type coreType = currentCore->Type();
+		if (threadIsPCritical) {
+			if (coreType == CORE_TYPE_BIG || coreType == CORE_TYPE_UNIFORM_PERFORMANCE)
+				m1_typeMatchScore = LL_SCORE_PPREF_ON_BIG;
+			else if (coreType == CORE_TYPE_LITTLE)
+				m1_typeMatchScore = LL_SCORE_PPREF_ON_LITTLE;
+		} else { // Flexible / E-Preferential (less differentiated in LL)
+			if (coreType == CORE_TYPE_BIG || coreType == CORE_TYPE_UNIFORM_PERFORMANCE)
+				m1_typeMatchScore = LL_SCORE_OTHER_ON_BIG;
+			else if (coreType == CORE_TYPE_LITTLE)
+				m1_typeMatchScore = LL_SCORE_OTHER_ON_LITTLE;
 		}
 
-		if (typesAreCompatibleOrPreferred && prevCore->GetLoad() < kMaxLoadForWarmCorePreference) {
-			bool preferPrevCore = false;
-			if (initialChosenCore != NULL && initialChosenCore->GetLoad() == 0
-				&& initialChosenCore->GetActiveTime() == 0 && prevCore->GetLoad() > 0) {
-				if (prevCore->GetLoad() < kLowLoad) { preferPrevCore = true; }
-			} else if (initialChosenCore != NULL) {
-				if (prevCore->GetLoad() <= initialChosenCore->GetLoad() + kCacheWarmCoreLoadBonus) {
-					preferPrevCore = true;
+		int32 m2_capacityScore = 0;
+		int32 threadNormLoad = threadData->GetLoad();
+		uint32 coreRawCapacity = currentCore->PerformanceCapacity();
+		if (coreRawCapacity == 0) coreRawCapacity = SCHEDULER_NOMINAL_CAPACITY;
+		int32 coreNormCapacity = (int32)((uint64)coreRawCapacity * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY);
+		int32 coreNormLoad = currentCore->GetLoad();
+		int32 remainingNormalizedCapacity = coreNormCapacity - coreNormLoad;
+
+		if (remainingNormalizedCapacity < threadNormLoad) {
+			m2_capacityScore = -10000; // Heavy penalty if thread doesn't fit
+		} else {
+			int32 headroom = remainingNormalizedCapacity - threadNormLoad;
+			m2_capacityScore = headroom / LL_SCORE_CAPACITY_ADEQUACY_FACTOR;
+		}
+
+		int32 m3_loadScore = 0;
+		int32 baseLoadScore = (kMaxLoad - coreNormLoad);
+		int32 idleBonus = 0;
+		if (currentCore->GetActiveTime() == 0 && coreNormLoad == 0)
+			idleBonus = LL_SCORE_IDLE_BONUS;
+		m3_loadScore = baseLoadScore + idleBonus;
+
+		int32 m4_cacheAffinityScore = 0;
+		if (currentCore == prevCore && !low_latency_has_cache_expired(threadData)) {
+			m4_cacheAffinityScore = LL_SCORE_CACHE_AFFINITY_BONUS;
+		}
+		// M5_STCScore is 0 for Low Latency mode.
+
+		// Calculate Total Score
+		currentTotalScore = (int32)( (W_M1_LL * m1_typeMatchScore) +
+									 (W_M2_LL * m2_capacityScore) +
+									 (W_M3_LL * m3_loadScore) +
+									 (W_M4_LL * m4_cacheAffinityScore) );
+
+		TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " evaluating Core %" B_PRId32 "(T%d,Cap %" B_PRIu32 ",Load %" B_PRId32 "): M1=%+" B_PRId32 ", M2=%+" B_PRId32 ", M3=%+" B_PRId32 ", M4=%+" B_PRId32 " => Total Score %" B_PRId32 "\n",
+			thread->id, currentCore->ID(), currentCore->Type(), currentCore->PerformanceCapacity(), currentCore->GetLoad(),
+			m1_typeMatchScore, m2_capacityScore, m3_loadScore, m4_cacheAffinityScore, currentTotalScore);
+
+		// Update Best Candidate
+		if (bestCore == NULL || currentTotalScore > highestScore) {
+			highestScore = currentTotalScore;
+			bestCore = currentCore;
+		} else if (currentTotalScore == highestScore) {
+			// Tie-breaking: prefer lower core ID for determinism if scores are equal.
+			// Could also prefer prevCore if cache is warm and scores are equal.
+			if (currentCore == prevCore && !low_latency_has_cache_expired(threadData) && bestCore != prevCore) {
+				bestCore = currentCore; // Prefer warm prevCore in a tie
+			} else if (currentCore->ID() < bestCore->ID() && !(bestCore == prevCore && !low_latency_has_cache_expired(threadData))) {
+				bestCore = currentCore;
+			}
+		}
+	}
+
+	// 4. Final Fallback
+	if (bestCore == NULL) {
+		TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " - Scoring yielded no bestCore. Using simple fallback.\n", thread->id);
+		for (int32 i = 0; i < gCoreCount; ++i) {
+			CoreEntry* core = &gCoreEntries[i];
+			if (core->IsDefunct()) continue;
+			bool hasEnabledCPU = false;
+			CPUSet coreCPUs = core->CPUMask();
+			for(int32 cpu_idx = 0; cpu_idx < smp_get_num_cpus(); ++cpu_idx) {
+				if (coreCPUs.GetBit(cpu_idx) && gCPUEnabled.GetBit(cpu_idx)) {
+					hasEnabledCPU = true; break;
 				}
-			} else {
-				preferPrevCore = true;
 			}
-
-			if (preferPrevCore) {
-				TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " - Cache bonus: Switching to prevCore %" B_PRId32 " (Type %d) from initial %" B_PRId32 " (Type %d)\n",
-					thread->id, prevCore->ID(), prevCore->fCoreType, initialChosenCore ? initialChosenCore->ID() : -1, initialChosenCore ? initialChosenCore->fCoreType : -1);
-				chosenCore = prevCore;
-			}
+			if (!hasEnabledCPU) continue;
+			if (useAffinityMask && !core->CPUMask().Matches(affinityMask)) continue;
+			bestCore = core; // Pick first valid one
+			break;
 		}
 	}
 
-	ASSERT(chosenCore != NULL && "Could not choose a core in low_latency_choose_core");
-	return chosenCore;
+	if (bestCore == NULL) {
+		panic("low_latency_choose_core: Could not find any suitable core for thread %" B_PRId32 "!\n", thread->id);
+		// Should not happen if there's at least one enabled CPU in the system.
+		// As a last resort, could try to pick gCoreEntries[0] if system has CPUs,
+		// ignoring affinity, but panic is better to indicate a serious issue.
+		// return &gCoreEntries[smp_get_current_cpu() % gCoreCount]; // Extremely desperate
+	}
+
+	TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " chose Core %" B_PRId32 " (Type %d) with score %" B_PRId32 "\n",
+		thread->id, bestCore->ID(), bestCore->Type(), highestScore);
+	return bestCore;
 }
 
 

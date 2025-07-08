@@ -525,6 +525,7 @@ static status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) {
 }
 
 status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* modeFromHook, enum pipe_id_priv pipeFromHook);
+static status_t i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i915_set_display_config_args* args);
 static status_t i915_apply_staged_display_config(intel_i915_device_info* devInfo);
 
 
@@ -646,6 +647,19 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			// The kernel will then call the internal function to set this one display.
 			// If a SET_CONFIG has happened, the accelerant's main set_display_mode will read that.
 			return intel_display_set_mode_ioctl_entry(devInfo, &user_mode, targetPipe);
+		}
+		case INTEL_I915_SET_DISPLAY_CONFIG: {
+			if (devInfo == NULL || buffer == NULL || length != sizeof(i915_set_display_config_args)) {
+				TRACE("SET_DISPLAY_CONFIG: Invalid args (devInfo %p, buffer %p, length %lu vs %lu)\n",
+					devInfo, buffer, length, sizeof(i915_set_display_config_args));
+				return B_BAD_VALUE;
+			}
+			i915_set_display_config_args args;
+			if (user_memcpy(&args, buffer, sizeof(i915_set_display_config_args)) != B_OK) {
+				TRACE("SET_DISPLAY_CONFIG: user_memcpy failed for main args struct\n");
+				return B_BAD_ADDRESS;
+			}
+			return i915_set_display_config_ioctl_handler(devInfo, &args);
 		}
 		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_MMAP_AREA: return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
@@ -1156,4 +1170,566 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		default: return B_DEV_INVALID_IOCTL;
 	}
 	return B_DEV_INVALID_IOCTL; // Should not be reached
+}
+
+
+static status_t
+i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i915_set_display_config_args* args)
+{
+	status_t status = B_OK;
+	struct i915_display_pipe_config* pipe_configs_kernel_copy = NULL;
+	size_t pipe_configs_array_size = 0;
+
+	TRACE("i915_set_display_config_ioctl_handler: num_pipes %lu, flags 0x%lx, user_ptr 0x%llx\n",
+		args->num_pipe_configs, args->flags, args->pipe_configs_ptr);
+
+	if (args->num_pipe_configs == 0 || args->num_pipe_configs > PRIV_MAX_PIPES) {
+		TRACE("i915_set_display_config_ioctl_handler: Invalid num_pipe_configs %lu\n", args->num_pipe_configs);
+		return B_BAD_VALUE;
+	}
+
+	if (args->pipe_configs_ptr == 0) {
+		TRACE("i915_set_display_config_ioctl_handler: pipe_configs_ptr is NULL\n");
+		return B_BAD_ADDRESS;
+	}
+
+	pipe_configs_array_size = sizeof(struct i915_display_pipe_config) * args->num_pipe_configs;
+	pipe_configs_kernel_copy = (struct i915_display_pipe_config*)malloc(pipe_configs_array_size);
+	if (pipe_configs_kernel_copy == NULL) {
+		TRACE("i915_set_display_config_ioctl_handler: Failed to allocate memory for pipe_configs\n");
+		return B_NO_MEMORY;
+	}
+
+	if (user_memcpy(pipe_configs_kernel_copy, (void*)(uintptr_t)args->pipe_configs_ptr, pipe_configs_array_size) != B_OK) {
+		TRACE("i915_set_display_config_ioctl_handler: user_memcpy failed for pipe_configs array\n");
+		free(pipe_configs_kernel_copy);
+		return B_BAD_ADDRESS;
+	}
+
+	// --- Placeholder for Check Phase ---
+	// TODO: Implement detailed validation of each pipe_config.
+	// TODO: Implement resource calculation (CDCLK, DPLLs, transcoders, bandwidth).
+	// TODO: Check for conflicts.
+	// If (args->flags & I915_DISPLAY_CONFIG_TEST_ONLY) then return status after check.
+	TRACE("i915_set_display_config_ioctl_handler: Check Phase\n");
+
+	// --- Internal State Tracking for Check Phase ---
+	// This array will hold the validated and planned configuration for pipes that will be active.
+	// We use PRIV_MAX_PIPES as the size, indexed by actual pipe_id_priv.
+	struct planned_pipe_config {
+		const struct i915_display_pipe_config* user_config; // Pointer to the user's config for this pipe
+		struct intel_i915_gem_object* fb_gem_obj;         // Validated GEM object
+		intel_clock_params_t clock_params;                // Calculated clock parameters
+		enum transcoder_id_priv assigned_transcoder;
+		int assigned_dpll_id; // For HSW/IVB style fixed DPLLs primarily
+		bool needs_modeset;   // True if this pipe requires a full re-program vs. just minor update
+	} planned_configs[PRIV_MAX_PIPES];
+
+	uint32 active_pipe_count = 0;
+	uint32 required_cdclk_khz = 0;
+	bool dpll_reserved[MAX_HW_DPLLS] = {false}; // Simple DPLL reservation tracking for this check pass
+
+	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+		planned_configs[i].user_config = NULL;
+		planned_configs[i].fb_gem_obj = NULL;
+		planned_configs[i].assigned_transcoder = PRIV_TRANSCODER_INVALID;
+		planned_configs[i].assigned_dpll_id = -1;
+		planned_configs[i].needs_modeset = true; // Assume modeset unless determined otherwise
+	}
+
+	// Pass 1: Validate individual configs and gather resource needs
+	for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+		const struct i915_display_pipe_config* current_user_config = &pipe_configs_kernel_copy[i];
+		enum pipe_id_priv pipe = (enum pipe_id_priv)current_user_config->pipe_id;
+
+		TRACE("  Checking Pipe %u: active %d, mode %dx%d @ %ukHz, conn %u, fb_handle %u, pos %ldx%ld\n",
+			current_user_config->pipe_id,
+			current_user_config->active,
+			current_user_config->mode.timing.h_display,
+			current_user_config->mode.timing.v_display,
+			current_user_config->mode.timing.pixel_clock,
+			current_user_config->connector_id,
+			current_user_config->fb_gem_handle,
+			current_user_config->pos_x,
+			current_user_config->pos_y);
+
+		if (pipe >= PRIV_MAX_PIPES) {
+			TRACE("    Error: Invalid pipe_id %u\n", pipe);
+			status = B_BAD_VALUE;
+			goto check_done_release_gem;
+		}
+
+		// Mark this pipe as being configured by the user request.
+		planned_configs[pipe].user_config = current_user_config;
+
+		if (!current_user_config->active) {
+			// If pipe is being disabled, mark it for modeset to ensure proper teardown.
+			// Actual resource release logic will be in commit phase.
+			planned_configs[pipe].needs_modeset = true;
+			continue; // Nothing more to check for an inactive pipe in this pass
+		}
+
+		active_pipe_count++;
+
+		// Validate connector ID
+		if (current_user_config->connector_id == I915_PORT_ID_USER_NONE ||
+			current_user_config->connector_id >= I915_MAX_PORTS_USER) { // Using userspace enum max
+			TRACE("    Error: Invalid connector_id %u for active pipe %u\n", current_user_config->connector_id, pipe);
+			status = B_BAD_VALUE;
+			goto check_done_release_gem;
+		}
+		// TODO: More detailed connector validation (is it physically present? VBT mapping to pipe?)
+
+		// Validate framebuffer GEM handle
+		if (current_user_config->fb_gem_handle == 0) {
+			TRACE("    Error: Active pipe %u has null framebuffer GEM handle\n", pipe);
+			status = B_BAD_VALUE;
+			goto check_done_release_gem;
+		}
+		planned_configs[pipe].fb_gem_obj = (struct intel_i915_gem_object*)_generic_handle_lookup(
+			current_user_config->fb_gem_handle, HANDLE_TYPE_GEM_OBJECT);
+		if (planned_configs[pipe].fb_gem_obj == NULL) {
+			TRACE("    Error: Failed to lookup GEM handle %u for pipe %u\n", current_user_config->fb_gem_handle, pipe);
+			status = B_BAD_VALUE;
+			goto check_done_release_gem;
+		}
+		// TODO: Validate GEM object properties (size against mode, format if driver uses it, tiling compatibility)
+		// For now, we just got a reference. It will be put if check fails or after commit.
+
+		// Reserve Transcoder
+		status = i915_get_transcoder_for_pipe(devInfo, pipe, &planned_configs[pipe].assigned_transcoder);
+		if (status != B_OK) {
+			TRACE("    Error: Failed to get transcoder for pipe %u: %s\n", pipe, strerror(status));
+			goto check_done_release_gem;
+		}
+
+		// Calculate Clocks and check DPLL needs (simplified for Haiku's current DPLL model)
+		status = intel_i915_calculate_display_clocks(devInfo, &current_user_config->mode,
+			pipe, (enum intel_port_id_priv)current_user_config->connector_id,
+			&planned_configs[pipe].clock_params);
+		if (status != B_OK) {
+			TRACE("    Error: Failed to calculate clocks for pipe %u: %s\n", pipe, strerror(status));
+			goto check_done_release_transcoders;
+		}
+
+		if (planned_configs[pipe].clock_params.pixel_clock_khz == 0) {
+			TRACE("    Error: Calculated pixel clock is zero for pipe %u\n", pipe);
+			status = B_BAD_VALUE;
+			goto check_done_release_transcoders;
+		}
+
+		if (planned_configs[pipe].clock_params.cdclk_freq_khz > required_cdclk_khz) {
+			required_cdclk_khz = planned_configs[pipe].clock_params.cdclk_freq_khz;
+		}
+
+		planned_configs[pipe].assigned_dpll_id = planned_configs[pipe].clock_params.selected_dpll_id;
+		if (planned_configs[pipe].assigned_dpll_id != -1) {
+			if (planned_configs[pipe].assigned_dpll_id >= MAX_HW_DPLLS) {
+				TRACE("    Error: Pipe %u selected invalid DPLL ID %d\n", pipe, planned_configs[pipe].assigned_dpll_id);
+				status = B_ERROR; // Internal error essentially
+				goto check_done_release_transcoders;
+			}
+			if (dpll_reserved[planned_configs[pipe].assigned_dpll_id]) {
+				// This is a simplified check. A real check would compare if the *existing reservation*
+				// is for the *exact same clock frequency*. If so, it can be shared.
+				// For now, any prior reservation means conflict if it's not for the same pipe.
+				// And even for the same pipe, if the mode changes, it might need re-eval.
+				// The current Haiku i915 driver's `dplls[id].user_pipe` is not robust enough for this check alone.
+				TRACE("    Error: DPLL ID %d for pipe %u is already reserved by another pipe in this config.\n",
+					planned_configs[pipe].assigned_dpll_id, pipe);
+				status = B_BUSY; // Resource conflict
+				goto check_done_release_transcoders;
+			}
+			dpll_reserved[planned_configs[pipe].assigned_dpll_id] = true;
+		}
+		// TODO: Mode validation against connector EDID (display.c has intel_i915_parse_edid)
+	}
+
+	// Pass 2: Global checks
+	if (active_pipe_count > 0) {
+		if (required_cdclk_khz > devInfo->current_cdclk_freq_khz) {
+			TRACE("  CDCLK change required: current %u kHz, needed %u kHz\n",
+				devInfo->current_cdclk_freq_khz, required_cdclk_khz);
+			// This implies a full modeset for all pipes might be needed if CDCLK changes.
+			// The commit phase will handle this.
+		}
+
+		// Placeholder for actual bandwidth check
+		// status = i915_check_display_bandwidth(devInfo, active_pipe_count, pipe_configs_kernel_copy);
+		// if (status != B_OK) {
+		// 	TRACE("    Error: Bandwidth check failed: %s\n", strerror(status));
+		// 	goto check_done_release_all_resources;
+		// }
+	}
+	TRACE("i915_set_display_config_ioctl_handler: Check Phase completed with status: %s\n", strerror(status));
+
+	// If only testing, or if checks failed, prepare to return.
+	if ((args->flags & I915_DISPLAY_CONFIG_TEST_ONLY) || status != B_OK) {
+		// Release resources acquired during this check phase
+check_done_release_all_resources: // Fall through for error cases
+		for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+			if (planned_configs[i].assigned_transcoder != PRIV_TRANSCODER_INVALID) {
+				i915_release_transcoder(devInfo, planned_configs[i].assigned_transcoder);
+			}
+			// Simple DPLL release for now, would be more complex with a real manager
+			if (planned_configs[i].assigned_dpll_id != -1) {
+				// This doesn't really "release" in the current Haiku model other than clearing a flag
+				// if the commit phase was smarter. For now, just mark as not reserved for *this check*.
+			}
+		}
+check_done_release_transcoders: // Fall through for some error cases
+		// If only transcoders were acquired before error
+		if (status != B_OK) { // Only release transcoders if an error occurred after some were acquired
+			for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+				if (planned_configs[i].user_config && planned_configs[i].user_config->active &&
+					planned_configs[i].assigned_transcoder != PRIV_TRANSCODER_INVALID &&
+					status != B_OK) { // Double check status as we might fall through
+					bool already_released = false; // Avoid double release if jumping from _all_resources
+					for (uint32 j = i + 1; j < PRIV_MAX_PIPES; ++j) { // Check if it was released by _all_resources already
+						if (planned_configs[j].assigned_transcoder == planned_configs[i].assigned_transcoder) {
+							already_released = true; break;
+						}
+					}
+					if (!already_released) i915_release_transcoder(devInfo, planned_configs[i].assigned_transcoder);
+				}
+			}
+		}
+check_done_release_gem:
+		for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+			if (planned_configs[i].fb_gem_obj != NULL) {
+				intel_i915_gem_object_put(planned_configs[i].fb_gem_obj);
+			}
+		}
+		free(pipe_configs_kernel_copy);
+		return status;
+	}
+
+	// --- Placeholder for Commit Phase ---
+	// At this point, 'planned_configs' holds the validated setup.
+	// The GEM objects in planned_configs[pipe].fb_gem_obj have a reference taken.
+	// Transcoders are "reserved" via i915_get_transcoder_for_pipe.
+	// DPLLs are "reserved" via dpll_reserved array (simple model).
+	// The commit phase will use this info. If commit fails, these resources
+	// also need to be cleaned up similarly to the error path above.
+	// If commit succeeds, GEM references are transferred to devInfo->framebuffer_bo,
+	// and transcoder/DPLL states are updated in devInfo.
+	TRACE("i915_set_display_config_ioctl_handler: Commit Phase\n");
+
+	// TODO: Acquire global display lock (e.g., gDisplayLock or a new devInfo->display_lock)
+	// mutex_lock(&devInfo->display_commit_lock); // Example
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_ALL);
+	if (fw_status != B_OK) {
+		TRACE("    Commit Error: Failed to get forcewake: %s\n", strerror(fw_status));
+		status = fw_status;
+		// Resources acquired in check phase (GEMs, transcoders) still need release
+		goto commit_failed_release_check_resources;
+	}
+
+	// --- Disable Pass ---
+	TRACE("  Commit: Disable Pass\n");
+	for (enum pipe_id_priv hw_pipe_idx = PRIV_PIPE_A; hw_pipe_idx < PRIV_MAX_PIPES; hw_pipe_idx++) {
+		if (!devInfo->pipes[hw_pipe_idx].enabled)
+			continue;
+
+		bool disable_this_pipe = true;
+		const struct i915_display_pipe_config* user_req_for_this_pipe = NULL;
+
+		for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+			if ((enum pipe_id_priv)pipe_configs_kernel_copy[i].pipe_id == hw_pipe_idx) {
+				user_req_for_this_pipe = &pipe_configs_kernel_copy[i];
+				break;
+			}
+		}
+
+		if (user_req_for_this_pipe != NULL && user_req_for_this_pipe->active) {
+			// Pipe is active in new config. Does it need a full modeset?
+			// The 'needs_modeset' flag in planned_configs would ideally be set by comparing
+			// current devInfo->pipes[hw_pipe_idx].current_mode with user_req_for_this_pipe->mode, etc.
+			// For now, assume any change to an active pipe or disabling it requires full teardown first.
+			// A more refined check would compare old vs new state for this pipe.
+			// If mode, connector, or significant clocking changes, it needs full modeset.
+			// This simplified logic will tear down and rebuild more often than strictly necessary.
+			if (memcmp(&devInfo->pipes[hw_pipe_idx].current_mode.timing,
+					   &user_req_for_this_pipe->mode.timing, sizeof(display_timing)) == 0) {
+				// Basic check: if timings are the same, maybe not a full disable.
+				// This is insufficient for a real driver but a start.
+				// A full comparison of relevant intel_crtc_state fields is needed.
+				// For now, to be safe, any active pipe in the new config that was also active
+				// will be put through a disable/enable cycle if its 'planned_configs[hw_pipe_idx].needs_modeset' was true.
+				// The 'planned_configs[hw_pipe_idx].needs_modeset' is currently always true.
+				disable_this_pipe = planned_configs[hw_pipe_idx].needs_modeset;
+			}
+		} // else: pipe was enabled, but not in new config OR new config says inactive -> disable it.
+
+		if (disable_this_pipe) {
+			TRACE("    Disabling pipe %d for reconfig or disable.\n", hw_pipe_idx);
+			intel_output_port_state* old_port_state = NULL;
+			for(int i=0; i < devInfo->num_ports_detected; ++i) {
+				if (devInfo->ports[i].current_pipe_assignment == hw_pipe_idx) {
+					old_port_state = &devInfo->ports[i];
+					break;
+				}
+			}
+
+			if (old_port_state != NULL) { // A port was using this pipe
+				if (old_port_state->type == PRIV_OUTPUT_LVDS || old_port_state->type == PRIV_OUTPUT_EDP) {
+					intel_lvds_set_backlight(devInfo, old_port_state, false);
+					// Consider VBT T3 delay
+				}
+				intel_i915_plane_enable(devInfo, hw_pipe_idx, false);
+
+				if (old_port_state->type == PRIV_OUTPUT_DP || old_port_state->type == PRIV_OUTPUT_HDMI || old_port_state->type == PRIV_OUTPUT_TMDS_DVI)
+					intel_ddi_port_disable(devInfo, old_port_state);
+				else if (old_port_state->type == PRIV_OUTPUT_LVDS || old_port_state->type == PRIV_OUTPUT_EDP)
+					intel_lvds_port_disable(devInfo, old_port_state);
+
+				if (devInfo->pipes[hw_pipe_idx].cached_clock_params.needs_fdi) {
+					intel_i915_enable_fdi(devInfo, hw_pipe_idx, false);
+				}
+			}
+			intel_i915_pipe_disable(devInfo, hw_pipe_idx);
+			if (old_port_state != NULL && (old_port_state->type == PRIV_OUTPUT_LVDS || old_port_state->type == PRIV_OUTPUT_EDP)) {
+				intel_lvds_panel_power_off(devInfo, old_port_state);
+			}
+			if (devInfo->pipes[hw_pipe_idx].cached_clock_params.selected_dpll_id != -1) {
+				intel_i915_enable_dpll_for_pipe(devInfo, hw_pipe_idx, false, &devInfo->pipes[hw_pipe_idx].cached_clock_params);
+				devInfo->dplls[devInfo->pipes[hw_pipe_idx].cached_clock_params.selected_dpll_id].is_in_use = false;
+				// devInfo->dplls[...].user_pipe = PRIV_PIPE_INVALID; // For more robust tracking
+			}
+			if (old_port_state && old_port_state->source_transcoder != PRIV_TRANSCODER_INVALID) {
+				i915_release_transcoder(devInfo, old_port_state->source_transcoder);
+				// devInfo->transcoders[...].user_pipe = PRIV_PIPE_INVALID; // For robust tracking
+			}
+
+			if (devInfo->framebuffer_bo[hw_pipe_idx] != NULL) {
+				intel_i915_gtt_unmap_memory(devInfo,
+					devInfo->framebuffer_gtt_offset_pages[hw_pipe_idx] * B_PAGE_SIZE,
+					devInfo->framebuffer_bo[hw_pipe_idx]->num_phys_pages);
+				// TODO: Free GTT bitmap pages for the old framebuffer
+				intel_i915_gem_object_put(devInfo->framebuffer_bo[hw_pipe_idx]);
+				devInfo->framebuffer_bo[hw_pipe_idx] = NULL;
+			}
+			devInfo->pipes[hw_pipe_idx].enabled = false;
+			devInfo->pipes[hw_pipe_idx].current_dpms_mode = B_DPMS_OFF;
+			if (old_port_state) old_port_state->current_pipe_assignment = PRIV_PIPE_INVALID;
+		}
+	}
+
+	// --- CDCLK Programming ---
+	if (active_pipe_count > 0 && required_cdclk_khz != devInfo->current_cdclk_freq_khz && required_cdclk_khz > 0) {
+		TRACE("  Commit: Programming CDCLK from %u to %u kHz\n", devInfo->current_cdclk_freq_khz, required_cdclk_khz);
+		intel_clock_params_t temp_cdclk_params = {0}; // Needs to be properly filled for HSW LCPLL source etc.
+		temp_cdclk_params.cdclk_freq_khz = required_cdclk_khz;
+		// This is simplified; intel_program_cdclk needs more context for some Gens (like HSW LCPLL source choice).
+		// The 'planned_configs' should ideally store a chosen global cdclk_params if a change is needed.
+		// For now, assuming intel_program_cdclk can derive what it needs from target frequency.
+		status = intel_i915_program_cdclk(devInfo, &temp_cdclk_params);
+		if (status != B_OK) {
+			TRACE("    Commit Error: Failed to program CDCLK: %s\n", strerror(status));
+			goto commit_failed_release_forcewake;
+		}
+		devInfo->current_cdclk_freq_khz = required_cdclk_khz;
+	}
+
+	// --- Enable/Configure Pass ---
+	TRACE("  Commit: Enable/Configure Pass\n");
+	for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+		const struct i915_display_pipe_config* user_pipe_cfg = &pipe_configs_kernel_copy[i];
+		enum pipe_id_priv pipe = (enum pipe_id_priv)user_pipe_cfg->pipe_id;
+		struct planned_pipe_config* planned_cfg = &planned_configs[pipe];
+
+		if (!user_pipe_cfg->active || planned_cfg->fb_gem_obj == NULL) {
+			// This pipe was marked inactive by user, or its fb_gem_obj was already released due to check error.
+			// Its old configuration (if any) was handled in the Disable Pass.
+			// Ensure its transcoder/DPLL from check phase are released if they weren't used.
+			if (planned_cfg->assigned_transcoder != PRIV_TRANSCODER_INVALID) {
+				i915_release_transcoder(devInfo, planned_cfg->assigned_transcoder);
+				planned_cfg->assigned_transcoder = PRIV_TRANSCODER_INVALID; // Mark as handled
+			}
+			// DPLL reservation was via simple bool array, effectively released by not using it.
+			if (planned_cfg->fb_gem_obj != NULL) { // Should be NULL if inactive, but defensive
+				intel_i915_gem_object_put(planned_cfg->fb_gem_obj);
+				planned_cfg->fb_gem_obj = NULL;
+			}
+			continue;
+		}
+
+		TRACE("    Configuring pipe %d\n", pipe);
+		devInfo->framebuffer_bo[pipe] = planned_cfg->fb_gem_obj; // Transfer ownership/reference
+		planned_cfg->fb_gem_obj = NULL; // Avoid double-put later
+
+		// TODO: Mark GTT pages for framebuffer_gtt_offset_pages[pipe] as used in bitmap
+		status = intel_i915_gem_object_map_gtt(devInfo->framebuffer_bo[pipe],
+			devInfo->framebuffer_gtt_offset_pages[pipe], GTT_CACHE_WRITE_COMBINING); // Or derive caching from BO
+		if (status != B_OK) {
+			TRACE("    Commit Error: Pipe %d failed to map framebuffer to GTT: %s\n", pipe, strerror(status));
+			intel_i915_gem_object_put(devInfo->framebuffer_bo[pipe]);
+			devInfo->framebuffer_bo[pipe] = NULL;
+			// TODO: How to handle partial failure? Attempt to disable this pipe?
+			continue; // Skip this pipe
+		}
+
+		// Get stride, format etc from devInfo->framebuffer_bo[pipe]
+		uint32_t stride = devInfo->framebuffer_bo[pipe]->stride;
+		color_space fb_format = user_pipe_cfg->mode.space; // This needs mapping to HW format bits
+		enum i915_tiling_mode tiling_mode = devInfo->framebuffer_bo[pipe]->actual_tiling_mode;
+
+
+		intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)user_pipe_cfg->connector_id);
+		if (!port_state) { TRACE("    Commit Error: Pipe %d no port_state for connector %u\n", pipe, user_pipe_cfg->connector_id); status = B_ERROR; continue; }
+
+
+		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+			intel_lvds_panel_power_on(devInfo, port_state);
+		}
+
+		status = intel_i915_program_dpll_for_pipe(devInfo, pipe, &planned_cfg->clock_params);
+		if (status != B_OK) { TRACE("    Commit Error: Pipe %d program DPLL failed: %s\n", pipe, strerror(status)); continue; }
+		status = intel_i915_enable_dpll_for_pipe(devInfo, pipe, true, &planned_cfg->clock_params);
+		if (status != B_OK) { TRACE("    Commit Error: Pipe %d enable DPLL failed: %s\n", pipe, strerror(status)); continue; }
+		if (planned_cfg->assigned_dpll_id != -1) {
+			devInfo->dplls[planned_cfg->assigned_dpll_id].is_in_use = true;
+			devInfo->dplls[planned_cfg->assigned_dpll_id].user_pipe = pipe;
+		}
+
+
+		intel_i915_configure_pipe_timings(devInfo, planned_cfg->assigned_transcoder, &user_pipe_cfg->mode);
+		intel_i915_configure_pipe_source_size(devInfo, pipe, user_pipe_cfg->mode.virtual_width, user_pipe_cfg->mode.virtual_height);
+		uint8_t bpp = get_bpp_from_colorspace(user_pipe_cfg->mode.space); // Helper from display.c
+		intel_i915_configure_transcoder_pipe(devInfo, planned_cfg->assigned_transcoder, &user_pipe_cfg->mode, bpp);
+
+		intel_i915_configure_primary_plane(devInfo, pipe, devInfo->framebuffer_gtt_offset_pages[pipe],
+			user_pipe_cfg->mode.virtual_width, user_pipe_cfg->mode.virtual_height, stride, fb_format, tiling_mode);
+
+		if (planned_cfg->clock_params.needs_fdi) {
+			intel_i915_program_fdi(devInfo, pipe, &planned_cfg->clock_params);
+		}
+		intel_i915_pipe_enable(devInfo, pipe, &user_pipe_cfg->mode, &planned_cfg->clock_params);
+		if (planned_cfg->clock_params.needs_fdi) {
+			intel_i915_enable_fdi(devInfo, pipe, true);
+		}
+
+		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+			intel_lvds_port_enable(devInfo, port_state, pipe, &user_pipe_cfg->mode);
+		} else if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
+			intel_ddi_port_enable(devInfo, port_state, pipe, &user_pipe_cfg->mode, &planned_cfg->clock_params);
+		}
+
+		intel_i915_plane_enable(devInfo, pipe, true);
+
+		if (port_state->type == PRIV_OUTPUT_LVDS || port_state->type == PRIV_OUTPUT_EDP) {
+			intel_lvds_set_backlight(devInfo, port_state, true);
+		}
+
+		// Update driver state
+		devInfo->pipes[pipe].enabled = true;
+		devInfo->pipes[pipe].current_mode = user_pipe_cfg->mode;
+		devInfo->pipes[pipe].cached_clock_params = planned_cfg->clock_params;
+		devInfo->pipes[pipe].current_dpms_mode = B_DPMS_ON;
+		port_state->current_pipe_assignment = pipe;
+		port_state->source_transcoder = planned_cfg->assigned_transcoder; // Store which transcoder this port is using via its pipe.
+		// devInfo->transcoders[planned_cfg->assigned_transcoder].user_pipe = pipe; // is_in_use already true
+
+		TRACE("    Pipe %d configured successfully.\n", pipe);
+		status = B_OK; // Mark overall success if at least one pipe is good.
+	}
+
+	// --- Update Shared Info ---
+	// TODO: Iterate devInfo->pipes and populate shared_info accurately.
+	// For now, just set active_display_count as an example.
+	devInfo->shared_info->active_display_count = 0;
+	for(enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
+		if (devInfo->pipes[p].enabled) {
+			devInfo->shared_info->active_display_count++;
+			// TODO: Populate devInfo->shared_info->pipe_display_configs[p]
+		}
+	}
+	// TODO: Determine and set shared_info->primary_pipe_index
+
+commit_failed_release_forcewake:
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	// TODO: Release global display lock
+	// mutex_unlock(&devInfo->display_commit_lock);
+
+commit_failed_release_check_resources:
+	// Release any resources from check phase that weren't successfully committed or transferred
+	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+		if (planned_configs[i].fb_gem_obj != NULL) { // Not transferred to devInfo->framebuffer_bo
+			intel_i915_gem_object_put(planned_configs[i].fb_gem_obj);
+		}
+		// Transcoders are tricky: if commit failed mid-way, some might be in devInfo, some still here.
+		// A more robust model would track "committed_transcoder" vs "planned_transcoder".
+		// For now, the check-phase release logic handles uncommitted ones if status != B_OK from there.
+		// If commit started and failed, some transcoders might be "stuck" in devInfo.
+		// This simplified cleanup assumes transcoders/DPLLs are either fully committed or fully rolled back by disable pass.
+		// This is not fully robust for partial commit failures.
+		if (status != B_OK && planned_configs[i].assigned_transcoder != PRIV_TRANSCODER_INVALID) {
+			// Attempt to release if it wasn't successfully used by a pipe that stayed enabled
+			bool still_in_use_by_devinfo = false;
+			if (devInfo->pipes[i].enabled && devInfo->ports[planned_configs[i].user_config->connector_id].source_transcoder == planned_configs[i].assigned_transcoder) {
+				still_in_use_by_devinfo = true;
+			}
+			if(!still_in_use_by_devinfo) {
+				i915_release_transcoder(devInfo, planned_configs[i].assigned_transcoder);
+			}
+		}
+	}
+
+
+cleanup_and_return:
+	free(pipe_configs_kernel_copy);
+	return status;
+}
+	free(pipe_configs_kernel_copy);
+	return status;
+}
+			pipe_configs_kernel_copy[i].pipe_id,
+			pipe_configs_kernel_copy[i].active,
+			pipe_configs_kernel_copy[i].mode.timing.h_display,
+			pipe_configs_kernel_copy[i].mode.timing.v_display,
+			pipe_configs_kernel_copy[i].connector_id,
+			pipe_configs_kernel_copy[i].fb_gem_handle,
+			pipe_configs_kernel_copy[i].pos_x,
+			pipe_configs_kernel_copy[i].pos_y);
+
+		// Basic validation example
+		if (pipe_configs_kernel_copy[i].pipe_id >= PRIV_MAX_PIPES) {
+			TRACE("  Invalid pipe_id %lu\n", pipe_configs_kernel_copy[i].pipe_id);
+			status = B_BAD_VALUE;
+			goto cleanup_and_return;
+		}
+		if (pipe_configs_kernel_copy[i].active && pipe_configs_kernel_copy[i].connector_id == I915_PORT_ID_USER_NONE) {
+			TRACE("  Active pipe %lu has no connector assigned\n", pipe_configs_kernel_copy[i].pipe_id);
+			status = B_BAD_VALUE;
+			goto cleanup_and_return;
+		}
+		if (pipe_configs_kernel_copy[i].active && pipe_configs_kernel_copy[i].fb_gem_handle == 0) {
+			TRACE("  Active pipe %lu has no framebuffer GEM handle\n", pipe_configs_kernel_copy[i].pipe_id);
+			// Depending on policy, could allocate, or error out. Plan says user provides.
+			status = B_BAD_VALUE;
+			goto cleanup_and_return;
+		}
+	}
+
+	if (args->flags & I915_DISPLAY_CONFIG_TEST_ONLY) {
+		TRACE("i915_set_display_config_ioctl_handler: TEST_ONLY flag set. Skipping commit.\n");
+		// status would be the result of the check phase.
+		goto cleanup_and_return; // Assuming status is B_OK if checks passed so far.
+	}
+
+	// --- Placeholder for Commit Phase ---
+	// TODO: Acquire global display lock & forcewake.
+	// TODO: Implement Disable Pass (disable conflicting old configurations).
+	// TODO: Implement CDCLK programming if needed.
+	// TODO: Implement Enable/Configure Pass (program hardware for new active configurations).
+	// TODO: Update shared_info.
+	// TODO: Release forcewake & lock.
+	TRACE("i915_set_display_config_ioctl_handler: Commit Phase (TODO)\n");
+	status = B_UNSUPPORTED; // Mark as unsupported until fully implemented
+
+
+cleanup_and_return:
+	free(pipe_configs_kernel_copy);
+	return status;
 }

@@ -45,16 +45,83 @@ enum {
 	// Or, better, use a distinct base for i915 specific multi-monitor ioctls if needed.
 	// For now, assuming these numbers are available under INTEL_I915_IOCTL_BASE.
 	INTEL_I915_GET_DISPLAY_COUNT,      // = INTEL_I915_IOCTL_BASE + 100 (example)
-	INTEL_I915_GET_DISPLAY_INFO,       // = INTEL_I915_IOCTL_BASE + 101
-	INTEL_I915_SET_DISPLAY_CONFIG,     // = INTEL_I915_IOCTL_BASE + 102
+	INTEL_I915_GET_DISPLAY_INFO,
+	INTEL_I915_SET_DISPLAY_CONFIG,     // Ensure this is correctly numbered relative to others
 	INTEL_I915_GET_DISPLAY_CONFIG,
 	INTEL_I915_PROPOSE_DISPLAY_CONFIG,    // User-space might call this to validate a whole setup
 	INTEL_I915_SET_EDID_FOR_PROPOSAL,
 	INTEL_I915_WAIT_FOR_DISPLAY_CHANGE,
 	INTEL_I915_PROPOSE_SPECIFIC_MODE, // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
 	INTEL_I915_GET_PIPE_DISPLAY_MODE,
-	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE
+	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE,
+	// Add new IOCTL number if it wasn't already in the enum
+	// For example, if the list above is contiguous:
+	// INTEL_I915_SET_DISPLAY_CONFIG_NEW // (if the one above was a placeholder)
 };
+
+
+// --- IOCTL Structures for INTEL_I915_SET_DISPLAY_CONFIG ---
+
+/* Matches enum pipe_id_priv from intel_i915_priv.h (kernel) */
+/* Userspace should use these symbolic names or their underlying values */
+enum i915_pipe_id_user {
+	I915_PIPE_USER_A = 0,
+	I915_PIPE_USER_B,
+	I915_PIPE_USER_C,
+	I915_PIPE_USER_D,
+	I915_MAX_PIPES_USER // Should map to PRIV_MAX_PIPES in kernel
+};
+
+/* Matches enum intel_port_id_priv from intel_i915_priv.h (kernel) */
+/* Userspace should use these symbolic names or their underlying values */
+enum i915_port_id_user {
+	I915_PORT_ID_USER_NONE = 0,
+	I915_PORT_ID_USER_A,
+	I915_PORT_ID_USER_B,
+	I915_PORT_ID_USER_C,
+	I915_PORT_ID_USER_D,
+	I915_PORT_ID_USER_E,
+	I915_PORT_ID_USER_F,
+	I915_MAX_PORTS_USER // Should map to PRIV_MAX_PORTS in kernel
+};
+
+/**
+ * struct i915_display_pipe_config
+ * Configuration for a single display pipe/CRTC.
+ * Passed as part of an array to the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+ */
+struct i915_display_pipe_config {
+	uint32 pipe_id;      // Pipe identifier (from enum i915_pipe_id_user)
+	bool   active;       // True if this pipe should be active.
+
+	struct display_mode mode; // Standard Haiku display_mode structure.
+
+	uint32 connector_id; // Connector identifier (from enum i915_port_id_user)
+
+	uint32 fb_gem_handle;    // User-space GEM handle for the framebuffer.
+
+	int32  pos_x;
+	int32  pos_y;
+
+	uint32 reserved[4]; // For future expansion, zero-fill.
+};
+
+/**
+ * struct i915_set_display_config_args
+ * Argument structure for the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+ */
+struct i915_set_display_config_args {
+	uint32 num_pipe_configs;
+	uint32 flags;             // e.g., I915_DISPLAY_CONFIG_TEST_ONLY
+
+	uint64 pipe_configs_ptr;  // User-space pointer to array of i915_display_pipe_config.
+
+	uint64 reserved[4];       // For future expansion, zero-fill.
+};
+
+// Flags for i915_set_display_config_args.flags
+#define I915_DISPLAY_CONFIG_TEST_ONLY (1 << 0) // Validate but do not apply.
+
 
 // Args for INTEL_I915_PROPOSE_SPECIFIC_MODE
 typedef struct {

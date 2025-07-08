@@ -730,6 +730,82 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			}
 			return B_OK;
 		}
+		case INTEL_I915_GET_CONNECTOR_INFO: {
+			if (devInfo == NULL || buffer == NULL || length != sizeof(intel_i915_get_connector_info_args)) {
+				TRACE("GET_CONNECTOR_INFO: Invalid args\n");
+				return B_BAD_VALUE;
+			}
+			intel_i915_get_connector_info_args args;
+			// Copy in the connector_id from user
+			if (user_memcpy(&args.connector_id, &((intel_i915_get_connector_info_args*)buffer)->connector_id, sizeof(args.connector_id)) != B_OK) {
+				TRACE("GET_CONNECTOR_INFO: user_memcpy failed for connector_id\n");
+				return B_BAD_ADDRESS;
+			}
+
+			TRACE("GET_CONNECTOR_INFO: Requested for connector_id %lu\n", args.connector_id);
+
+			if (args.connector_id == 0 || args.connector_id >= PRIV_MAX_PORTS) { // PRIV_PORT_ID_NONE is 0
+				TRACE("GET_CONNECTOR_INFO: Invalid connector_id %lu\n", args.connector_id);
+				return B_BAD_VALUE;
+			}
+
+			intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)args.connector_id);
+			if (port_state == NULL) {
+				TRACE("GET_CONNECTOR_INFO: No port_state found for connector_id %lu\n", args.connector_id);
+				// To avoid leaking kernel info, perhaps just zero out and return OK, or a specific error.
+				// For now, let's indicate it's not a found/valid port for info.
+				return B_ENTRY_NOT_FOUND;
+			}
+
+			// Populate output fields
+			args.type = port_state->type; // This assumes kernel enum values are directly usable or mapped by userspace
+			args.is_connected = port_state->connected;
+			args.edid_valid = port_state->edid_valid;
+
+			if (port_state->edid_valid) {
+				memcpy(args.edid_data, port_state->edid_data, sizeof(args.edid_data)); // Copies up to 256 bytes
+			} else {
+				memset(args.edid_data, 0, sizeof(args.edid_data));
+			}
+
+			args.num_edid_modes = min_c(port_state->num_modes, MAX_EDID_MODES_PER_PORT_ACCEL);
+			for (uint32 i = 0; i < args.num_edid_modes; i++) {
+				args.edid_modes[i] = port_state->modes[i];
+			}
+
+			args.current_pipe_id = (uint32)port_state->current_pipe_assignment; // Cast to uint32
+			if (port_state->current_pipe_assignment != PRIV_PIPE_INVALID &&
+				devInfo->pipes[port_state->current_pipe_assignment].enabled) {
+				args.current_mode = devInfo->pipes[port_state->current_pipe_assignment].current_mode;
+			} else {
+				memset(&args.current_mode, 0, sizeof(display_mode));
+				args.current_pipe_id = (uint32)I915_PIPE_USER_INVALID; // Use a defined invalid marker
+			}
+
+			// Construct name
+			const char* type_str = "Unknown";
+			switch(port_state->type) {
+				case PRIV_OUTPUT_ANALOG: type_str = "VGA"; break;
+				case PRIV_OUTPUT_LVDS: type_str = "LVDS"; break;
+				case PRIV_OUTPUT_EDP: type_str = "eDP"; break;
+				case PRIV_OUTPUT_DP: type_str = "DP"; break;
+				case PRIV_OUTPUT_HDMI: type_str = "HDMI"; break;
+				case PRIV_OUTPUT_TMDS_DVI: type_str = "DVI"; break;
+				default: break;
+			}
+			// Map logical_port_id (PRIV_PORT_A etc) to a char suffix (A, B, C...)
+			char port_suffix = '?';
+			if (port_state->logical_port_id >= PRIV_PORT_A && port_state->logical_port_id < PRIV_MAX_PORTS) {
+				port_suffix = 'A' + (port_state->logical_port_id - PRIV_PORT_A);
+			}
+			snprintf(args.name, I915_CONNECTOR_NAME_LEN, "%s-%c", type_str, port_suffix);
+
+			if (user_memcpy(buffer, &args, sizeof(intel_i915_get_connector_info_args)) != B_OK) {
+				TRACE("GET_CONNECTOR_INFO: user_memcpy failed for returning data\n");
+				return B_BAD_ADDRESS;
+			}
+			return B_OK;
+		}
 		case INTEL_I915_PROPOSE_SPECIFIC_MODE: {
 			if (devInfo == NULL || buffer == NULL || length != sizeof(intel_i915_propose_specific_mode_args)) {
 				TRACE("PROPOSE_SPECIFIC_MODE: Invalid args\n");
@@ -1873,13 +1949,51 @@ check_done_release_gem:
 	// TODO: Iterate devInfo->pipes and populate shared_info accurately.
 	// For now, just set active_display_count as an example.
 	devInfo->shared_info->active_display_count = 0;
-	for(enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
-		if (devInfo->pipes[p].enabled) {
+	uint32 first_active_pipe_array_idx = MAX_PIPES_I915; // Use MAX_PIPES_I915 as an invalid index
+
+	for (enum pipe_id_priv p_kernel = PRIV_PIPE_A; p_kernel < PRIV_MAX_PIPES; p_kernel++) {
+		uint32 p_array_idx = (uint32)p_kernel; // Assuming direct mapping for shared_info array
+
+		if (devInfo->pipes[p_kernel].enabled) {
 			devInfo->shared_info->active_display_count++;
-			// TODO: Populate devInfo->shared_info->pipe_display_configs[p]
+			if (first_active_pipe_array_idx == MAX_PIPES_I915) {
+				first_active_pipe_array_idx = p_array_idx;
+			}
+			// Populate per-pipe info in shared_info
+			devInfo->shared_info->pipe_display_configs[p_array_idx].is_active = true;
+			devInfo->shared_info->pipe_display_configs[p_array_idx].current_mode = devInfo->pipes[p_kernel].current_mode;
+			if (devInfo->framebuffer_bo[p_kernel] != NULL) {
+				devInfo->shared_info->pipe_display_configs[p_array_idx].bytes_per_row = devInfo->framebuffer_bo[p_kernel]->stride;
+				// Fills more fb info if available/needed by accelerant for this struct
+			} else {
+				devInfo->shared_info->pipe_display_configs[p_array_idx].bytes_per_row = 0;
+			}
+		} else {
+			devInfo->shared_info->pipe_display_configs[p_array_idx].is_active = false;
+			memset(&devInfo->shared_info->pipe_display_configs[p_array_idx].current_mode, 0, sizeof(display_mode));
+			devInfo->shared_info->pipe_display_configs[p_array_idx].bytes_per_row = 0;
 		}
 	}
-	// TODO: Determine and set shared_info->primary_pipe_index
+
+	// Determine and set shared_info->primary_pipe_index
+	if (args->primary_pipe_id < PRIV_MAX_PIPES && devInfo->pipes[args->primary_pipe_id].enabled) {
+		// User provided a valid, active pipe as primary
+		devInfo->shared_info->primary_pipe_index = (uint32)args->primary_pipe_id; // Assuming direct map to array index
+		TRACE("  Commit: User preferred primary pipe %lu is active, setting.\n", args->primary_pipe_id);
+	} else if (first_active_pipe_array_idx != MAX_PIPES_I915) {
+		// No valid user preference, or preferred pipe not active; use the first active pipe.
+		devInfo->shared_info->primary_pipe_index = first_active_pipe_array_idx;
+		TRACE("  Commit: No user primary preference or preferred inactive. Setting first active pipe %lu as primary.\n", first_active_pipe_array_idx);
+	} else {
+		// No active pipes, default to Pipe A's array index (usually 0).
+		devInfo->shared_info->primary_pipe_index = (uint32)PRIV_PIPE_A;
+		TRACE("  Commit: No active pipes. Defaulting primary to array index for Pipe A (%d).\n", PRIV_PIPE_A);
+	}
+	// Ensure primary_pipe_index is always valid for array access, even if no pipes active.
+	if (devInfo->shared_info->primary_pipe_index >= MAX_PIPES_I915) {
+		devInfo->shared_info->primary_pipe_index = 0; // Final fallback
+	}
+
 
 commit_failed_release_forcewake:
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);

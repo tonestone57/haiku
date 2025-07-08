@@ -54,10 +54,32 @@ enum {
 	INTEL_I915_PROPOSE_SPECIFIC_MODE, // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
 	INTEL_I915_GET_PIPE_DISPLAY_MODE,
 	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE,
+	INTEL_I915_GET_CONNECTOR_INFO, // New IOCTL
 	// Add new IOCTL number if it wasn't already in the enum
 	// For example, if the list above is contiguous:
 	// INTEL_I915_SET_DISPLAY_CONFIG_NEW // (if the one above was a placeholder)
 };
+
+// --- Args for INTEL_I915_GET_CONNECTOR_INFO ---
+#define MAX_EDID_MODES_PER_PORT_ACCEL 32 // Max modes to return to userspace
+#define I915_CONNECTOR_NAME_LEN 32
+
+typedef struct {
+	// Input
+	uint32 connector_id; // Kernel's enum intel_port_id_priv value, or a stable index
+
+	// Output
+	uint32 type;         // enum i915_port_id_user (maps to kernel's intel_output_type_priv)
+	bool   is_connected;
+	bool   edid_valid;
+	uint8  edid_data[256]; // First two blocks (128 bytes each) of EDID
+	uint32 num_edid_modes;
+	display_mode edid_modes[MAX_EDID_MODES_PER_PORT_ACCEL];
+	display_mode current_mode; // Current mode if active on a pipe
+	uint32 current_pipe_id;    // Kernel's enum pipe_id_priv if active, else I915_PIPE_USER_INVALID
+	char   name[I915_CONNECTOR_NAME_LEN]; // e.g., "DP-1", "HDMI-A"
+	uint32 reserved[4];
+} intel_i915_get_connector_info_args;
 
 
 // --- IOCTL Structures for INTEL_I915_SET_DISPLAY_CONFIG ---
@@ -69,7 +91,8 @@ enum i915_pipe_id_user {
 	I915_PIPE_USER_B,
 	I915_PIPE_USER_C,
 	I915_PIPE_USER_D,
-	I915_MAX_PIPES_USER // Should map to PRIV_MAX_PIPES in kernel
+	I915_PIPE_USER_INVALID = 0xFFFFFFFF, // For no preference or invalid state
+	I915_MAX_PIPES_USER // Should map to PRIV_MAX_PIPES in kernel, ensure this is last if used as count
 };
 
 /* Matches enum intel_port_id_priv from intel_i915_priv.h (kernel) */
@@ -115,8 +138,11 @@ struct i915_set_display_config_args {
 	uint32 flags;             // e.g., I915_DISPLAY_CONFIG_TEST_ONLY
 
 	uint64 pipe_configs_ptr;  // User-space pointer to array of i915_display_pipe_config.
-
-	uint64 reserved[4];       // For future expansion, zero-fill.
+	uint32 primary_pipe_id;   // User's preferred primary pipe (from enum i915_pipe_id_user).
+	                          // Set to I915_PIPE_USER_INVALID for no preference.
+	uint64 reserved[3];       // For future expansion, zero-fill (one u64 slot used by primary_pipe_id if uint64 was intended for alignment).
+	                          // If uint64 reserved[4] was strict, then primary_pipe_id needs to be part of a packed struct or careful placement.
+	                          // Assuming for now it can replace part of the reserved space.
 };
 
 // Flags for i915_set_display_config_args.flags
@@ -498,6 +524,7 @@ typedef struct {
 		uint32		bytes_per_row;
 		uint16		bits_per_pixel;
 		bool		is_active;
+		uint32		connector_id; // Kernel's enum intel_port_id_priv (or mapped user equivalent) this pipe is driving
 	} pipe_display_configs[MAX_PIPES_I915];
 	uint32			active_display_count;
 	uint32			primary_pipe_index; // Array index (0-based)

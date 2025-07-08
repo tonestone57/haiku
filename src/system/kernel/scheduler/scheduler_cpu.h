@@ -35,12 +35,6 @@ class CPUEntry;
 class CoreEntry;
 class PackageEntry;
 
-// Remove ThreadRunQueue typedef as it's MLFQ specific.
-// class ThreadRunQueue : public RunQueue<ThreadData, THREAD_MAX_SET_PRIORITY> {
-// public:
-//						void			Dump() const;
-// };
-
 class CPUEntry : public HeapLinkImpl<CPUEntry, int32> {
 public:
 										CPUEntry();
@@ -56,20 +50,14 @@ public:
 	inline				void			LockRunQueue();
 	inline				void			UnlockRunQueue();
 
-						// Modified for EEVDF: mlfqLevel and addToFront are no longer relevant here.
 						void			AddThread(ThreadData* thread);
 						void			RemoveThread(ThreadData* thread);
-						// RemoveFromQueue might be obsolete or just call RemoveThread.
 
-						// Renamed and functionality will change for EEVDF (eligibility check).
-						// This is now non-const as it will pop the chosen candidate.
 						ThreadData*		PeekEligibleNextThread();
-	//inline				int				HighestMLFQLevel() const { return fMlfqHighestNonEmptyLevel; } // Obsolete
 	inline				int32			GetTotalThreadCount() const { return fTotalThreadCount; }
 
 
-						ThreadData*		PeekIdleThread() const; // May need adjustment for how idle threads are handled.
-										// Idle thread might not be in EevdfRunQueue.
+						ThreadData*		PeekIdleThread() const;
 						void			SetIdleThread(ThreadData* idleThread);
 
 
@@ -92,31 +80,25 @@ public:
 
 	static inline		CPUEntry*		GetCPU(int32 cpu);
 
-						// New method for IRQ load
 						int32			CalculateTotalIrqLoad() const;
 
-						// Public accessor for MLFQ levels (caller must hold fQueueLock)
-						// Public accessor for MLFQ levels (caller must hold fQueueLock)
-						// This is now obsolete with EEVDF.
-						// const ThreadRunQueue& GetMLFQLevel(int level) const {
-						// #if KDEBUG
-						//	ASSERT(are_interrupts_enabled() == false);
-						// #endif
-						//	ASSERT(level >= 0 && level < NUM_MLFQ_LEVELS);
-						//	return fMlfq[level];
-						// }
 						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
 						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
-	inline				bigtime_t		MinVirtualRuntime(); // Now non-const and calls _UpdateMinVirtualRuntime
-	inline				bigtime_t		GetCachedMinVirtualRuntime() const; // New lock-free getter
+	inline				bigtime_t		MinVirtualRuntime();
+	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
 
-	// Work-stealing related fields
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
 
 private:
-						void			_UpdateMinVirtualRuntime(); // Ensures fMinVirtualRuntime >= gGlobalMinVirtualRuntime
-						// void			_UpdateHighestMLFQLevel(); // Obsolete
+						// Calculates a heap key for this CPU that is SMT-aware.
+						// The key reflects the CPU's own instantaneous load plus a penalty
+						// derived from the load of its active SMT siblings, using
+						// gSchedulerSMTConflictFactor. A higher key indicates a more
+						// desirable (less loaded from an SMT perspective) CPU.
+						// outEffectiveSmtLoad returns the calculated effective load (0.0 to ~1.0+).
+						int32			_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const;
+						void			_UpdateMinVirtualRuntime();
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
 
@@ -126,35 +108,26 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						EevdfRunQueue	fEevdfRunQueue; // Replaces fMlfq array
-						ThreadData*		fIdleThread;    // Explicitly store this CPU's idle thread
-						bigtime_t		fMinVirtualRuntime; // Minimum vruntime in fEevdfRunQueue
-						// int32			fMlfqHighestNonEmptyLevel; // Obsolete
-						spinlock		fQueueLock; // Protects fEevdfRunQueue, fTotalThreadCount, and fMinVirtualRuntime
+						EevdfRunQueue	fEevdfRunQueue;
+						ThreadData*		fIdleThread;
+						bigtime_t		fMinVirtualRuntime;
+						spinlock		fQueueLock;
 
-						// Historical thread execution load on this CPU.
-						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fLoad;
-						// EWMA of recent CPU activity (busy vs. idle time).
-						// See scheduler_common.h for detailed explanation of load metrics.
 						float			fInstantaneousLoad;
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
-						int32			fTotalThreadCount; // Total threads in all MLFQ levels for this CPU
+						int32			fTotalThreadCount;
 
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
-						bool			fUpdateLoadEvent; // Moved here
+						bool			fUpdateLoadEvent;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
 
 
-// Unified IRQ target selection function
-/*!
-	\param irqVector The IRQ vector being placed; used for checking task affinity.
-*/
 CPUEntry* SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 irqLoadToMove,
 	float irqTargetFactor, float smtConflictFactor,
 	int32 baseMaxIrqLoadFromMode);
@@ -187,8 +160,7 @@ public:
 
 	inline				CPUPriorityHeap*	CPUHeap();
 
-	// ThreadCount now sums threads from all its CPUs' MLFQs
-						int32			ThreadCount() const; // Changed to non-inline
+						int32			ThreadCount() const;
 
 	inline				bigtime_t		GetActiveTime() const;
 	inline				void			IncreaseActiveTime(
@@ -215,8 +187,17 @@ public:
 
 	static inline		CoreEntry*		GetCore(int32 cpu);
 
-	// Public getter for fDefunct
 	inline				bool			IsDefunct() const { return fDefunct; }
+
+	// Called by a CPUEntry when its instantaneous load changes.
+	// This method is responsible for ensuring that the SMT-aware heap keys
+	// of all CPUs on this core are updated, as a load change on one SMT sibling
+	// affects the SMT-aware desirability (and thus heap key) of other siblings.
+	// It iterates all CPUs on this core and triggers a recalculation of their
+	// SMT-aware heap key and updates their position in fCPUHeap.
+	// Must be called with fCPULock held if called from a context that doesn't already hold it,
+	// though typically CPUEntry::UpdateInstantaneousLoad calls this, and this function acquires fCPULock.
+						void			CpuInstantaneousLoadChanged(CPUEntry* changedCpu);
 
 private:
 						void			_UpdateLoad(bool forceUpdate = false);
@@ -237,21 +218,15 @@ private:
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
 
-						// Average historical thread execution load of CPUs on this core.
-						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fLoad;
-						// Average EWMA of recent CPU activity of CPUs on this core.
-						// See scheduler_common.h for detailed explanation of load metrics.
 						float			fInstantaneousLoad;
-						// Sum of fNeededLoad from threads primarily associated with this core.
-						// See scheduler_common.h for detailed explanation of load metrics.
 						int32			fCurrentLoad;
 						uint32			fLoadMeasurementEpoch;
 						bool			fHighLoad;
 						bigtime_t		fLastLoadUpdate;
 						rw_spinlock		fLoadLock;
 
-						bool			fDefunct;	// True if core has no enabled CPUs
+						bool			fDefunct;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
@@ -269,12 +244,11 @@ public:
 											PackageEntry();
 
 						void				Init(int32 id);
-						void				_AddConfiguredCore(); // New method for init
+						void				_AddConfiguredCore();
 
 	inline				void				CoreGoesIdle(CoreEntry* core);
 	inline				void				CoreWakesUp(CoreEntry* core);
 
-	// Declaration only, definition moved to .cpp
 	inline				CoreEntry*			GetIdleCore(int32 index = 0) const;
 
 						void				AddIdleCore(CoreEntry* core);
@@ -283,7 +257,6 @@ public:
 	static inline		PackageEntry*		GetMostIdlePackage();
 	static inline		PackageEntry*		GetLeastIdlePackage();
 
-	// Public getters
 	inline				int32				PackageID() const { return fPackageID; }
 	inline				int32				IdleCoreCountNoLock() const { return fIdleCoreCount; }
 	inline				int32				CoreCountNoLock() const { return fCoreCount; }
@@ -306,7 +279,7 @@ inline CoreEntry*
 PackageEntry::GetIdleCore(int32 index /* = 0 */) const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ReadSpinLocker lock(fCoreLock); // fCoreLock is mutable
+	ReadSpinLocker lock(fCoreLock);
 	CoreEntry* element = fIdleCores.Last();
 	for (int32 i = 0; element != NULL && i < index; i++)
 		element = fIdleCores.GetPrevious(element);
@@ -317,12 +290,9 @@ PackageEntry::GetIdleCore(int32 index /* = 0 */) const
 extern CPUEntry* gCPUEntries;
 
 extern CoreEntry* gCoreEntries;
-// extern CoreLoadHeap gCoreLoadHeap; // Replaced by sharded version
-// extern CoreLoadHeap gCoreHighLoadHeap; // Replaced by sharded version
-// extern rw_spinlock gCoreHeapsLock; // Replaced by sharded version
 extern int32 gCoreCount;
 
-const int32 kNumCoreLoadHeapShards = 8; // Number of shards for core load heaps
+const int32 kNumCoreLoadHeapShards = 8;
 extern CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
 extern CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
 extern rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
@@ -352,10 +322,8 @@ CPUEntry::UnlockRunQueue()
 inline bigtime_t
 CPUEntry::MinVirtualRuntime()
 {
-	// This method is now defined in scheduler_cpu.cpp as it calls _UpdateMinVirtualRuntime.
-	// The declaration is non-const.
 	InterruptsSpinLocker _(fQueueLock);
-	_UpdateMinVirtualRuntime(); // Ensures fMinVirtualRuntime is up-to-date with global state
+	_UpdateMinVirtualRuntime();
 	return fMinVirtualRuntime;
 }
 
@@ -371,8 +339,6 @@ CPUEntry::GetCPU(int32 cpu)
 inline bigtime_t
 CPUEntry::GetCachedMinVirtualRuntime() const
 {
-	// Atomically read the current value of fMinVirtualRuntime.
-	// This value is updated by _UpdateMinVirtualRuntime under fQueueLock.
 	return atomic_get64((const int64*)&fMinVirtualRuntime);
 }
 
@@ -399,9 +365,6 @@ CoreEntry::CPUHeap()
 	SCHEDULER_ENTER_FUNCTION();
 	return &fCPUHeap;
 }
-
-
-// CoreEntry::ThreadCount() moved to .cpp file for full implementation
 
 
 inline void
@@ -432,8 +395,6 @@ inline int32
 CoreEntry::GetLoad() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// Return 0 if fCPUCount is 0 to avoid division by zero
-	// Also ensure active CPUs are considered for load calculation.
 	int32 activeCPUsOnCore = 0;
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && gCPUEnabled.GetBit(i)) {
@@ -454,13 +415,10 @@ CoreEntry::AddLoad(int32 load, uint32 epoch, bool updateLoad)
 	ASSERT(gTrackCoreLoad);
 	ASSERT(load >= 0 && load <= kMaxLoad);
 
-	// This function's locking and update logic for fLoad vs fCurrentLoad
-	// might need review for full consistency, but keeping as is for now.
 	WriteSpinLocker locker(fLoadLock);
 	atomic_add(&fCurrentLoad, load);
 	if (fLoadMeasurementEpoch != epoch)
 		atomic_add(&fLoad, load);
-	// Unlock happens on locker destruction
 
 	if (updateLoad)
 		_UpdateLoad(true);
@@ -483,7 +441,7 @@ CoreEntry::RemoveLoad(int32 load, bool force)
 			atomic_add(&fLoad, -load);
 		}
 		epochToReturn = fLoadMeasurementEpoch;
-	} // Locker destroyed, lock released
+	}
 
 	if (force)
 		_UpdateLoad(true);
@@ -512,19 +470,11 @@ CoreEntry::ChangeLoad(int32 delta)
 inline void
 PackageEntry::CoreGoesIdle(CoreEntry* core)
 {
-	// Called when a core within this package becomes fully idle (all its
-	// logical CPUs are idle).
-	// Updates the package's count of idle cores and adds the core to its
-	// fIdleCores list. If this results in all cores in the package being idle,
-	// the package itself is added to the global gIdlePackageList.
 	SCHEDULER_ENTER_FUNCTION();
 	WriteSpinLocker lock(fCoreLock);
 	ASSERT(fIdleCoreCount >= 0 && fIdleCoreCount <= fCoreCount);
 
-	// If the core is already in the idle list, this call might be redundant.
-	// Do not increment fIdleCoreCount or re-add to list.
 	if (fIdleCores.Contains(core)) {
-		// Ensure package's global idle status is correct if it should be globally idle.
 		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
 			WriteSpinLocker listLock(gIdlePackageLock);
 			if (!gIdlePackageList.Contains(this))
@@ -533,21 +483,15 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 		return;
 	}
 
-	// The core is not on the list, so we are about to add it and increment count.
-	// The assertion fIdleCoreCount < fCoreCount must hold true here.
-	// If it fails, it means fIdleCoreCount reached fCoreCount without this 'core'
-	// being on the list, which points to fIdleCoreCount being over-incremented elsewhere
-	// or fCoreCount being too low.
 	ASSERT(fIdleCoreCount < fCoreCount);
 
-	fIdleCores.Add(core); // Add to this package's list of idle cores.
+	fIdleCores.Add(core);
 	fIdleCoreCount++;
 
 	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
-		// All cores in this package are now idle.
-		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
-		if (!gIdlePackageList.Contains(this)) // Check if THIS package instance is already linked
-			gIdlePackageList.Add(this); // Add this package to global idle list.
+		WriteSpinLocker listLock(gIdlePackageLock);
+		if (!gIdlePackageList.Contains(this))
+			gIdlePackageList.Add(this);
 	}
 }
 
@@ -555,23 +499,17 @@ PackageEntry::CoreGoesIdle(CoreEntry* core)
 inline void
 PackageEntry::CoreWakesUp(CoreEntry* core)
 {
-	// Called when a previously idle core within this package becomes active
-	// (at least one of its logical CPUs is no longer idle).
-	// Updates the package's count of idle cores and removes the core from its
-	// fIdleCores list. If the package was previously fully idle, it's removed
-	// from the global gIdlePackageList.
 	SCHEDULER_ENTER_FUNCTION();
 	bool packageWasFullyIdle = (fIdleCoreCount == fCoreCount && fCoreCount > 0);
-	WriteSpinLocker _(fCoreLock); // Protects fIdleCoreCount and fIdleCores list.
-	ASSERT(fIdleCoreCount > 0); // Should have at least one idle core to wake up from.
+	WriteSpinLocker _(fCoreLock);
+	ASSERT(fIdleCoreCount > 0);
 	ASSERT(fIdleCoreCount <= fCoreCount);
-	fIdleCores.Remove(core); // Remove from this package's list of idle cores.
+	fIdleCores.Remove(core);
 	fIdleCoreCount--;
 	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
-		// Package was fully idle and now has at least one active core.
-		WriteSpinLocker listLock(gIdlePackageLock); // Lock for global idle package list.
-		if (gIdlePackageList.Contains(this)) // Check if THIS package instance is linked
-			gIdlePackageList.Remove(this); // Remove from global idle list.
+		WriteSpinLocker listLock(gIdlePackageLock);
+		if (gIdlePackageList.Contains(this))
+			gIdlePackageList.Remove(this);
 	}
 }
 
@@ -582,9 +520,6 @@ CoreEntry::CPUGoesIdle(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount < fCPUCount);
-	// When a CPU on this core becomes idle, increment core's idle CPU count.
-	// If this makes all CPUs on this core idle (fIdleCPUCount + 1 == fCPUCount),
-	// then this core is now considered idle, so notify its parent package.
 	if (atomic_add(&fIdleCPUCount, 1) + 1 == fCPUCount)
 		fPackage->CoreGoesIdle(this);
 }
@@ -596,13 +531,10 @@ CoreEntry::CPUWakesUp(CPUEntry* /* cpu */)
 	if (gSingleCore)
 		return;
 	ASSERT(fIdleCPUCount > 0);
-	// When a CPU on this core becomes active (was idle).
-	// If this core was previously fully idle (all its CPUs were idle),
-	// then this CPU waking up makes the core active. Notify its parent package.
-	if (fIdleCPUCount == fCPUCount) { // This implies it was fully idle
+	if (fIdleCPUCount == fCPUCount) {
 		fPackage->CoreWakesUp(this);
 	}
-	atomic_add(&fIdleCPUCount, -1); // Decrement core's idle CPU count.
+	atomic_add(&fIdleCPUCount, -1);
 }
 
 
@@ -619,26 +551,17 @@ CoreEntry::GetCore(int32 cpu)
 PackageEntry::GetMostIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	// ReadSpinLocker lock(gIdlePackageLock); // Removed: Unnecessary and causes deadlock risk
 	PackageEntry* mostIdle = NULL;
-	int32 maxIdleCores = -1; // Start with -1 to ensure any package with >=0 idle cores is picked
+	int32 maxIdleCores = -1;
 	for (int32 i = 0; i < gPackageCount; i++) {
 		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);
-		// Only consider packages that have *some* idle cores, unless all are fully busy
 		if (gPackageEntries[i].fIdleCoreCount > maxIdleCores) {
 			maxIdleCores = gPackageEntries[i].fIdleCoreCount;
 			mostIdle = &gPackageEntries[i];
 		}
 	}
-	// If maxIdleCores is still 0 or -1, it means no package has truly idle cores,
-	// or all are equally non-idle. This function might need to return NULL
-	// or pick one based on another metric if strictly "idle" cores are sought.
-	// The original logic would pick one even if fIdleCoreCount is 0 for all.
-	// Let's stick to returning a package if one was found, even if its idle_core_count is 0,
-	// if all others are also 0. The > comparison handles this.
-	// If maxIdleCores remains -1 (no packages?), return NULL.
 	if (maxIdleCores < 0) return NULL;
-	return mostIdle; // This can be NULL if gPackageCount is 0 or no suitable package found.
+	return mostIdle;
 }
 
 
@@ -648,7 +571,7 @@ PackageEntry::GetLeastIdlePackage()
 	SCHEDULER_ENTER_FUNCTION();
 	ReadSpinLocker lock(gIdlePackageLock);
 	PackageEntry* leastIdleWithIdleCores = NULL;
-	int32 minIdleCores = 0x7fffffff; // Ensure any valid count is smaller
+	int32 minIdleCores = 0x7fffffff;
 
 	for (int32 i = 0; i < gPackageCount; i++) {
 		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);

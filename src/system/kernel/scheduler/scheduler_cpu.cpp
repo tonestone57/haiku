@@ -101,6 +101,47 @@ CPUEntry::CPUEntry()
 
 
 void
+CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
+{
+	// The 'changedCpu' parameter is noted (for debugging/logging if needed),
+	// but we update all CPUs on this core because any CPU's load change
+	// can affect the SMT-aware key of its SMT siblings.
+	SCHEDULER_ENTER_FUNCTION();
+
+	SpinLocker lock(fCPULock); // Protects fCPUHeap modifications
+
+	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
+		return;
+
+	TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": A CPU's instantaneous load changed. Updating SMT-aware heap keys for all %" B_PRId32 " CPUs on this core.\n",
+		ID(), fCPUCount);
+
+	// Iterate all CPUs belonging to this core.
+	for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
+			CPUEntry* cpuToUpdate = CPUEntry::GetCPU(i);
+			ASSERT(cpuToUpdate->Core() == this); // Ensure it's actually one of our CPUs
+
+			// Only update if the CPU is currently in the heap.
+			// A CPU might not be in the heap if it was just added and AddCPU itself
+			// will place it, or if it's being removed.
+			if (cpuToUpdate->GetHeapLink()->fIndex != -1) {
+				float effectiveSmtLoad; // This will be filled by _CalculateSmtAwareKey
+				int32 smtAwareKey = cpuToUpdate->_CalculateSmtAwareKey(effectiveSmtLoad);
+
+				// CPUEntry::UpdatePriority takes the key and calls ModifyKey on fCPUHeap.
+				// This ensures the CPU's position in the heap reflects its current SMT-aware load.
+				cpuToUpdate->UpdatePriority(smtAwareKey);
+
+				TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": Updated CPU %" B_PRId32 "'s SMT-aware heap key to %" B_PRId32 " (effective SMT load: %.2f)\n",
+					ID(), cpuToUpdate->ID(), smtAwareKey, effectiveSmtLoad);
+			}
+		}
+	}
+}
+
+
+void
 CPUEntry::Init(int32 id, CoreEntry* core)
 {
 	// Initializes this CPUEntry for the logical CPU specified by `id`,
@@ -428,12 +469,65 @@ CPUEntry::UpdateInstantaneousLoad(bigtime_t now)
 	fInstLoadLastActiveTimeSnapshot = currentTotalActiveTime;
 	fInstLoadLastUpdateTimeSnapshot = now;
 
+	// Update the core's overall instantaneous load.
 	if (fCore) {
 		fCore->UpdateInstantaneousLoad();
 	}
-	// Update this CPU's score in its core's CPUHeap
-	// Higher score is better (less loaded).
-	UpdatePriority(kMaxLoad - (int32)(fInstantaneousLoad * kMaxLoad));
+	// Update this CPU's score in its core's CPUHeap.
+	// The key used for UpdatePriority will now be SMT-aware, calculated by _CalculateSmtAwareKey.
+	// After updating its own instantaneous load, this CPU notifies its core,
+	// which then triggers an SMT-aware key update for this CPU and its SMT siblings.
+	if (fCore) {
+		fCore->CpuInstantaneousLoadChanged(this);
+	}
+}
+
+
+/*!
+	Calculates a heap key for this CPU that is SMT-aware.
+	The key reflects the CPU's own instantaneous load plus a penalty
+	derived from the load of its active SMT siblings, using
+	gSchedulerSMTConflictFactor. A higher key indicates a more
+	desirable (less loaded from an SMT perspective) CPU for placement.
+	The heap (CPUPriorityHeap) is assumed to be a max-heap of these keys.
+	\param outEffectiveSmtLoad Reference to a float where the calculated
+	       effective SMT-aware load (0.0 to 1.0+, before scaling to key)
+	       will be stored.
+	\return The SMT-aware heap key.
+*/
+int32
+CPUEntry::_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const
+{
+	float ownLoad = GetInstantaneousLoad();
+	float smtPenalty = 0.0f;
+
+	if (fCore != NULL && fCore->CPUCount() > 1 && gSchedulerSMTConflictFactor > 0.0f) {
+		// This CPU is on a core with other CPUs (potential SMT siblings)
+		CPUSet coreCPUs = fCore->CPUMask();
+		int32 currentSMTID = gCPU[fCPUNumber].topology_id[CPU_TOPOLOGY_SMT];
+
+		if (currentSMTID != -1) { // Check if this CPU is part of an SMT group
+			for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+				if (i == fCPUNumber || !coreCPUs.GetBit(i) || gCPU[i].disabled)
+					continue;
+
+				// Check if CPU 'i' is an SMT sibling on the same physical core
+				if (gCPU[i].topology_id[CPU_TOPOLOGY_CORE] == fCore->ID()
+					&& gCPU[i].topology_id[CPU_TOPOLOGY_SMT] == currentSMTID) {
+					smtPenalty += CPUEntry::GetCPU(i)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
+				}
+			}
+		}
+	}
+
+	outEffectiveSmtLoad = ownLoad + smtPenalty;
+	// Clamp effective load to a maximum of 1.0f for key calculation.
+	// This prevents negative keys if smtPenalty is very high, assuming kMaxLoad is positive.
+	// A load > 1.0 means it's effectively more than 100% busy due to SMT contention.
+	outEffectiveSmtLoad = std::min(outEffectiveSmtLoad, 1.0f);
+
+	// Higher key value means more desirable (less loaded).
+	return kMaxLoad - (int32)(outEffectiveSmtLoad * kMaxLoad);
 }
 
 
@@ -971,6 +1065,46 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 }
 
 
+void
+CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
+{
+	// The 'changedCpu' parameter is noted (for debugging/logging if needed),
+	// but we update all CPUs on this core because any CPU's load change
+	// can affect the SMT-aware key of its SMT siblings.
+	SCHEDULER_ENTER_FUNCTION();
+
+	SpinLocker lock(fCPULock); // Protects fCPUHeap modifications
+
+	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
+		return;
+
+	TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": A CPU's instantaneous load changed. Updating SMT-aware heap keys for all %" B_PRId32 " CPUs on this core.\n",
+		ID(), fCPUCount);
+
+	// Iterate all CPUs belonging to this core.
+	for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
+			CPUEntry* cpuToUpdate = CPUEntry::GetCPU(i);
+			ASSERT(cpuToUpdate->Core() == this); // Ensure it's actually one of our CPUs
+
+			// Only update if the CPU is currently in the heap.
+			// A CPU might not be in the heap if it was just added and AddCPU itself
+			// will place it, or if it's being removed.
+			if (cpuToUpdate->GetHeapLink()->fIndex != -1) {
+				float effectiveSmtLoad; // This will be filled by _CalculateSmtAwareKey
+				int32 smtAwareKey = cpuToUpdate->_CalculateSmtAwareKey(effectiveSmtLoad);
+
+				// CPUEntry::UpdatePriority takes the key and calls ModifyKey on fCPUHeap.
+				// This ensures the CPU's position in the heap reflects its current SMT-aware load.
+				cpuToUpdate->UpdatePriority(smtAwareKey);
+
+				TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": Updated CPU %" B_PRId32 "'s SMT-aware heap key to %" B_PRId32 " (effective SMT load: %.2f)\n",
+					ID(), cpuToUpdate->ID(), smtAwareKey, effectiveSmtLoad);
+			}
+		}
+	}
+}
+
 /* static */ void
 CoreEntry::_UnassignThread(Thread* thread, void* data)
 {
@@ -1489,3 +1623,5 @@ void Scheduler::init_debug_commands()
 // Actually, the best is to use the one that was accepted: `ASSERT(fQueueLock.IsOwnedByCurrentThread());`
 // I will ensure the implementation of _UpdateMinVirtualRuntime uses this.
 // The diff from the previous step already includes this.
+
+[end of src/system/kernel/scheduler/scheduler_cpu.cpp]

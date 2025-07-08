@@ -8,6 +8,7 @@
 
 
 #include <OS.h>
+#include <support/atomic.h> // For atomic_get64, etc.
 
 #include <smp.h>
 #include <thread.h>

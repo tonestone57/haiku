@@ -899,14 +899,23 @@ CoreEntry::ThreadCount() const
 void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
+	SCHEDULER_ENTER_FUNCTION();
 	SpinLocker lock(fCPULock);
+
+	ASSERT_PRINT(cpu->Core() == this, "CPU %" B_PRId32 " belongs to core %" B_PRId32
+		", not %" B_PRId32, cpu->ID(), cpu->Core()->ID(), ID());
+	ASSERT_PRINT(!fCPUSet.GetBit(cpu->ID()), "CPU %" B_PRId32 " already in core %" B_PRId32,
+		cpu->ID(), ID());
 
 	fCPUSet.SetBit(cpu->ID());
 	fCPUCount++;
-	fIdleCPUCount++;
-	fCPUHeap.Insert(cpu, B_IDLE_PRIORITY);
+	// fIdleCPUCount is managed by CPUGoesIdle/CPUWakesUp.
 
-	if (fCPUCount == 1) {
+	float effectiveSmtLoad;
+	int32 initialKey = cpu->_CalculateSmtAwareKey(effectiveSmtLoad);
+	cpu->UpdatePriority(initialKey); // This handles heap insertion if CPU is enabled.
+
+	if (fCPUCount == 1 && gCPUEnabled.GetBit(cpu->ID())) {
 		fLoad = 0;
 		fCurrentLoad = 0;
 		fInstantaneousLoad = 0.0f;
@@ -914,15 +923,16 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 		fLastLoadUpdate = system_time();
 		fLoadMeasurementEpoch = 0;
 
-		// Insert into the appropriate shard if this is the first CPU
 		int32 shardIndex = this->ID() % Scheduler::kNumCoreLoadHeapShards;
 		WriteSpinLocker heapsLock(Scheduler::gCoreHeapsShardLock[shardIndex]);
-		if (this->GetMinMaxHeapLink()->fIndex == -1) { // If not already in any heap
-			Scheduler::gCoreLoadHeapShards[shardIndex].Insert(this, 0); // Initial load is 0
+		if (this->GetMinMaxHeapLink()->fIndex == -1) {
+			Scheduler::gCoreLoadHeapShards[shardIndex].Insert(this, 0);
 		}
-		heapsLock.Unlock();
+		// heapsLock is auto-unlocked.
 
 		if (fPackage != NULL) {
+			// This assumes a new core with its first enabled CPU starts effectively idle
+			// for package management. Actual idle state is determined by scheduling.
 			fPackage->AddIdleCore(this);
 		}
 	}

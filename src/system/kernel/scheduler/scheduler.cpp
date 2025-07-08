@@ -1278,7 +1278,10 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 			scheduler_enqueue_in_run_queue(threadToReenqueue->GetThread());
 		}
 
-		cpuEntry->UpdatePriority(B_IDLE_PRIORITY);
+		// The call to cpuEntry->UpdatePriority(B_IDLE_PRIORITY) is considered redundant.
+		// CoreEntry::RemoveCPU will remove the cpuEntry from its fCPUHeap.
+		// The CPUEntry's SMT-aware key (fHeapValue) will become irrelevant once removed.
+		// If the CPU is later re-enabled, CoreEntry::AddCPU will calculate and set a fresh SMT-aware key.
 		ThreadEnqueuer enqueuer; // Used by core->RemoveCPU if core becomes defunct
 		core->RemoveCPU(cpuEntry, enqueuer);
 	}

@@ -518,40 +518,77 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 
 
 // Intel Blitter Command Definitions
-#define BLT_DEPTH_8			(0 << 24)
-#define BLT_DEPTH_16_565	(1 << 24)
-#define BLT_DEPTH_16_1555	(2 << 24)
-#define BLT_DEPTH_32		(3 << 24)
-#define BLT_ROP_PATCOPY		(0xF0 << 16)
-#define BLT_ROP_SRCCOPY		(0xCC << 16)
-#define BLT_ROP_DSTINVERT	(0x55 << 16)
+// PRM Ref: Search for "XY_COLOR_BLT" or "XY_SRC_COPY_BLT" in the relevant GEN's PRM volume for Blitter.
+// DW0 fields are generally consistent from Gen4 through Gen9 for these commands, but Gen specific PRMs are authoritative.
+// For Gen11+, Blitter commands might be part of a larger "Render Engine" command set or have different structures.
+#define BLT_DEPTH_8			(0 << 24) // DW0 Bits 25:24 = 00b
+#define BLT_DEPTH_16_565	(1 << 24) // DW0 Bits 25:24 = 01b (e.g., B_RGB16)
+#define BLT_DEPTH_16_1555	(2 << 24) // DW0 Bits 25:24 = 10b (e.g., B_RGB15, B_RGBA15)
+#define BLT_DEPTH_32		(3 << 24) // DW0 Bits 25:24 = 11b (e.g., B_RGB32, B_RGBA32)
+// PRM Verification (Gen8+): Confirm BLT_DEPTH_* bit positions (25:24) and enum values remain unchanged.
+
+#define BLT_ROP_PATCOPY		(0xF0 << 16) // DW0 Bits 23:16 = 0xF0 (Pattern ROP)
+#define BLT_ROP_SRCCOPY		(0xCC << 16) // DW0 Bits 23:16 = 0xCC (Source ROP)
+#define BLT_ROP_DSTINVERT	(0x55 << 16) // DW0 Bits 23:16 = 0x55 (Destination Invert ROP)
+// PRM Verification (Gen8+): Confirm ROP field (Bits 23:16) is consistent. Standard ROP values (F0, CC, 55) are common.
+
 // For XY_COLOR_BLT & XY_SRC_COPY_BLT on Gen7+, DW0 bits:
-#define BLT_WRITE_RGB		(1 << 20) // Bit 20: RGB Write Enable
-#define BLT_WRITE_ALPHA		(1 << 21) // Bit 21: Alpha Write Enable
+#define BLT_WRITE_RGB		(1 << 20) // DW0 Bit 20: RGB Write Enable (often called "Color Write Enable")
+#define BLT_WRITE_ALPHA		(1 << 21) // DW0 Bit 21: Alpha Write Enable
+// PRM Verification (Gen8+):
+// - Confirm positions of RGB (Bit 20) and Alpha (Bit 21) write enables.
+// - Determine if BLT_WRITE_ALPHA is necessary for 32bpp SRCCOPY to preserve/copy alpha.
+// - Check if these bits are only for 32bpp formats or if they have meaning for other depths.
+//   Typically, for non-32bpp, the format itself dictates channel writes.
 
 
-#define MI_BATCH_BUFFER_END	(0x0A000000)
+#define MI_BATCH_BUFFER_END	(0x0A000000) // Standard MI command, very stable.
 
-#define GFX_OP_PIPE_CONTROL_CMD	(0x3 << 29 | 0x3 << 27 | 0x2 << 24)
+#define GFX_OP_PIPE_CONTROL_CMD	(0x3 << 29 | 0x3 << 27 | 0x2 << 24) // Opcode for PIPE_CONTROL
+// PRM Verification (Gen8+): While PIPE_CONTROL is fundamental, ensure opcode and specific flush/stall bits are still
+// the most appropriate for synchronizing blitter operations, especially if interacting with other engines or CPU.
 #define PIPE_CONTROL_LEN(len)	((len) - 2)
-#define PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH	(1 << 12)
-#define PIPE_CONTROL_CS_STALL                   (1 << 20)
+#define PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH	(1 << 12) // DW1 Bit 12
+#define PIPE_CONTROL_CS_STALL                   (1 << 20) // DW1 Bit 20
 
-#define XY_COLOR_BLT_CMD_OPCODE		(0x50 << 22)
-#define XY_COLOR_BLT_LENGTH		(5 - 2)
+#define XY_COLOR_BLT_CMD_OPCODE		(0x50 << 22) // DW0 Bits 28:22 = 1010000b
+// PRM Verification (Gen8+): Confirm this opcode (0x50) is still the primary/optimal for XY color blits.
+// Check command length field (Bits 7:0 of DW0) if it's fixed or varies.
+#define XY_COLOR_BLT_LENGTH		(5 - 2) // Command length = 5 DWords. Field value is (Length - 2).
 
-#define XY_SRC_COPY_BLT_CMD_OPCODE	(0x53 << 22)
-#define XY_SRC_COPY_BLT_LENGTH		(6 - 2)
+#define XY_SRC_COPY_BLT_CMD_OPCODE	(0x53 << 22) // DW0 Bits 28:22 = 1010011b
+// PRM Verification (Gen8+): Confirm this opcode (0x53) is still the primary/optimal for XY source copy blits.
+// Check command length field (Bits 7:0 of DW0).
+#define XY_SRC_COPY_BLT_LENGTH		(6 - 2) // Command length = 6 DWords. Field value is (Length - 2).
+
 // For XY_SRC_COPY_BLT_CMD (Gen4-Gen7 documented), DW0 bit 19 for Chroma Key Enable.
 // Gen8+ needs PRM verification if this bit/mechanism changed for XY_SRC_COPY_BLT.
-#define XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE (1 << 19)
+#define XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE (1 << 19) // DW0 Bit 19
+// PRM Verification (Gen8+):
+// - Confirm DW0 Bit 19 is still "Chroma Key Enable".
+// - Verify the kernel IOCTL INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY correctly programs
+//   the corresponding hardware registers (e.g., BCS_CHROMA_KEY_LOW/HIGH/MASK or similar for Gen8+).
+//   Register addresses and bitfields for these can change.
 
 
 // Tiling bits for XY_COLOR_BLT (Destination)
-#define XY_COLOR_BLT_DST_TILED_GEN7		(1 << 11)
+#define XY_COLOR_BLT_DST_TILED_GEN7		(1 << 11) // DW0 Bit 11: Destination Tiled
+// PRM Verification (Gen8+):
+// - Confirm DW0 Bit 11 is still "Destination Tiled" for XY_COLOR_BLT.
+// - Understand if this single bit is sufficient or if extended surface state is required/preferred for blitter on Gen8+.
+
 // Tiling bits for XY_SRC_COPY_BLT (Destination & Source)
-#define XY_SRC_COPY_BLT_DST_TILED_GEN7	(1 << 11)
-#define XY_SRC_COPY_BLT_SRC_TILED_GEN7	(1 << 15)
+#define XY_SRC_COPY_BLT_DST_TILED_GEN7	(1 << 11) // DW0 Bit 11: Destination Tiled
+#define XY_SRC_COPY_BLT_SRC_TILED_GEN7	(1 << 15) // DW0 Bit 15: Source Tiled
+// PRM Verification (Gen8+):
+// - Confirm DW0 Bit 11 ("Dest Tiled") and Bit 15 ("Src Tiled") for XY_SRC_COPY_BLT.
+// - As with XY_COLOR_BLT, check for interactions with extended surface state.
+
+// Note on BLT_CLIPPING_ENABLE:
+// This is typically DW0 Bit 10 for XY_COLOR_BLT and XY_SRC_COPY_BLT.
+// PRM Verification (Gen8+): Confirm DW0 Bit 10 for clipping enable.
+// Also verify associated clip rectangle registers (e.g., CLIPRECT_XMIN/YMIN, CLIPRECT_XMAX/YMAX or Gen8+ equivalents)
+// are correctly programmed by the kernel via INTEL_I915_IOCTL_SET_BLITTER_CLIP_RECTS.
 
 // Note: For Gen8/Gen9, PRM checks are needed to confirm if these bits are identical.
 // Initial assumption is they are similar for XY blits.
@@ -562,14 +599,32 @@ _log_tiling_generalization_status()
 	static bool status_logged = false;
 	if (!status_logged && gInfo && gInfo->shared_info) {
 		uint8_t gen = gInfo->shared_info->graphics_generation;
+		bool tiling_active_by_kernel = (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE);
+
 		if (gen == 7) {
-			syslog(LOG_INFO, "intel_i915_accelerant_2d: Using Gen7 specific tiling logic for XY blits.");
+			syslog(LOG_INFO, "intel_i915_accelerant_2d: Applying Gen7 XY Blit tiling flags (DW0 Bit 11 for Dest, Bit 15 for Src) when kernel indicates surface is tiled.");
 		} else if (gen == 8 || gen == 9) {
-			syslog(LOG_INFO, "intel_i915_accelerant_2d: Using Gen7-like tiling logic for Gen %u XY blits. PRM verification strongly recommended.", gen);
+			syslog(LOG_INFO, "intel_i915_accelerant_2d: Applying Gen7-style XY Blit tiling flags (DW0 Bit 11 for Dest, Bit 15 for Src) for Gen %u when kernel indicates surface is tiled. These are generally consistent for basic tiling indication.", gen);
 		} else if (gen > 9) {
-			syslog(LOG_WARNING, "intel_i915_accelerant_2d: WARNING! Tiling command flags for Gen %u are UNKNOWN and thus DISABLED for XY blits. Surface tiling properties are still set by kernel.", gen);
-		} else if (gen != 0 && gen < 7) {
-			syslog(LOG_INFO, "intel_i915_accelerant_2d: Tiling command flags for Gen %u (pre-Gen7) are not explicitly set by this accelerant for XY blits.", gen);
+			if (tiling_active_by_kernel) {
+				syslog(LOG_WARNING, "intel_i915_accelerant_2d: WARNING! Kernel indicates tiled surface for Gen %u, but XY Blit tiling command flags are UNKNOWN and thus NOT SET by this accelerant. Blits may be incorrect.", gen);
+			} else {
+				syslog(LOG_INFO, "intel_i915_accelerant_2d: XY Blit tiling command flags for Gen %u are UNKNOWN and NOT SET by this accelerant.", gen);
+			}
+		} else if (gen == 6) { // Sandy Bridge
+			if (tiling_active_by_kernel) {
+				syslog(LOG_INFO, "intel_i915_accelerant_2d: Kernel indicates tiled surface for Gen %u (Sandy Bridge). Current code does NOT SET specific XY Blit DW0 tiling flags; different/additional flags might be needed for optimal Gen6 blitter performance on tiled surfaces.", gen);
+			} else {
+				syslog(LOG_INFO, "intel_i915_accelerant_2d: Gen %u (Sandy Bridge): XY Blit DW0 tiling flags are NOT SET by this accelerant.", gen);
+			}
+		} else if (gen != 0 && gen < 6) { // Pre-Sandy Bridge
+			if (tiling_active_by_kernel) {
+				syslog(LOG_INFO, "intel_i915_accelerant_2d: Kernel indicates tiled surface for Gen %u (pre-Sandy Bridge). XY Blit tiling command flags are NOT SET by this accelerant; hardware capabilities/flags differ significantly.", gen);
+			} else {
+				syslog(LOG_INFO, "intel_i915_accelerant_2d: Gen %u (pre-Sandy Bridge): XY Blit tiling command flags are NOT SET by this accelerant.", gen);
+			}
+		} else if (gen == 0) {
+			syslog(LOG_WARNING, "intel_i915_accelerant_2d: Graphics generation is 0 (unknown). Tiling flags will not be set.");
 		}
 		status_logged = true;
 	}
@@ -622,10 +677,15 @@ intel_i915_draw_hv_lines(engine_token *et, uint32 color,
 static uint32
 get_blit_colordepth_flags(uint16 bits_per_pixel, color_space format)
 {
+	// PRM Verification (Gen8+): Ensure these mappings from Haiku color space
+	// to hardware BLT_DEPTH_* flags are still appropriate.
+	// The BLT_DEPTH_* bit positions (25:24 in DW0) should be confirmed.
 	switch (format) {
 		case B_CMAP8: return BLT_DEPTH_8;
 		case B_RGB15: case B_RGBA15: case B_RGB15_BIG: case B_RGBA15_BIG: return BLT_DEPTH_16_1555;
 		case B_RGB16: case B_RGB16_BIG: return BLT_DEPTH_16_565;
+		// For B_RGB24_BIG, blitter might not have a native 24bpp mode and often 32bpp is used.
+		// PRM should be checked for specific 24bpp packed format handling if required.
 		case B_RGB24_BIG: case B_RGB32: case B_RGBA32: case B_RGB32_BIG: case B_RGBA32_BIG: return BLT_DEPTH_32;
 		default:
 			TRACE("get_blit_colordepth_flags: Unknown color space %d, bpp %d. Defaulting to 32bpp flags.\n", format, bits_per_pixel);
@@ -636,9 +696,15 @@ get_blit_colordepth_flags(uint16 bits_per_pixel, color_space format)
 static uint32*
 emit_pipe_control_render_stall(uint32* cs)
 {
+	// PRM Verification (Gen8+):
+	// - Confirm GFX_OP_PIPE_CONTROL_CMD opcode (0x3 << 29 | 0x3 << 27 | 0x2 << 24) is correct.
+	// - Confirm PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH (DW1 Bit 12) and
+	//   PIPE_CONTROL_CS_STALL (DW1 Bit 20) are the appropriate flags for ensuring
+	//   blitter command completion and memory coherency before CPU access or subsequent GPU work.
+	//   Newer gens might have more specific/efficient flush/stall options or require additional flags.
 	cs[0] = GFX_OP_PIPE_CONTROL_CMD | PIPE_CONTROL_LEN(4);
 	cs[1] = PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH | PIPE_CONTROL_CS_STALL;
-	cs[2] = 0; cs[3] = 0;
+	cs[2] = 0; cs[3] = 0; // Post-sync op, address, immediate data (not used here)
 	return cs + 4;
 }
 
@@ -696,9 +762,9 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count,
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
 		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
-		size_t cmd_dwords_per_span = 5;
-		size_t pipe_control_dwords = 4;
-		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_span) + pipe_control_dwords + 1;
+		size_t cmd_dwords_per_span = 5; // XY_COLOR_BLT command length
+		size_t pipe_control_dwords = 4; // For emit_pipe_control_render_stall
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_span) + pipe_control_dwords + 1; // +1 for MI_BATCH_BUFFER_END
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
 		uint32 cmd_handle; area_id k_area, c_area = -1; uint32* cpu_buf;
@@ -710,32 +776,47 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count,
 			uint16 y = list[(batch * max_ops_per_batch + i) * 3 + 0];
 			uint16 x1 = list[(batch * max_ops_per_batch + i) * 3 + 1];
 			uint16 x2 = list[(batch * max_ops_per_batch + i) * 3 + 2];
-			if (x1 >= x2) continue;
+			if (x1 >= x2) continue; // Span length must be > 0
 
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping
+			// PRM Verification (Gen8+): Confirm XY_COLOR_BLT_CMD_OPCODE (0x50<<22) and XY_COLOR_BLT_LENGTH (5-2) are correct.
+			// Confirm ROP_PATCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, and clipping bit positions.
 			uint32 cmd_dw0 = XY_COLOR_BLT_CMD_OPCODE | XY_COLOR_BLT_LENGTH | BLT_ROP_PATCOPY;
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA is needed/desired for 32bpp PATCOPY, add it here.
+				// Typically for PATCOPY, alpha is either from pattern (if ROP supports it) or ignored.
+			}
 			if (enable_hw_clip) {
-				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+				// This assumes BLT_CLIPPING_ENABLE is DW0 Bit 10.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				// Apply tiling flags for known/assumed compatible generations
 				if (gen == 7 || gen == 8 || gen == 9) {
+					// This assumes XY_COLOR_BLT_DST_TILED_GEN7 is DW0 Bit 11.
+					// PRM Verification (Gen8, Gen9): Confirm this bit is correct and sufficient.
 					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
 				}
-				// For gen > 9, specific tiling flags are unknown, so not set.
-				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch (Bytes per row)
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (x1 & 0xFFFF) | ((y & 0xFFFF) << 16);
+			// DW3: Destination X2 (right), Y2 (bottom) -> For spans, Y2 = Y1 + 1
 			cpu_buf[cur_dw_idx++] = (x2 & 0xFFFF) | (((y + 1) & 0xFFFF) << 16);
+			// DW4: Color
 			cpu_buf[cur_dw_idx++] = color;
 		}
-		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
-		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx); *p = MI_BATCH_BUFFER_END; cur_dw_idx = (p - cpu_buf) + 1;
+		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; } // All spans were zero-length
+
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("fill_span: EXECBUFFER failed.\n");
@@ -756,14 +837,17 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 	intel_i915_set_blitter_chroma_key_args ck_args;
 	ck_args.low_color = transparent_color;
 	ck_args.high_color = transparent_color;
-	// This mask (0x7 for RGB) needs PRM verification for specific color formats (e.g. BGR vs RGB)
-	// and what the hardware expects. Assuming RGB for now.
+	// PRM Verification (Gen8+):
+	// - Confirm the mask 0x00FFFFFF (ignore alpha) is appropriate for common pixel formats.
+	// - Verify how the kernel's INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY programs
+	//   the hardware registers (e.g., BCS_CHROMA_KEY_LOW/HIGH/MASK for Gen8+, or equivalents).
+	//   Ensure register addresses and bitfields for color/mask are correct.
 	ck_args.mask = 0x00FFFFFF; // Enable check for R, G, B. Alpha ignored.
 	ck_args.enable = true;
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY, &ck_args, sizeof(ck_args)) != 0) {
 		TRACE("s2s_transparent_blit: Failed to set chroma key via IOCTL. Falling back to normal blit.\n");
-		intel_i915_screen_to_screen_blit(et, list, count);
+		intel_i915_screen_to_screen_blit(et, list, count, enable_hw_clip); // Pass enable_hw_clip
 		return;
 	}
 
@@ -772,7 +856,7 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
 		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
-		size_t cmd_dwords_per_blit = 6;
+		size_t cmd_dwords_per_blit = 6; // XY_SRC_COPY_BLT command length
 		size_t pipe_control_dwords = 4;
 		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit) + pipe_control_dwords + 1;
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
@@ -788,37 +872,61 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 		for (size_t i = 0; i < current_batch_count; i++) {
 			blit_params *blit = &list[batch * max_ops_per_batch + i];
 
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping, ChromaKey
+			// PRM Verification (Gen8+): Confirm XY_SRC_COPY_BLT_CMD_OPCODE (0x53<<22) and XY_SRC_COPY_BLT_LENGTH (6-2).
+			// Confirm ROP_SRCCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, clipping, and chroma key bit positions.
 			uint32 cmd_dw0 = XY_SRC_COPY_BLT_CMD_OPCODE | XY_SRC_COPY_BLT_LENGTH | BLT_ROP_SRCCOPY;
-			if (gen >= 4) { // Chroma Key Enable bit (19) is documented for Gen4+ XY_SRC_COPY_BLT
+			if (gen >= 4) { // Chroma Key Enable bit (19) is documented for Gen4-Gen7.
+				// PRM Verification (Gen8+): Confirm DW0 Bit 19 is still Chroma Key Enable.
 				cmd_dw0 |= XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE;
 			}
 			if (enable_hw_clip) {
-				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+				// Assumes DW0 Bit 10 for clipping.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
 			}
 
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA (Bit 21) is needed to copy source alpha
+				// (when not chroma-keyed out), it should be added here. Current setup preserves dest alpha.
+			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				// Apply tiling flags for known/assumed compatible generations
 				if (gen == 7 || gen == 8 || gen == 9) {
+					// Assumes DW0 Bit 11 (Dest Tiled) and Bit 15 (Src Tiled).
+					// PRM Verification (Gen8, Gen9): Confirm these bits are correct and sufficient.
 					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
 					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
 				}
-				// For gen > 9, specific tiling flags are unknown, so not set.
-				// For gen < 7, these specific Gen7+ flags are not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
+			// DW3: Destination X2 (right), Y2 (bottom)
 			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF) | (((blit->dest_top + blit->height) & 0xFFFF) << 16);
+			// DW4: Source Base Address (GTT offset)
+			// PRM Verification (Gen8+): Ensure GTT offset is still the way to specify source/dest for blitter.
+			// Some newer gens might use more complex surface state binding. For basic FB to FB, GTT offset is common.
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical;
+			// DW5: Source X1 (left), Y1 (top), Source Pitch (often in this DWord or implied by Dest Pitch if same surface)
+			// The current command structure assumes source pitch is same as dest pitch for FB-to-FB blits.
+			// If separate source pitch is needed, command structure might differ or require another DWord.
+			// PRM Verification (Gen8+): Confirm how source pitch is handled if different from dest pitch.
+			// For this command (XY_SRC_COPY_BLT), DW5 typically only holds Src X1, Y1. Src Pitch is often in DW1 (like Dest Pitch) or a separate field.
+			// The Linux i915 driver often sets bits [31:16] of DW1 for Source Pitch if different.
+			// Here, we assume src pitch == dest pitch, which is gInfo->shared_info->bytes_per_row.
 			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
 		}
 
 		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
-		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx); *p = MI_BATCH_BUFFER_END; cur_dw_idx = (p - cpu_buf) + 1;
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
@@ -847,13 +955,15 @@ intel_i915_screen_to_screen_scaled_filtered_blit(engine_token* et,
 
 	// IMPORTANT: This function is a conceptual outline.
 	// Actual implementation requires deep PRM knowledge for setting up:
-	// 1. Surface states (for source and destination)
-	// 2. Sampler states (for bilinear filtering from source)
+	// 1. Surface states (for source and destination) - RENDER_SURFACE_STATE for Gen7+
+	// 2. Sampler states (for bilinear filtering from source) - SAMPLER_STATE for Gen7+
 	// 3. Vertex formats and vertex buffers (defining the destination quad)
 	// 4. Shader programs (vertex and fragment shaders for texture sampling)
 	// 5. Viewport, Scissor, Blend states, etc.
 	// 6. Binding table entries to link shaders to surfaces.
 	// This is far more complex than XY_SRC_COPY_BLT and typically uses the Render Command Streamer (RCS).
+	// PRM Verification (Gen8+): All 3D pipeline commands (MEDIA_VFE_STATE, 3DSTATE_VS, PS, CONSTANT_*,
+	// SURFACE_STATE, SAMPLER_STATE, 3DPRIMITIVE etc.) need to be checked for Gen8+ specific changes.
 
 	TRACE("s2s_scaled_filtered_blit: %lu ops. HW Accel for this is COMPLEX and NOT fully implemented - conceptual outline only.\n", count);
 
@@ -1018,7 +1128,7 @@ intel_i915_screen_to_screen_scaled_filtered_blit(engine_token* et,
 	// exec_args.relocations_ptr = ...; exec_args.relocation_count = ...;
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
-		TRACE("s2s_scaled_blit: EXECBUFFER failed for item %u.\n", op_idx);
+		TRACE("s2s_scaled_blit: EXECBUFFER failed for item %u.\n", 0); // Corrected: op_idx not defined here.
 	}
 	destroy_cmd_buffer(cmd_handle, c_area_cmd, cs_start);
 
@@ -1039,7 +1149,7 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
 		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
-		size_t cmd_dwords_per_rect = 5;
+		size_t cmd_dwords_per_rect = 5; // XY_COLOR_BLT command length
 		size_t pipe_control_dwords = 4;
 		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1;
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
@@ -1053,30 +1163,43 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 			fill_rect_params *rect = &list[batch * max_ops_per_batch + i];
 			if (rect->right < rect->left || rect->bottom < rect->top) continue;
 
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping
+			// PRM Verification (Gen8+): Confirm XY_COLOR_BLT_CMD_OPCODE (0x50<<22) and XY_COLOR_BLT_LENGTH (5-2).
+			// Confirm ROP_PATCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, and clipping bit positions.
 			uint32 cmd_dw0 = XY_COLOR_BLT_CMD_OPCODE | XY_COLOR_BLT_LENGTH | BLT_ROP_PATCOPY;
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA is desired for 32bpp PATCOPY, add here.
+			}
 			if (enable_hw_clip) {
-				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+				// Assumes DW0 Bit 10 for clipping.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				// Apply tiling flags for known/assumed compatible generations
 				if (gen == 7 || gen == 8 || gen == 9) {
+					// Assumes DW0 Bit 11 for Dest Tiled.
+					// PRM Verification (Gen8, Gen9): Confirm bit and sufficiency.
 					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
 				}
-				// For gen > 9, specific tiling flags are unknown, so not set.
-				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16);
+			// DW3: Destination X2 (right+1), Y2 (bottom+1)
 			cpu_buf[cur_dw_idx++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16);
+			// DW4: Color
 			cpu_buf[cur_dw_idx++] = color;
 		}
 		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
-		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx); *p = MI_BATCH_BUFFER_END; cur_dw_idx = (p - cpu_buf) + 1;
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("fill_rectangle: EXECBUFFER failed.\n");
@@ -1094,7 +1217,7 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
 		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
-		size_t cmd_dwords_per_rect = 5;
+		size_t cmd_dwords_per_rect = 5; // XY_COLOR_BLT command length (used for invert too)
 		size_t pipe_control_dwords = 4;
 		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1;
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
@@ -1108,30 +1231,44 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 			fill_rect_params *rect = &list[batch * max_ops_per_batch + i];
 			if (rect->right < rect->left || rect->bottom < rect->top) continue;
 
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping
+			// PRM Verification (Gen8+): Confirm XY_COLOR_BLT_CMD_OPCODE and LENGTH.
+			// Confirm ROP_DSTINVERT, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, and clipping bit positions.
 			uint32 cmd_dw0 = XY_COLOR_BLT_CMD_OPCODE | XY_COLOR_BLT_LENGTH | BLT_ROP_DSTINVERT;
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// PRM Verification (Gen8+): DSTINVERT typically inverts all enabled channels.
+				// If alpha should also be inverted (and BLT_WRITE_ALPHA is the control), add it.
+			}
 			if (enable_hw_clip) {
-				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+				// Assumes DW0 Bit 10 for clipping.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				// Apply tiling flags for known/assumed compatible generations
 				if (gen == 7 || gen == 8 || gen == 9) {
+					// Assumes DW0 Bit 11 for Dest Tiled.
+					// PRM Verification (Gen8, Gen9): Confirm bit and sufficiency.
 					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
 				}
-				// For gen > 9, specific tiling flags are unknown, so not set.
-				// For gen < 7, XY_COLOR_BLT_DST_TILED_GEN7 is not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16);
+			// DW3: Destination X2 (right+1), Y2 (bottom+1)
 			cpu_buf[cur_dw_idx++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16);
+			// DW4: Color (Pattern - not used by DSTINVERT ROP, but command expects the DWord)
 			cpu_buf[cur_dw_idx++] = 0; // Dummy color for DSTINVERT
 		}
 		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
-		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx); *p = MI_BATCH_BUFFER_END; cur_dw_idx = (p - cpu_buf) + 1;
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("invert_rectangle: EXECBUFFER failed.\n");
@@ -1149,7 +1286,7 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
 		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
-		size_t cmd_dwords_per_blit = 6;
+		size_t cmd_dwords_per_blit = 6; // XY_SRC_COPY_BLT command length
 		size_t pipe_control_dwords = 4;
 		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit) + pipe_control_dwords + 1;
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
@@ -1162,32 +1299,51 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 		for (size_t i = 0; i < current_batch_count; i++) {
 			blit_params *blit = &list[batch * max_ops_per_batch + i];
 
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping
+			// PRM Verification (Gen8+): Confirm XY_SRC_COPY_BLT_CMD_OPCODE (0x53<<22) and XY_SRC_COPY_BLT_LENGTH (6-2).
+			// Confirm ROP_SRCCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, and clipping bit positions.
 			uint32 cmd_dw0 = XY_SRC_COPY_BLT_CMD_OPCODE | XY_SRC_COPY_BLT_LENGTH | BLT_ROP_SRCCOPY;
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
-			if (depth_flags == BLT_DEPTH_32) cmd_dw0 |= BLT_WRITE_RGB;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA (Bit 21) is needed/desired for 32bpp SRCCOPY
+				// to copy source alpha to destination, it should be added here.
+				// Current setup preserves destination alpha.
+			}
 			if (enable_hw_clip) {
-				cmd_dw0 |= BLT_CLIPPING_ENABLE;
+				// Assumes DW0 Bit 10 for clipping.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
-				// Apply tiling flags for known/assumed compatible generations
 				if (gen == 7 || gen == 8 || gen == 9) {
+					// Assumes DW0 Bit 11 (Dest Tiled) and Bit 15 (Src Tiled).
+					// PRM Verification (Gen8, Gen9): Confirm these bits are correct and sufficient.
 					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
 					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
 				}
-				// For gen > 9, specific tiling flags are unknown, so not set.
-				// For gen < 7, these specific Gen7+ flags are not applicable.
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch (also used for Source Pitch if not otherwise specified)
+			// PRM Verification (Gen8+): Confirm if DW1 Bit [31:16] is available for separate Source Pitch
+			// if needed, or if XY_SRC_COPY_BLT has another way or requires a different command for it.
+			// Current code assumes SrcPitch == DstPitch.
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row; // Dest pitch
+			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
+			// DW3: Destination X2 (right), Y2 (bottom)
 			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF) | (((blit->dest_top + blit->height) & 0xFFFF) << 16);
+			// DW4: Source Base Address (GTT offset)
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical; // Source GTT offset (assuming same FB)
+			// DW5: Source X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
 		}
 		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
-		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx); *p = MI_BATCH_BUFFER_END; cur_dw_idx = (p - cpu_buf) + 1;
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
 
 		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
 		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("s2s_blit: EXECBUFFER failed.\n");

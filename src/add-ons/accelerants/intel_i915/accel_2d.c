@@ -112,6 +112,221 @@ err_close_bo:
 }
 
 
+// New function for drawing arbitrary lines using the 3D pipeline (conceptual stub)
+void
+intel_i915_draw_line_arbitrary(engine_token *et,
+    const line_params *line, uint32 color,
+    const general_rect* clip_rects, uint32 num_clip_rects)
+{
+    if (gInfo == NULL || gInfo->device_fd < 0 || line == NULL) {
+        TRACE("draw_line_arbitrary: Invalid params or not initialized.\n");
+        return;
+    }
+
+    // Check for zero-length line (draw as a point)
+    if (line->x1 == line->x2 && line->y1 == line->y2) {
+        fill_rect_params point_rect = {line->x1, line->y1, line->x1, line->y1};
+        // Determine if clipping should be enabled based on num_clip_rects
+        // The intel_i915_fill_rectangle function expects a boolean for enable_hw_clip.
+        // If num_clip_rects > 0, we'd typically set up scissor/clip state.
+        // For this fallback, we just pass a hint.
+        intel_i915_fill_rectangle(et, color, &point_rect, 1, (num_clip_rects > 0));
+        return;
+    }
+
+    // Fallback to existing H/V line drawer if applicable
+    if (line->y1 == line->y2) { // Horizontal line
+        uint16 hv_line_coords[4] = {(uint16)line->x1, (uint16)line->y1, (uint16)line->x2, (uint16)line->y2};
+        // The intel_i915_draw_hv_lines function also expects a boolean for enable_hw_clip.
+        // It internally converts lines to fill_rect_params.
+        // We need to pass clipping information if we want the H/V lines to be clipped.
+        // This might require intel_i915_draw_hv_lines to also take clip_rects or for
+        // intel_i915_fill_rectangle to handle a list of clip_rects if that's how app_server works.
+        // For now, indicating clipping might be active.
+        intel_i915_draw_hv_lines(et, color, hv_line_coords, 1, (num_clip_rects > 0));
+        return;
+    }
+    if (line->x1 == line->x2) { // Vertical line
+        uint16 hv_line_coords[4] = {(uint16)line->x1, (uint16)line->y1, (uint16)line->x2, (uint16)line->y2};
+        intel_i915_draw_hv_lines(et, color, hv_line_coords, 1, (num_clip_rects > 0));
+        return;
+    }
+
+    // Angled line: requires 3D pipeline
+    TRACE("draw_line_arbitrary: Angled line (%d,%d)-(%d,%d) color 0x%lx. 3D Pipe (STUBBED).\n",
+        line->x1, line->y1, line->x2, line->y2, color);
+
+    // --- Conceptual Geometric Calculation for a ~1px thick quad ---
+    // These would be screen coordinates. The VS would transform them to clip space.
+    float x1 = (float)line->x1;
+    float y1 = (float)line->y1;
+    float x2 = (float)line->x2;
+    float y2 = (float)line->y2;
+
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+
+    // For a 1-pixel thick line, half_thickness is 0.5.
+    // The extrusion direction depends on whether the line is more horizontal or vertical.
+    float v_x0, v_y0, v_x1, v_y1, v_x2, v_y2, v_x3, v_y3;
+
+    if (fabsf(dx) >= fabsf(dy)) { // More horizontal or equal (prefer horizontal for diagonal)
+        // Extrude vertically by 0.5
+        v_x0 = x1; v_y0 = y1 - 0.5f;
+        v_x1 = x1; v_y1 = y1 + 0.5f;
+        v_x2 = x2; v_y2 = y2 + 0.5f;
+        v_x3 = x2; v_y3 = y2 - 0.5f;
+    } else { // More vertical
+        // Extrude horizontally by 0.5
+        v_x0 = x1 - 0.5f; v_y0 = y1;
+        v_x1 = x1 + 0.5f; v_y1 = y1;
+        v_x2 = x2 + 0.5f; v_y2 = y2;
+        v_x3 = x2 - 0.5f; v_y3 = y2;
+    }
+
+    TRACE("  Quad Vertices (conceptual screen coords):\n"
+          "  V0: (%.2f, %.2f)\n  V1: (%.2f, %.2f)\n"
+          "  V2: (%.2f, %.2f)\n  V3: (%.2f, %.2f)\n",
+          v_x0, v_y0, v_x1, v_y1, v_x2, v_y2, v_x3, v_y3);
+
+    // These vertices (v_x0,v_y0 ... v_x3,v_y3) would form the input
+    // for the vertex buffer. They would typically be ordered to form two triangles, e.g.:
+    // Triangle 1: V0, V1, V2
+    // Triangle 2: V0, V2, V3
+    // (Or using a triangle strip: V0, V1, V3, V2 if winding is correct)
+
+    // --- Actual 3D Pipeline Implementation for Angled Lines (Conceptual) ---
+	uint8_t gen = gInfo->shared_info->graphics_generation;
+
+	// 1. Acquire Engine & Batch Buffer
+	// ACQUIRE_ENGINE(et); // Assuming et is passed in and valid by the hook
+	size_t cmd_dwords_estimate = 200; // Rough estimate
+	size_t cmd_buffer_size = cmd_dwords_estimate * sizeof(uint32);
+	uint32 cmd_handle = 0;
+	area_id k_area_cmd = -1, c_area_cmd = -1;
+	uint32* cs_start = NULL;
+	uint32* cs = NULL;
+
+	if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area_cmd, (void**)&cs_start) != B_OK) {
+		TRACE("draw_line_arbitrary: Failed to create command buffer.\n");
+		// RELEASE_ENGINE(et, NULL);
+		return;
+	}
+	c_area_cmd = area_for(cs_start);
+	cs = cs_start;
+
+	// --- Framebuffer Constants ---
+	const uint32_t fb_gtt_offset = gInfo->shared_info->framebuffer_physical;
+	const uint32_t fb_stride = gInfo->shared_info->bytes_per_row;
+	const uint16_t fb_total_width = gInfo->shared_info->current_mode.virtual_width;
+	const uint16_t fb_total_height = gInfo->shared_info->current_mode.virtual_height;
+	const uint32_t fb_format_hw = get_surface_format_hw_value(gInfo->shared_info->current_mode.space);
+	const bool fb_is_tiled = (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE);
+	const uint32_t fb_tile_mode_hw = fb_is_tiled ? (gInfo->shared_info->fb_tiling_mode == I915_TILING_X ? 1 : 2) : 0;
+
+	// --- Shader Kernels (Conceptual - these would be GEM BOs) ---
+	// uint32_t vs_kernel_gtt_offset = get_solid_color_vs_gtt_offset(gen);
+	// uint32_t ps_kernel_gtt_offset = get_solid_color_ps_gtt_offset(gen);
+	TRACE("    Conceptual: Would get GTT offsets for solid color VS & PS kernels.\n");
+
+
+	// --- Vertex Buffer for the Quad ---
+	scaled_blit_vertex vb_data[4]; // Using scaled_blit_vertex for {x,y,z,w, u,v}
+	                               // For solid lines, u,v are not strictly needed but VS might expect them.
+	                               // A simpler vertex {x,y} might be used if VS is adapted.
+	vb_data[0] = (scaled_blit_vertex){v_x0, v_y0, 0.0f, 1.0f, 0.0f, 0.0f};
+	vb_data[1] = (scaled_blit_vertex){v_x1, v_y1, 0.0f, 1.0f, 0.0f, 0.0f};
+	vb_data[2] = (scaled_blit_vertex){v_x2, v_y2, 0.0f, 1.0f, 0.0f, 0.0f}; // For TRIANGLE_STRIP V3,V2 order
+	vb_data[3] = (scaled_blit_vertex){v_x3, v_y3, 0.0f, 1.0f, 0.0f, 0.0f}; // For TRIANGLE_STRIP V0,V1,V3,V2
+
+	uint32_t vb_handle = 0;
+	area_id k_area_vb = -1;
+	void* cpu_addr_vb = NULL;
+	uint64_t vb_gtt_offset = 0;
+	status_t vb_status = create_and_upload_gem_bo(vb_data, sizeof(vb_data),
+		I915_BO_ALLOC_CACHING_WC, /* suitable flags for VB */
+		&vb_handle, &k_area_vb, &cpu_addr_vb, &vb_gtt_offset);
+
+	if (vb_status != B_OK) {
+		TRACE("draw_line_arbitrary: Failed to create/upload vertex buffer: %s\n", strerror(vb_status));
+		destroy_cmd_buffer(cmd_handle, c_area_cmd, cs_start);
+		// RELEASE_ENGINE(et, NULL);
+		return;
+	}
+	TRACE("    Conceptual: Vertex Buffer GTT offset 0x%llx\n", vb_gtt_offset);
+
+
+	// --- Conceptual Command Stream Construction ---
+	// This is a highly simplified sequence. Many DWords and specific values are omitted.
+	// Refer to Intel PRMs (Gen7.5+ Vol 2a, 2d, Vol 7) for actual command details.
+
+	// Example: Minimal state setup (many commands omitted for brevity)
+	// *cs++ = CMD_PIPELINE_SELECT | PIPELINE_SELECT_3D; (If not default)
+	// *cs++ = CMD_STATE_BASE_ADDRESS ... (setup surface state base, dynamic state base, etc.)
+	// *cs++ = CMD_3DSTATE_BINDING_TABLE_POINTERS ... (point to a simple binding table for RT)
+	// *cs++ = CMD_RENDER_SURFACE_STATE ... (setup for framebuffer as RT, written to SSB)
+	// *cs++ = CMD_3DSTATE_VIEWPORT_STATE_POINTERS ...
+	// *cs++ = CMD_3DSTATE_SCISSOR_STATE_POINTERS ... (set to clip_rects or dest line bounds)
+	// if (num_clip_rects > 0) {
+	//    *cs++ = GEN7_3DSTATE_SCISSOR_RECTANGLE_ENABLE | (3-2);
+	//    *cs++ = (clip_rects[0].left & 0xFFFF) | ((clip_rects[0].top & 0xFFFF) << 16);
+	//    *cs++ = (clip_rects[0].right & 0xFFFF) | ((clip_rects[0].bottom & 0xFFFF) << 16);
+	// } else { /* Set to full framebuffer */ }
+	// *cs++ = CMD_3DSTATE_VS ... (point to VS kernel)
+	// *cs++ = CMD_3DSTATE_PS ... (point to PS kernel, setup constants for 'color')
+	// *cs++ = CMD_3DSTATE_CONSTANT_PS ... (load 'color' into PS constants)
+	//    uint32_t r = (color >> 16) & 0xff; uint32_t g = (color >> 8) & 0xff; uint32_t b = color & 0xff; uint32_t a = (color >> 24) & 0xff;
+	//    float fc[4] = { r/255.f, g/255.f, b/255.f, a/255.f };
+	//    memcpy(cs, fc, sizeof(fc)); cs += 4; // Example for loading 1 vec4 constant
+	// *cs++ = CMD_3DSTATE_VERTEX_BUFFERS ... (point to vb_gtt_offset, stride=sizeof(scaled_blit_vertex))
+	// *cs++ = CMD_3DSTATE_VERTEX_ELEMENTS ... (describe position element R32G32_FLOAT or R32G32B32A32_FLOAT)
+	// *cs++ = CMD_3DSTATE_BLEND_STATE_POINTERS ... (opaque blend)
+	// *cs++ = CMD_3DSTATE_DEPTH_BUFFER_TYPE_NULL ... (disable depth)
+
+	// *cs++ = CMD_3DPRIMITIVE | _3DPRIM_TRIANGLESTRIP | (num_dwords_for_prim_cmd - 2);
+	// *cs++ = 4; // Vertex count for strip (V0,V1,V3,V2)
+	// *cs++ = 0; // Start vertex
+	// *cs++ = 1; // Instance count
+	// *cs++ = 0; // Start instance
+
+	TRACE("    Conceptual: Emitted 3D pipeline state and 3DPRIMITIVE for line quad.\n");
+	// Fallback to ensure batch ends for stub
+	cs = emit_pipe_control(cs, PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH | PIPE_CONTROL_CS_STALL, 0,0,0);
+	*cs++ = MI_BATCH_BUFFER_END;
+	// --- End Conceptual Command Stream ---
+
+	uint32_t current_batch_len_dwords = cs - cs_start;
+	intel_i915_gem_execbuffer_args exec_args = { cmd_handle, current_batch_len_dwords * sizeof(uint32), RCS0 };
+	// TODO: Add relocations for vb_gtt_offset, shader_gtt_offsets, state_buffer_gtt_offsets
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
+		TRACE("draw_line_arbitrary: EXECBUFFER failed.\n");
+	}
+
+	destroy_cmd_buffer(cmd_handle, c_area_cmd, cs_start);
+	if (vb_handle != 0) { // Destroy the temporary Vertex Buffer GEM object
+		intel_i915_gem_close_args close_args = { vb_handle };
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+	}
+	// RELEASE_ENGINE(et, NULL);
+    return;
+}
+
+
+void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count,
+    //    - Scissor should be set based on clip_rects if num_clip_rects > 0.
+    //      If multiple clip_rects, this implies multiple draw calls or complex stencil.
+    //      For simplicity, assume for now only the first clip_rect is used if num_clip_rects > 0.
+    // 4. Emit 3DPRIMITIVE to draw the quad.
+    // 5. Emit PIPE_CONTROL for sync.
+    // 6. Submit Batch Buffer.
+    // 7. Release Engine.
+
+    // No software fallback implemented here for angled lines.
+    return;
+}
+
+
 // Intel Blitter Command Definitions
 #define BLT_DEPTH_8			(0 << 24)
 #define BLT_DEPTH_16_565	(1 << 24)

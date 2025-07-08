@@ -653,19 +653,92 @@ accel_draw_line_array_unclipped(engine_token* et, uint32 color, uint32 count, vo
 static void
 accel_draw_line_unclipped(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
 {
-	if (gInfo != NULL && gInfo->device_fd >= 0) {
-		intel_i915_set_blitter_hw_clip_rect_args clip_args = {0, 0, 0x3FFF, 0x3FFF, false};
-		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args, sizeof(clip_args));
-	}
+	// Clipping for single lines is often handled by app_server pre-clipping coordinates,
+	// or by a global clip rect if the hardware/accelerant supports it universally.
+	// The 'enable_hw_clip' parameter in the actual drawing functions refers to
+	// whether the IOCTL-set global clip rect should be respected by the blitter.
+	// For 3D pipeline lines, clipping would be via scissor.
+
 	if (pattern == 0xff) { // Solid pattern
-		uint16 line_coords[4] = {x1, y1, x2, y2};
-		if (x1 == x2 || y1 == y2) { // Only H/V lines
+		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical line
+			uint16 line_coords[4] = {x1, y1, x2, y2};
+			// Assuming no clipping for this unclipped wrapper, so pass false for enable_hw_clip
 			intel_i915_draw_hv_lines(et, color, line_coords, 1, false);
+		} else { // Angled line
+			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
+			// Pass NULL, 0 for clip_rects as this is an "unclipped" path conceptually
+			intel_i915_draw_line_arbitrary(et, &params, color, NULL, 0);
 		}
+	} else {
+		// TODO: Handle patterned lines (likely software fallback or advanced shader)
+		TRACE("accel_draw_line_unclipped: Patterned lines not implemented.\n");
 	}
 }
 
+
 // --- Clipped Hook Implementations (accel_fill_rect_clipped, accel_invert_rect_clipped, accel_blit_clipped already added) ---
+
+// It's more common for the main hook (e.g., accel_draw_line_array) to handle clipping
+// by passing clip_info to the underlying drawing function.
+// The "unclipped" wrappers would then explicitly pass no clip info or disable HW clipping.
+
+// Let's adjust accel_draw_line_array to be the main hook function that receives clip_info
+// and then calls underlying implementations.
+
+static void
+accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void* list, void* clip_info_ptr)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0 || list == NULL)
+		return;
+
+	graf_card_info* clip_info = (graf_card_info*)clip_info_ptr;
+	uint16* line_list = (uint16*)list;
+	bool use_clip = (clip_info != NULL && clip_info->clipping_rect_count > 0);
+	general_rect clip_rect = {0,0,0,0};
+
+	if (use_clip) {
+		// Using the first clip_rect for simplicity, as app_server usually decomposes.
+		clip_rect.left = clip_info->clip_left;
+		clip_rect.top = clip_info->clip_top;
+		clip_rect.right = clip_info->clip_right;
+		clip_rect.bottom = clip_info->clip_bottom;
+		// Note: intel_i915_draw_line_arbitrary expects an array of general_rect.
+		// For now, we'll pass a pointer to a single one.
+	}
+
+	// TODO: Batch H/V lines and Angled lines separately for efficiency.
+	// For now, calling per line. This is INEFFICIENT for angled lines.
+	for (uint32 i = 0; i < count; i++) {
+		uint16 x1 = line_list[i * 4 + 0];
+		uint16 y1 = line_list[i * 4 + 1];
+		uint16 x2 = line_list[i * 4 + 2];
+		uint16 y2 = line_list[i * 4 + 3];
+
+		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical
+			// intel_i915_draw_hv_lines takes a bool for enable_hw_clip.
+			// If use_clip is true, we'd need to set the HW clip rect via IOCTL first,
+			// then call intel_i915_draw_hv_lines with true, then disable HW clip.
+			// This is how other _clipped 2D functions work.
+			if (use_clip) {
+				intel_i915_set_blitter_hw_clip_rect_args clip_args_ioctl;
+				clip_args_ioctl.x1 = clip_rect.left;
+				clip_args_ioctl.y1 = clip_rect.top;
+				clip_args_ioctl.x2 = clip_rect.right;
+				clip_args_ioctl.y2 = clip_rect.bottom;
+				clip_args_ioctl.enable = true;
+				ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args_ioctl, sizeof(clip_args_ioctl));
+				intel_i915_draw_hv_lines(et, color, &line_list[i*4], 1, true);
+				clip_args_ioctl.enable = false;
+				ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT, &clip_args_ioctl, sizeof(clip_args_ioctl));
+			} else {
+				intel_i915_draw_hv_lines(et, color, &line_list[i*4], 1, false);
+			}
+		} else { // Angled line
+			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
+			intel_i915_draw_line_arbitrary(et, &params, color, use_clip ? &clip_rect : NULL, use_clip ? 1 : 0);
+		}
+	}
+}
 
 // The accel_draw_line_array and accel_draw_line functions from the previous step
 // will now become the *clipped* versions by default if B_DRAW_LINE_ARRAY_CLIPPED existed,
@@ -676,16 +749,67 @@ accel_draw_line_unclipped(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uin
 
 // Re-defining accel_draw_line_array and accel_draw_line to be the "unclipped" ones
 // as per the new wrapper pattern.
+
+// This is the function returned by get_accelerant_hook for B_DRAW_LINE_ARRAY
 static void
-accel_draw_line_array(engine_token* et, uint32 color, uint32 count, void* list)
+accel_draw_line_array(engine_token* et, uint32 count, uint8 *raw_list, uint32 color)
 {
-	accel_draw_line_array_unclipped(et, color, count, list);
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0 || raw_list == NULL)
+		return;
+
+	uint16* line_list = (uint16*)raw_list;
+	// Conceptual: check if global hardware clipping is enabled for the 2D blitter
+	// This state would be managed by the B_SET_CLIPPING_RECTS hook.
+	bool hw_clip_enabled_for_blitter = false; // Assume false unless B_SET_CLIPPING_RECTS sets it
+	// if (gInfo->shared_info->hw_blitter_clip_enabled) hw_clip_enabled_for_blitter = true;
+
+
+	// TODO: Batch H/V lines and Angled lines separately for efficiency.
+	// For now, calling per line. This is INEFFICIENT for angled lines.
+	for (uint32 i = 0; i < count; i++) {
+		uint16 x1 = line_list[i * 4 + 0];
+		uint16 y1 = line_list[i * 4 + 1];
+		uint16 x2 = line_list[i * 4 + 2];
+		uint16 y2 = line_list[i * 4 + 3];
+
+		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical
+			// intel_i915_draw_hv_lines uses the blitter.
+			// It respects the global blitter clip rect if its 'enable_hw_clip' is true.
+			intel_i915_draw_hv_lines(et, color, &line_list[i*4], 1, hw_clip_enabled_for_blitter);
+		} else { // Angled line
+			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
+			// intel_i915_draw_line_arbitrary uses the 3D pipe.
+			// It needs its own clipping (e.g. scissor rect).
+			// For now, pass NULL for clip_rects, meaning no specific 3D scissor beyond screen bounds.
+			// A more advanced version would take clip_rects from a B_SET_CLIPPING_RECTS hook
+			// and convert them to scissor for the 3D pipe.
+			intel_i915_draw_line_arbitrary(et, &params, color, NULL, 0);
+		}
+	}
 }
 
+// This is the function returned by get_accelerant_hook for B_DRAW_LINE
 static void
 accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
 {
-	accel_draw_line_unclipped(et, x1, y1, x2, y2, color, pattern);
+	if (gInfo == NULL || gInfo->device_fd < 0)
+		return;
+
+	// Conceptual: check if global hardware clipping is enabled for the 2D blitter
+	bool hw_clip_enabled_for_blitter = false;
+	// if (gInfo->shared_info->hw_blitter_clip_enabled) hw_clip_enabled_for_blitter = true;
+
+	if (pattern == 0xff) { // Solid pattern
+		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical line
+			uint16 line_coords[4] = {x1, y1, x2, y2};
+			intel_i915_draw_hv_lines(et, color, line_coords, 1, hw_clip_enabled_for_blitter);
+		} else { // Angled line
+			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
+			intel_i915_draw_line_arbitrary(et, &params, color, NULL, 0);
+		}
+	} else {
+		TRACE("accel_draw_line: Patterned lines not implemented.\n");
+	}
 }
 
 

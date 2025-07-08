@@ -40,6 +40,19 @@ extern void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint3
 extern void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count, bool enable_hw_clip);
 extern void intel_i915_draw_hv_lines(engine_token *et, uint32 color, uint16 *line_coords, uint32 num_lines, bool enable_hw_clip);
 
+// Structure for arbitrary line parameters
+typedef struct {
+	int16 x1; // Use int16 to match typical screen coordinates
+	int16 y1;
+	int16 x2;
+	int16 y2;
+	// uint8 pattern; // Could be added if pattern support is desired
+} line_params;
+
+// New function for arbitrary lines
+extern void intel_i915_draw_line_arbitrary(engine_token *et,
+    const line_params *line, uint32 color,
+    const general_rect* clip_rects, uint32 num_clip_rects); // Using general_rect for clip_rects for consistency with other hooks
 
 #ifdef __cplusplus
 }

@@ -260,7 +260,9 @@ static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
-static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqToMoveLoad);
+// Forward declaration for _scheduler_select_cpu_for_irq which calls SelectTargetCPUForIRQ
+static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
+
 
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
 
@@ -1094,30 +1096,44 @@ void
 scheduler_on_thread_destroy(Thread* thread)
 {
 	// Called when a thread is being destroyed.
-	// We need to clean up any IRQ-task affinities associated with this thread.
-	if (sIrqTaskAffinityMap != NULL && thread != NULL) {
-		InterruptsSpinLocker locker(gIrqTaskAffinityLock);
-		// Currently, the sIrqTaskAffinityMap (IRQ -> thread_id) is not efficiently
-		// searchable by thread_id to find all IRQs associated with this dying thread.
-		// A full scan of the map would be required, which could be slow if the map is large.
-		//
-		// For Phase 1 of IRQ-Task Colocation:
-		// We rely on "cleanup-on-use" in scheduler_irq_balance_event() and
-		// potentially in SelectTargetCPUForIRQ() if it also queries the map.
-		// When these functions encounter an IRQ affinity pointing to a thread_id
-		// that no longer exists (or is a zombie), they will remove that stale entry.
-		//
-		// TODO: For a more robust and immediate cleanup, consider:
-		// 1. A reverse map: thread_id -> list_of_IRQ_vectors. This would make
-		//    cleanup here O(num_affinitized_irqs_for_this_thread).
-		// 2. Storing `Thread*` (with proper reference counting) in sIrqTaskAffinityMap
-		//    instead of `thread_id`. When the thread's reference count drops to zero
-		//    (or a special flag is set on destruction), its associated IRQ affinities
-		//    could be more directly found if the map supports value-based iteration well,
-		//    or if the Thread object itself held a list of its affinitized IRQs.
-		//
-		// For now, log that cleanup relies on the "on-use" mechanism.
-		TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed. Any IRQ affinities for this thread will be cleared on next use if stale.\n", thread->id);
+	// Cleans up any IRQ-task affinities associated with this thread from the
+	// global sIrqTaskAffinityMap by using the thread's local list of
+	// affinitized IRQs.
+	if (sIrqTaskAffinityMap != NULL && thread != NULL && thread->scheduler_data != NULL) {
+		ThreadData* threadData = thread->scheduler_data;
+		int8 irqCount = 0;
+		const int32* affinitizedIrqs = threadData->GetAffinitizedIrqs(irqCount);
+
+		if (irqCount > 0) {
+			InterruptsSpinLocker locker(gIrqTaskAffinityLock);
+			for (int8 i = 0; i < irqCount; ++i) {
+				int32 irq = affinitizedIrqs[i];
+				thread_id currentMappedTid;
+				// Verify that the map indeed points to *this* dying thread for this IRQ
+				// before removing, to prevent accidentally removing an affinity that might have
+				// been reassigned if there was a race or an unlikely intermediate state.
+				if (sIrqTaskAffinityMap->Lookup(irq, &currentMappedTid) == B_OK
+					&& currentMappedTid == thread->id) {
+					sIrqTaskAffinityMap->Remove(irq);
+					TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed, removed its affinity for IRQ %" B_PRId32 " from global map.\n",
+						thread->id, irq);
+				} else {
+					// This case (IRQ in thread's list but not in map, or map points elsewhere)
+					// could indicate an inconsistency if not handled carefully elsewhere (e.g.,
+					// if an IRQ was reassigned but not removed from old thread's list).
+					// The ThreadData list should be the source of truth for *this* thread's affinities.
+					TRACE_SCHED_IRQ_ERR("ThreadDestroy: T %" B_PRId32 " noted IRQ %" B_PRId32 " in its list, "
+						"but global map did not point to this thread (or IRQ not in map). Current map tid: %" B_PRId32 ".\n",
+						thread->id, irq, currentMappedTid);
+				}
+			}
+		}
+		// Clear the list in ThreadData as well, although ThreadData is about to be deleted.
+		// This is good practice in case ClearAffinitizedIrqs had other side effects.
+		threadData->ClearAffinitizedIrqs();
+	} else if (thread != NULL) {
+		TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed. No sIrqTaskAffinityMap or no scheduler_data, "
+			"no IRQ affinity cleanup needed from here.\n", thread->id);
 	}
 
 	delete thread->scheduler_data;
@@ -2198,6 +2214,11 @@ scheduler_perform_load_balance()
 	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
 	migrationPerformed = true;
 
+	// IRQ Follow-Task logic
+	if (threadToMove->Core() != sourceCPU->Core()) { // Check if moved across cores
+		scheduler_maybe_follow_task_irqs(threadToMove, targetCPU->Core(), targetCPU);
+	}
+
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
 	bool newThreadIsEligible = (system_time() >= threadToMove->EligibleTime());
@@ -2211,6 +2232,61 @@ scheduler_perform_load_balance()
 		}
 	}
 	return migrationPerformed;
+}
+
+
+// #pragma mark - IRQ Follow Task Logic
+
+/*!
+	Checks if a thread that just migrated to a new core/CPU has any affinitized
+	IRQs that should also be moved to follow it.
+	This is called after a thread has been successfully migrated, typically by
+	the load balancer.
+	\param threadData The scheduler data for the migrated thread.
+	\param newCore The new core the thread has been migrated to.
+	\param newCpu The specific new CPU the thread is on (can be NULL if only core matters).
+*/
+static void
+scheduler_maybe_follow_task_irqs(ThreadData* threadData, CoreEntry* newCore, CPUEntry* newCpu)
+{
+	if (threadData == NULL || threadData->IsIdle() || newCore == NULL)
+		return;
+
+	int8 irqCount = 0;
+	const int32* affinitizedIrqs = threadData->GetAffinitizedIrqs(irqCount);
+	if (irqCount == 0)
+		return;
+
+	TRACE_SCHED_IRQ("FollowTask: T %" B_PRId32 " moved to core %" B_PRId32 "/CPU %" B_PRId32
+		". Checking %d affinitized IRQs.\n",
+		threadData->GetThread()->id, newCore->ID(), newCpu ? newCpu->ID() : -1, irqCount);
+
+	for (int8 i = 0; i < irqCount; ++i) {
+		int32 irqVector = affinitizedIrqs[i];
+
+		// TODO: A more robust way to get current IRQ load is needed.
+		//       Currently using a placeholder. The load influences CPU selection.
+		//       Ideally, retrieve irq_assignment->load for irqVector.
+		int32 estimatedIrqLoad = 100; // Placeholder for actual IRQ load
+
+		// TODO: Check if the IRQ is already handled optimally on the newCore.
+		//       This requires a function like get_irq_routing_info(irqVector, &currentCpuId)
+		//       to avoid unnecessary re-assignments if the IRQ is already on a good
+		//       CPU of newCore or even on newCpu itself.
+		//       For this phase, we always attempt re-selection and assignment.
+		//       assign_io_interrupt_to_cpu() might be a no-op if already optimal,
+		//       but avoiding the call altogether would be better.
+
+		CPUEntry* targetCpuForIrq = _scheduler_select_cpu_for_irq(newCore, irqVector, estimatedIrqLoad);
+		if (targetCpuForIrq != NULL) {
+			TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32 " to CPU %" B_PRId32 " (on core %" B_PRId32 ") for T %" B_PRId32 "\n",
+				irqVector, targetCpuForIrq->ID(), newCore->ID(), threadData->GetThread()->id);
+			assign_io_interrupt_to_cpu(irqVector, targetCpuForIrq->ID());
+		} else {
+			TRACE_SCHED_IRQ("FollowTask: No suitable CPU on core %" B_PRId32 " for IRQ %" B_PRId32 " for T %" B_PRId32 "\n",
+				newCore->ID(), irqVector, threadData->GetThread()->id);
+		}
+	}
 }
 
 
@@ -2532,42 +2608,114 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 	if (thid == 0 || thid == B_CURRENT_THREAD_ID)
 		targetThreadId = thread_get_current_thread_id();
 
-	InterruptsSpinLocker locker(gIrqTaskAffinityLock);
+	InterruptsSpinLocker locker(gIrqTaskAffinityLock); // Protects sIrqTaskAffinityMap and related ThreadData updates
+
+	thread_id oldTargetThreadId = -1;
+	bool hadOldAffinity = (sIrqTaskAffinityMap->Lookup(irqVector, &oldTargetThreadId) == B_OK);
 
 	if (targetThreadId == -1) {
-		// Clear affinity for this IRQ
-		sIrqTaskAffinityMap->Remove(irqVector);
-		TRACE_SCHED_IRQ("SetIrqTaskColocation: Cleared affinity for IRQ %d\n", irqVector);
+		// Clearing affinity for irqVector
+		if (hadOldAffinity) {
+			sIrqTaskAffinityMap->Remove(irqVector);
+			Thread* oldThread = Thread::Get(oldTargetThreadId);
+			if (oldThread != NULL) {
+				BReference<Thread> oldThreadRef(oldThread, true);
+				// Thread's scheduler_lock should be sufficient to protect its ThreadData's IRQ list
+				InterruptsSpinLocker schedulerLocker(oldThread->scheduler_lock);
+				if (oldThread->scheduler_data != NULL) {
+					oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
+				}
+			}
+		}
+		TRACE_SCHED_IRQ("SetIrqTaskColocation: Cleared affinity for IRQ %d (was for T %" B_PRId32 ")\n", irqVector, oldTargetThreadId);
 		return B_OK;
 	}
 
-	// Validate thread ID if not clearing
-	struct thread* thread = thread_get_kernel_thread(targetThreadId);
-	if (thread == NULL) {
-		// Also check if it's a zombie, as get_kernel_thread might return non-NULL for zombies
-		if (thread_is_zombie(targetThreadId))
-			return B_BAD_THREAD_ID;
-		// If not zombie but still NULL, then it's a bad ID.
+	// Setting or changing affinity to targetThreadId
+	Thread* targetThread = Thread::Get(targetThreadId);
+	if (targetThread == NULL || thread_is_zombie(targetThreadId)) {
+		// New target thread is invalid. If there was an old affinity, remove it.
+		if (hadOldAffinity) {
+			sIrqTaskAffinityMap->Remove(irqVector);
+			Thread* oldThread = Thread::Get(oldTargetThreadId);
+			if (oldThread != NULL) {
+				BReference<Thread> oldThreadRef(oldThread, true);
+				InterruptsSpinLocker schedulerLocker(oldThread->scheduler_lock);
+				if (oldThread->scheduler_data != NULL) {
+					oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
+				}
+			}
+			TRACE_SCHED_IRQ("SetIrqTaskColocation: New target T %" B_PRId32 " invalid, cleared old affinity for IRQ %d from T %" B_PRId32 "\n",
+				targetThreadId, irqVector, oldTargetThreadId);
+		}
 		return B_BAD_THREAD_ID;
 	}
-	// thread_put_kernel_thread(thread); // Release reference if get_kernel_thread acquired one.
-	// For HashTable, we store thread_id, so no need to keep thread reference here.
+	BReference<Thread> targetThreadRef(targetThread, true);
 
-	// Insert/Update the affinity
-	// HashTable::Put will update if key exists, or insert if not.
+	// Add IRQ to the new target thread's list in ThreadData
+	// This requires targetThread's scheduler_lock. gIrqTaskAffinityLock is already held.
+	bool addedToNewThreadData = false;
+	{
+		InterruptsSpinLocker targetSchedulerLocker(targetThread->scheduler_lock);
+		if (targetThread->scheduler_data != NULL) {
+			addedToNewThreadData = targetThread->scheduler_data->AddAffinitizedIrq(irqVector);
+		} else {
+			// This should ideally not happen if targetThread is valid and initialized.
+			TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: T %" B_PRId32 " has NULL scheduler_data.\n", targetThreadId);
+			// oldTargetThreadId remains in map if hadOldAffinity was true.
+			return B_ERROR; // Or more specific error
+		}
+	}
+
+	if (!addedToNewThreadData) {
+		TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: FAILED to add IRQ %d to T %" B_PRId32 "'s ThreadData list (list full?).\n",
+			irqVector, targetThreadId);
+		// Affinity not added to ThreadData, so don't update sIrqTaskAffinityMap to point to this new thread.
+		// If there was an old affinity, it remains in sIrqTaskAffinityMap.
+		return B_NO_MEMORY; // Indicates list full or similar resource issue on ThreadData
+	}
+
+	// If there was an old affinity to a *different* thread, remove IRQ from old thread's list.
+	if (hadOldAffinity && oldTargetThreadId != targetThreadId) {
+		Thread* oldThread = Thread::Get(oldTargetThreadId);
+		if (oldThread != NULL) {
+			BReference<Thread> oldThreadRef(oldThread, true);
+			InterruptsSpinLocker oldSchedulerLocker(oldThread->scheduler_lock);
+			if (oldThread->scheduler_data != NULL) {
+				oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
+			}
+		}
+	}
+
+	// Now, update the main sIrqTaskAffinityMap to point to the new targetThreadId.
+	// HashTable::Put will overwrite if irqVector key already exists.
 	status_t status = sIrqTaskAffinityMap->Put(irqVector, targetThreadId);
 	if (status == B_OK) {
-		TRACE_SCHED_IRQ("SetIrqTaskColocation: Set affinity for IRQ %d to thread %" B_PRId32 "\n",
-			irqVector, targetThreadId);
+		TRACE_SCHED_IRQ("SetIrqTaskColocation: Updated sIrqTaskAffinityMap: IRQ %d -> T %" B_PRId32 " (was T %" B_PRId32 ")\n",
+			irqVector, targetThreadId, hadOldAffinity ? oldTargetThreadId : -1);
 	} else {
-		TRACE_SCHED_IRQ("SetIrqTaskColocation: FAILED to set affinity for IRQ %d to thread %" B_PRId32 ", error: %s\n",
+		// sIrqTaskAffinityMap->Put failed. This is a problem.
+		// We need to roll back the AddAffinitizedIrq from the new targetThread's ThreadData.
+		TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: FAILED to update sIrqTaskAffinityMap for IRQ %d to T %" B_PRId32 ", error: %s. Rolling back ThreadData.\n",
 			irqVector, targetThreadId, strerror(status));
+		{
+			InterruptsSpinLocker targetSchedulerLocker(targetThread->scheduler_lock);
+			if (targetThread->scheduler_data != NULL) {
+				targetThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
+			}
+		}
+		// If Put failed, the old mapping in sIrqTaskAffinityMap (if any) might still be there,
+		// or the map might be in an inconsistent state if Put had side effects before failing.
+		// This depends on HashTable::Put behavior on failure after key exists.
+		// For robustness, one might try to restore the old mapping if hadOldAffinity was true.
+		// However, if Put itself fails, further Puts might also fail.
 	}
 
 	// TODO: Optionally, trigger an immediate re-evaluation of this IRQ's placement.
-	// For Phase 1, the periodic balancer or next natural assignment will pick it up.
+	// This would involve finding the current CPU of irqVector and the target CPU/core of targetThreadId,
+	// and if they are different, calling assign_io_interrupt_to_cpu.
 
-	return status;
+	return status; // Return status of the sIrqTaskAffinityMap->Put operation
 }
 
 

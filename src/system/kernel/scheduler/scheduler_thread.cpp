@@ -31,6 +31,10 @@ ThreadData::_InitBase()
 	fAverageRunBurstTimeEWMA = SCHEDULER_TARGET_LATENCY / 2;
 	fVoluntarySleepTransitions = 0;
 
+	// IRQ-Task Colocation
+	fAffinitizedIrqCount = 0;
+	// fAffinitizedIrqs will be uninitialized, ClearAffinitizedIrqs or memset could be used if needed
+
 	// Fields related to a specific quantum slice, reset when a new quantum starts
 	fTimeUsedInCurrentQuantum = 0;
 	fCurrentEffectiveQuantum = 0;
@@ -60,6 +64,78 @@ ThreadData::_InitBase()
 	// Load balancing
 	fLastMigrationTime = 0;
 }
+
+
+// #pragma mark - IRQ-Task Colocation Methods for ThreadData
+
+bool
+ThreadData::AddAffinitizedIrq(int32 irq)
+{
+	// This method should be called with appropriate locks held
+	// (e.g., thread's scheduler_lock or main fLock).
+	// The caller (_user_set_irq_task_colocation) will hold gIrqTaskAffinityLock,
+	// and should also ensure synchronization for ThreadData modification.
+	// Typically, this means acquiring the thread's fLock.
+
+	if (fAffinitizedIrqCount >= MAX_AFFINITIZED_IRQS_PER_THREAD) {
+		TRACE_SCHED_IRQ_ERR("ThreadData::AddAffinitizedIrq: T %" B_PRId32 " cannot add IRQ %" B_PRId32 ", list full (%d/%d).\n",
+			fThread->id, irq, fAffinitizedIrqCount, MAX_AFFINITIZED_IRQS_PER_THREAD);
+		return false; // List is full
+	}
+
+	// Check for duplicates
+	for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
+		if (fAffinitizedIrqs[i] == irq) {
+			// Already present, no action needed, report success.
+			return true;
+		}
+	}
+
+	fAffinitizedIrqs[fAffinitizedIrqCount++] = irq;
+	TRACE_SCHED_IRQ("ThreadData::AddAffinitizedIrq: T %" B_PRId32 " added IRQ %" B_PRId32 ". Count: %d.\n",
+		fThread->id, irq, fAffinitizedIrqCount);
+	return true;
+}
+
+bool
+ThreadData::RemoveAffinitizedIrq(int32 irq)
+{
+	// Similar synchronization considerations as AddAffinitizedIrq.
+
+	for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
+		if (fAffinitizedIrqs[i] == irq) {
+			// Found it, remove by shifting subsequent elements
+			fAffinitizedIrqCount--;
+			for (int8 j = i; j < fAffinitizedIrqCount; ++j) {
+				fAffinitizedIrqs[j] = fAffinitizedIrqs[j + 1];
+			}
+			// Optional: Clear the last (now unused) element if desired
+			// fAffinitizedIrqs[fAffinitizedIrqCount] = 0; // Or some invalid IRQ marker
+			TRACE_SCHED_IRQ("ThreadData::RemoveAffinitizedIrq: T %" B_PRId32 " removed IRQ %" B_PRId32 ". New count: %d.\n",
+				fThread->id, irq, fAffinitizedIrqCount);
+			return true;
+		}
+	}
+	// Not found is not an error for removal, just means no action taken.
+	TRACE_SCHED_IRQ("ThreadData::RemoveAffinitizedIrq: T %" B_PRId32 " IRQ %" B_PRId32 " not found in affinitized list.\n",
+		fThread->id, irq);
+	return false;
+}
+
+void
+ThreadData::ClearAffinitizedIrqs()
+{
+	// Typically called during ThreadData initialization if explicit clearing is needed,
+	// or if all affinities need to be reset for some reason.
+	// _InitBase already sets fAffinitizedIrqCount = 0.
+	// If the array contents need to be zeroed:
+	// memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
+	fAffinitizedIrqCount = 0; // Sufficient as count dictates usage.
+	TRACE_SCHED_IRQ("ThreadData::ClearAffinitizedIrqs: T %" B_PRId32 " cleared all IRQ affinities.\n", fThread->id);
+}
+
+
+// #pragma mark - Core Logic
 
 
 inline CoreEntry*
@@ -231,8 +307,16 @@ ThreadData::ThreadData(Thread* thread)
 	fLatencyNice(LATENCY_NICE_DEFAULT),
 	// I/O-bound heuristic
 	fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
-	fVoluntarySleepTransitions(0)
+	fVoluntarySleepTransitions(0),
+	// IRQ-Task Colocation
+	fAffinitizedIrqCount(0)
 {
+	// fAffinitizedIrqs elements are uninitialized by default.
+	// _InitBase now handles fAffinitizedIrqCount = 0;
+	// If explicit clearing of the array content is desired, add:
+	// memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
+	// or call ClearAffinitizedIrqs() here if it does more.
+
 	// EEVDF specific initializations, if any, can go here.
 	// For example, a new thread might start with zero lag.
 	// Virtual runtime typically starts at a value relative to the current

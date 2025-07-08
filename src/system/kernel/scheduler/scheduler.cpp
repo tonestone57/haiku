@@ -104,6 +104,93 @@ static inline int32 scheduler_priority_to_weight(int32 priority) {
 }
 
 
+static int
+cmd_thread_sched_info(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: thread_sched_info <thread_id>\n");
+		return B_KDEBUG_ERROR;
+	}
+
+	thread_id id = strtoul(argv[1], NULL, 0);
+	if (id <= 0) {
+		kprintf("Invalid thread ID: %s\n", argv[1]);
+		return B_KDEBUG_ERROR;
+	}
+
+	Thread* thread = Thread::Get(id);
+	if (thread == NULL) {
+		kprintf("Thread %" B_PRId32 " not found.\n", id);
+		return B_KDEBUG_ERROR;
+	}
+	BReference<Thread> threadRef(thread, true); // Manage reference
+
+	// Acquire locks to safely access thread and scheduler data
+	// Note: Acquiring multiple locks needs care for ordering if other parts of code do too.
+	// For KDL, it's usually okay as system is paused, but good practice.
+	// Thread::fLock protects some thread fields, thread->scheduler_lock protects scheduler_data.
+	thread->Lock();
+	InterruptsSpinLocker schedulerLocker(thread->scheduler_lock);
+
+	kprintf("Scheduler Info for Thread %" B_PRId32 " (\"%s\"):\n", thread->id, thread->name);
+	kprintf("--------------------------------------------------\n");
+
+	kprintf("Base Priority:      %" B_PRId32 "\n", thread->priority);
+	kprintf("Latency Nice (canonical): %d\n", thread->latency_nice); // From struct Thread
+
+	if (thread->scheduler_data != NULL) {
+		ThreadData* td = thread->scheduler_data;
+		kprintf("Scheduler Data (ThreadData*) at: %p\n", td);
+		td->Dump(); // This prints most EEVDF params, effective prio, load, etc.
+
+		kprintf("\nAdditional Scheduler Details:\n");
+		kprintf("  Pinned to CPU:      ");
+		if (thread->pinned_to_cpu > 0) {
+			kprintf("%" B_PRId32 "\n", thread->pinned_to_cpu - 1);
+		} else {
+			kprintf("no\n");
+		}
+		kprintf("  CPU Affinity Mask:  ");
+		CPUSet affinityMask = td->GetCPUMask();
+		if (affinityMask.IsEmpty() || affinityMask.IsFull(true)) {
+			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
+		} else {
+			// Print up to 2 64-bit hex values for the mask
+			const uint64* bits = affinityMask.Bits();
+			kprintf("0x%016" B_PRIx64, bits[0]);
+			if (CPUSet::CountBits() > 64) // Assuming CPUSet can be > 64 bits
+				kprintf("%016" B_PRIx64, bits[1]);
+			kprintf("\n");
+		}
+
+		kprintf("  I/O Bound Heuristic:\n");
+		kprintf("    Avg Run Burst (us): %" B_PRId64 "\n", td->fAverageRunBurstTimeEWMA);
+		kprintf("    Voluntary Sleeps:   %" B_PRIu32 "\n", td->fVoluntarySleepTransitions);
+		kprintf("    Is Likely I/O Bound: %s\n", td->IsLikelyIOBound() ? "yes" : "no");
+
+		kprintf("  Affinitized IRQs:\n");
+		int8 irqCount = 0;
+		const int32* affIrqs = td->GetAffinitizedIrqs(irqCount);
+		if (irqCount > 0) {
+			for (int8 i = 0; i < irqCount; ++i) {
+				kprintf("    IRQ %" B_PRId32 "\n", affIrqs[i]);
+			}
+		} else {
+			kprintf("    none\n");
+		}
+
+	} else {
+		kprintf("Scheduler Data:     <not initialized/available>\n");
+	}
+
+	schedulerLocker.Unlock();
+	thread->Unlock();
+
+	kprintf("--------------------------------------------------\n");
+	return 0;
+}
+
+
 #include <OS.h>
 
 #include <AutoDeleter.h>
@@ -1491,6 +1578,12 @@ scheduler_init()
 	}
 	Scheduler::init_debug_commands();
 	_scheduler_init_kdf_debug_commands();
+	add_debugger_command_etc("thread_sched_info", &cmd_thread_sched_info,
+		"Dump detailed scheduler information for a specific thread",
+		"<thread_id>\n"
+		"Prints detailed scheduler-specific data for the given thread ID,\n"
+		"including EEVDF parameters, load metrics, affinity, and more.\n"
+		"  <thread_id>  - ID of the thread.\n", 0);
 
 	// Initialize IRQ-Task Affinity Map for IRQ-task colocation.
 	sIrqTaskAffinityMap = new(std::nothrow) HashTable<IntHashDefinition>;
@@ -2314,24 +2407,32 @@ _kern_get_thread_latency_nice(thread_id thid, int8* outLatencyNice)
 	// If specific threads' info should be protected, add checks here.
 
 	int8 value;
+	status_t status = B_OK;
 	{
 		InterruptsSpinLocker schedulerLocker(thread->scheduler_lock);
 		if (thread->scheduler_data == NULL) {
 			// Should not happen for valid threads after init
-			return B_ERROR; // Should map to something like EIO or EINVAL if possible
+			status = B_ERROR; // Should map to something like EIO or EINVAL if possible
+			value = LATENCY_NICE_DEFAULT; // Default value on error
+		} else {
+			value = thread->scheduler_data->LatencyNice();
 		}
-		value = thread->scheduler_data->LatencyNice();
 	}
 
-	if (user_memcpy(outLatencyNice, &value, sizeof(int8)) != B_OK)
-		return B_BAD_ADDRESS; // EFAULT
+	if (status == B_OK) {
+		if (user_memcpy(outLatencyNice, &value, sizeof(int8)) != B_OK)
+			status = B_BAD_ADDRESS; // EFAULT
+	}
 
-	return B_OK; // Success is 0
+	TRACE_SCHED("get_latency_nice: T %" B_PRId32 " -> value %d, status %#" B_PRIx32 " (%s)\n",
+		thid, (status == B_OK ? value : -1), status, strerror(status));
+	return status;
 }
 
 status_t
 _kern_set_thread_latency_nice(thread_id thid, int8 latencyNice)
 {
+	TRACE_SCHED("set_latency_nice: T %" B_PRId32 " requested value %d\n", thid, (int)latencyNice);
 	if (latencyNice < LATENCY_NICE_MIN || latencyNice > LATENCY_NICE_MAX)
 		return B_BAD_VALUE; // EINVAL
 
@@ -2376,7 +2477,7 @@ _kern_set_thread_latency_nice(thread_id thid, int8 latencyNice)
 	targetThread->latency_nice = latencyNice; // Update main struct
 	targetThread->scheduler_data->SetLatencyNice(latencyNice); // Update scheduler cache
 
-	TRACE_SCHED("set_latency_nice: T %" B_PRId32 " to %d\n", thid, (int)latencyNice);
+	TRACE_SCHED("set_latency_nice: T %" B_PRId32 " successfully set to %d\n", thid, (int)latencyNice);
 
 	bool wasRunning = (targetThread->state == B_THREAD_RUNNING && targetThread->cpu != NULL);
 	bool wasReadyAndEnqueued = (targetThread->state == B_THREAD_READY && targetThread->scheduler_data->IsEnqueued());

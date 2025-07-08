@@ -1225,9 +1225,9 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 	if (queue.IsEmpty()) {
 		kprintf("  Run queue is empty.\n");
 	} else {
-		kprintf("  %-18s %-7s %-15s %-11s %-11s %-11s %-12s %s\n",
-			"Thread*", "ID", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Name");
-		kprintf("  ----------------------------------------------------------------------------------------------------------\n");
+		kprintf("  %-18s %-7s %-5s %-5s %-5s %-15s %-11s %-11s %-11s %-12s %-4s %-8s %s\n",
+			"Thread*", "ID", "Pri", "EPri", "LNice", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Load", "Aff", "Name");
+		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
 
 		const int MAX_THREADS_TO_DUMP_PER_CPU = 128; // Max threads we'll pull out for dumping
 		ThreadData* dumpedThreads[MAX_THREADS_TO_DUMP_PER_CPU];
@@ -1242,9 +1242,21 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 			dumpedThreads[numActuallyDumped++] = td;
 
 			Thread* t = td->GetThread();
-			kprintf("  %p  %-7" B_PRId32 " %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %s\n",
-				t, t->id, td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
-				td->SliceDuration(), td->VirtualRuntime(), t->name);
+			char affinityStr[10];
+			if (t->pinned_to_cpu > 0) {
+				snprintf(affinityStr, sizeof(affinityStr), "CPU%d", t->pinned_to_cpu - 1);
+			} else if (!td->GetCPUMask().IsEmpty() && !td->GetCPUMask().IsFull()) {
+				// Just show first bit of mask for brevity in this table. Full mask in thread_sched_info.
+				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", td->GetCPUMask().Bits()[0]);
+			} else {
+				strcpy(affinityStr, "-");
+			}
+
+			kprintf("  %p  %-7" B_PRId32 " %-5" B_PRId32 " %-5" B_PRId32 " %-5d %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %-3" B_PRId32 "%% %-8s %s\n",
+				t, t->id, t->priority, td->GetEffectivePriority(), (int)td->LatencyNice(),
+				td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
+				td->SliceDuration(), td->VirtualRuntime(),
+				td->GetLoad() / (kMaxLoad / 100), affinityStr, t->name);
 		}
 
 		// Re-add all popped threads
@@ -1265,8 +1277,8 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 			kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
 				numActuallyDumped, totalInQueueOriginally);
 		}
-		kprintf("  ----------------------------------------------------------------------------------------------------------\n");
-		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ".\n",
+		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
+		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ". (Pri=BasePrio, EPri=EffectivePrio, LNice=LatencyNice, Load=NeededLoad%%)\n",
 			numActuallyDumped, queue.Count());
 	}
 	cpu->UnlockRunQueue();
@@ -1276,12 +1288,25 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 /* static */ void
 DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
-	kprintf("%4" B_PRId32 " %11" B_PRId32 "%% %8.2f %7" B_PRId32 " %5" B_PRIu32 "\n",
+	// Acquire core's CPU lock to safely read fIdleCPUCount and other CPU related counts.
+	// However, GetLoad() and ThreadCount() might have their own internal locking or rely on atomics/seqlocks.
+	// For KDL, direct access might be mostly safe as system is paused, but good practice is to consider.
+	// For fIdleCPUCount, it's updated with fCPULock.
+	SpinLocker coreCpuListLock(entry->fCPULock);
+	int32 idleCpuCount = entry->fIdleCPUCount; // Access under lock
+	coreCpuListLock.Unlock(); // Release lock after getting what's needed under it
+
+	kprintf("%4" B_PRId32 " %4" B_PRId32 " %3" B_PRId32 "/%-3" B_PRId32 " %8" B_PRId32 "%% %8.2f %8" B_PRId32 " %7" B_PRId32 " %5" B_PRIu32 " %s\n",
 		entry->ID(),
-		entry->GetLoad(),
-		entry->GetInstantaneousLoad(),
-		entry->ThreadCount(),
-		entry->LoadMeasurementEpoch());
+		entry->Package() ? entry->Package()->PackageID() : -1,
+		idleCpuCount, // entry->fIdleCPUCount,
+		entry->CPUCount(),
+		entry->GetLoad(),		// Average historical load
+		entry->GetInstantaneousLoad(), // Average instantaneous load
+		entry->fCurrentLoad / (kMaxLoad / 100), // Current summed needed load as percentage
+		entry->ThreadCount(),	// Total threads on core
+		entry->LoadMeasurementEpoch(),
+		entry->fHighLoad ? "Yes" : "No");
 }
 
 
@@ -1320,21 +1345,22 @@ static int
 dump_cpu_heap(int /* argc */, char** /* argv */)
 {
 	kprintf("Core Load Heaps (Sharded):\n");
+	kprintf("  Core Pkg Idle/Total AvgLoad InstLoad CurLoad Threads Epoch HiLoad\n");
+	kprintf("  --------------------------------------------------------------------------------\n");
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
-		kprintf("---- Shard %" B_PRId32 " ----\n", shardIdx);
-
+		kprintf("---- Shard %" B_PRId32 " (Low Load) ----\n", shardIdx);
 		WriteSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
-
-		kprintf("  Low Load Cores in Shard %" B_PRId32 " (ID AvgLoad InstLoad Threads Epoch):\n", shardIdx);
 		if (Scheduler::gCoreLoadHeapShards[shardIdx].Count() > 0) {
-			Scheduler::gCoreLoadHeapShards[shardIdx].Dump();
+			Scheduler::gCoreLoadHeapShards[shardIdx].Dump(); // Calls DumpCoreLoadHeapEntry
 		} else {
 			kprintf("    (empty)\n");
 		}
+		shardLocker.Unlock();
 
-		kprintf("\n  High Load Cores in Shard %" B_PRId32 " (ID AvgLoad InstLoad Threads Epoch):\n", shardIdx);
+		kprintf("---- Shard %" B_PRId32 " (High Load) ----\n", shardIdx);
+		shardLocker.Lock(); // Re-acquire for the high load heap
 		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].Count() > 0) {
-			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump();
+			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump(); // Calls DumpCoreLoadHeapEntry
 		} else {
 			kprintf("    (empty)\n");
 		}
@@ -1342,18 +1368,16 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 		kprintf("\n");
 	}
 
-	// The rest of the function (dumping per-core CPU heaps) remains the same.
+	kprintf("\nPer-Core CPU Details (SMT-Aware Keys & EEVDF Info):\n");
 	for (int32 i = 0; i < gCoreCount; i++) {
-		bool coreHasEnabledCPUs = false;
-		for(int j=0; j < smp_get_num_cpus(); ++j) {
-			if (gCoreEntries[i].CPUMask().GetBit(j) && gCPUEnabled.GetBit(j)) {
-				coreHasEnabledCPUs = true;
-				break;
-			}
-		}
-		if (gCoreEntries[i].CPUCount() > 0) {
-			kprintf("\nCore %" B_PRId32 " CPU Priority Heap (CPUs on this core):\n", i);
-			gCoreEntries[i].CPUHeap()->Dump();
+		CoreEntry* core = &gCoreEntries[i];
+		if (core->CPUCount() > 0 && !core->IsDefunct()) {
+			kprintf("\nCore %" B_PRId32 " (Package %" B_PRId32 "):\n", core->ID(), core->Package() ? core->Package()->PackageID() : -1);
+			// Modify CPUPriorityHeap::Dump to show SMT-aware key and more details
+			// or iterate CPUs manually here for more control over output.
+			// For now, let existing CPUPriorityHeap::Dump be called, then enhance that.
+			kprintf("  CPUs in Priority Heap (Key is SMT-Aware if implemented in CPUEntry::UpdatePriority):\n");
+			core->CPUHeap()->Dump(); // This will call the modified CPUPriorityHeap::Dump
 		}
 	}
 	return 0;

@@ -17,6 +17,7 @@
 #include <kernel/util/list.h> // For struct list and list_link
 
 #include "accelerant.h" // For intel_i915_shared_info
+#include "intel_skl_display.h" // Gen9/Skylake specific display state structures
 
 // Forward declarations
 struct intel_vbt_data;

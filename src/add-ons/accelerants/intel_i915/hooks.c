@@ -52,7 +52,7 @@ static status_t intel_i915_get_accelerant_device_info(accelerant_device_info *ad
  * @brief Retrieves the VBlank retrace semaphore for the current accelerant instance's target pipe.
  * This function calls the INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE IOCTL to get a per-pipe
  * semaphore from the kernel. If the IOCTL fails or is not supported, it falls back to
- * the global vblank_sem from the shared_info structure.
+ * the global vblank_sem from the shared_info structure (which might be less accurate for clones).
  *
  * @return The sem_id for VBlank synchronization, or an error code (e.g., B_BAD_VALUE)
  *         if the accelerant is not initialized or the semaphore cannot be retrieved.
@@ -62,13 +62,13 @@ intel_i915_accelerant_retrace_semaphore(void)
 {
 	if (!gInfo || gInfo->device_fd < 0) {
 		TRACE("ACCELERANT_RETRACE_SEMAPHORE: Accelerant not initialized.\n");
-		return B_BAD_VALUE; // Or another appropriate error code like B_NO_INIT
+		return B_BAD_VALUE;
 	}
 
 	intel_i915_get_retrace_semaphore_args args;
 	// gInfo->target_pipe is of type enum accel_pipe_id.
 	// The kernel IOCTL expects its internal enum pipe_id_priv.
-	// We assume a direct numerical correspondence (ACCEL_PIPE_A == PRIV_PIPE_A, etc.).
+	// A direct numerical correspondence is assumed (ACCEL_PIPE_A == PRIV_PIPE_A, etc.).
 	args.pipe_id = gInfo->target_pipe;
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE, &args, sizeof(args)) == B_OK) {
@@ -78,12 +78,14 @@ intel_i915_accelerant_retrace_semaphore(void)
 
 	TRACE("ACCELERANT_RETRACE_SEMAPHORE: IOCTL failed for pipe %d. Falling back to global sem (%" B_PRId32 ").\n",
 		gInfo->target_pipe, (gInfo->shared_info ? gInfo->shared_info->vblank_sem : -1));
+	// Fallback to global semaphore from shared_info if per-pipe IOCTL fails.
+	// This global semaphore might only be relevant for the primary display pipe.
 	if (gInfo->shared_info && gInfo->shared_info->vblank_sem >= B_OK) {
 		return gInfo->shared_info->vblank_sem;
 	}
 
 	TRACE("ACCELERANT_RETRACE_SEMAPHORE: Fallback to global sem also failed or invalid.\n");
-	return B_ERROR; // Should ideally not happen if init was successful and kernel provides sems
+	return B_ERROR; // Or a more specific error if appropriate.
 }
 
 // --- Mode Configuration Hooks ---
@@ -128,16 +130,16 @@ intel_i915_propose_display_mode(display_mode *target, const display_mode *low, c
 	if (status == B_OK) {
 		*target = args.result_mode; // Copy back the (potentially modified) mode from kernel
 	} else {
-		TRACE("PROPOSE_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
+		TRACE("PROPOSE_DISPLAY_MODE: IOCTL failed for pipe %d: %s\n", gInfo->target_pipe, strerror(status));
 	}
 	return status;
 }
 
 /**
  * @brief Sets the display mode for the current accelerant instance's target pipe.
- * This is primarily a legacy hook. For robust multi-monitor configurations,
- * the `INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION` hook should be used.
- * Calling this hook in an active multi-monitor setup might only affect its `target_pipe`
+ * This is primarily a legacy hook. For robust multi-monitor configurations, the
+ * `INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION` hook should be used.
+ * Calling this hook on an instance in a multi-monitor setup might only affect its `target_pipe`
  * if the kernel can safely do so, or it might be rejected if it conflicts with
  * the overall established multi-monitor configuration.
  *
@@ -157,7 +159,7 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
 	// based on the driver instance (`devInfo`) associated with `gInfo->device_fd`.
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
 	if (status != B_OK) {
-		TRACE("SET_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
+		TRACE("SET_DISPLAY_MODE: IOCTL for pipe %d failed: %s\n", gInfo->target_pipe, strerror(status));
 	}
 	return status;
 }
@@ -166,8 +168,9 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
  * @brief Retrieves the current display mode for the accelerant instance's target pipe.
  * It first attempts to get the mode via the INTEL_I915_GET_PIPE_DISPLAY_MODE IOCTL.
  * If that fails, it falls back to reading from the `shared_info` structure. The
- * `shared_info->pipe_display_configs` array is the preferred fallback, then the
- * legacy `shared_info->current_mode` for the primary pipe of the primary instance.
+ * `shared_info->pipe_display_configs` array is the preferred fallback for the specific pipe.
+ * If that also fails (e.g. pipe not active in shared_info), for the primary accelerant instance (Pipe A),
+ * it may fall back to the legacy `shared_info->current_mode`.
  *
  * @param current_mode Pointer to a display_mode structure to be filled.
  * @return B_OK on success, or an error code if the mode cannot be determined.
@@ -187,10 +190,10 @@ intel_i915_get_display_mode(display_mode *current_mode)
 	} else {
 		TRACE("GET_DISPLAY_MODE: IOCTL INTEL_I915_GET_PIPE_DISPLAY_MODE failed for target_pipe %d: %s.\n",
 			gInfo->target_pipe, strerror(status));
-		// Fallback to shared_info. This is less reliable than the IOCTL, especially for cloned instances,
+		// Fallback to shared_info. This is less reliable than the IOCTL, especially for cloned (non-primary) instances,
 		// as shared_info is updated by the kernel *after* a successful modeset.
 		if (gInfo->shared_info) {
-			uint32 pipeArrayIndex = gInfo->target_pipe; // Assumes accel_pipe_id is a direct array index
+			uint32 pipeArrayIndex = gInfo->target_pipe; // Assuming accel_pipe_id is a direct array index
 			                                          // for shared_info->pipe_display_configs.
 
 			// Check if the target pipe has an active configuration in shared_info.
@@ -211,13 +214,13 @@ intel_i915_get_display_mode(display_mode *current_mode)
 					status = B_OK;
 				} else {
 					memset(current_mode, 0, sizeof(display_mode)); // No valid mode found
-					status = B_ERROR; // Keep original error or set new one
+					status = (status == B_OK) ? B_ERROR : status; // Keep original error or set new one
 					TRACE("GET_DISPLAY_MODE: Fallback for pipe A failed, no active primary pipe in shared_info.\n");
 				}
 			} else {
 				// No specific info for this pipe, and it's not a primary fallback case.
 				memset(current_mode, 0, sizeof(display_mode));
-				status = B_ERROR; // Keep original error or set new one
+				status = (status == B_OK) ? B_ERROR : status; // Keep original error or set new one
 				TRACE("GET_DISPLAY_MODE: Fallback failed, target pipe %d not active in shared_info or not primary instance for fallback.\n", gInfo->target_pipe);
 			}
 		} else {

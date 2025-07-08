@@ -61,8 +61,12 @@ enum {
  * @brief Accelerant hook feature code for setting a complete multi-monitor display configuration.
  * This hook allows specifying modes, active states, positions, and framebuffer GEM handles
  * for multiple display pipes simultaneously. It's the preferred method for multi-monitor setups.
- * Data passed to this hook should be a pointer to an array of 'accelerant_display_config' structures,
- * with the count specified as part of the call (details TBD by actual hook signature).
+ * The 'data' parameter for get_accelerant_hook with this feature should be NULL.
+ * The returned function pointer will have the signature:
+ *   status_t (*set_config_hook)(uint32 display_count,
+ *                               const accelerant_display_config configs[],
+ *                               uint32 primary_display_pipe_id_user,
+ *                               uint32 accel_flags);
  */
 #define INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION (B_ACCELERANT_PRIVATE_OFFSET + 100)
 
@@ -71,27 +75,36 @@ enum {
 /**
  * @brief Configuration for a single display pipe/CRTC, used by the
  * INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION hook.
+ * This structure is defined in user-space (accelerant) and passed to the hook.
+ * The hook implementation will then translate this into an array of
+ * 'struct i915_display_pipe_config' (kernel structure) for the IOCTL.
  */
 typedef struct {
-	uint32 pipe_id;      /**< Pipe identifier (from enum i915_pipe_id_user). */
-	bool   active;       /**< True if this pipe should be active. */
-	display_mode mode;   /**< Standard Haiku display_mode structure for this pipe. */
-	uint32 connector_id; /**< Connector identifier (from enum i915_port_id_user) this pipe should drive. */
-	uint32 fb_gem_handle;/**< User-space GEM handle for the framebuffer. The caller is responsible
-	                          for ensuring this BO is valid and appropriately sized/formatted for the mode. */
-	int32  pos_x;        /**< X position of this display in the virtual desktop. */
-	int32  pos_y;        /**< Y position of this display in the virtual desktop. */
+	uint32 pipe_id;      /**< Pipe identifier (from user-space enum i915_pipe_id_user).
+	                          This indicates which logical pipe (CRTC) this configuration applies to. */
+	bool   active;       /**< True if this pipe should be active in the new configuration.
+	                          If false, the pipe will be disabled if currently active. */
+	display_mode mode;   /**< Standard Haiku display_mode structure defining the timings, resolution,
+	                          and color space for this pipe. */
+	uint32 connector_id; /**< Connector identifier (from user-space enum i915_port_id_user)
+	                          that this pipe should drive. */
+	uint32 fb_gem_handle;/**< User-space GEM handle for the framebuffer (scanout buffer) for this pipe.
+	                          The caller (e.g., app_server) is responsible for ensuring this Buffer Object
+	                          is valid, appropriately sized for the mode, and has a suitable pixel format. */
+	int32  pos_x;        /**< X position of this display's top-left corner on the virtual desktop. */
+	int32  pos_y;        /**< Y position of this display's top-left corner on the virtual desktop. */
 } accelerant_display_config;
 
 /**
  * @brief Flags for the INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION hook.
  */
-#define ACCELERANT_DISPLAY_CONFIG_TEST_ONLY (1 << 0) /**< Validate the configuration but do not apply it. */
+#define ACCELERANT_DISPLAY_CONFIG_TEST_ONLY (1 << 0) /**< If set, the configuration is validated by the kernel
+                                                          but not actually applied (hardware state is not changed). */
 
 
 // --- Args for INTEL_I915_GET_CONNECTOR_INFO IOCTL ---
-#define MAX_EDID_MODES_PER_PORT_ACCEL 32 // Max modes to return to userspace from a single connector's EDID
-#define I915_CONNECTOR_NAME_LEN 32       // Max length for connector name (e.g., "DP-1")
+#define MAX_EDID_MODES_PER_PORT_ACCEL 32 /**< Max number of EDID modes to return to userspace for a single connector. */
+#define I915_CONNECTOR_NAME_LEN 32       /**< Max length for human-readable connector name (e.g., "DP-1"). */
 typedef struct {
 	// Input
 	uint32 connector_id; /**< Kernel's internal connector identifier (typically enum intel_port_id_priv). */
@@ -100,13 +113,14 @@ typedef struct {
 	uint32 type;         /**< Type of the connector (user-space enum i915_port_id_user, maps to kernel's intel_output_type_priv). */
 	bool   is_connected; /**< True if a display is physically connected to this port. */
 	bool   edid_valid;   /**< True if valid EDID data was retrieved from the connected display. */
-	uint8  edid_data[256];/**< Raw EDID data (first two blocks, 128 bytes each). */
-	uint32 num_edid_modes;/**< Number of display modes parsed from EDID, stored in edid_modes. */
+	uint8  edid_data[256];/**< Raw EDID data (first two blocks, 128 bytes each). Valid if edid_valid is true. */
+	uint32 num_edid_modes;/**< Number of display modes parsed from EDID, stored in edid_modes array. */
 	display_mode edid_modes[MAX_EDID_MODES_PER_PORT_ACCEL]; /**< Array of display modes derived from EDID. */
 	display_mode current_mode; /**< Current mode if this connector is active on a pipe. Zeroed if not active. */
-	uint32 current_pipe_id;    /**< Kernel's pipe ID (enum pipe_id_priv) this connector is driven by, or I915_PIPE_USER_INVALID. */
+	uint32 current_pipe_id;    /**< Kernel's pipe ID (enum pipe_id_priv) this connector is currently driven by,
+	                                 or I915_PIPE_USER_INVALID if not assigned or inactive. */
 	char   name[I915_CONNECTOR_NAME_LEN]; /**< Human-readable connector name (e.g., "DP-1", "HDMI-A"). */
-	uint32 reserved[4];  /**< Reserved for future use. */
+	uint32 reserved[4];  /**< Reserved for future use, initialize to zero. */
 } intel_i915_get_connector_info_args;
 
 
@@ -115,33 +129,36 @@ typedef struct {
 /**
  * @brief User-space identifiers for display pipes (CRTCs).
  * These should correspond to the kernel's internal pipe identifiers (enum pipe_id_priv).
+ * Used in communication between accelerant and kernel.
  */
 enum i915_pipe_id_user {
-	I915_PIPE_USER_A = 0, // Corresponds to PRIV_PIPE_A
-	I915_PIPE_USER_B,     // Corresponds to PRIV_PIPE_B
-	I915_PIPE_USER_C,     // Corresponds to PRIV_PIPE_C
-	I915_PIPE_USER_D,     // Corresponds to PRIV_PIPE_D
+	I915_PIPE_USER_A = 0, /**< Corresponds to kernel's PRIV_PIPE_A. */
+	I915_PIPE_USER_B,     /**< Corresponds to kernel's PRIV_PIPE_B. */
+	I915_PIPE_USER_C,     /**< Corresponds to kernel's PRIV_PIPE_C. */
+	I915_PIPE_USER_D,     /**< Corresponds to kernel's PRIV_PIPE_D. */
 	I915_PIPE_USER_INVALID = 0xFFFFFFFF, /**< Indicates no specific pipe or an invalid state. */
-	I915_MAX_PIPES_USER   /**< Number of user-space pipe identifiers. Should align with kernel's max pipes. */
+	I915_MAX_PIPES_USER   /**< Number of user-space pipe identifiers. Should align with kernel's PRIV_MAX_PIPES. */
 };
 
 /**
  * @brief User-space identifiers for display connectors/ports.
  * These should correspond to the kernel's internal port identifiers (enum intel_port_id_priv).
+ * Used in communication between accelerant and kernel.
  */
 enum i915_port_id_user {
-	I915_PORT_ID_USER_NONE = 0, // Corresponds to PRIV_PORT_ID_NONE
-	I915_PORT_ID_USER_A,        // Corresponds to PRIV_PORT_A (e.g., eDP-1 or DP-1)
-	I915_PORT_ID_USER_B,        // Corresponds to PRIV_PORT_B
-	I915_PORT_ID_USER_C,        // Corresponds to PRIV_PORT_C
-	I915_PORT_ID_USER_D,        // Corresponds to PRIV_PORT_D
-	I915_PORT_ID_USER_E,        // Corresponds to PRIV_PORT_E
-	I915_PORT_ID_USER_F,        // Corresponds to PRIV_PORT_F (newer gens)
-	I915_MAX_PORTS_USER         /**< Number of user-space port identifiers. Should align with kernel's max ports. */
+	I915_PORT_ID_USER_NONE = 0, /**< Corresponds to kernel's PRIV_PORT_ID_NONE. */
+	I915_PORT_ID_USER_A,        /**< Corresponds to kernel's PRIV_PORT_A (e.g., eDP-1 or DP-1). */
+	I915_PORT_ID_USER_B,        /**< Corresponds to kernel's PRIV_PORT_B. */
+	I915_PORT_ID_USER_C,        /**< Corresponds to kernel's PRIV_PORT_C. */
+	I915_PORT_ID_USER_D,        /**< Corresponds to kernel's PRIV_PORT_D. */
+	I915_PORT_ID_USER_E,        /**< Corresponds to kernel's PRIV_PORT_E. */
+	I915_PORT_ID_USER_F,        /**< Corresponds to kernel's PRIV_PORT_F (newer gens). */
+	I915_MAX_PORTS_USER         /**< Number of user-space port identifiers. Should align with kernel's PRIV_MAX_PORTS. */
 };
 
 /**
  * @brief Configuration for a single display pipe/CRTC for the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+ * This structure is passed from user-space (accelerant) to the kernel.
  */
 struct i915_display_pipe_config {
 	uint32 pipe_id;      /**< Pipe identifier (from enum i915_pipe_id_user). */
@@ -204,7 +221,7 @@ struct intel_i915_single_display_config {
 	int32							pos_y;
 };
 struct intel_i915_multi_display_config {
-	uint32								magic;
+	uint32								magic; // Should be a defined constant
 	uint32								display_count;
 	intel_i915_single_display_config	configs[MAX_PIPES_I915];
 };
@@ -294,7 +311,7 @@ enum accel_pipe_id {
 	ACCEL_PIPE_A = 0,
 	ACCEL_PIPE_B = 1,
 	ACCEL_PIPE_C = 2,
-	// ACCEL_PIPE_D, // Uncomment if supporting 4 pipes consistently
+	// ACCEL_PIPE_D, // Uncomment if supporting 4 pipes consistently in accelerant logic
 	ACCEL_PIPE_INVALID = -1
 };
 
@@ -443,7 +460,7 @@ typedef struct {
 	uint32			max_pixel_clock;    /**< Maximum supported pixel clock (kHz). */
 	display_mode	preferred_mode_suggestion; /**< Kernel's preferred mode suggestion. */
 
-	// Extended Hardware Capabilities (for Mesa/Gallium & general driver use)
+	// Extended Hardware Capabilities
 	uint32			supported_tiling_modes;     /**< Bitmask of supported GEM BO tiling modes ( (1<<I915_TILING_NONE) | ... ). */
 	uint32			max_texture_2d_width;       /**< Maximum width for a 2D texture/surface. */
 	uint32			max_texture_2d_height;      /**< Maximum height for a 2D texture/surface. */
@@ -464,7 +481,8 @@ typedef struct {
 	uint8_t			ppgtt_type;                 /**< Type of PPGTT supported (enum intel_ppgtt_type from kernel). */
 	uint8_t			ppgtt_size_bits;            /**< Effective addressable bits for PPGTT. */
 
-	// Multi-monitor and Hotplug related fields
+	// Multi-monitor and Hotplug fields
+	/** @brief Per-pipe display configuration, reflecting the current hardware state. Indexed by kernel's enum pipe_id_priv. */
 	struct per_pipe_display_info_accel {
 		addr_t		frame_buffer_base;   /**< User-space address if FB is mapped (often not directly used by accelerant). */
 		uint32		frame_buffer_offset; /**< GTT page offset for this pipe's framebuffer BO. */
@@ -473,20 +491,21 @@ typedef struct {
 		uint16		bits_per_pixel;     /**< Bits per pixel for this pipe's mode. */
 		bool		is_active;          /**< True if this pipe is currently active. */
 		uint32		connector_id;       /**< Kernel's connector ID (enum intel_port_id_priv) this pipe is driving. */
-	} pipe_display_configs[MAX_PIPES_I915]; /**< Per-pipe configuration array, indexed by kernel's enum pipe_id_priv. */
+	} pipe_display_configs[MAX_PIPES_I915];
 
 	uint32			active_display_count; /**< Number of currently active display pipes. */
 	uint32			primary_pipe_index;   /**< Array index in pipe_display_configs for the current primary display. */
 
 	edid1_info		edid_infos[MAX_PIPES_I915]; /**< EDID information for display connected to each pipe (if any). Indexed by pipe ID. */
 	bool			has_edid[MAX_PIPES_I915];   /**< True if edid_infos[pipe_idx] contains valid EDID. */
-	bool			pipe_needs_edid_reprobe[MAX_PIPES_I915]; /**< Flag set by HPD handler if EDID might be stale for a pipe. */
-
+	/** @brief Flags indicating if EDID for a pipe needs re-probing due to an HPD event. Indexed by pipe ID. */
+	bool			pipe_needs_edid_reprobe[MAX_PIPES_I915];
 	/**
-	 * @brief Bitmask indicating the current physical connection status of HPD-capable ports.
-	 * Each bit corresponds to a kernel HPD line identifier (e.g., from i915_hpd_line_identifier).
-	 * Updated by the accelerant's HPD thread after querying connectors.
-	 * App_server can use this to know which ports are currently connected.
+	 * @brief Bitmask reflecting the current physical connection status of HPD-capable ports.
+	 * Each bit should correspond to a kernel HPD line identifier (e.g., from i915_hpd_line_identifier).
+	 * Updated by the accelerant's HPD thread after querying all relevant connectors.
+	 * App_server can use this (along with changed_hpd_mask from B_SCREEN_CHANGED) to know current port states.
+	 * TODO: Ensure consistent bit mapping between this mask and kernel HPD line identifiers.
 	 */
 	uint32			ports_connected_status_mask;
 
@@ -496,6 +515,9 @@ typedef struct {
 } intel_i915_shared_info;
 
 // --- Accelerant's Global State Structure ---
+/**
+ * @brief Holds the state for a single accelerant instance (primary or clone).
+ */
 typedef struct {
 	int							device_fd;          /**< File descriptor for the kernel driver device. */
 	bool						is_clone;           /**< True if this is a cloned accelerant instance (for a secondary head). */

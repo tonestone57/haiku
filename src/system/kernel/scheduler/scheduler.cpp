@@ -2068,6 +2068,19 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 }
 
 
+// Define constants for b.L type compatibility bonus/penalties
+// These values are added to the benefit score. Their magnitude should be
+// relative to typical benefit scores (which are influenced by lag and eligibility).
+// Lag can be ~slice_duration (e.g. 2000-10000), eligibility improvement similar.
+// So bonuses should be in a comparable range to make a difference.
+#define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL (SCHEDULER_TARGET_LATENCY * 4) // Strong incentive
+#define BL_TYPE_PENALTY_PPREF_BIG_TO_LITTLE_LL (SCHEDULER_TARGET_LATENCY * 10) // Strong disincentive
+
+#define BL_TYPE_BONUS_EPREF_BIG_TO_LITTLE_PS (SCHEDULER_TARGET_LATENCY * 2) // Moderate incentive
+#define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_PS (SCHEDULER_TARGET_LATENCY * 1) // Mild incentive (PS still cares for power)
+#define BL_TYPE_PENALTY_EPREF_LITTLE_TO_BIG_PS (SCHEDULER_TARGET_LATENCY * 1) // Mild disincentive
+
+
 static bool // Changed return type
 scheduler_perform_load_balance()
 {
@@ -2098,69 +2111,65 @@ scheduler_perform_load_balance()
 	int32 maxLoadFound = -1;
 	int32 minLoadFound = 0x7fffffff;
 
+	// --- Initial Source/Target Core Selection (based on normalized load) ---
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
 		ReadSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
-
-		// Find best source candidate in this shard's high-load heap
-		for (int32 i = 0; ; i++) {
-			CoreEntry* core = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum(i);
-			if (core == NULL) break;
-			if (core->IsDefunct()) continue;
-			if (core->GetLoad() > maxLoadFound) {
-				maxLoadFound = core->GetLoad();
-				sourceCoreCandidate = core;
-			}
-			break;
+		CoreEntry* shardBestSource = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum();
+		if (shardBestSource != NULL && !shardBestSource->IsDefunct() && shardBestSource->GetLoad() > maxLoadFound) {
+			maxLoadFound = shardBestSource->GetLoad();
+			sourceCoreCandidate = shardBestSource;
 		}
 
-		// Find best target candidate in this shard's low-load heap
-		for (int32 i = 0; ; i++) {
-			CoreEntry* core = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(i);
-			if (core == NULL) break;
-			if (core->IsDefunct()) continue;
-
+		CoreEntry* shardBestTarget = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum();
+		if (shardBestTarget != NULL && !shardBestTarget->IsDefunct() && shardBestTarget->GetLoad() < minLoadFound) {
 			// Ensure target is not the same as the current overall best source candidate
-			// This check is a bit simplified; ideally, we'd collect all candidates then pick distinct source/target.
-			// For now, if a core is a good target and also the current best source, we might skip it as target.
-			if (sourceCoreCandidate != NULL && core == sourceCoreCandidate) continue;
-
-			if (core->GetLoad() < minLoadFound) {
-				minLoadFound = core->GetLoad();
-				targetCoreCandidate = core;
+			if (sourceCoreCandidate != NULL && shardBestTarget == sourceCoreCandidate) {
+				// Try next best in this shard if current best target is the source
+				CoreEntry* nextBestTarget = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(1);
+				if (nextBestTarget != NULL && !nextBestTarget->IsDefunct() && nextBestTarget->GetLoad() < minLoadFound) {
+					minLoadFound = nextBestTarget->GetLoad();
+					targetCoreCandidate = nextBestTarget;
+				}
+			} else {
+				minLoadFound = shardBestTarget->GetLoad();
+				targetCoreCandidate = shardBestTarget;
 			}
-			break;
 		}
 		shardLocker.Unlock();
 	}
 
-	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
-		return migrationPerformed;
-
-	// Re-check if targetCoreCandidate became the same as sourceCoreCandidate due to separate shard processing
-	if (targetCoreCandidate == sourceCoreCandidate) {
-	    // Try to find a different targetCoreCandidate from all shards that is not sourceCoreCandidate
-	    minLoadFound = 0x7fffffff;
-	    CoreEntry* alternativeTarget = NULL;
-	    for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
-	        ReadSpinLocker altShardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
-	        for (int32 i = 0; ; i++) {
-	            CoreEntry* core = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(i);
-	            if (core == NULL) break;
-	            if (core->IsDefunct() || core == sourceCoreCandidate) continue;
-	            if (core->GetLoad() < minLoadFound) {
-	                minLoadFound = core->GetLoad();
-	                alternativeTarget = core;
-	            }
-	            break;
-	        }
-	        altShardLocker.Unlock();
-	    }
-	    targetCoreCandidate = alternativeTarget;
-	    if (targetCoreCandidate == NULL) // Still no alternative target
-		return migrationPerformed;
+	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate) {
+		// If still same or one is null, try a more exhaustive search for a distinct pair
+		if (sourceCoreCandidate != NULL && targetCoreCandidate == sourceCoreCandidate) {
+			minLoadFound = 0x7fffffff;
+			CoreEntry* alternativeTarget = NULL;
+			for (int32 i = 0; i < gCoreCount; ++i) {
+				CoreEntry* core = &gCoreEntries[i];
+				if (core->IsDefunct() || core == sourceCoreCandidate) continue;
+				if (core->GetLoad() < minLoadFound) {
+					minLoadFound = core->GetLoad();
+					alternativeTarget = core;
+				}
+			}
+			targetCoreCandidate = alternativeTarget;
+		}
+		if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
+			return migrationPerformed;
 	}
 
+	// --- b.L Aware Refinement of Source/Target (Conceptual Placeholder) ---
+	// In Low Latency: if sourceCore is LITTLE and targetCore is LITTLE,
+	// check if a BIG core is available and less loaded than sourceCore.
+	// If so, newTargetCore = BIG core. This is complex to do perfectly without
+	// iterating all cores again with type preferences.
+	// For now, the main intelligence will be in thread selection bonus.
+	TRACE_SCHED_BL("LoadBalance: Initial candidates: SourceCore %" B_PRId32 " (Type %d, Load %" B_PRId32 "), TargetCore %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
+		sourceCoreCandidate->ID(), sourceCoreCandidate->Type(), sourceCoreCandidate->GetLoad(),
+		targetCoreCandidate->ID(), targetCoreCandidate->Type(), targetCoreCandidate->GetLoad());
 
+
+	// --- Imbalance Check (using kLoadDifference) ---
+	// TODO: kLoadDifference might need to be type-aware later.
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
 		return migrationPerformed;
 
@@ -2170,7 +2179,7 @@ scheduler_perform_load_balance()
 
 	CPUEntry* sourceCPU = NULL;
 	CPUEntry* targetCPU = NULL;
-	CoreEntry* finalTargetCore = NULL;
+	CoreEntry* finalTargetCore = NULL; // This will be the core we are migrating *to*.
 
 	CPUEntry* idleTargetCPUOnTargetCore = _find_idle_cpu_on_core(targetCoreCandidate);
 	if (idleTargetCPUOnTargetCore != NULL) {
@@ -2178,47 +2187,92 @@ scheduler_perform_load_balance()
 			targetCoreCandidate->ID(), idleTargetCPUOnTargetCore->ID());
 	}
 
-	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) {
+	// --- Determine finalTargetCore based on mode ---
+	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) { // Power Saving Mode
 		CoreEntry* consolidationCore = NULL;
 		if (gCurrentMode != NULL && gCurrentMode->get_consolidation_target_core != NULL)
-			consolidationCore = gCurrentMode->get_consolidation_target_core(NULL);
+			consolidationCore = gCurrentMode->get_consolidation_target_core(NULL); // Pass NULL for global STC
+		// If no STC, try to designate one (power_saving_designate_consolidation_core prefers LITTLEs)
 		if (consolidationCore == NULL && gCurrentMode != NULL && gCurrentMode->designate_consolidation_core != NULL) {
 			consolidationCore = gCurrentMode->designate_consolidation_core(NULL);
 		}
 
 		if (consolidationCore != NULL) {
 			if (sourceCoreCandidate != consolidationCore &&
-				(consolidationCore->GetLoad() < kHighLoad || consolidationCore->GetInstantaneousLoad() < 0.8f)) {
+				(consolidationCore->GetLoad() < kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY || consolidationCore->GetInstantaneousLoad() < 0.8f)) {
 				finalTargetCore = consolidationCore;
-			} else if (sourceCoreCandidate == consolidationCore && sourceCoreCandidate->GetLoad() > kVeryHighLoad) {
+				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
+					finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
+			} else if (sourceCoreCandidate == consolidationCore && sourceCoreCandidate->GetLoad() > kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+				// STC is overloaded, try to find a spill target (preferably another LITTLE)
 				CoreEntry* spillTarget = NULL;
+				int32 minSpillLoad = 0x7fffffff;
 				for (int32 i = 0; i < gCoreCount; ++i) {
 					CoreEntry* core = &gCoreEntries[i];
-					if (core == consolidationCore || core->GetLoad() == 0) continue;
-					if (core->GetLoad() < kHighLoad) {
-						if (spillTarget == NULL || core->GetLoad() < spillTarget->GetLoad()) {
+					if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
+					// Prefer spilling to a LITTLE core if possible
+					if (core->Type() == CORE_TYPE_LITTLE && core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+						if (core->GetLoad() < minSpillLoad) {
+							minSpillLoad = core->GetLoad();
 							spillTarget = core;
+						}
+					}
+				}
+				// If no LITTLE spill target, try any other non-loaded core
+				if (spillTarget == NULL) {
+					for (int32 i = 0; i < gCoreCount; ++i) {
+						CoreEntry* core = &gCoreEntries[i];
+						if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
+						if (core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+							if (core->GetLoad() < minSpillLoad) {
+								minSpillLoad = core->GetLoad();
+								spillTarget = core;
+							}
 						}
 					}
 				}
 				if (spillTarget != NULL) {
 					finalTargetCore = spillTarget;
+					TRACE_SCHED_BL("LoadBalance (PS): STC %" B_PRId32 " overloaded, spilling to Core %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
+						sourceCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
 				} else {
+					// No good spill target, fall back to original targetCoreCandidate if suitable
 					finalTargetCore = targetCoreCandidate;
 					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
 					if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0
 						&& gCurrentMode->should_wake_core_for_load != NULL) {
+						// should_wake_core_for_load needs to be b.L aware
 						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5)) {
 							finalTargetCore = NULL;
 						}
 					}
 				}
-			} else { return migrationPerformed; }
-		} else { return migrationPerformed; }
+			} else { /* STC is source but not overloaded, or STC is target but too loaded */ return migrationPerformed; }
+		} else { /* No STC available */ return migrationPerformed; }
 		if (finalTargetCore == NULL) { return migrationPerformed; }
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
-	} else {
+	} else { // Low Latency Mode or other spread policy
 		finalTargetCore = targetCoreCandidate;
+		// b.L Refinement for LL mode: If source is LITTLE and target is LITTLE, but a BIG core is available & better.
+		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD &&
+			sourceCoreCandidate->Type() == CORE_TYPE_LITTLE &&
+			finalTargetCore->Type() == CORE_TYPE_LITTLE) {
+			CoreEntry* bestBigTarget = NULL;
+			int32 bestBigTargetLoad = 0x7fffffff;
+			for (int32 i = 0; i < gCoreCount; ++i) {
+				CoreEntry* core = &gCoreEntries[i];
+				if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE)) continue;
+				if (core->GetLoad() < sourceCoreCandidate->GetLoad() && core->GetLoad() < bestBigTargetLoad) {
+					bestBigTargetLoad = core->GetLoad();
+					bestBigTarget = core;
+				}
+			}
+			if (bestBigTarget != NULL) {
+				finalTargetCore = bestBigTarget;
+				TRACE_SCHED_BL("LoadBalance (LL): Switched target from LITTLE %" B_PRId32 " to BIG/UNIFORM %" B_PRId32 " (Load %" B_PRId32 ")\n",
+					targetCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->GetLoad());
+			}
+		}
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	}
 
@@ -2235,7 +2289,7 @@ scheduler_perform_load_balance()
 	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
 
 	ThreadData* bestCandidateToMove = NULL;
-	bigtime_t maxBenefitScore = -1;
+	bigtime_t maxBenefitScore = -1; // Initialize to a value that any positive score can beat
 
 	const int MAX_LB_CANDIDATES_TO_CHECK = 10;
 	const bigtime_t MIN_POSITIVE_LAG_FOR_MIGRATION = SCHEDULER_MIN_GRANULARITY * 2;
@@ -2261,7 +2315,7 @@ scheduler_perform_load_balance()
 		}
 
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
-		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
+		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU; // Should not happen if finalTargetCore is valid
 
 		bigtime_t targetQueueMinVruntime = representativeTargetCPU->GetCachedMinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
@@ -2270,17 +2324,23 @@ scheduler_perform_load_balance()
 		if (candidateWeight <= 0) candidateWeight = 1;
 
 		bigtime_t candidateSliceDuration = candidate->SliceDuration();
-		bigtime_t candidateWeightedSlice = (candidateSliceDuration * SCHEDULER_WEIGHT_SCALE) / candidateWeight;
-		bigtime_t estimatedLagOnTarget = candidateWeightedSlice - (estimatedVRuntimeOnTarget - targetQueueMinVruntime);
+		// Use target core's capacity for entitlement calculation on target
+		uint32 targetCoreCapacity = finalTargetCore->PerformanceCapacity() > 0 ? finalTargetCore->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
+		uint64 normalizedSliceWorkNum = (uint64)candidateSliceDuration * targetCoreCapacity;
+		bigtime_t normalizedSliceWorkOnTarget = normalizedSliceWorkNum / SCHEDULER_NOMINAL_CAPACITY;
+		bigtime_t weightedNormalizedSliceEntitlementOnTarget = (normalizedSliceWorkOnTarget * SCHEDULER_WEIGHT_SCALE) / candidateWeight;
+
+		bigtime_t estimatedLagOnTarget = weightedNormalizedSliceEntitlementOnTarget - (estimatedVRuntimeOnTarget - targetQueueMinVruntime);
 
 		bigtime_t estimatedEligibleTimeOnTarget;
 		if (estimatedLagOnTarget >= 0) {
 			estimatedEligibleTimeOnTarget = now;
 		} else {
-			bigtime_t delay = (-estimatedLagOnTarget * SCHEDULER_WEIGHT_SCALE) / candidateWeight;
-			if (candidateWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-			delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-			estimatedEligibleTimeOnTarget = now + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY);
+			uint64 delayNumerator = (uint64)(-estimatedLagOnTarget) * candidateWeight * SCHEDULER_NOMINAL_CAPACITY;
+			uint64 delayDenominator = (uint64)SCHEDULER_WEIGHT_SCALE * targetCoreCapacity;
+			bigtime_t wallClockDelay = (delayDenominator == 0) ? SCHEDULER_TARGET_LATENCY * 2 : delayNumerator / delayDenominator;
+			wallClockDelay = min_c(wallClockDelay, (bigtime_t)SCHEDULER_TARGET_LATENCY * 2);
+			estimatedEligibleTimeOnTarget = now + max_c(wallClockDelay, (bigtime_t)SCHEDULER_MIN_GRANULARITY);
 		}
 
 		bigtime_t eligibilityImprovement = candidate->EligibleTime() - estimatedEligibleTimeOnTarget;
@@ -2290,27 +2350,68 @@ scheduler_perform_load_balance()
 		bigtime_t affinityBonus = 0;
 		if (idleTargetCPUOnTargetCore != NULL
 			&& candidate->GetThread()->previous_cpu == &gCPU[idleTargetCPUOnTargetCore->ID()]) {
-			affinityBonus = SCHEDULER_TARGET_LATENCY * 2;
+			affinityBonus = SCHEDULER_TARGET_LATENCY * 2; // Existing affinity bonus
 			currentBenefitScore += affinityBonus;
 			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " gets wake-affinity bonus %" B_PRId64 " for CPU %" B_PRId32 "\n",
 				candidate->GetThread()->id, affinityBonus, idleTargetCPUOnTargetCore->ID());
 		}
 
 		if (candidate->IsLikelyIOBound()) {
-			if (affinityBonus == 0) {
+			if (affinityBonus == 0) { // Only apply penalty if no wake-affinity bonus
 				currentBenefitScore /= kIOBoundScorePenaltyFactor;
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
 					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
 			} else {
-				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity, score not reduced.\n",
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity, score not reduced by I/O penalty.\n",
 					candidate->GetThread()->id);
 			}
 		}
+
+		// --- b.L Type Compatibility Bonus/Penalty ---
+		bool isPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidate->LatencyNice() < -5 || candidate->GetLoad() > kHighLoad);
+		bool isEPref = (!isPCritical && (candidate->GetBasePriority() < B_NORMAL_PRIORITY || candidate->LatencyNice() > 5 || candidate->GetLoad() < kLowLoad));
+
+		scheduler_core_type sourceType = sourceCPU->Core()->Type();
+		scheduler_core_type targetType = finalTargetCore->Type();
+		bigtime_t typeBonus = 0;
+
+		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD) { // Low Latency
+			if (isPCritical && sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+				typeBonus = BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL;
+			} else if (isPCritical && (sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+				typeBonus = -BL_TYPE_PENALTY_PPREF_BIG_TO_LITTLE_LL;
+			}
+		} else { // Power Saving (Consolidate)
+			if (isEPref && (sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+				typeBonus = BL_TYPE_BONUS_EPREF_BIG_TO_LITTLE_PS;
+			} else if (isPCritical && sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+				typeBonus = BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_PS;
+			} else if (isEPref && sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+				typeBonus = -BL_TYPE_PENALTY_EPREF_LITTLE_TO_BIG_PS;
+			}
+		}
+		currentBenefitScore += typeBonus;
+		if (typeBonus != 0) {
+			TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 " (PCrit %d, EPref %d) from %d to %d gets type_bonus %" B_PRId64 ". New score: %" B_PRId64 "\n",
+				candidate->GetThread()->id, isPCritical, isEPref, sourceType, targetType, typeBonus, currentBenefitScore);
+		}
+		// --- End b.L Type Compatibility ---
+
 
 		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": currentLag %" B_PRId64 ", estEligTgt %" B_PRId64 " (currEligSrc %" B_PRId64 "), affinityBonus %" B_PRId64 ", final benefitScore %" B_PRId64 "\n",
 			candidate->GetThread()->id, currentLagOnSource, estimatedEligibleTimeOnTarget, candidate->EligibleTime(), affinityBonus, currentBenefitScore);
 
 		if (currentBenefitScore > maxBenefitScore) {
+			// Additional check: if target is LITTLE and source is BIG/UNI, and thread is P-Critical,
+			// ensure benefit is VERY high to justify such a move (even with penalty, score might be positive).
+			// This is mostly covered by the penalty, but as a safeguard.
+			if (isPCritical && (targetType == CORE_TYPE_LITTLE) && (sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+				if (currentBenefitScore < BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL) { // Requires a huge score to move P-crit to LITTLE
+					TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 " is P-Critical. Suppressing move from BIG/UNI Core %" B_PRId32 " to LITTLE Core %" B_PRId32 " due to insufficient benefit score %" B_PRId64 ".\n",
+						candidate->GetThread()->id, sourceCPU->Core()->ID(), finalTargetCore->ID(), currentBenefitScore);
+					continue; // Skip this candidate if it's a P-Critical going to LITTLE without overwhelming benefit
+				}
+			}
 			maxBenefitScore = currentBenefitScore;
 			bestCandidateToMove = candidate;
 		}
@@ -2318,7 +2419,7 @@ scheduler_perform_load_balance()
 
 	for (int i = 0; i < checkedCount; ++i) {
 		if (tempStorage[i] != bestCandidateToMove) {
-			sourceQueue.Add(tempStorage[i]);
+			sourceQueue.Add(tempStorage[i]); // Re-add non-chosen candidates
 		}
 	}
 	threadToMove = bestCandidateToMove;
@@ -2329,50 +2430,52 @@ scheduler_perform_load_balance()
 		return migrationPerformed;
 	}
 
+	// Select target CPU on the finalTargetCore, considering threadToMove's affinity
 	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
-	if (targetCPU == NULL || targetCPU == sourceCPU) {
-		if (threadToMove != NULL) {
+	if (targetCPU == NULL || targetCPU == sourceCPU) { // Should not pick sourceCPU if finalTargetCore is different
+		if (threadToMove != NULL) { // Re-add if target invalid
 			sourceQueue.Add(threadToMove);
 		}
 		sourceCPU->UnlockRunQueue();
-		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 "\n",
+		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 " or target is source.\n",
 			threadToMove->GetThread()->id, finalTargetCore->ID());
 		return migrationPerformed;
 	}
 
+	// Proceed with migration
 	atomic_add(&sourceCPU->fTotalThreadCount, -1);
 	ASSERT(sourceCPU->fTotalThreadCount >=0);
-	sourceCPU->_UpdateMinVirtualRuntime();
+	sourceCPU->_UpdateMinVirtualRuntime(); // Update min VR for source CPU's queue
 
 	threadToMove->MarkDequeued();
-	sourceCPU->UnlockRunQueue();
+	sourceCPU->UnlockRunQueue(); // Source CPU's queue unlocked
 
-	TRACE("LoadBalance (EEVDF): Migrating thread %" B_PRId32 " (Lag %" B_PRId64 ", VD %" B_PRId64 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 "\n",
-		threadToMove->GetThread()->id, threadToMove->Lag(), threadToMove->VirtualDeadline(), sourceCPU->ID(), targetCPU->ID());
+	TRACE_SCHED_BL("LoadBalance (EEVDF): Migrating T %" B_PRId32 " (Lag %" B_PRId64 ", Score %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d) to CPU %" B_PRId32 "(C%d,T%d)\n",
+		threadToMove->GetThread()->id, threadToMove->Lag(), maxBenefitScore,
+		sourceCPU->ID(), sourceCPU->Core()->ID(), sourceCPU->Core()->Type(),
+		targetCPU->ID(), targetCPU->Core()->ID(), targetCPU->Core()->Type());
 
-	if (threadToMove->Core() != NULL)
-		threadToMove->UnassignCore(false);
+	// Unassign from old core (affects load accounting)
+	if (threadToMove->Core() != NULL) // Should always be true if it was on sourceCPU
+		threadToMove->UnassignCore(false); // false = not currently running
 
-	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
-	CoreEntry* actualFinalTargetCore = targetCPU->Core();
-	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU); // This sets threadToMove->fCore
+	// Update thread's core association and EEVDF parameters for the new target
+	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()]; // Set previous_cpu hint for next placement
+	CoreEntry* actualFinalTargetCore = targetCPU->Core(); // Should be same as finalTargetCore
+	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU); // This sets threadToMove->fCore and adds load to new core
 	ASSERT(threadToMove->Core() == actualFinalTargetCore);
 
-	// Acquire scheduler_lock for threadToMove before updating its EEVDF parameters.
-	InterruptsSpinLocker schedulerLocker(threadToMove->GetThread()->scheduler_lock);
-
-	// Update EEVDF parameters for the migrated thread.
-	// isNewOrRelocated = true, isRequeue = false.
-	threadToMove->UpdateEevdfParameters(targetCPU, true, false);
-
-	schedulerLocker.Unlock(); // Release lock
+	{ // Scope for schedulerLocker
+		InterruptsSpinLocker schedulerLocker(threadToMove->GetThread()->scheduler_lock);
+		threadToMove->UpdateEevdfParameters(targetCPU, true, false); // true = new/relocated
+	}
 
 	TRACE_SCHED("LoadBalance: Migrated T %" B_PRId32 " to CPU %" B_PRId32 " (after UpdateEevdfParameters), new VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 "\n",
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
 	// Add to target CPU's run queue
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove);
+	targetCPU->AddThread(threadToMove); // This calls MarkEnqueued & updates targetCPU's totalThreadCount
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(now);
@@ -2380,26 +2483,25 @@ scheduler_perform_load_balance()
 	migrationPerformed = true;
 
 	// IRQ Follow-Task logic
-	if (threadToMove->Core() != sourceCPU->Core()) { // Check if moved across cores
+	if (threadToMove->Core() != sourceCPU->Core()) { // Check if moved across physical cores
 		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
 		int8 localIrqCount = 0;
 		thread_id migratedThId = threadToMove->GetThread()->id;
 
-		// Safely copy the IRQ list.
-		// scheduler_perform_load_balance itself runs with interrupts disabled.
-		// The fAffinitizedIrqs array in ThreadData is protected by the thread's scheduler_lock.
-		InterruptsSpinLocker followTaskLocker(threadToMove->GetThread()->scheduler_lock);
-		const int32* affinitizedIrqsPtr = threadToMove->GetAffinitizedIrqs(localIrqCount);
-		if (localIrqCount > 0) {
-			memcpy(localIrqList, affinitizedIrqsPtr, localIrqCount * sizeof(int32));
-		}
-		followTaskLocker.Unlock();
+		{ // Scope for followTaskLocker
+			InterruptsSpinLocker followTaskLocker(threadToMove->GetThread()->scheduler_lock);
+			const int32* affinitizedIrqsPtr = threadToMove->GetAffinitizedIrqs(localIrqCount);
+			if (localIrqCount > 0) {
+				memcpy(localIrqList, affinitizedIrqsPtr, localIrqCount * sizeof(int32));
+			}
+		} // followTaskLocker released
 
 		if (localIrqCount > 0) {
 			scheduler_maybe_follow_task_irqs(migratedThId, localIrqList, localIrqCount, targetCPU->Core(), targetCPU);
 		}
 	}
 
+	// Check if reschedule is needed on target CPU
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
 	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
 	bool newThreadIsEligible = (system_time() >= threadToMove->EligibleTime());

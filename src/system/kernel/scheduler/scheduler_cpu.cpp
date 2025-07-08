@@ -643,8 +643,31 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 		locker.Unlock();
 
 		// Update this CPUEntry's measurement of active time for its fLoad calculation.
-		fMeasureActiveTime += activeTime;
-		// Update the parent CoreEntry's cumulative active time.
+		// fMeasureActiveTime now accumulates capacity-normalized work.
+		uint32 coreCapacity = SCHEDULER_NOMINAL_CAPACITY;
+		if (fCore != NULL && fCore->fPerformanceCapacity > 0) {
+			coreCapacity = fCore->fPerformanceCapacity;
+		} else if (fCore != NULL && fCore->fPerformanceCapacity == 0) {
+			TRACE_SCHED_WARNING("TrackActivity: CPU %" B_PRId32 ", Core %" B_PRId32 " has 0 capacity! Using nominal %u for fMeasureActiveTime.\n",
+				fCPUNumber, fCore->ID(), SCHEDULER_NOMINAL_CAPACITY);
+		} else if (fCore == NULL) {
+			TRACE_SCHED_WARNING("TrackActivity: CPU %" B_PRId32 " has NULL CoreEntry! Using nominal capacity %u for fMeasureActiveTime.\n",
+				fCPUNumber, SCHEDULER_NOMINAL_CAPACITY);
+		}
+
+		if (activeTime > 0) { // Only add if there was actual activity
+			uint64 normalizedActiveContributionNum = (uint64)activeTime * coreCapacity;
+			uint32 normalizedActiveContributionDen = SCHEDULER_NOMINAL_CAPACITY;
+			if (normalizedActiveContributionDen == 0) { // Should not happen
+				TRACE_SCHED_WARNING("TrackActivity: CPU %" B_PRId32 ", SCHEDULER_NOMINAL_CAPACITY is 0! Cannot normalize active time.\n", fCPUNumber);
+				// Fallback to non-normalized, or handle error appropriately
+				fMeasureActiveTime += activeTime;
+			} else {
+				fMeasureActiveTime += normalizedActiveContributionNum / normalizedActiveContributionDen;
+			}
+		}
+
+		// Update the parent CoreEntry's cumulative active time (still wall-clock based).
 		if (fCore) fCore->IncreaseActiveTime(activeTime);
 
 		// Let the thread itself account for its consumed CPU time.

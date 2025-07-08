@@ -56,8 +56,8 @@ ThreadData::_InitBase()
 	// Load estimation
 	fNeededLoad = 0;
 	fLoadMeasurementEpoch = 0;
-	fMeasureAvailableActiveTime = 0;
-	fMeasureAvailableTime = 0;
+	fMeasureAvailableActiveTime = 0; // Will store normalized work
+	fMeasureAvailableTime = 0;       // Will store wall-clock available time
 	fLastMeasureAvailableTime = 0;
 
 	// Load balancing
@@ -708,6 +708,9 @@ ThreadData::_ComputeNeededLoad()
 		return;
 
 	// period is guaranteed > 0 here due to the check above.
+	// fMeasureAvailableActiveTime now stores normalized work.
+	// period is wall-clock time.
+	// currentLoadPercentage will represent demand for nominal capacity units, scaled by kMaxLoad.
 	int32 currentLoadPercentage = (int32)((fMeasureAvailableActiveTime * kMaxLoad) / period);
 	currentLoadPercentage = std::max(0, std::min(kMaxLoad, currentLoadPercentage));
 
@@ -722,13 +725,16 @@ ThreadData::_ComputeNeededLoad()
 	fNeededLoad = newNeededLoad;
 
 	fLastMeasureAvailableTime = fMeasureAvailableTime;
-	fMeasureAvailableActiveTime = 0;
+	fMeasureAvailableActiveTime = 0; // Reset normalized active time accumulator
 
-	// EEVDF
+	// EEVDF parameters are not re-initialized here. This function focuses on load.
+	// Minor cleanup: fSliceDuration was an EEVDF param; its re-init here was a relic.
+	// Corrected to match constructor default for slice duration.
+	// However, fSliceDuration is primarily managed by UpdateEevdfParameters.
 	fVirtualDeadline = 0;
 	fLag = 0;
 	fEligibleTime = 0;
-	fSliceDuration = kBaseQuanta[NUM_MLFQ_LEVELS / 2]; // Default slice
+	fSliceDuration = kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)];
 	fVirtualRuntime = 0;
 	// fEevdfLink is implicitly default-constructed.
 }
@@ -828,3 +834,105 @@ ThreadData::IsLikelyIOBound() const
 		fThread->id, fAverageRunBurstTimeEWMA, IO_BOUND_BURST_THRESHOLD_US, isIOBound ? "true" : "false");
 	return isIOBound;
 }
+
+// This is the new version of ThreadData::UpdateActivity for the overwrite
+inline void
+ThreadData::UpdateActivity(bigtime_t active)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	if (IsIdle())
+		return; // Idle threads don't track quantum usage or load this way.
+
+	// Accumulate CPU time used in the current quantum.
+	fTimeUsedInCurrentQuantum += active;
+	// Subtract any time that was "stolen" by interrupts during this slice.
+	// fStolenTime is accumulated by SetStolenInterruptTime.
+	fTimeUsedInCurrentQuantum -= fStolenTime;
+	fStolenTime = 0; // Reset stolen time for the next slice.
+
+	if (fTimeUsedInCurrentQuantum < 0) // Should not happen if fStolenTime is accurate
+		fTimeUsedInCurrentQuantum = 0;
+
+
+	if (gTrackCoreLoad) {
+		// Update measures used for calculating this thread's fNeededLoad.
+
+		// fMeasureAvailableTime: Wall time it was "available" (ready or running).
+		// 'active' is the wall-clock time the thread *just ran*. This contributes
+		// to the period over which its activity (for fNeededLoad) is measured.
+		fMeasureAvailableTime += active;
+
+		// fMeasureAvailableActiveTime: Now accumulates capacity-normalized work done by this thread.
+		// 'fCore' is the core this thread is currently associated with (and just ran on).
+		uint32 coreCapacityOfExecution = SCHEDULER_NOMINAL_CAPACITY;
+		if (fCore != NULL && fCore->fPerformanceCapacity > 0) {
+			coreCapacityOfExecution = fCore->fPerformanceCapacity;
+		} else if (fCore != NULL && fCore->fPerformanceCapacity == 0) {
+			// This case should ideally not happen if cores are initialized properly.
+			TRACE_SCHED_WARNING("ThreadData::UpdateActivity: T %" B_PRId32 " ran on Core %" B_PRId32
+				" with 0 capacity! Using nominal %u for fNeededLoad active time calc.\n",
+				fThread->id, fCore->ID(), SCHEDULER_NOMINAL_CAPACITY);
+		} else if (fCore == NULL) {
+			// This is problematic, as we don't know the capacity of the core it ran on.
+			// Should ideally not happen for a thread whose activity is being updated after running.
+			TRACE_SCHED_WARNING("ThreadData::UpdateActivity: T %" B_PRId32
+				" has NULL fCore! Using nominal capacity %u for fNeededLoad active time calc.\n",
+				fThread->id, SCHEDULER_NOMINAL_CAPACITY);
+		}
+
+		if (active > 0) {
+			// Calculate normalized active contribution: active_wall_clock * (core_cap / nominal_cap)
+			uint64 normalizedActiveNum = (uint64)active * coreCapacityOfExecution;
+			// SCHEDULER_NOMINAL_CAPACITY is guaranteed non-zero (defined as 1024).
+			bigtime_t normalizedActiveContribution = normalizedActiveNum / SCHEDULER_NOMINAL_CAPACITY;
+
+			// fMeasureAvailableActiveTime now stores normalized work units.
+			fMeasureAvailableActiveTime += normalizedActiveContribution;
+		}
+	}
+}
+// --- End of new UpdateActivity ---
+
+// This is the new version of ThreadData::_ComputeNeededLoad for the overwrite
+void
+ThreadData::_ComputeNeededLoad()
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(!IsIdle());
+
+	bigtime_t period = fMeasureAvailableTime - fLastMeasureAvailableTime;
+	if (period <= 0)
+		return;
+
+	// period is guaranteed > 0 here due to the check above.
+	// fMeasureAvailableActiveTime now stores normalized work.
+	// period is wall-clock time.
+	// currentLoadPercentage will represent demand for nominal capacity units, scaled by kMaxLoad.
+	int32 currentLoadPercentage = (int32)((fMeasureAvailableActiveTime * kMaxLoad) / period);
+	currentLoadPercentage = std::max(0, std::min(kMaxLoad, currentLoadPercentage));
+
+	const float alpha = 0.5f;
+	int32 newNeededLoad = (int32)(alpha * currentLoadPercentage + (1.0f - alpha) * fNeededLoad);
+	newNeededLoad = std::max(0, std::min(kMaxLoad, newNeededLoad));
+
+
+	if (fCore != NULL && newNeededLoad != fNeededLoad) {
+		fCore->ChangeLoad(newNeededLoad - fNeededLoad);
+	}
+	fNeededLoad = newNeededLoad;
+
+	fLastMeasureAvailableTime = fMeasureAvailableTime;
+	fMeasureAvailableActiveTime = 0; // Reset normalized active time accumulator
+
+	// EEVDF parameters are not re-initialized here. This function focuses on load.
+	// Minor cleanup: fSliceDuration was an EEVDF param; its re-init here was a relic.
+	// Corrected to match constructor default for slice duration.
+	// However, fSliceDuration is primarily managed by UpdateEevdfParameters.
+	fVirtualDeadline = 0;
+	fLag = 0;
+	fEligibleTime = 0;
+	fSliceDuration = kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)];
+	fVirtualRuntime = 0;
+	// fEevdfLink is implicitly default-constructed.
+}
+// --- End of new _ComputeNeededLoad ---

@@ -215,6 +215,10 @@ extern "C" status_t init_driver(void) {
 		current_dev_info->rcs0 = NULL;
 		current_dev_info->rps_state = NULL;
 
+		for (int k = 0; k < PRIV_MAX_PIPES; k++) {
+			current_dev_info->vblank_sems[k] = -1; // Initialize per-pipe sems
+		}
+
 		// Initialize DPLL states
 		for (int k = 0; k < MAX_HW_DPLLS; k++) {
 			current_dev_info->dplls[k].is_in_use = false;
@@ -660,6 +664,148 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				return B_BAD_ADDRESS;
 			}
 			return i915_set_display_config_ioctl_handler(devInfo, &args);
+		}
+		case INTEL_I915_GET_PIPE_DISPLAY_MODE: {
+			if (devInfo == NULL || buffer == NULL || length != sizeof(intel_i915_get_pipe_display_mode_args)) {
+				TRACE("GET_PIPE_DISPLAY_MODE: Invalid args\n");
+				return B_BAD_VALUE;
+			}
+			intel_i915_get_pipe_display_mode_args args;
+			if (user_memcpy(&args, buffer, sizeof(args)) != B_OK) {
+				TRACE("GET_PIPE_DISPLAY_MODE: user_memcpy failed for args\n");
+				return B_BAD_ADDRESS;
+			}
+
+			enum pipe_id_priv requested_pipe = (enum pipe_id_priv)args.pipe_id;
+			TRACE("GET_PIPE_DISPLAY_MODE: Requested for pipe %d\n", requested_pipe);
+
+			if (requested_pipe < PRIV_PIPE_A || requested_pipe >= PRIV_MAX_PIPES) {
+				TRACE("GET_PIPE_DISPLAY_MODE: Invalid pipe_id %d\n", requested_pipe);
+				return B_BAD_VALUE;
+			}
+
+			// Directly copy the current mode stored in the pipe's hardware state.
+			// If the pipe is not enabled, this mode might be stale or zeroed, which is acceptable.
+			args.pipe_mode = devInfo->pipes[requested_pipe].current_mode;
+
+			if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) {
+				TRACE("GET_PIPE_DISPLAY_MODE: user_memcpy failed for returning mode\n");
+				return B_BAD_ADDRESS;
+			}
+			return B_OK;
+		}
+		case INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE: {
+			if (devInfo == NULL || buffer == NULL || length != sizeof(intel_i915_get_retrace_semaphore_args)) {
+				TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: Invalid args\n");
+				return B_BAD_VALUE;
+			}
+			intel_i915_get_retrace_semaphore_args args;
+			// Only pipe_id is input, but copy whole struct for simplicity with output.
+			if (user_memcpy(&args, buffer, sizeof(args)) != B_OK) {
+				TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: user_memcpy failed for args\n");
+				return B_BAD_ADDRESS;
+			}
+
+			enum pipe_id_priv requested_pipe = (enum pipe_id_priv)args.pipe_id;
+			TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: Requested for pipe %d\n", requested_pipe);
+
+			if (requested_pipe < PRIV_PIPE_A || requested_pipe >= PRIV_MAX_PIPES) {
+				TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: Invalid pipe_id %d\n", requested_pipe);
+				return B_BAD_VALUE;
+			}
+
+			if (devInfo->vblank_sems[requested_pipe] < B_OK) {
+				TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: Semaphore for pipe %d not initialized or invalid (id: %" B_PRId32 ")\n",
+					requested_pipe, devInfo->vblank_sems[requested_pipe]);
+				// This case should ideally not happen if irq_init was successful for all pipes.
+				// Could also indicate pipe is not supposed to be active or doesn't support vblank events.
+				return B_UNSUPPORTED; // Or B_NO_INIT if preferred for uninitialized sem
+			}
+
+			args.sem = devInfo->vblank_sems[requested_pipe];
+
+			if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) {
+				TRACE("GET_RETRACE_SEMAPHORE_FOR_PIPE: user_memcpy failed for returning sem_id\n");
+				return B_BAD_ADDRESS;
+			}
+			return B_OK;
+		}
+		case INTEL_I915_PROPOSE_SPECIFIC_MODE: {
+			if (devInfo == NULL || buffer == NULL || length != sizeof(intel_i915_propose_specific_mode_args)) {
+				TRACE("PROPOSE_SPECIFIC_MODE: Invalid args\n");
+				return B_BAD_VALUE;
+			}
+			intel_i915_propose_specific_mode_args args;
+			if (user_memcpy(&args, buffer, sizeof(args)) != B_OK) {
+				TRACE("PROPOSE_SPECIFIC_MODE: user_memcpy failed for args\n");
+				return B_BAD_ADDRESS;
+			}
+
+			enum pipe_id_priv requested_pipe = (enum pipe_id_priv)args.pipe_id;
+			TRACE("PROPOSE_SPECIFIC_MODE: Requested for pipe %d\n", requested_pipe);
+
+			if (requested_pipe < PRIV_PIPE_A || requested_pipe >= PRIV_MAX_PIPES) {
+				TRACE("PROPOSE_SPECIFIC_MODE: Invalid pipe_id %d\n", requested_pipe);
+				return B_BAD_VALUE;
+			}
+
+			// Simplified mode proposal logic:
+			// Try to find an exact match for target_mode on any connector associated with this pipe.
+			// If not found, try to find preferred mode of the first connected port on this pipe.
+			// This is a basic implementation. A real one would iterate modes and match constraints.
+			bool mode_found = false;
+			display_mode best_match = {0};
+
+			for (uint32 i = 0; i < devInfo->num_ports_detected; i++) {
+				intel_output_port_state* port = &devInfo->ports[i];
+				// TODO: Need a robust way to know which ports can be driven by `requested_pipe`.
+				// This might involve checking VBT data or assuming certain fixed mappings.
+				// For now, let's assume any connected port *could* be a candidate, and
+				// if the pipe is already assigned, prefer that port.
+				if (port->connected && port->num_modes > 0) {
+					if (port->current_pipe_assignment == requested_pipe || port->current_pipe_assignment == PRIV_PIPE_INVALID) {
+						for (int m = 0; m < port->num_modes; m++) {
+							// Basic check against target resolution and refresh (pixel clock is a proxy for refresh)
+							if (port->modes[m].virtual_width == args.target_mode.virtual_width &&
+								port->modes[m].virtual_height == args.target_mode.virtual_height &&
+								(args.target_mode.timing.pixel_clock == 0 || port->modes[m].timing.pixel_clock == args.target_mode.timing.pixel_clock)) {
+								// TODO: Check against low_bound and high_bound more thoroughly
+								best_match = port->modes[m];
+								mode_found = true;
+								TRACE("PROPOSE_SPECIFIC_MODE: Found exact match on port %u for pipe %d\n", port->logical_port_id, requested_pipe);
+								goto found_and_copy_back;
+							}
+						}
+						// If no exact match yet, consider preferred mode of this port if it's the first potential one.
+						if (!mode_found && port->preferred_mode.timing.pixel_clock != 0) {
+							best_match = port->preferred_mode;
+							mode_found = true; // Tentative
+							TRACE("PROPOSE_SPECIFIC_MODE: Using preferred mode of port %u for pipe %d as candidate\n", port->logical_port_id, requested_pipe);
+						}
+					}
+				}
+			}
+
+			if (!mode_found && devInfo->preferred_mode_suggestion.timing.pixel_clock != 0) {
+				// Fallback to global preferred mode if no pipe-specific found
+				best_match = devInfo->preferred_mode_suggestion;
+				mode_found = true;
+				TRACE("PROPOSE_SPECIFIC_MODE: Using global preferred mode for pipe %d\n", requested_pipe);
+			}
+
+
+		found_and_copy_back:
+			if (mode_found) {
+				args.result_mode = best_match;
+				if (user_memcpy(buffer, &args, sizeof(args)) != B_OK) {
+					TRACE("PROPOSE_SPECIFIC_MODE: user_memcpy failed for returning result_mode\n");
+					return B_BAD_ADDRESS;
+				}
+				return B_OK;
+			} else {
+				TRACE("PROPOSE_SPECIFIC_MODE: No suitable mode found for pipe %d\n", requested_pipe);
+				return B_DEV_INVALID_IOCTL; // Or B_BAD_VALUE if no mode meets criteria
+			}
 		}
 		case INTEL_I915_IOCTL_GEM_CREATE: return intel_i915_gem_create_ioctl(devInfo, buffer, length);
 		case INTEL_I915_IOCTL_GEM_MMAP_AREA: return intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);

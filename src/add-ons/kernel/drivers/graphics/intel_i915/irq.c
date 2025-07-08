@@ -23,35 +23,61 @@ extern struct work_queue* gPmWorkQueue;
 status_t
 intel_i915_irq_init(intel_i915_device_info* devInfo)
 {
-	char semName[64]; status_t status;
+	char semName[64];
+	status_t status = B_OK; // Initialize status
 	if (!devInfo || !devInfo->shared_info || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
 
-	snprintf(semName, sizeof(semName), "i915_0x%04x_vblank_sem", devInfo->runtime_caps.device_id);
-	devInfo->vblank_sem_id = create_sem(0, semName);
-	if (devInfo->vblank_sem_id < B_OK) return devInfo->vblank_sem_id;
-	devInfo->shared_info->vblank_sem = devInfo->vblank_sem_id;
+	// Create per-pipe VBlank semaphores
+	for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; p++) {
+		snprintf(semName, sizeof(semName), "i915_0x%04x_vblank_pipe%c_sem",
+			devInfo->runtime_caps.device_id, 'A' + p);
+		devInfo->vblank_sems[p] = create_sem(0, semName);
+		if (devInfo->vblank_sems[p] < B_OK) {
+			status = devInfo->vblank_sems[p]; // Store the error
+			// Cleanup previously created sems for this device
+			for (enum pipe_id_priv k = PRIV_PIPE_A; k < p; k++) {
+				if (devInfo->vblank_sems[k] >= B_OK) {
+					delete_sem(devInfo->vblank_sems[k]);
+					devInfo->vblank_sems[k] = -1;
+				}
+			}
+			return status; // Return the error from create_sem
+		}
+	}
+	// For backward compatibility or primary display, shared_info->vblank_sem can point to Pipe A's sem.
+	devInfo->shared_info->vblank_sem = devInfo->vblank_sems[PRIV_PIPE_A];
+
 
 	if (devInfo->irq_line == 0 || devInfo->irq_line == 0xff) {
-		TRACE("IRQ: No IRQ line assigned or IRQ disabled.
-");
-		return B_OK; // Not an error, just means no IRQ handling.
+		TRACE("IRQ: No IRQ line assigned or IRQ disabled. Per-pipe sems created but IRQ handler not installed.\n");
+		return B_OK; // Not an error, just means no IRQ handling for now.
 	}
 
 	status = install_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo, 0);
 	if (status != B_OK) {
-		delete_sem(devInfo->vblank_sem_id);
-		devInfo->vblank_sem_id = -1;
+		// Cleanup all per-pipe sems if IRQ handler install fails
+		for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; p++) {
+			if (devInfo->vblank_sems[p] >= B_OK) {
+				delete_sem(devInfo->vblank_sems[p]);
+				devInfo->vblank_sems[p] = -1;
+			}
+		}
+		devInfo->shared_info->vblank_sem = -1;
 		return status;
 	}
 	devInfo->irq_cookie = devInfo;
 
 	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (fw_status != B_OK) {
-		// If forcewake fails, we can't configure IRQs. Uninstall handler.
 		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
 		devInfo->irq_cookie = NULL;
-		delete_sem(devInfo->vblank_sem_id);
-		devInfo->vblank_sem_id = -1;
+		for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; p++) {
+			if (devInfo->vblank_sems[p] >= B_OK) {
+				delete_sem(devInfo->vblank_sems[p]);
+				devInfo->vblank_sems[p] = -1;
+			}
+		}
+		devInfo->shared_info->vblank_sem = -1;
 		return fw_status;
 	}
 
@@ -104,17 +130,20 @@ intel_i915_irq_uninit(intel_i915_device_info* devInfo)
 				intel_i915_write32(devInfo, PMIMR, 0xFFFFFFFF); // Mask all PM IRQs
 				intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			} else {
-				TRACE("IRQ_uninit: Failed to get forcewake, IRQ registers not masked.
-");
+				TRACE("IRQ_uninit: Failed to get forcewake, IRQ registers not masked.\n");
 			}
 		}
 		remove_io_interrupt_handler(devInfo->irq_line, intel_i915_interrupt_handler, devInfo->irq_cookie);
 		devInfo->irq_cookie = NULL;
 	}
-	if (devInfo->vblank_sem_id >= B_OK) {
-		delete_sem(devInfo->vblank_sem_id);
-		devInfo->vblank_sem_id = -1;
+
+	for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; p++) {
+		if (devInfo->vblank_sems[p] >= B_OK) {
+			delete_sem(devInfo->vblank_sems[p]);
+			devInfo->vblank_sems[p] = -1;
+		}
 	}
+	devInfo->shared_info->vblank_sem = -1; // Clear shared info pointer too
 }
 
 
@@ -218,8 +247,12 @@ intel_i915_handle_pipe_vblank(intel_i915_device_info* devInfo, enum pipe_id_priv
 
 	// Always release the generic VBLANK semaphore for this pipe,
 	// regardless of whether a flip occurred, to unblock general VBLANK waiters.
-	if (devInfo->vblank_sem_id >= B_OK) {
-		release_sem_etc(devInfo->vblank_sem_id, 1, B_DO_NOT_RESCHEDULE);
+	if (pipe < PRIV_MAX_PIPES && devInfo->vblank_sems[pipe] >= B_OK) {
+		release_sem_etc(devInfo->vblank_sems[pipe], 1, B_DO_NOT_RESCHEDULE);
+	} else if (pipe == PRIV_PIPE_A && devInfo->shared_info->vblank_sem >= B_OK) {
+		// Fallback for Pipe A if per-pipe sem somehow not valid but global one is
+		// (should not happen with current init logic but defensive)
+		release_sem_etc(devInfo->shared_info->vblank_sem, 1, B_DO_NOT_RESCHEDULE);
 	}
 }
 

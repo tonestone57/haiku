@@ -585,7 +585,10 @@ typedef struct intel_i915_device_info {
 
 	struct intel_engine_cs* rcs0; struct rps_info* rps_state;
 	uint32_t current_cdclk_freq_khz;
-	uint32_t open_count; int32_t irq_line; sem_id vblank_sem_id; void* irq_cookie;
+	uint32_t open_count; int32_t irq_line;
+	// sem_id vblank_sem_id; // This will be replaced by per-pipe sems
+	sem_id vblank_sems[PRIV_MAX_PIPES]; // Per-pipe VBlank semaphores
+	void* irq_cookie;
 
 	display_mode preferred_mode_suggestion; // Kernel's suggestion for preferred mode
 

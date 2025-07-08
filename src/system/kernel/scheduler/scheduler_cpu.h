@@ -26,6 +26,19 @@
 
 namespace Scheduler {
 
+// Defines the type of a CPU core, relevant for heterogeneous systems (big.LITTLE)
+enum scheduler_core_type {
+	CORE_TYPE_UNKNOWN = 0,				// Type not determined or system is homogeneous (legacy default)
+	CORE_TYPE_UNIFORM_PERFORMANCE = 1,	// Known to be homogeneous performance cores
+	CORE_TYPE_LITTLE = 2,				// High-efficiency core
+	CORE_TYPE_BIG = 3					// High-performance core
+};
+
+// Nominal capacity reference for fPerformanceCapacity.
+// For example, a "standard" big core could be 1024.
+// LITTLE cores would be < 1024, future "bigger" big cores > 1024.
+#define SCHEDULER_NOMINAL_CAPACITY 1024
+
 
 class DebugDumper;
 
@@ -44,6 +57,10 @@ public:
 
 	inline				int32			ID() const	{ return fCPUNumber; }
 	inline				CoreEntry*		Core() const	{ return fCore; }
+	inline				scheduler_core_type Type() const; // Forward to Core's type
+	inline				uint32			PerformanceCapacity() const; // Forward to Core's capacity
+	inline				uint32			EnergyEfficiency() const; // Forward to Core's efficiency
+
 
 						void			Start();
 						void			Stop();
@@ -215,6 +232,11 @@ private:
 						CPUPriorityHeap	fCPUHeap;
 						spinlock		fCPULock;
 
+						// big.LITTLE / Heterogeneous properties
+						scheduler_core_type fCoreType;
+						uint32			fPerformanceCapacity;	// Relative to SCHEDULER_NOMINAL_CAPACITY
+						uint32			fEnergyEfficiency;		// Abstract scale, higher is more efficient
+
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
@@ -231,6 +253,27 @@ private:
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
+
+// Inline getters for CPUEntry to access its Core's heterogeneous properties
+// Definition needs to be after CoreEntry is fully defined.
+inline scheduler_core_type CPUEntry::Type() const {
+	// SCHEDULER_ENTER_FUNCTION(); // Optional for such simple forwarding
+	ASSERT(fCore != NULL);
+	return fCore->fCoreType;
+}
+
+inline uint32 CPUEntry::PerformanceCapacity() const {
+	// SCHEDULER_ENTER_FUNCTION();
+	ASSERT(fCore != NULL);
+	return fCore->fPerformanceCapacity;
+}
+
+inline uint32 CPUEntry::EnergyEfficiency() const {
+	// SCHEDULER_ENTER_FUNCTION();
+	ASSERT(fCore != NULL);
+	return fCore->fEnergyEfficiency;
+}
+
 
 class CoreLoadHeap : public MinMaxHeap<CoreEntry, int32> {
 public:

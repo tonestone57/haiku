@@ -1396,6 +1396,8 @@ init()
 	for (int32 i = 0; i < coreCount; ++i)
 		coreHasRegisteredWithPackage[i] = false;
 
+	// This loop ensures CoreEntry objects are Init()ed and then populated
+	// with big.LITTLE specific data if available from the underlying gCPU[i].arch.
 	for (int32 i = 0; i < cpuCount; ++i) {
 		int32 coreIdx = sCPUToCore[i];
 		int32 packageIdx = sCPUToPackage[i];
@@ -1406,8 +1408,67 @@ init()
 		CoreEntry* currentCore = &gCoreEntries[coreIdx];
 		PackageEntry* currentPackage = &gPackageEntries[packageIdx];
 
-		if (currentCore->ID() == -1) {
+		if (currentCore->ID() == -1) { // First time we encounter this physical core
 			currentCore->Init(coreIdx, currentPackage);
+
+			// --- Populate big.LITTLE properties for the CoreEntry ---
+			// This assumes that arch_cpu_init() (or similar arch-specific code)
+			// has discovered these properties and stored them in a way accessible
+			// via gCPU[i]. For example, in gCPU[i].arch fields.
+			// All logical CPUs (SMT threads) on the same physical core are assumed
+			// to share the same core type and base capacity.
+			// We use gCPU[i] (the first logical CPU found for this core) as representative.
+
+			// Placeholder for actual access to discovered data from gCPU[i].arch:
+			// Example: currentCore->fCoreType = gCPU[i].arch.discovered_core_type;
+			// Example: currentCore->fPerformanceCapacity = gCPU[i].arch.discovered_capacity;
+			// Example: currentCore->fEnergyEfficiency = gCPU[i].arch.discovered_efficiency;
+
+			// For now, without actual arch-specific discovery code changes,
+			// these will effectively use the defaults set in CoreEntry's constructor/Init.
+			// The following is conceptual, showing where arch data would be integrated.
+#if B_HAIKU_CPU_X86
+			// Example: Hypothetical fields in arch_cpu_info for x86
+			// if (gCPU[i].arch.cpu_type == ARCH_CPU_TYPE_P_CORE) {
+			// 	currentCore->fCoreType = CORE_TYPE_BIG;
+			// 	currentCore->fPerformanceCapacity = SCHEDULER_NOMINAL_CAPACITY;
+			// 	currentCore->fEnergyEfficiency = 500; // Arbitrary example
+			// } else if (gCPU[i].arch.cpu_type == ARCH_CPU_TYPE_E_CORE) {
+			// 	currentCore->fCoreType = CORE_TYPE_LITTLE;
+			// 	currentCore->fPerformanceCapacity = SCHEDULER_NOMINAL_CAPACITY / 2; // Example
+			// 	currentCore->fEnergyEfficiency = 800; // Arbitrary example
+			// } else {
+			//	// Defaults from CoreEntry constructor/Init take effect
+			// }
+#elif B_HAIKU_CPU_ARM
+			// Example: Hypothetical fields in arch_cpu_info for ARM from Device Tree
+			// if (gCPU[i].arch.dt_core_type != CORE_TYPE_UNKNOWN) {
+			//	currentCore->fCoreType = gCPU[i].arch.dt_core_type;
+			//	currentCore->fPerformanceCapacity = gCPU[i].arch.dt_capacity;
+			//	currentCore->fEnergyEfficiency = gCPU[i].arch.dt_efficiency;
+			// } else {
+			//	// Defaults from CoreEntry constructor/Init take effect
+			// }
+#endif
+			// If still unknown after potential arch-specific checks, refine default.
+			// This helps non-hetero SMP systems appear as UNIFORM_PERFORMANCE.
+			if (currentCore->fCoreType == CORE_TYPE_UNKNOWN) {
+				// A more robust check would involve arch_cpu_is_heterogeneous() flag.
+				// For now, if multiple cores exist and we don't know otherwise, assume uniform.
+				// If only one core, also uniform.
+				if (gCoreCount > 0) { // Check gCoreCount not cpuCount for physical cores
+					currentCore->fCoreType = CORE_TYPE_UNIFORM_PERFORMANCE;
+				}
+				// fPerformanceCapacity and fEnergyEfficiency retain constructor defaults
+				// (SCHEDULER_NOMINAL_CAPACITY and 0 respectively).
+			}
+			if (currentCore->fPerformanceCapacity == 0) {
+				// Ensure capacity is non-zero, default to nominal if arch code didn't set it.
+				currentCore->fPerformanceCapacity = SCHEDULER_NOMINAL_CAPACITY;
+			}
+
+			dprintf("scheduler_init: Core %" B_PRId32 ": Type %d, Capacity %" B_PRIu32 ", Efficiency %" B_PRIu32 "\n",
+				currentCore->ID(), currentCore->fCoreType, currentCore->fPerformanceCapacity, currentCore->fEnergyEfficiency);
 		}
 
 		if (!coreHasRegisteredWithPackage[coreIdx]) {

@@ -51,6 +51,7 @@
 #include <vm/VMAddressSpace.h>
 #include <wait_for_objects.h>
 
+#include "scheduler_defs.h" // For LATENCY_NICE_DEFAULT
 #include "TeamThreadTables.h"
 
 
@@ -265,6 +266,7 @@ Thread::Thread(const char* name, thread_id threadID, struct cpu_ent* cpu)
 	serial_number(-1),
 	hash_next(NULL),
 	priority(-1),
+	latency_nice(LATENCY_NICE_DEFAULT),
 	io_priority(-1),
 	cpu(cpu),
 	previous_cpu(NULL),

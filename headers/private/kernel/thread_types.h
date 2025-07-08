@@ -227,6 +227,7 @@ struct Thread : TeamThreadIteratorEntry<thread_id>, KernelReferenceable {
 	char			name[B_OS_NAME_LENGTH];	// protected by fLock
 	bool			going_to_suspend;	// protected by scheduler lock
 	int32			priority;		// protected by scheduler lock
+	int8			latency_nice;	// Latency preference for EEVDF
 	int32			io_priority;	// protected by fLock
 	int32			state;			// protected by scheduler lock
 	struct cpu_ent	*cpu;			// protected by scheduler lock

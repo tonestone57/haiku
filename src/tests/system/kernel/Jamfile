@@ -79,6 +79,8 @@ SimpleTest sigint_bug113_test : sigint_bug113_test.cpp ;
 
 SimpleTest sigsuspend_test : sigsuspend_test.cpp ;
 
+SimpleTest latency_nice_test : latency_nice_test.cpp ;
+
 SubInclude HAIKU_TOP src tests system kernel cache ;
 SubInclude HAIKU_TOP src tests system kernel fs ;
 SubInclude HAIKU_TOP src tests system kernel disk_device_manager ;

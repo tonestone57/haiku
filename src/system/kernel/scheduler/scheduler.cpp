@@ -2216,6 +2216,180 @@ scheduler_perform_load_balance()
 
 // #pragma mark - Syscalls
 
+status_t
+_kern_get_thread_latency_nice(thread_id thid, int8* outLatencyNice)
+{
+	if (outLatencyNice == NULL || !IS_USER_ADDRESS(outLatencyNice))
+		return B_BAD_ADDRESS;
+
+	if (thid <= 0) {
+		// Try to provide a default for invalid ID if possible, but signal error.
+		// Or, strictly return error and user must handle.
+		// For now, let's be strict. User should check return before using outLatencyNice.
+		return B_BAD_THREAD_ID;
+	}
+
+	Thread* thread = Thread::Get(thid);
+	if (thread == NULL)
+		return B_BAD_THREAD_ID; // ESRCH
+	BReference<Thread> threadReference(thread, true);
+
+	// No specific permission check for 'get' by default, anyone can query.
+	// If specific threads' info should be protected, add checks here.
+
+	int8 value;
+	{
+		InterruptsSpinLocker schedulerLocker(thread->scheduler_lock);
+		if (thread->scheduler_data == NULL) {
+			// Should not happen for valid threads after init
+			return B_ERROR; // Should map to something like EIO or EINVAL if possible
+		}
+		value = thread->scheduler_data->LatencyNice();
+	}
+
+	if (user_memcpy(outLatencyNice, &value, sizeof(int8)) != B_OK)
+		return B_BAD_ADDRESS; // EFAULT
+
+	return B_OK; // Success is 0
+}
+
+status_t
+_kern_set_thread_latency_nice(thread_id thid, int8 latencyNice)
+{
+	if (latencyNice < LATENCY_NICE_MIN || latencyNice > LATENCY_NICE_MAX)
+		return B_BAD_VALUE; // EINVAL
+
+	if (thid <= 0)
+		return B_BAD_THREAD_ID; // ESRCH
+
+	Thread* currentThread = thread_get_current_thread();
+	Thread* targetThread = NULL;
+
+	if (thid == currentThread->id) {
+		targetThread = currentThread;
+		targetThread->AcquireReference();
+	} else {
+		targetThread = Thread::Get(thid);
+		if (targetThread == NULL)
+			return B_BAD_THREAD_ID; // ESRCH
+	}
+	BReference<Thread> threadReference(targetThread, true);
+
+	// Permission check
+	if (targetThread->team != currentThread->team
+		&& currentThread->team->effective_uid != 0) {
+		// Not same team and caller is not root
+		return B_NOT_ALLOWED; // EPERM
+	}
+
+	InterruptsSpinLocker schedulerLocker(targetThread->scheduler_lock);
+	// Additional locking for targetThread->latency_nice (main struct field):
+	// If other parts of the kernel access thread->latency_nice without holding scheduler_lock,
+	// then targetThread->fLock (the general thread mutex) should be acquired here.
+	// For now, assuming coordinated access or that scheduler_lock is sufficient.
+	// To be very safe:
+	// targetThread->Lock(); // Acquire general thread lock
+	// ...
+	// targetThread->Unlock(); // Release general thread lock
+
+	if (targetThread->scheduler_data == NULL) {
+		// targetThread->Unlock(); // if general lock was taken
+		return B_ERROR; // Or a more specific error like EINVAL if appropriate
+	}
+
+	targetThread->latency_nice = latencyNice; // Update main struct
+	targetThread->scheduler_data->SetLatencyNice(latencyNice); // Update scheduler cache
+
+	TRACE_SCHED("set_latency_nice: T %" B_PRId32 " to %d\n", thid, (int)latencyNice);
+
+	bool wasRunning = (targetThread->state == B_THREAD_RUNNING && targetThread->cpu != NULL);
+	bool wasReadyAndEnqueued = (targetThread->state == B_THREAD_READY && targetThread->scheduler_data->IsEnqueued());
+
+	if (wasRunning || wasReadyAndEnqueued) {
+		CPUEntry* cpuContext = NULL;
+		if (wasRunning) {
+			cpuContext = CPUEntry::GetCPU(targetThread->cpu->cpu_num);
+		} else {
+			if (targetThread->previous_cpu != NULL && targetThread->scheduler_data->Core() != NULL
+				&& CPUEntry::GetCPU(targetThread->previous_cpu->cpu_num)->Core() == targetThread->scheduler_data->Core()) {
+				cpuContext = CPUEntry::GetCPU(targetThread->previous_cpu->cpu_num);
+			} else if (targetThread->scheduler_data->Core() != NULL
+					   && targetThread->scheduler_data->Core()->CPUCount() > 0) {
+				cpuContext = CPUEntry::GetCPU(targetThread->scheduler_data->Core()->CPUMask().FirstSetBit());
+				TRACE_SCHED("set_latency_nice: T %" B_PRId32 " ready&enqueued, using first CPU of its core for context.\n", thid);
+			}
+		}
+
+		if (cpuContext == NULL) {
+			TRACE_SCHED("set_latency_nice: T %" B_PRId32 " has no CPU context for update, using global min_vruntime.\n", thid);
+		}
+
+		targetThread->scheduler_data->SetSliceDuration(
+			scheduler_calculate_eevdf_slice(targetThread->scheduler_data, cpuContext));
+
+		bigtime_t reference_min_vruntime;
+		if (cpuContext != NULL) {
+			InterruptsSpinLocker queueLocker(cpuContext->fQueueLock);
+			reference_min_vruntime = cpuContext->MinVirtualRuntime();
+		} else {
+			reference_min_vruntime = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
+		}
+
+		int32 weight = scheduler_priority_to_weight(targetThread->scheduler_data->GetBasePriority());
+		if (weight <= 0) weight = 1;
+
+		bigtime_t newWeightedSlice = (targetThread->scheduler_data->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
+		targetThread->scheduler_data->SetLag(newWeightedSlice
+			- (targetThread->scheduler_data->VirtualRuntime() - reference_min_vruntime));
+
+		if (targetThread->scheduler_data->IsRealTime()) {
+			targetThread->scheduler_data->SetEligibleTime(system_time());
+		} else if (targetThread->scheduler_data->Lag() >= 0) {
+			targetThread->scheduler_data->SetEligibleTime(system_time());
+		} else {
+			bigtime_t delay = (-targetThread->scheduler_data->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
+			delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
+			targetThread->scheduler_data->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+		}
+		targetThread->scheduler_data->SetVirtualDeadline(
+			targetThread->scheduler_data->EligibleTime() + targetThread->scheduler_data->SliceDuration());
+
+		TRACE_SCHED("set_latency_nice: T %" B_PRId32 " params updated: slice %" B_PRId64 ", lag %" B_PRId64 ", elig %" B_PRId64 ", VD %" B_PRId64 "\n",
+			thid, targetThread->scheduler_data->SliceDuration(), targetThread->scheduler_data->Lag(),
+			targetThread->scheduler_data->EligibleTime(), targetThread->scheduler_data->VirtualDeadline());
+
+		if (wasRunning) {
+			ASSERT(cpuContext != NULL);
+			gCPU[cpuContext->ID()].invoke_scheduler = true;
+			if (cpuContext->ID() != smp_get_current_cpu()) {
+				smp_send_ici(cpuContext->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+			}
+		} else if (wasReadyAndEnqueued) {
+			ASSERT(cpuContext != NULL);
+			InterruptsSpinLocker queueLocker(cpuContext->fQueueLock);
+			cpuContext->GetEevdfRunQueue().Update(targetThread->scheduler_data);
+
+			Thread* currentOnThatCpu = gCPU[cpuContext->ID()].running_thread;
+			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
+				|| (system_time() >= targetThread->scheduler_data->EligibleTime()
+					&& targetThread->scheduler_data->VirtualDeadline() < currentOnThatCpu->scheduler_data->VirtualDeadline())) {
+				if (cpuContext->ID() == smp_get_current_cpu()) {
+					gCPU[cpuContext->ID()].invoke_scheduler = true;
+				} else {
+					smp_send_ici(cpuContext->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+				}
+			}
+			TRACE_SCHED("set_latency_nice: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
+				thid, cpuContext->ID());
+		}
+	}
+	// schedulerLocker (InterruptsSpinLocker) is released.
+	// targetThread->Unlock(); // if general lock was taken
+
+	return B_OK; // Success is 0
+}
+
+
 bigtime_t
 _user_estimate_max_scheduling_latency(thread_id id)
 {

@@ -357,6 +357,14 @@ extern status_t		wait_for_thread_etc(thread_id id, uint32 flags, bigtime_t timeo
 						status_t *_returnCode);
 extern status_t		on_exit_thread(void (*callback)(void *), void *data);
 
+/* Latency-Nice definitions (Experimental Haiku API) */
+#define LATENCY_NICE_MIN -20
+#define LATENCY_NICE_MAX 19
+#define LATENCY_NICE_DEFAULT 0
+
+extern status_t set_thread_latency_nice(thread_id thid, int8 latencyNice);
+extern status_t get_thread_latency_nice(thread_id thid, int8* outLatencyNice);
+
 extern thread_id 	find_thread(const char *name);
 
 extern status_t		send_data(thread_id thread, int32 code, const void *buffer,

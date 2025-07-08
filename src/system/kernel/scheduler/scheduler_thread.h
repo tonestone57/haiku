@@ -223,7 +223,7 @@ private:
 			bigtime_t	fEligibleTime;				// EEVDF: Wall-clock time when thread can next run.
 			bigtime_t	fSliceDuration;				// EEVDF: Current wall-clock slice/quantum duration.
 			bigtime_t	fVirtualRuntime;			// EEVDF: Accumulated weighted execution time.
-			int8		fLatencyNice;				// EEVDF: Latency preference (-20 to +19), affects slice.
+			// int8		fLatencyNice; // This was already here from a previous understanding, ensure it's used correctly.
 			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue (contains SchedulerHeapLink).
 
 	// I/O-bound detection heuristic fields

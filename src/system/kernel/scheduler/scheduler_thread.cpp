@@ -248,6 +248,7 @@ ThreadData::Init()
 {
 	_InitBase();
 	fCore = NULL;
+	fLatencyNice = fThread->latency_nice; // Explicitly copy from Thread struct
 
 	Thread* currentThread = thread_get_current_thread();
 	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
@@ -272,6 +273,7 @@ ThreadData::Init(CoreEntry* core)
 {
 	_InitBase();
 	fCore = core;
+	fLatencyNice = fThread->latency_nice; // Explicitly copy from Thread struct
 	fReady = true;
 	fNeededLoad = 0;
 	// fCurrentMlfqLevel = NUM_MLFQ_LEVELS - 1; // REMOVED
@@ -410,38 +412,28 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	// Base slice duration from priority using definitions from scheduler_defs.h
 	int effectivePriority = GetBasePriority();
 	// Clamp priority to valid range for safety, though ThreadData should maintain valid priority.
-	if (effectivePriority < 0) effectivePriority = 0;
-	if (effectivePriority >= B_MAX_PRIORITY) effectivePriority = B_MAX_PRIORITY -1;
+	if (effectivePriority < 0) effectivePriority = 0; // Should map to B_IDLE_PRIORITY level via MapPriorityToEffectiveLevel
+	if (effectivePriority >= B_MAX_PRIORITY) effectivePriority = B_MAX_PRIORITY - 1;
 
 	int level = MapPriorityToEffectiveLevel(effectivePriority);
-	// Use kBaseQuanta from scheduler_defs.h (NUM_PRIORITY_LEVELS)
-	// and apply gSchedulerBaseQuantumMultiplier here.
-	bigtime_t baseSliceWithMultiplier = (bigtime_t)(kBaseQuanta[level] * gSchedulerBaseQuantumMultiplier);
+	bigtime_t baseSlice = kBaseQuanta[level]; // Direct use of kBaseQuanta
 
-	// Get latency_nice factor
-	// fLatencyNice is now a member of ThreadData
 	int latencyNiceIdx = latency_nice_to_index(fLatencyNice);
-	// gLatencyNiceFactors and LATENCY_NICE_FACTOR_SCALE_SHIFT are from scheduler_defs.h
 	int32 factor = gLatencyNiceFactors[latencyNiceIdx];
 
-	// Apply factor
-	// (baseSliceWithMultiplier * factor) / SCALE can overflow if baseSlice is large.
-	// (baseSliceWithMultiplier / SCALE) * factor loses precision.
-	// (baseSliceWithMultiplier * factor) >> SHIFT is good for powers of 2.
-	bigtime_t modulatedSlice = (baseSliceWithMultiplier * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
+	// Apply factor: (baseSlice * factor) / SCALE
+	// (baseSlice * factor) >> SHIFT is good for powers of 2 SCALE
+	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
 
-	// Clamp to system min/max defined in scheduler_defs.h
+	// Clamp to system min/max
 	if (modulatedSlice < kMinSliceGranularity)
 		modulatedSlice = kMinSliceGranularity;
 	if (modulatedSlice > kMaxSliceDuration)
 		modulatedSlice = kMaxSliceDuration;
 
-	// Note: fSliceDuration will be set by the caller (e.g., in reschedule or enqueue)
-	// by calling SetSliceDuration(calculated_value). This function just calculates.
-
-	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: thread %" B_PRId32 ", prio %d, latency_nice %d, "
-		"baseSliceWithMultiplier %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
-		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSliceWithMultiplier, factor, (int)LATENCY_NICE_FACTOR_SCALE,
+	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, latency_nice %d, "
+		"baseSlice %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
+		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE,
 		modulatedSlice);
 
 	return modulatedSlice;

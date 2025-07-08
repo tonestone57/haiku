@@ -2382,26 +2382,42 @@ scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
 		// If we reach here, targetCpuForIrq is non-NULL and is different from currentIrqCpuNum.
 		// A move is potentially beneficial. Check cooldown.
 		bigtime_t now = system_time();
-		bool allowMove = true;
+		bool proceedWithMove = false;
 
-		bigtime_t lastMove = atomic_load_64(&gIrqLastFollowMoveTime[irqVector]);
-		if (now < lastMove + kIrqFollowTaskCooldownPeriod) {
-			allowMove = false;
-			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64 ", cooldown %" B_PRId64 "). Skipping move.\n",
-				irqVector, migratedThreadId, lastMove, now, kIrqFollowTaskCooldownPeriod);
+		bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqVector]);
+
+		if (now >= lastRecordedMoveTime + kIrqFollowTaskCooldownPeriod) {
+			// Cooldown seems to have expired. Attempt to claim the update.
+			if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqVector], lastRecordedMoveTime, now)) {
+				// Successfully updated the timestamp; we are the one to do the move.
+				proceedWithMove = true;
+				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
+					" - Cooldown passed, CAS successful (old_ts %" B_PRId64 ", new_ts %" B_PRId64 "). Allowing move.\n",
+					irqVector, migratedThreadId, lastRecordedMoveTime, now);
+			} else {
+				// CAS failed. Another CPU updated the timestamp since we read it.
+				// That other CPU "won" this round. We should not move the IRQ.
+				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
+					" - Cooldown passed, but CAS failed. Another CPU likely updated timestamp. Move deferred.\n",
+					irqVector, migratedThreadId);
+				proceedWithMove = false;
+			}
 		} else {
-			// "Last writer wins" is acceptable for a cooldown timestamp.
-			// If two CPUs race here, both might pass the check using a slightly stale 'lastMove',
-			// and both might write 'now' (or slightly different 'now' values). The effect is minimal.
-			atomic_store_64(&gIrqLastFollowMoveTime[irqVector], now);
-			// allowMove remains true
+			// Still within the cooldown period from lastRecordedMoveTime.
+			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
+				" is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64
+				", cooldown %" B_PRId64 "). Skipping move.\n",
+				irqVector, migratedThreadId, lastRecordedMoveTime, now, kIrqFollowTaskCooldownPeriod);
+			proceedWithMove = false;
 		}
 
-		if (allowMove) {
-			TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32 " (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 " (on core %" B_PRId32 ") for T %" B_PRId32 "\n",
-				irqVector, actualIrqLoad, currentIrqCpuNum, targetCpuForIrq->ID(), newCore->ID(), migratedThreadId);
+		if (proceedWithMove) {
+			TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32
+				" (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32
+				" (on core %" B_PRId32 ") for T %" B_PRId32 "\n",
+				irqVector, actualIrqLoad, currentIrqCpuNum,
+				targetCpuForIrq->ID(), newCore->ID(), migratedThreadId);
 			assign_io_interrupt_to_cpu(irqVector, targetCpuForIrq->ID());
-			// Timestamp was updated before this call if allowMove was true and not in cooldown.
 		}
 	}
 }

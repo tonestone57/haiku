@@ -124,7 +124,7 @@ static bool find_gen7_wrpll_dividers(uint32_t tclk, uint32_t rclk, intel_clock_p
 			p->wrpll_m2_frac_en=uf;p->wrpll_m2_frac=uf?m2f:0;p->wrpll_p1=p1i;p->wrpll_p2=p2i;}
 			if(best_err==0&&!isdp)goto found_gen7w;
 		} if(best_err==0&&!isdp)goto found_gen7w;
-	} found_gen7w:; long allow_err=min_c(tclk/1000,500);
+	} found_gen7w:; long allow_err=min_c(tclk/1000,500); // Use min_c standard macro
 	if(p->dpll_vco_khz>0&&best_err<=allow_err){ TRACE("WRPLL: t%u r%u->V%u N%u M2i%u Fe%d F%u P1f%u P2f%u (e%ld)\n",tclk,rclk,p->dpll_vco_khz,p->wrpll_n,p->wrpll_m2,p->wrpll_m2_frac_en,p->wrpll_m2_frac,p->wrpll_p1,p->wrpll_p2,best_err); return true;}
 	TRACE("WRPLL FAIL: t%u r%u. BestE %ld (allow %ld)\n",tclk,rclk,best_err,allow_err); return false;
 }
@@ -134,11 +134,11 @@ static bool find_hsw_spll_dividers(uint32_t tclk,uint32_t rclk,intel_clock_param
 	for(int p1i=0;p1i<4;++p1i)for(int p2i=0;p2i<2;++p2i){
 		uint32_t p1a=hsw_spll_p1_map[p1i],p2d=hsw_spll_p2_eff_div[p2i],pt=p1a*p2d,tvco=tclk*pt;
 		if(tvco<v_min||tvco>v_max)continue;
-		for(uint32_t na=1;na<=15;++na){ if(na<1)continue;
-			uint64_t m2n=(uint64_t)tvco*na;uint32_t m2d=rclk*2,m2i=(m2n+m2d/2)/m2d;
-			if(m2i<20||m2i>120)continue;
+		for(uint32_t na=1;na<=15;++na){ if(na<1)continue; // N field is 1-15 for calculation, programmed N-1
+			uint64_t m2n=(uint64_t)tvco*na;uint32_t m2d=rclk*2,m2i=(m2n+m2d/2)/m2d; // M2 integer part
+			if(m2i<20||m2i>120)continue; // M2 range for HSW SPLL
 			uint32_t avco=(rclk*2*m2i)/na;long err=abs((long)avco-(long)tvco);
-			if(err<best_err){best_err=err;p->dpll_vco_khz=avco;p->spll_n=na-1;
+			if(err<best_err){best_err=err;p->dpll_vco_khz=avco;p->spll_n=na-1; // Program N-1
 			p->spll_m2=m2i;p->spll_p1=p1i;p->spll_p2=p2i;}
 			if(best_err==0)goto found_hsw_spll;
 		}if(best_err==0)goto found_hsw_spll;
@@ -147,21 +147,25 @@ static bool find_hsw_spll_dividers(uint32_t tclk,uint32_t rclk,intel_clock_param
 	TRACE("HSW SPLL FAIL: t%u r%u. BestE %ld\n",tclk,rclk,best_err);return false;
 }
 status_t find_ivb_dpll_dividers(uint32_t t_out_clk, uint32_t rclk, bool isdp, intel_clock_params_t*p){
-	const uint32_t v_min=1700000,v_max=3500000;long best_err=-1;p->is_wrpll=true;p->dpll_vco_khz=0;p->ivb_dpll_m1_reg_val=10;
+	const uint32_t v_min=1700000,v_max=3500000;long best_err=-1;p->is_wrpll=true;p->dpll_vco_khz=0;p->ivb_dpll_m1_reg_val=10; // Default M1 for SSC
 	TRACE("IVB DPLL: Target %u Ref %u DP %d\n",t_out_clk,rclk,isdp);
-	for(uint32_t p1f=0;p1f<=7;++p1f){uint32_t p1a=p1f+1,p2fv,p2a,p2ls=0,p2le=1;
-		if(isdp){p2fv=1;p2a=5;p2ls=p2fv;p2le=p2fv;}
-		for(uint32_t p2fi=p2ls;p2fi<=p2le;++p2fi){if(!isdp){p2fv=p2fi;p2a=(p2fv==1)?5:10;}
-			uint64_t tv64=(uint64_t)t_out_clk*p1a*p2a;if(tv64<v_min||tv64>v_max)continue; uint32_t tv=(uint32_t)tv64;
-			for(uint32_t n1f=0;n1f<=15;++n1f){uint32_t n1a=n1f+2; double m2id_f=(double)tv*n1a/rclk; int32_t m2fc=(int32_t)round(m2id_f)-2;
-				for(int m2off=-2;m2off<=2;++m2off){int32_t m2fs=m2fc+m2off;if(m2fs<0||m2fs>511)continue;
-					uint32_t m2f=(uint32_t)m2fs,m2a=m2f+2;uint64_t cvn=(uint64_t)rclk*m2a;uint32_t cv=(uint32_t)((cvn+(n1a/2))/n1a);
-					uint64_t con=(uint64_t)cv;uint32_t pta=p1a*p2a;if(pta==0)continue;uint32_t coc=(uint32_t)((con+(pta/2))/pta);
+	for(uint32_t p1f=0;p1f<=7;++p1f){uint32_t p1a=p1f+1,p2fv,p2a,p2ls=0,p2le=1; // p1f is field value (actual p1 = p1f+1)
+		if(isdp){p2fv=1;p2a=5;p2ls=p2fv;p2le=p2fv;} // DP uses P2=5 (field value 1)
+		else {p2fv=0; p2a=10; p2ls=0; p2le=1;} // Non-DP can use P2=5 (field 1) or P2=10 (field 0)
+
+		for(uint32_t p2fi=p2ls;p2fi<=p2le;++p2fi){if(!isdp){p2fv=p2fi;p2a=(p2fv==1)?5:10;} // Iterate P2 options for non-DP
+			uint64_t tv64=(uint64_t)t_out_clk*p1a*p2a;if(tv64<v_min||tv64>v_max)continue; uint32_t tv=(uint32_t)tv64; // Target VCO
+			for(uint32_t n1f=0;n1f<=15;++n1f){uint32_t n1a=n1f+2; // N1 field value (actual N1 = n1f+2)
+				double m2id_f=(double)tv*n1a/rclk; int32_t m2fc=(int32_t)round(m2id_f)-2; // Ideal M2 (m2_field_val + 2)
+				for(int m2off=-2;m2off<=2;++m2off){int32_t m2fs=m2fc+m2off;if(m2fs<0||m2fs>511)continue; // M2 field value range
+					uint32_t m2f=(uint32_t)m2fs,m2a=m2f+2;uint64_t cvn=(uint64_t)rclk*m2a;uint32_t cv=(uint32_t)((cvn+(n1a/2))/n1a); // Actual VCO
+					uint64_t con=(uint64_t)cv;uint32_t pta=p1a*p2a;if(pta==0)continue;uint32_t coc=(uint32_t)((con+(pta/2))/pta); // Actual output clock
 					long err=(long)coc-(long)t_out_clk;if(err<0)err=-err;
 					if(best_err==-1||err<best_err){best_err=err;p->dpll_vco_khz=cv;p->wrpll_p1=p1f;p->wrpll_p2=p2fv;p->wrpll_n=n1f;p->wrpll_m2=m2f;}
-					if(err==0)goto found_ivb_final;
+					if(err==0 && !isdp)goto found_ivb_final; // For non-DP, exact match is fine
 	}}}} found_ivb_final:;
-	if(best_err==-1||best_err>1){TRACE("IVB DPLL FAIL: BestE %ld Tgt %u\n",best_err,t_out_clk);return B_ERROR;}
+	long allowed_err = isdp ? 0 : 1; // DP needs exact match, others can tolerate 1kHz error
+	if(best_err==-1||best_err > allowed_err){TRACE("IVB DPLL FAIL: BestE %ld Tgt %u (Allowed %ld)\n",best_err,t_out_clk, allowed_err);return B_ERROR;}
 	TRACE("IVB DPLL: Tgt %u->VCO %u (Err %ld) P1f%u P2f%u N1f%u M2f%u M1f%u\n",t_out_clk,p->dpll_vco_khz,best_err,p->wrpll_p1,p->wrpll_p2,p->wrpll_n,p->wrpll_m2,p->ivb_dpll_m1_reg_val);return B_OK;
 }
 
@@ -188,25 +192,99 @@ static void calculate_fdi_m_n_values_internal(uint32_t *rM, uint32_t *rN, uint32
 	if(mIn>0&&*rM==0)*rM=1; if(nIn>0&&*rN==0)*rN=1;
 	TRACE("FDI M/N Calc: In %lu/%lu -> Out %lu/%lu\n", mIn,nIn,*rM,*rN);
 }
-static void calculate_fdi_m_n_params(intel_i915_device_info* d, enum pipe_id_priv pi, intel_clock_params_t* c) {
-	if(!c->needs_fdi){c->fdi_params.data_m=c->fdi_params.data_n=0;c->fdi_params.link_m=c->fdi_params.link_n=0;c->fdi_params.tu_size=64;return;}
-	uint32_t pclk_khz=c->adjusted_pixel_clock_khz; uint32_t tconf=intel_i915_read32(d,TRANSCONF(pi));
-	uint32_t bpc_f=(tconf&TRANSCONF_PIPE_BPC_MASK)>>TRANSCONF_PIPE_BPC_SHIFT;
-	switch(bpc_f){case TRANSCONF_PIPE_BPC_6_FIELD:c->fdi_params.pipe_bpc_total=18;break; case TRANSCONF_PIPE_BPC_8_FIELD:c->fdi_params.pipe_bpc_total=24;break;
-	case TRANSCONF_PIPE_BPC_10_FIELD:c->fdi_params.pipe_bpc_total=30;break; case TRANSCONF_PIPE_BPC_12_FIELD:c->fdi_params.pipe_bpc_total=36;break;
-	default:c->fdi_params.pipe_bpc_total=24;TRACE("FDI M/N: Unknown BPC field %u, default 24bpp\n",bpc_f);}
-	uint8_t lanes=c->fdi_params.fdi_lanes; if(lanes==0)lanes=(IS_IVYBRIDGE(d->device_id)&&!IS_IVYBRIDGE_MOBILE(d->device_id))?4:2;
-	c->fdi_params.fdi_lanes=lanes; c->fdi_params.tu_size=64; uint32_t fdi_sym_rate=FDI_LINK_FREQ_2_7_GHZ_KHZ;
-	if(pclk_khz==0||c->fdi_params.pipe_bpc_total==0){TRACE("FDI M/N: Invalid pclk(%u)/bpc(%u)\n",pclk_khz,c->fdi_params.pipe_bpc_total);c->fdi_params.data_m=22;c->fdi_params.data_n=24;c->fdi_params.link_m=22;c->fdi_params.link_n=24;return;}
-	uint64_t n_num=(uint64_t)fdi_sym_rate*8*c->fdi_params.tu_size*lanes; uint64_t n_den=(uint64_t)pclk_khz*c->fdi_params.pipe_bpc_total;
-	if(n_den==0){TRACE("FDI M/N: Denom 0 in N calc\n");c->fdi_params.data_n=1;}else{c->fdi_params.data_n=(uint16_t)(n_num/n_den);}
-	c->fdi_params.data_m=c->fdi_params.tu_size;
-	if(c->fdi_params.data_n==0)c->fdi_params.data_n=1; if(c->fdi_params.data_m==0)c->fdi_params.data_m=1;
-	if(c->fdi_params.data_n>FDI_LINK_M_N_MASK)c->fdi_params.data_n=FDI_LINK_M_N_MASK; if(c->fdi_params.data_m>FDI_LINK_M_N_MASK)c->fdi_params.data_m=FDI_LINK_M_N_MASK;
-	c->fdi_params.link_m=c->fdi_params.data_m; c->fdi_params.link_n=c->fdi_params.data_n;
-	TRACE("FDI M/N: DataM/N=%u/%u,TU %u,BPC %u,Lanes %u,Pclk %u\n",c->fdi_params.data_m,c->fdi_params.data_n,c->fdi_params.tu_size,c->fdi_params.pipe_bpc_total,lanes,pclk_khz);
+
+// Calculate FDI M/N parameters.
+// The target_pipe_bpc_total is the total bits per pixel for the pipe (e.g., 18 for 6bpc, 24 for 8bpc).
+static void calculate_fdi_m_n_params(intel_i915_device_info* d,
+	intel_clock_params_t* c, uint8_t target_pipe_bpc_total)
+{
+	if(!c->needs_fdi){
+		c->fdi_params.data_m=c->fdi_params.data_n=0;
+		c->fdi_params.link_m=c->fdi_params.link_n=0;
+		c->fdi_params.tu_size=64; // Default TU size
+		return;
+	}
+
+	uint32_t pclk_khz = c->adjusted_pixel_clock_khz;
+	c->fdi_params.pipe_bpc_total = target_pipe_bpc_total;
+
+	uint8_t lanes = c->fdi_params.fdi_lanes;
+	if (lanes == 0) { // Default if not set by caller
+		lanes = (IS_IVYBRIDGE_DESKTOP(d->runtime_caps.device_id)) ? 4 : 2; // Use runtime_caps for IS_IVYBRIDGE_DESKTOP
+	}
+	c->fdi_params.fdi_lanes = lanes;
+	c->fdi_params.tu_size = 64; // Common TU size for FDI
+	uint32_t fdi_sym_rate = FDI_LINK_FREQ_2_7_GHZ_KHZ; // FDI link frequency is 2.7 GHz
+
+	if (pclk_khz == 0 || c->fdi_params.pipe_bpc_total == 0) {
+		TRACE("FDI M/N: Invalid pclk (%u kHz) or bpc_total (%u). Using placeholders.\n",
+			pclk_khz, c->fdi_params.pipe_bpc_total);
+		c->fdi_params.data_m = 22; c->fdi_params.data_n = 24; // Common failsafe values
+		c->fdi_params.link_m = 22; c->fdi_params.link_n = 24;
+		return;
+	}
+
+	// N = (FDI Link Symbol Rate * 8 bits/symbol * TU Size * Num Lanes) / (Pixel Clock * Bits Per Pixel)
+	// M = TU Size
+	uint64_t n_numerator = (uint64_t)fdi_sym_rate * 8 * c->fdi_params.tu_size * lanes;
+	uint64_t n_denominator = (uint64_t)pclk_khz * c->fdi_params.pipe_bpc_total;
+
+	if (n_denominator == 0) {
+		TRACE("FDI M/N: Denominator is 0 in N calculation. Using N=1.\n");
+		c->fdi_params.data_n = 1;
+	} else {
+		c->fdi_params.data_n = (uint16_t)(n_numerator / n_denominator);
+	}
+	c->fdi_params.data_m = c->fdi_params.tu_size;
+
+	// Ensure M and N are within valid hardware limits (typically 16-bit for FDI M/N registers)
+	// and are not zero if inputs were non-zero.
+	if (c->fdi_params.data_n == 0 && n_denominator != 0) c->fdi_params.data_n = 1; // Avoid N=0 if possible
+	if (c->fdi_params.data_m == 0) c->fdi_params.data_m = 1; // Avoid M=0
+
+	if (c->fdi_params.data_n > FDI_LINK_M_N_MASK) c->fdi_params.data_n = FDI_LINK_M_N_MASK;
+	if (c->fdi_params.data_m > FDI_LINK_M_N_MASK) c->fdi_params.data_m = FDI_LINK_M_N_MASK;
+
+	// Link M/N are typically same as Data M/N for FDI
+	c->fdi_params.link_m = c->fdi_params.data_m;
+	c->fdi_params.link_n = c->fdi_params.data_n;
+
+	TRACE("FDI M/N: DataM/N=%u/%u, TU %u, BPC %u, Lanes %u, Pclk %u kHz\n",
+		c->fdi_params.data_m, c->fdi_params.data_n, c->fdi_params.tu_size,
+		c->fdi_params.pipe_bpc_total, lanes, pclk_khz);
 }
 // --- END FDI M/N Calculation ---
+
+// Placeholder for DP link clock calculation helper
+static uint32_t
+intel_dp_get_link_clock_for_mode(intel_i915_device_info* devInfo,
+                                 const display_mode* mode,
+                                 const intel_output_port_state* port_state)
+{
+	// This is a very simplified placeholder.
+	// A real implementation needs to:
+	// 1. Calculate the required data rate for the mode: (pixel_clock_hz * bpp_effective) / num_lanes
+	//    where bpp_effective includes overhead like 8b/10b encoding.
+	// 2. Iterate through available link rates (1.62, 2.7, 5.4 GHz, etc.) supported by the port (from DPCD).
+	// 3. Select the lowest link rate that can support the required data rate with the available number of lanes.
+	// For now, just return a common high rate if supported, or a lower one.
+
+	if (port_state == NULL || mode == NULL) return 162000; // Default to lowest
+
+	// Example: Prioritize higher link rates if port supports them.
+	// This doesn't check if the rate is actually *needed* or optimal.
+	if (port_state->dpcd_data.max_link_rate >= DPCD_LINK_BW_5_4) {
+		TRACE("DP Link Clock: Defaulting to 5.4 GHz (540000 kHz) for port %d based on DPCD max.\n", port_state->logical_port_id);
+		return 540000;
+	}
+	if (port_state->dpcd_data.max_link_rate >= DPCD_LINK_BW_2_7) {
+		TRACE("DP Link Clock: Defaulting to 2.7 GHz (270000 kHz) for port %d based on DPCD max.\n", port_state->logical_port_id);
+		return 270000;
+	}
+	TRACE("DP Link Clock: Defaulting to 1.62 GHz (162000 kHz) for port %d.\n", port_state->logical_port_id);
+	return 162000; // Default to 1.62 GHz
+}
+
 
 status_t
 intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
@@ -217,7 +295,7 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	clocks->pixel_clock_khz = mode->timing.pixel_clock;
 	clocks->adjusted_pixel_clock_khz = mode->timing.pixel_clock;
 	clocks->needs_fdi = false;
-	clocks->pipe_for_fdi_mn_calc = pipe;
+	// clocks->pipe_for_fdi_mn_calc = pipe; // No longer needed as BPC passed directly
 
 	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, targetPortId);
 	if (port_state == NULL) { TRACE("calculate_clocks: No port_state for targetPortId %d\n", targetPortId); return B_BAD_VALUE;}
@@ -225,69 +303,152 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	if (IS_IVYBRIDGE(devInfo->device_id) || IS_SANDYBRIDGE(devInfo->device_id)) {
 		if (port_state->is_pch_port) {
 			clocks->needs_fdi = true;
-			clocks->fdi_params.fdi_lanes = (IS_IVYBRIDGE(devInfo->device_id) && !IS_IVYBRIDGE_MOBILE(devInfo->device_id)) ? 4 : 2;
+			// Default FDI lanes. IVB Desktop often 4 lanes, Mobile/SNB 2 lanes.
+			// This should ideally also come from VBT or be determined by platform more accurately.
+			clocks->fdi_params.fdi_lanes = (IS_IVYBRIDGE_DESKTOP(devInfo->runtime_caps.device_id)) ? 4 : 2;
 			TRACE("calculate_clocks: Port ID %d PCH-driven, FDI needed (%d lanes)\n", targetPortId, clocks->fdi_params.fdi_lanes);
 		}
 	}
+
+	// CDCLK: Use current, or calculate target for programming later.
 	clocks->cdclk_freq_khz = devInfo->current_cdclk_freq_khz;
-	if (clocks->cdclk_freq_khz == 0) {
-		clocks->cdclk_freq_khz = IS_HASWELL(devInfo->device_id) ? 450000 : 400000;
+	if (clocks->cdclk_freq_khz == 0) { // Fallback if not read during init
+		clocks->cdclk_freq_khz = IS_HASWELL(devInfo->device_id) ? 450000 :
+		                         (IS_IVYBRIDGE(devInfo->device_id) ? 400000 : 320000); // Default for SNB
 		TRACE("calculate_clocks: CDCLK was 0, fallback %u kHz for Gen %d\n", clocks->cdclk_freq_khz, INTEL_DISPLAY_GEN(devInfo));
 	}
+
 	if (IS_HASWELL(devInfo->device_id)) {
+		// This block calculates hsw_cdclk_ctl_field_val based on clocks->cdclk_freq_khz (which is current_cdclk_freq_khz)
+		// It doesn't *change* CDCLK, just finds the register values for the *current* CDCLK.
+		// A higher-level function needs to determine the *required* CDCLK.
 		bool found_hsw_cdclk_setting = false; uint32_t target_cdclk = clocks->cdclk_freq_khz;
 		uint32_t lcpll_sources[]={1350000,2700000,810000}; uint32_t select_bits[]={HSW_CDCLK_SELECT_1350,HSW_CDCLK_SELECT_2700,HSW_CDCLK_SELECT_810};
 		for(int i=0;i<3;++i){ uint32_t src_khz=lcpll_sources[i], sel_val=select_bits[i], div_fval=0;
 			if(target_cdclk==src_khz/2)div_fval=HSW_CDCLK_DIVISOR_2_FIELD_VAL; else if(target_cdclk==(uint32_t)(src_khz/2.5))div_fval=HSW_CDCLK_DIVISOR_2_5_FIELD_VAL;
 			else if(target_cdclk==src_khz/3)div_fval=HSW_CDCLK_DIVISOR_3_FIELD_VAL; else if(target_cdclk==src_khz/4)div_fval=HSW_CDCLK_DIVISOR_4_FIELD_VAL;
-			if(div_fval!=0||(target_cdclk==src_khz/3&&HSW_CDCLK_DIVISOR_3_FIELD_VAL==0)){
-				if(target_cdclk==src_khz/3&&HSW_CDCLK_DIVISOR_3_FIELD_VAL==0)div_fval=HSW_CDCLK_DIVISOR_3_FIELD_VAL;
+			if(div_fval!=0||(target_cdclk==src_khz/3&&HSW_CDCLK_DIVISOR_3_FIELD_VAL==0)){ // Condition for HSW_CDCLK_DIVISOR_3_FIELD_VAL being 0
+				if(target_cdclk==src_khz/3&&HSW_CDCLK_DIVISOR_3_FIELD_VAL==0)div_fval=HSW_CDCLK_DIVISOR_3_FIELD_VAL; // Ensure it's set if it's the valid 0 field
 				clocks->hsw_cdclk_source_lcpll_freq_khz=src_khz; clocks->hsw_cdclk_ctl_field_val=sel_val|div_fval;
 				clocks->hsw_cdclk_ctl_field_val&=~HSW_CDCLK_FREQ_DECIMAL_ENABLE; found_hsw_cdclk_setting=true;
 				TRACE("calc_clk: HSW CDCLK: Target %u from LCPLL %u. CTL val: 0x%x\n",target_cdclk,src_khz,clocks->hsw_cdclk_ctl_field_val); break;
 		}}
 		if(!found_hsw_cdclk_setting){TRACE("calc_clk: HSW No LCPLL/div for CDCLK %u. Using current HW val.\n",target_cdclk);
-			clocks->hsw_cdclk_ctl_field_val=intel_i915_read32(devInfo,CDCLK_CTL_HSW);
+			// Read current hardware configuration as fallback
+			clocks->hsw_cdclk_ctl_field_val=intel_i915_read32(devInfo,CDCLK_CTL_HSW); // Needs FW
 			uint32_t cur_sel=clocks->hsw_cdclk_ctl_field_val&HSW_CDCLK_FREQ_CDCLK_SELECT_SHIFT;
 			if(cur_sel==HSW_CDCLK_SELECT_2700)clocks->hsw_cdclk_source_lcpll_freq_khz=2700000;
 			else if(cur_sel==HSW_CDCLK_SELECT_810)clocks->hsw_cdclk_source_lcpll_freq_khz=810000;
-			else clocks->hsw_cdclk_source_lcpll_freq_khz=1350000;
+			else clocks->hsw_cdclk_source_lcpll_freq_khz=1350000; // Default LCPLL source
 	}}
 
-	bool is_dp= (port_state->type==PRIV_OUTPUT_DP||port_state->type==PRIV_OUTPUT_EDP);
-	clocks->is_dp_or_edp=is_dp; clocks->is_lvds=(port_state->type==PRIV_OUTPUT_LVDS);
-	uint32_t ref_clk=0, dpll_tgt_freq=clocks->adjusted_pixel_clock_khz;
+	bool is_dp = (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP);
+	clocks->is_dp_or_edp = is_dp;
+	clocks->is_lvds = (port_state->type == PRIV_OUTPUT_LVDS);
+
+	// Adjust pixel clock for LVDS dual channel
+	if (clocks->is_lvds && port_state->panel_is_dual_channel) { // Assuming panel_is_dual_channel is set from VBT
+		clocks->adjusted_pixel_clock_khz = mode->timing.pixel_clock / 2;
+		TRACE("Clocks: LVDS dual channel, adjusted PCLK for DPLL: %u kHz (original %u kHz)\n",
+			clocks->adjusted_pixel_clock_khz, mode->timing.pixel_clock);
+	}
+	// Ensure dpll_tgt_freq uses the potentially adjusted clock for non-DP paths
+	uint32_t ref_clk_khz = 0; // Renamed from ref_clk to avoid conflict
+	uint32_t dpll_tgt_freq = clocks->adjusted_pixel_clock_khz;
+
 
 	if(IS_HASWELL(devInfo->device_id)){ bool use_spll=false;
 		// On Haswell, HDMI on DDI A (hw_port_index 0) typically uses SPLL.
-		// Other DDIs (B, C, D, E) for HDMI/DP would use WRPLLs.
-		// This is a common hardware configuration. VBT indicates which DDI is HDMI,
-		// but usually not a specific flag to choose SPLL vs WRPLL for DDI A.
-		// The VBT's main role here is to confirm that DDI A is indeed an HDMI port.
+		// VBT should confirm this.
 		if(port_state->type==PRIV_OUTPUT_HDMI && port_state->hw_port_index==0) { // DDI A as HDMI
 			use_spll=true;
 		}
+
 		if(use_spll){clocks->selected_dpll_id=DPLL_ID_SPLL_HSW;clocks->is_wrpll=false;
-			uint32_t spll_ctl=intel_i915_read32(devInfo,SPLL_CTL_HSW);
-			if((spll_ctl&SPLL_REF_SEL_MASK_HSW)==SPLL_REF_LCPLL_HSW){ref_clk=get_hsw_lcpll_link_rate_khz(devInfo); TRACE("Clocks: HSW SPLL using LCPLL ref: %u kHz\n",ref_clk);}
-			else{ref_clk=REF_CLOCK_SSC_96000_KHZ; TRACE("Clocks: HSW SPLL using SSC ref: %u kHz (Default)\n",ref_clk);}
-			if(ref_clk==0){ref_clk=REF_CLOCK_SSC_96000_KHZ;TRACE("Clocks: HSW SPLL ref 0, fallback 96MHz SSC\n");}
-			TRACE("Clocks: HSW HDMI Port A: SPLL, Target %u, Ref %u\n",dpll_tgt_freq,ref_clk);
-			if(!find_hsw_spll_dividers(dpll_tgt_freq,ref_clk,clocks)){TRACE("Clocks: HSW SPLL calc fail\n");return B_ERROR;}
+			uint32_t spll_ctl=intel_i915_read32(devInfo,SPLL_CTL_HSW); // Needs FW
+			if((spll_ctl&SPLL_REF_SEL_MASK_HSW)==SPLL_REF_LCPLL_HSW){
+				ref_clk_khz=get_hsw_lcpll_link_rate_khz(devInfo); // Needs FW
+				TRACE("Clocks: HSW SPLL using LCPLL ref: %u kHz\n",ref_clk_khz);
+			} else {
+				ref_clk_khz=REF_CLOCK_SSC_96000_KHZ;
+				TRACE("Clocks: HSW SPLL using SSC ref: %u kHz (Default)\n",ref_clk_khz);
+			}
+			if(ref_clk_khz==0){ref_clk_khz=REF_CLOCK_SSC_96000_KHZ;TRACE("Clocks: HSW SPLL ref 0, fallback 96MHz SSC\n");}
+			TRACE("Clocks: HSW HDMI Port A: SPLL, Target PCLK %u, Ref %u\n",dpll_tgt_freq,ref_clk_khz);
+			if(!find_hsw_spll_dividers(dpll_tgt_freq,ref_clk_khz,clocks)){TRACE("Clocks: HSW SPLL calc fail\n");return B_ERROR;}
 		}else{clocks->is_wrpll=true;
-			if(pipe==PRIV_PIPE_A||pipe==PRIV_PIPE_C)clocks->selected_dpll_id=DPLL_ID_WRPLL1_HSW; else if(pipe==PRIV_PIPE_B)clocks->selected_dpll_id=DPLL_ID_WRPLL2_HSW; else return B_BAD_VALUE;
-			clocks->lcpll_freq_khz=get_hsw_lcpll_link_rate_khz(devInfo); ref_clk=clocks->lcpll_freq_khz;
-			if(is_dp){ if(port_state->dp_max_link_rate>=DPCD_LINK_BW_5_4)clocks->dp_link_rate_khz=540000; else if(port_state->dp_max_link_rate>=DPCD_LINK_BW_2_7)clocks->dp_link_rate_khz=270000; else clocks->dp_link_rate_khz=162000; dpll_tgt_freq=5400000;}
-			TRACE("Clocks: HSW WRPLL%d, Ref(LCPLL) %u, DPLL Target %u\n",clocks->selected_dpll_id+1,ref_clk,dpll_tgt_freq);
-			if(!find_gen7_wrpll_dividers(dpll_tgt_freq,ref_clk,clocks,is_dp))return B_ERROR;
+			// Pipe to WRPLL mapping for HSW: Pipe A/C -> WRPLL1, Pipe B -> WRPLL2
+			if(pipe==PRIV_PIPE_A||pipe==PRIV_PIPE_C)clocks->selected_dpll_id=DPLL_ID_WRPLL1_HSW;
+			else if(pipe==PRIV_PIPE_B)clocks->selected_dpll_id=DPLL_ID_WRPLL2_HSW;
+			else { TRACE("Clocks: HSW: Invalid pipe %d for WRPLL assignment.\n", pipe); return B_BAD_VALUE; }
+
+			clocks->lcpll_freq_khz=get_hsw_lcpll_link_rate_khz(devInfo); // Needs FW
+			ref_clk_khz=clocks->lcpll_freq_khz;
+			if (ref_clk_khz == 0) { ref_clk_khz = REF_CLOCK_LCPLL_2700_MHZ_KHZ; /* Fallback */ }
+
+
+			if(is_dp){
+				clocks->dp_link_rate_khz = intel_dp_get_link_clock_for_mode(devInfo, mode, port_state);
+				dpll_tgt_freq = clocks->dp_link_rate_khz; // DPLL directly generates the link symbol clock
+			}
+			// For non-DP, dpll_tgt_freq remains clocks->adjusted_pixel_clock_khz
+
+			TRACE("Clocks: HSW WRPLL%d, Ref(LCPLL) %u, DPLL Target (PCLK/LinkRate) %u\n",
+			      (clocks->selected_dpll_id == DPLL_ID_WRPLL1_HSW ? 1 : 2) ,ref_clk_khz,dpll_tgt_freq);
+			if(!find_gen7_wrpll_dividers(dpll_tgt_freq,ref_clk_khz,clocks,is_dp))return B_ERROR; // Corrected call
 	}}else if(IS_IVYBRIDGE(devInfo->device_id)){clocks->is_wrpll=true;
-		if(pipe==PRIV_PIPE_A||pipe==PRIV_PIPE_C)clocks->selected_dpll_id=DPLL_ID_DPLL_A_IVB; else if(pipe==PRIV_PIPE_B)clocks->selected_dpll_id=DPLL_ID_DPLL_B_IVB; else return B_BAD_VALUE;
-		bool use_ssc=true; ref_clk=use_ssc?REF_CLOCK_SSC_96000_KHZ:120000; clocks->ivb_dpll_m1_reg_val=use_ssc?10:8;
-		if(is_dp){if(port_state->dp_max_link_rate>=DPCD_LINK_BW_2_7)clocks->dp_link_rate_khz=270000; else clocks->dp_link_rate_khz=162000; dpll_tgt_freq=clocks->dp_link_rate_khz;}
-		TRACE("Clocks: IVB DPLL%c, Ref %u (SSC %d), DPLL Target %u\n",'A'+clocks->selected_dpll_id,ref_clk,use_ssc,dpll_tgt_freq);
-		if(!find_ivb_dpll_dividers(dpll_tgt_freq,ref_clk,is_dp,clocks))return B_ERROR;
-	}else{TRACE("Clocks: calc_display_clocks: Unsupp Gen %d\n",INTEL_DISPLAY_GEN(devInfo));return B_UNSUPPORTED;}
-	if(clocks->needs_fdi){calculate_fdi_m_n_params(devInfo,pipe,clocks);} // Use pipe for BPC lookup
+		// Pipe to DPLL mapping for IVB: Pipe A/C -> DPLL A, Pipe B -> DPLL B
+		if(pipe==PRIV_PIPE_A||pipe==PRIV_PIPE_C)clocks->selected_dpll_id=DPLL_ID_DPLL_A_IVB;
+		else if(pipe==PRIV_PIPE_B)clocks->selected_dpll_id=DPLL_ID_DPLL_B_IVB;
+		else { TRACE("Clocks: IVB: Invalid pipe %d for DPLL assignment.\n", pipe); return B_BAD_VALUE; }
+
+		bool use_ssc=true; // TODO: Make this VBT-derived or configurable
+		ref_clk_khz=use_ssc?REF_CLOCK_SSC_96000_KHZ:REF_CLOCK_SSC_120000_KHZ;
+		clocks->ivb_dpll_m1_reg_val=use_ssc?10:8;
+
+		if(is_dp){
+			clocks->dp_link_rate_khz = intel_dp_get_link_clock_for_mode(devInfo, mode, port_state);
+			dpll_tgt_freq = clocks->dp_link_rate_khz; // DPLL directly generates the link symbol clock
+		}
+		// For non-DP, dpll_tgt_freq remains clocks->adjusted_pixel_clock_khz
+
+		TRACE("Clocks: IVB DPLL%c, Ref %u (SSC %d), DPLL Target (PCLK/LinkRate) %u\n",
+		      (clocks->selected_dpll_id == DPLL_ID_DPLL_A_IVB ? 'A' : 'B'), ref_clk_khz, use_ssc, dpll_tgt_freq);
+		if(!find_ivb_dpll_dividers(dpll_tgt_freq,ref_clk_khz,is_dp,clocks))return B_ERROR;
+	} else if (IS_SANDYBRIDGE(devInfo->device_id)) {
+		// SNB clocking is complex and differs significantly for CPU eDP vs PCH-driven ports.
+		// This section remains a STUB and needs full implementation.
+		TRACE("Clocks: SNB clock calculation is STUBBED and not fully implemented.\n");
+		// TODO: Implement SNB clock calculations, considering CPU vs PCH ports, FDI, etc.
+		return B_UNSUPPORTED; // Explicitly mark as unsupported for now.
+	} else {
+		TRACE("Clocks: calc_display_clocks: Unsupported Gen %d\n",INTEL_DISPLAY_GEN(devInfo));
+		return B_UNSUPPORTED;
+	}
+
+	if(clocks->needs_fdi){
+		// Determine target BPC for FDI based on the new mode's color space.
+		uint8_t target_fdi_bpc_total = 24; // Default to 24bpp (8 bits per color component)
+		switch (mode->space) {
+			// Assuming standard 8bpc formats map to 24 total bits for FDI.
+			// Add cases if 6bpc (18 total) or 10bpc (30 total) etc. are supported via specific color spaces.
+			case B_RGB32_LITTLE: case B_RGBA32_LITTLE: case B_RGB32_BIG: case B_RGBA32_BIG:
+			case B_RGB24_LITTLE: case B_RGB24_BIG:
+			// For 16bpp/15bpp, FDI path often still uses 8bpc (24 total) and PCH might dither or truncate.
+			// Or, if hardware supports 6bpc (18 total) on FDI, that could be an option.
+			// For simplicity, assume 24bpp total for these common desktop formats.
+			case B_RGB16_LITTLE: case B_RGB16_BIG:
+			case B_RGB15_LITTLE: case B_RGBA15_LITTLE: case B_RGB15_BIG: case B_RGBA15_BIG:
+				target_fdi_bpc_total = 24;
+				break;
+			default:
+				TRACE("Clocks: FDI BPC: Unknown colorspace %d, defaulting to 24bpp total for FDI.\n", mode->space);
+				target_fdi_bpc_total = 24;
+				break;
+		}
+		clocks->fdi_params.pipe_bpc_total = target_fdi_bpc_total; // Store for reference
+		calculate_fdi_m_n_params(devInfo, clocks, target_fdi_bpc_total);
+	}
 	return B_OK;
 }
 
@@ -504,12 +665,12 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 
 	if (IS_HASWELL(devInfo->device_id)) {
 		if (clocks->is_wrpll) {
-			int dpll_idx = clocks->selected_dpll_id;
-			if (dpll_idx < 0 || dpll_idx > 1) { return B_BAD_INDEX; }
-			uint32_t wrpll_ctl_val = intel_i915_read32(devInfo, WRPLL_CTL(dpll_idx));
+			int dpll_idx = clocks->selected_dpll_id; // This is DPLL_ID_WRPLL1_HSW (0) or DPLL_ID_WRPLL2_HSW (1)
+			if (dpll_idx < DPLL_ID_WRPLL1_HSW || dpll_idx > DPLL_ID_WRPLL2_HSW) { return B_BAD_INDEX; } // Check against enum values
+			uint32_t wrpll_ctl_val = intel_i915_read32(devInfo, WRPLL_CTL(dpll_idx)); // WRPLL_CTL macro expects 0 or 1
 			wrpll_ctl_val &= ~(WRPLL_REF_LCPLL_HSW | WRPLL_REF_SSC_HSW | (0x7U << WRPLL_DP_LINKRATE_SHIFT_HSW));
 			if (clocks->lcpll_freq_khz > 0) wrpll_ctl_val |= WRPLL_REF_LCPLL_HSW;
-			else wrpll_ctl_val |= WRPLL_REF_SSC_HSW;
+			else wrpll_ctl_val |= WRPLL_REF_SSC_HSW; // Should not happen if LCPLL is primary ref for WRPLL
 			if (clocks->is_dp_or_edp) {
 				if (clocks->dp_link_rate_khz >= 540000) wrpll_ctl_val |= WRPLL_DP_LINKRATE_5_4;
 				else if (clocks->dp_link_rate_khz >= 270000) wrpll_ctl_val |= WRPLL_DP_LINKRATE_2_7;
@@ -523,7 +684,10 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 				div_frac_val |= (clocks->wrpll_m2_frac << HSW_WRPLL_M2_FRAC_SHIFT) & HSW_WRPLL_M2_FRAC_MASK;
 			}
 			div_frac_val |= (clocks->wrpll_m2 << HSW_WRPLL_M2_INT_SHIFT) & HSW_WRPLL_M2_INT_MASK;
+			// wrpll_n is actual N value (1-15). Field N-2.
+			if (clocks->wrpll_n < 2 || clocks->wrpll_n > 15+2-1) { TRACE("HSW WRPLL invalid N %u\n", clocks->wrpll_n); return B_BAD_VALUE;}
 			div_frac_val |= (((clocks->wrpll_n - 2)) << HSW_WRPLL_N_DIV_SHIFT) & HSW_WRPLL_N_DIV_MASK;
+			// wrpll_p1, wrpll_p2 are field values from map index
 			target_count_val |= (clocks->wrpll_p1 << HSW_WRPLL_P1_DIV_SHIFT) & HSW_WRPLL_P1_DIV_MASK;
 			target_count_val |= (clocks->wrpll_p2 << HSW_WRPLL_P2_DIV_SHIFT) & HSW_WRPLL_P2_DIV_MASK;
 			intel_i915_write32(devInfo, wrpll_div_frac_reg, div_frac_val);
@@ -533,29 +697,57 @@ intel_i915_program_dpll_for_pipe(intel_i915_device_info* devInfo,
 				dpll_idx, wrpll_ctl_val, div_frac_val, target_count_val);
 		} else { // SPLL
 			uint32_t spll_ctl_val = intel_i915_read32(devInfo, SPLL_CTL_HSW);
-			spll_ctl_val &= (SPLL_PLL_ENABLE_HSW | SPLL_PLL_OVERRIDE_HSW | SPLL_PCH_SSC_ENABLE_HSW);
-			spll_ctl_val |= SPLL_REF_LCPLL_HSW; // Assuming LCPLL ref for now
+			// Preserve enable/override bits if already set, clear divider/ref bits
+			spll_ctl_val &= (SPLL_PLL_ENABLE_HSW | SPLL_PLL_OVERRIDE_HSW | SPLL_SSC_ENABLE_HSW); // Keep existing state bits
+			// TODO: SPLL reference selection needs logic based on ref_clk_khz from calculate_clocks
+			if (clocks->ref_clk_khz == get_hsw_lcpll_link_rate_khz(devInfo)) { // This is a bit circular
+				spll_ctl_val |= SPLL_REF_LCPLL_HSW;
+			} else {
+				spll_ctl_val |= SPLL_REF_SSC_HSW; // Default to SSC if not LCPLL
+			}
 			spll_ctl_val |= (clocks->spll_m2 << SPLL_M2_INT_SHIFT_HSW) & SPLL_M2_INT_MASK_HSW;
+			// spll_n is field value (N-1).
 			spll_ctl_val |= (clocks->spll_n << SPLL_N_SHIFT_HSW) & SPLL_N_MASK_HSW;
+			// spll_p1, spll_p2 are field values from map index
 			spll_ctl_val |= (clocks->spll_p1 << SPLL_P1_SHIFT_HSW) & SPLL_P1_MASK_HSW;
 			spll_ctl_val |= (clocks->spll_p2 << SPLL_P2_SHIFT_HSW) & SPLL_P2_MASK_HSW;
 			intel_i915_write32(devInfo, SPLL_CTL_HSW, spll_ctl_val);
 			TRACE("HSW SPLL_CTL set to 0x%08" B_PRIx32 "\n", spll_ctl_val);
 		}
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
+		// selected_dpll_id is DPLL_ID_DPLL_A_IVB (0) or DPLL_ID_DPLL_B_IVB (1)
 		uint32_t dpll_reg = (clocks->selected_dpll_id == DPLL_ID_DPLL_A_IVB) ? DPLL_A_IVB : DPLL_B_IVB;
 		uint32_t dpll_md_reg = (clocks->selected_dpll_id == DPLL_ID_DPLL_A_IVB) ? DPLL_MD_A_IVB : DPLL_MD_B_IVB;
 		uint32_t dpll_val = intel_i915_read32(devInfo, dpll_reg);
+		// Preserve enable/override bits, clear divider/mode bits
 		dpll_val &= (DPLL_VCO_ENABLE_IVB | DPLL_OVERRIDE_IVB | DPLL_PORT_TRANS_SELECT_IVB_MASK | DPLL_REF_CLK_SEL_IVB_MASK);
+
+		// wrpll_p1 is P1 field value (0-7 for P1 div 1-8)
+		// wrpll_n is N1 field value (0-15 for N1 div 2-17)
+		// ivb_dpll_m1_reg_val is M1 field value (e.g. 10 for SSC, 8 for non-SSC)
+		// wrpll_m2 is M2 field value (0-511 for M2 div 2-513)
 		dpll_val |= (clocks->wrpll_p1 << DPLL_FPA0_P1_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P1_POST_DIV_MASK_IVB;
 		dpll_val |= (clocks->wrpll_n << DPLL_FPA0_N_DIV_SHIFT_IVB) & DPLL_FPA0_N_DIV_MASK_IVB;
 		dpll_val |= (clocks->ivb_dpll_m1_reg_val << DPLL_FPA0_M1_DIV_SHIFT_IVB) & DPLL_FPA0_M1_DIV_MASK_IVB;
 		dpll_val |= (clocks->wrpll_m2 << DPLL_FPA0_M2_DIV_SHIFT_IVB) & DPLL_FPA0_M2_DIV_MASK_IVB;
+
+		// Clear mode and P2 post div bits first
 		dpll_val &= ~(DPLL_MODE_MASK_IVB | DPLL_FPA0_P2_POST_DIV_MASK_IVB);
-		if (clocks->is_dp_or_edp) dpll_val |= DPLL_MODE_DP_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
-		else if (clocks->is_lvds) dpll_val |= DPLL_MODE_LVDS_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
-		else dpll_val |= DPLL_MODE_HDMI_DVI_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
+		// wrpll_p2 is P2 field value (0 for P2=10, 1 for P2=5)
+		if (clocks->is_dp_or_edp) {
+			dpll_val |= DPLL_MODE_DP_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
+		} else if (clocks->is_lvds) {
+			dpll_val |= DPLL_MODE_LVDS_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
+		} else { // HDMI/DVI
+			dpll_val |= DPLL_MODE_HDMI_DVI_IVB | ((clocks->wrpll_p2 << DPLL_FPA0_P2_POST_DIV_SHIFT_IVB) & DPLL_FPA0_P2_POST_DIV_MASK_IVB);
+		}
+
+		// TODO: Set DPLL_REF_CLK_SEL_IVB_MASK based on ref_clk_khz (SSC vs non-SSC)
+		// For now, assuming find_ivb_dpll_dividers sets ivb_dpll_m1_reg_val correctly for the chosen ref.
+
+		// Pixel multiplier for DP UDI (if > 1)
 		uint32_t dpll_md_val = (clocks->is_dp_or_edp && clocks->pixel_multiplier > 0) ? ((clocks->pixel_multiplier - 1) << DPLL_MD_UDI_MULTIPLIER_SHIFT_IVB) : 0;
+
 		intel_i915_write32(devInfo, dpll_reg, dpll_val);
 		intel_i915_write32(devInfo, dpll_md_reg, dpll_md_val);
 		TRACE("IVB DPLL programming: DPLL_VAL=0x%08" B_PRIx32 ", DPLL_MD_VAL=0x%08" B_PRIx32 "\n", dpll_val, dpll_md_val);
@@ -572,13 +764,26 @@ intel_i915_enable_dpll_for_pipe(intel_i915_device_info* devInfo,
 	TRACE("enable_dpll for pipe %d, enable: %s\n", pipe, enable ? "true" : "false");
 	if (!devInfo || !clocks || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
 	uint32_t reg_ctl, val, enable_bit, lock_bit;
+
 	if (IS_HASWELL(devInfo->device_id)) {
-		if (clocks->is_wrpll) { reg_ctl = WRPLL_CTL(clocks->selected_dpll_id); enable_bit = WRPLL_PLL_ENABLE; lock_bit = WRPLL_PLL_LOCK;}
-		else { reg_ctl = SPLL_CTL_HSW; enable_bit = SPLL_PLL_ENABLE_HSW; lock_bit = SPLL_PLL_LOCK_HSW;}
+		if (clocks->is_wrpll) {
+			// clocks->selected_dpll_id is DPLL_ID_WRPLL1_HSW (0) or DPLL_ID_WRPLL2_HSW (1)
+			reg_ctl = WRPLL_CTL(clocks->selected_dpll_id); enable_bit = WRPLL_PLL_ENABLE; lock_bit = WRPLL_PLL_LOCK;
+		} else { // SPLL
+			reg_ctl = SPLL_CTL_HSW; enable_bit = SPLL_PLL_ENABLE_HSW; lock_bit = SPLL_PLL_LOCK_HSW;
+		}
 	} else if (IS_IVYBRIDGE(devInfo->device_id)) {
-		reg_ctl = (pipe == PRIV_PIPE_A || pipe == PRIV_PIPE_C) ? DPLL_A_IVB : DPLL_B_IVB;
+		// clocks->selected_dpll_id is DPLL_ID_DPLL_A_IVB (0) or DPLL_ID_DPLL_B_IVB (1)
+		// Pipe C shares DPLL A. Pipe B uses DPLL B.
+		enum pipe_id_priv dpll_pipe_source = pipe;
+		if (pipe == PRIV_PIPE_C) dpll_pipe_source = PRIV_PIPE_A; // Pipe C uses DPLL A
+
+		if (dpll_pipe_source == PRIV_PIPE_A) reg_ctl = DPLL_A_IVB;
+		else if (dpll_pipe_source == PRIV_PIPE_B) reg_ctl = DPLL_B_IVB;
+		else { TRACE("IVB enable_dpll: Invalid effective pipe %d for DPLL selection.\n", dpll_pipe_source); return B_ERROR; }
+
 		enable_bit = DPLL_VCO_ENABLE_IVB; lock_bit = DPLL_LOCK_IVB;
-		TRACE("IVB enable_dpll using DPLL_A/B_IVB (Reg 0x%x)\n", reg_ctl);
+		TRACE("IVB enable_dpll using DPLL (Reg 0x%x) for pipe %d (effective source pipe %d)\n", reg_ctl, pipe, dpll_pipe_source);
 	} else { TRACE("enable_dpll: Unsupported device generation.\n"); return B_ERROR;}
 
 	val = intel_i915_read32(devInfo, reg_ctl);
@@ -586,7 +791,7 @@ intel_i915_enable_dpll_for_pipe(intel_i915_device_info* devInfo,
 	intel_i915_write32(devInfo, reg_ctl, val); (void)intel_i915_read32(devInfo, reg_ctl);
 	if (enable) {
 		snooze(20); bigtime_t startTime = system_time();
-		while (system_time() - startTime < 5000) {
+		while (system_time() - startTime < 5000) { // 5ms timeout for lock
 			if (intel_i915_read32(devInfo, reg_ctl) & lock_bit) {
 				TRACE("DPLL (Reg 0x%x) locked.\n", reg_ctl); return B_OK;
 			}
@@ -633,25 +838,31 @@ status_t intel_i915_program_fdi(intel_i915_device_info* devInfo, enum pipe_id_pr
 	uint32_t fdi_rx_ctl_reg = FDI_RX_CTL(pipe);
 	uint32_t fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
 	uint32_t fdi_rx_val = intel_i915_read32(devInfo, fdi_rx_ctl_reg);
-	fdi_tx_val &= (FDI_TX_ENABLE | FDI_PCDCLK_CHG_STATUS_IVB);
-	fdi_rx_val &= (FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB | FDI_FS_ERRC_ENABLE_IVB | FDI_FE_ERRC_ENABLE_IVB);
+	// Preserve enable bits, clear others that will be reprogrammed
+	fdi_tx_val &= (FDI_TX_ENABLE | FDI_PCDCLK_CHG_STATUS_IVB); // Keep enable and status bit
+	fdi_rx_val &= (FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB | FDI_FS_ERRC_ENABLE_IVB | FDI_FE_ERRC_ENABLE_IVB); // Keep existing state
+
 	fdi_tx_val &= ~FDI_TX_CTL_LANE_MASK_IVB;
 	if (fdi_lanes == 1) fdi_tx_val |= FDI_TX_CTL_LANE_1_IVB;
 	else if (fdi_lanes == 2) fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB;
 	else if (fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_tx_val |= FDI_TX_CTL_LANE_3_IVB;
 	else if (fdi_lanes == 4) fdi_tx_val |= FDI_TX_CTL_LANE_4_IVB;
-	else fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB;
+	else fdi_tx_val |= FDI_TX_CTL_LANE_2_IVB; // Default to 2 lanes
+
 	fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB;
-	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB;
+	fdi_tx_val |= FDI_LINK_TRAIN_PATTERN_1_IVB; // Start with training pattern 1
+
 	fdi_tx_val &= ~(FDI_TX_CTL_VOLTAGE_SWING_MASK_IVB | FDI_TX_CTL_PRE_EMPHASIS_MASK_IVB);
 	fdi_tx_val |= FDI_TX_CTL_VOLTAGE_SWING_LEVEL_0_IVB; // Start with VS0
 	fdi_tx_val |= FDI_TX_CTL_PRE_EMPHASIS_LEVEL_0_IVB;   // Start with PE0
+
 	fdi_rx_val &= ~FDI_RX_CTL_LANE_MASK_IVB;
 	if (fdi_lanes == 1) fdi_rx_val |= FDI_RX_CTL_LANE_1_IVB;
 	else if (fdi_lanes == 2) fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
 	else if (fdi_lanes == 3 && IS_IVYBRIDGE(devInfo->device_id)) fdi_rx_val |= FDI_RX_CTL_LANE_3_IVB;
 	else if (fdi_lanes == 4) fdi_rx_val |= FDI_RX_CTL_LANE_4_IVB;
-	else fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB;
+	else fdi_rx_val |= FDI_RX_CTL_LANE_2_IVB; // Default to 2 lanes
+
 	intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 	intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 	TRACE("FDI: Programmed FDI_TX_CTL(pipe %d)=0x%08x, FDI_RX_CTL(pipe %d)=0x%08x\n", pipe, fdi_tx_val, pipe, fdi_rx_val);
@@ -672,21 +883,26 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 	if (enable) {
 		fdi_rx_val |= FDI_RX_PLL_ENABLE_IVB;
 		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
-		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); snooze(10);
+		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); snooze(10); // Small delay for PLL to stabilize
+
 		fdi_tx_val |= FDI_TX_ENABLE; fdi_rx_val |= FDI_RX_ENABLE;
 		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
-		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg);
+		(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); // Posting read
+
+		// FDI Link Training
 		int retries = 0; bool fdi_trained = false; uint32_t fdi_rx_iir_reg = FDI_RX_IIR(pipe);
 		uint32_t current_vs_level_idx = 0; // Index for VS: 0 (0.4V), 1 (0.6V), 2 (0.8V)
 		uint32_t current_pe_level_idx = 0; // Index for PE: 0 (0dB), 1 (3.5dB)
+		// Voltage Swing field values from registers.h
 		const uint32_t vs_field_map[] = {FDI_TX_CTL_VOLTAGE_SWING_LEVEL_0_IVB, FDI_TX_CTL_VOLTAGE_SWING_LEVEL_1_IVB, FDI_TX_CTL_VOLTAGE_SWING_LEVEL_2_IVB};
+		// Pre-emphasis field values from registers.h
 		const uint32_t pe_field_map[] = {FDI_TX_CTL_PRE_EMPHASIS_LEVEL_0_IVB, FDI_TX_CTL_PRE_EMPHASIS_LEVEL_1_IVB, FDI_TX_CTL_PRE_EMPHASIS_LEVEL_2_IVB};
 		const int max_vs_idx = sizeof(vs_field_map)/sizeof(vs_field_map[0]) -1;
 		const int max_pe_idx = sizeof(pe_field_map)/sizeof(pe_field_map[0]) -1;
 
 		while (retries < ( (max_vs_idx + 1) * (max_pe_idx + 1) ) ) { // Max attempts based on VS/PE combos
-			if (retries > 0) { // Not the first attempt
+			if (retries > 0) { // Not the first attempt, adjust VS/PE
 				current_pe_level_idx++;
 				if (current_pe_level_idx > max_pe_idx) {
 					current_pe_level_idx = 0;
@@ -706,10 +922,12 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 					retries + 1, pipe, current_vs_level_idx, current_pe_level_idx, fdi_tx_val);
 			}
 
-			snooze(1000); uint32_t iir_val = intel_i915_read32(devInfo, fdi_rx_iir_reg);
+			snooze(1000); // Wait 1ms for training to attempt with current settings
+			uint32_t iir_val = intel_i915_read32(devInfo, fdi_rx_iir_reg);
 			if (iir_val & FDI_RX_BIT_LOCK_IVB) {
 				fdi_trained = true; TRACE("FDI: Link training for pipe %d successful (bit lock achieved).\n", pipe);
-				intel_i915_write32(devInfo, fdi_rx_iir_reg, iir_val & FDI_RX_BIT_LOCK_IVB); break;
+				intel_i915_write32(devInfo, fdi_rx_iir_reg, iir_val & FDI_RX_BIT_LOCK_IVB); // Clear interrupt bit
+				break;
 			}
 			TRACE("FDI: Link training poll %d for pipe %d, IIR=0x%08x (BitLock not set).\n", retries + 1, pipe, iir_val);
 			retries++;
@@ -717,7 +935,7 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 
 		if (fdi_trained) {
 			fdi_tx_val = intel_i915_read32(devInfo, fdi_tx_ctl_reg);
-			fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB; fdi_tx_val |= FDI_LINK_TRAIN_NONE_IVB;
+			fdi_tx_val &= ~FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB; fdi_tx_val |= FDI_LINK_TRAIN_NONE_IVB; // Training complete
 			intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 			TRACE("FDI: Link training for pipe %d complete, pattern set to NONE.\n", pipe);
 		} else {
@@ -730,14 +948,45 @@ status_t intel_i915_enable_fdi(intel_i915_device_info* devInfo, enum pipe_id_pri
 			intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 			return B_ERROR;
 		}
-	} else {
+	} else { // Disable FDI
 		fdi_tx_val &= ~(FDI_TX_ENABLE | FDI_TX_CTL_TRAIN_PATTERN_MASK_IVB);
 		fdi_rx_val &= ~(FDI_RX_ENABLE | FDI_RX_PLL_ENABLE_IVB);
 		intel_i915_write32(devInfo, fdi_tx_ctl_reg, fdi_tx_val);
 		intel_i915_write32(devInfo, fdi_rx_ctl_reg, fdi_rx_val);
 		TRACE("FDI: Disabling FDI TX/RX and RX PLL for pipe %d.\n", pipe);
 	}
-	(void)intel_i915_read32(devInfo, fdi_tx_ctl_reg);
-	(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg);
+	(void)intel_i915_read32(devInfo, fdi_tx_ctl_reg); // Posting read
+	(void)intel_i915_read32(devInfo, fdi_rx_ctl_reg); // Posting read
 	return B_OK;
+}
+
+// Function to get BPC from color_space for FDI calculation
+// This is a helper, could be static in this file or moved to a common place.
+// Returns total bits per pixel (e.g., 18, 24, 30, 36) for FDI link.
+static uint8_t get_fdi_target_bpc_total(color_space cs) {
+    switch (cs) {
+        // Assuming 8 bits per color component for these common formats
+        case B_RGB32_LITTLE: case B_RGBA32_LITTLE:
+        case B_RGB32_BIG:    case B_RGBA32_BIG:
+        case B_RGB24_LITTLE: case B_RGB24_BIG:
+            return 24; // 8 bpc * 3 colors = 24 total bits
+
+        // For 16bpp/15bpp, PCH/FDI path might still operate as if 8bpc (24 total)
+        // and truncation/dithering happens elsewhere, or it might support 6bpc (18 total).
+        // For simplicity and common hardware behavior, assume 24 total for these too.
+        // If specific 6bpc modes are needed, this needs adjustment and hardware capability check.
+        case B_RGB16_LITTLE: case B_RGB16_BIG:
+        case B_RGB15_LITTLE: case B_RGBA15_LITTLE:
+        case B_RGB15_BIG:    case B_RGBA15_BIG:
+            return 24; // Defaulting to 24 total bits for 15/16bpp modes
+
+        // TODO: Add cases for 10bpc (30 total) and 12bpc (36 total) if specific
+        // color_space enums represent them and hardware supports them over FDI.
+        // e.g., if a B_RGB30_LITTLE existed:
+        // case B_RGB30_LITTLE: return 30;
+
+        default:
+            TRACE("Clocks: FDI BPC: Unknown colorspace %d, defaulting to 24bpp total for FDI.\n", cs);
+            return 24;
+    }
 }

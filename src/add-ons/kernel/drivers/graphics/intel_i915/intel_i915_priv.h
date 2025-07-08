@@ -630,7 +630,9 @@ typedef struct intel_i915_device_info {
 		bool			is_in_use;
 		enum pipe_id_priv user_pipe;      // Which logical pipe is currently using this DPLL.
 		enum intel_port_id_priv user_port; // Which logical port is associated with this DPLL usage.
-		uint32_t		programmed_freq_khz; // Current frequency it's programmed to.
+		uint32_t		programmed_freq_khz; // Current frequency it's programmed to (e.g. VCO or Link Rate).
+		intel_clock_params_t programmed_params; // Full clock parameters this DPLL was last programmed with.
+		                                        // Used for conflict detection with active DPLLs.
 		// uint8_t		hw_dpll_id;       // Hardware ID if different from array index (e.g. DPLL_0, DPLL_1).
 		// bool			is_shared_dpll;   // If this DPLL can be shared under certain conditions.
 	} dplls[MAX_HW_DPLLS];

@@ -31,7 +31,7 @@
 #define MAX_CURSOR_DIM 256
 
 
-// Forward declaration for the new multi-monitor configuration hook function
+// Forward declaration for the new hook function
 static status_t intel_i915_set_display_configuration(
 	uint32 display_count,
 	const accelerant_display_config configs[],
@@ -76,7 +76,8 @@ intel_i915_accelerant_retrace_semaphore(void)
 		return args.sem;
 	}
 
-	TRACE("ACCELERANT_RETRACE_SEMAPHORE: IOCTL failed for pipe %d. Falling back to global sem.\n", gInfo->target_pipe);
+	TRACE("ACCELERANT_RETRACE_SEMAPHORE: IOCTL failed for pipe %d. Falling back to global sem (%" B_PRId32 ").\n",
+		gInfo->target_pipe, (gInfo->shared_info ? gInfo->shared_info->vblank_sem : -1));
 	if (gInfo->shared_info && gInfo->shared_info->vblank_sem >= B_OK) {
 		return gInfo->shared_info->vblank_sem;
 	}
@@ -126,6 +127,8 @@ intel_i915_propose_display_mode(display_mode *target, const display_mode *low, c
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_PROPOSE_SPECIFIC_MODE, &args, sizeof(args));
 	if (status == B_OK) {
 		*target = args.result_mode; // Copy back the (potentially modified) mode from kernel
+	} else {
+		TRACE("PROPOSE_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
 	}
 	return status;
 }
@@ -145,19 +148,23 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
 {
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
 
-	TRACE("intel_i915_set_display_mode: Called for pipe %d. For multi-monitor setups, use ACCELERANT_SET_DISPLAY_CONFIGURATION hook.\n",
+	TRACE("SET_DISPLAY_MODE: Hook called for pipe %d. For multi-monitor setups, use ACCELERANT_SET_DISPLAY_CONFIGURATION hook.\n",
 		gInfo->target_pipe);
 	// This IOCTL is simple and primarily for single-head or as a trigger after SET_DISPLAY_CONFIG.
 	// The kernel's INTEL_I915_SET_DISPLAY_MODE IOCTL handler determines the target pipe based on the
 	// driver instance associated with gInfo->device_fd.
-	return ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
+	if (status != B_OK) {
+		TRACE("SET_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
+	}
+	return status;
 }
 
 /**
  * @brief Retrieves the current display mode for the accelerant instance's target pipe.
  * It first attempts to get the mode via the INTEL_I915_GET_PIPE_DISPLAY_MODE IOCTL.
- * If that fails, it falls back to reading from the shared_info structure, which
- * might be stale or reflect only the primary display in some legacy contexts.
+ * If that fails, it falls back to reading from the shared_info structure.
+ * The shared_info reflects the state last set by a successful SET_DISPLAY_CONFIG or SET_DISPLAY_MODE.
  *
  * @param current_mode Pointer to a display_mode structure to be filled.
  * @return B_OK on success, or an error code.
@@ -177,17 +184,19 @@ intel_i915_get_display_mode(display_mode *current_mode)
 	} else {
 		TRACE("GET_DISPLAY_MODE: IOCTL INTEL_I915_GET_PIPE_DISPLAY_MODE failed for target_pipe %d: %s.\n",
 			gInfo->target_pipe, strerror(status));
-		// Fallback to shared_info. This is less reliable, especially for cloned (non-primary) instances.
+		// Fallback to shared_info. This is useful if the IOCTL fails or for a quick check,
+		// but shared_info is updated by the kernel *after* a successful modeset.
 		if (gInfo->shared_info) {
 			uint32 pipeArrayIndex = gInfo->target_pipe; // Assumes accel_pipe_id is a direct array index
 			                                          // for shared_info->pipe_display_configs.
 
 			// Check if the target pipe has an active configuration in shared_info.
 			// MAX_PIPES_I915 should be from accelerant.h, matching kernel's max pipes.
-			if (pipeArrayIndex < MAX_PIPES_I915 &&
+			if (pipeArrayIndex < MAX_PIPES_I915 && /* Ensure index is valid for the array */
 				gInfo->shared_info->pipe_display_configs[pipeArrayIndex].is_active) {
 				*current_mode = gInfo->shared_info->pipe_display_configs[pipeArrayIndex].current_mode;
-				TRACE("GET_DISPLAY_MODE: Falling back to shared_info->pipe_display_configs[%u].\n", pipeArrayIndex);
+				TRACE("GET_DISPLAY_MODE: Falling back to shared_info->pipe_display_configs[%u] for pipe %d.\n",
+					pipeArrayIndex, gInfo->target_pipe);
 				status = B_OK; // Consider this a success for the caller.
 			} else if (gInfo->target_pipe == ACCEL_PIPE_A && gInfo->shared_info->active_display_count > 0) {
 				// Legacy fallback for the primary accelerant instance (ACCEL_PIPE_A).
@@ -195,22 +204,23 @@ intel_i915_get_display_mode(display_mode *current_mode)
 				uint32 primary_idx = gInfo->shared_info->primary_pipe_index;
 				if (primary_idx < MAX_PIPES_I915 && gInfo->shared_info->pipe_display_configs[primary_idx].is_active) {
 					*current_mode = gInfo->shared_info->pipe_display_configs[primary_idx].current_mode;
-					TRACE("GET_DISPLAY_MODE: Falling back to shared_info's active primary pipe mode (index %u).\n", primary_idx);
+					TRACE("GET_DISPLAY_MODE: Falling back to shared_info's active primary pipe mode (index %u) for pipe A.\n", primary_idx);
 					status = B_OK;
 				} else {
 					memset(current_mode, 0, sizeof(display_mode)); // No valid mode found
-					status = B_ERROR;
-					TRACE("GET_DISPLAY_MODE: Fallback failed, no active primary pipe in shared_info.\n");
+					status = B_ERROR; // Keep original error or set new one
+					TRACE("GET_DISPLAY_MODE: Fallback for pipe A failed, no active primary pipe in shared_info.\n");
 				}
 			} else {
 				// No specific info for this pipe, and it's not a primary fallback case.
 				memset(current_mode, 0, sizeof(display_mode));
-				status = B_ERROR; // Indicate no valid mode found
-				TRACE("GET_DISPLAY_MODE: Fallback failed, target pipe %d not active in shared_info or not primary instance.\n", gInfo->target_pipe);
+				status = B_ERROR; // Keep original error or set new one
+				TRACE("GET_DISPLAY_MODE: Fallback failed, target pipe %d not active in shared_info or not primary instance for fallback.\n", gInfo->target_pipe);
 			}
 		} else {
 			// No shared_info available at all.
-			return B_ERROR;
+			TRACE("GET_DISPLAY_MODE: IOCTL failed and no shared_info available.\n");
+			return B_ERROR; // Return original error from IOCTL if shared_info is also NULL
 		}
 	}
 	return status;
@@ -362,7 +372,7 @@ static status_t intel_i915_get_sync_token(engine_token *et, sync_token *st) { re
 static status_t intel_i915_sync_to_token(sync_token *st) { return SYNC_TO_TOKEN(st); }
 
 // --- 2D Acceleration Hooks ---
-// Helper for rectangle intersection (min/max are not standard C, assume local defs or use ?: )
+// Helper for rectangle intersection (min_c/max_c are not standard C, assume local defs or use ?: )
 #ifndef min_c
 #define min_c(a,b) ((a) < (b) ? (a) : (b))
 #endif
@@ -741,3 +751,5 @@ intel_i915_set_display_configuration(
 
 	return status;
 }
+
+[end of src/add-ons/accelerants/intel_i915/hooks.c]

@@ -114,11 +114,11 @@ init_common(int fd, bool is_clone)
 				int head_idx = atoi(num_str);
 				// Map head_idx to accel_pipe_id. This assumes a direct mapping (0->A, 1->B, etc.)
 				// and that I915_MAX_PIPES_USER is consistent with accel_pipe_id values.
-				if (head_idx >= 0 && head_idx < I915_MAX_PIPES_USER) {
+				if (head_idx >= 0 && head_idx < I915_MAX_PIPES_USER) { // Using I915_MAX_PIPES_USER from accelerant.h
 					gInfo->target_pipe = (enum accel_pipe_id)head_idx;
 				} else {
-					TRACE("init_common: Parsed head index %d from path '%s' is out of range, defaulting to Pipe A.\n",
-						head_idx, gInfo->device_path_suffix);
+					TRACE("init_common: Parsed head index %d from path '%s' is out of range (max %d), defaulting to Pipe A.\n",
+						head_idx, gInfo->device_path_suffix, I915_MAX_PIPES_USER -1);
 					gInfo->target_pipe = ACCEL_PIPE_A;
 				}
 			} else {
@@ -150,7 +150,7 @@ init_common(int fd, bool is_clone)
 	// Clone the shared info area into this accelerant's address space
 	char shared_area_clone_name[B_OS_NAME_LENGTH];
 	snprintf(shared_area_clone_name, sizeof(shared_area_clone_name), "i915_shared_info_clone_%s", gInfo->device_path_suffix);
-	for (char *p = shared_area_clone_name; *p; ++p) if (*p == '/') *p = '_'; // Sanitize name
+	for (char *p = shared_area_clone_name; *p; ++p) if (*p == '/') *p = '_'; // Sanitize name for area
 	gInfo->shared_info_area = clone_area(shared_area_clone_name, (void**)&gInfo->shared_info,
 		B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, shared_args.shared_area);
 	if (gInfo->shared_info_area < B_OK) {
@@ -196,24 +196,28 @@ init_common(int fd, bool is_clone)
 				if (gInfo->framebuffer_base) delete_area(area_for(gInfo->framebuffer_base));
 				delete_area(gInfo->shared_info_area);
 				free(gInfo); gInfo = NULL;
-				return B_ERROR;
+				return B_ERROR; // Or a more specific error like B_NO_MEMORY or B_ERROR
 			}
 		}
 
 		// Spawn HPD (Hot Plug Detect) event handling thread for the primary instance.
 		// This thread will monitor for display connection changes.
 		gInfo->hpd_thread_active = true;
-		gInfo->hpd_thread = spawn_thread(hpd_event_thread_entry, "i915_hpd_monitor_thread",
+		char hpd_thread_name[B_OS_NAME_LENGTH];
+		snprintf(hpd_thread_name, sizeof(hpd_thread_name), "i915_hpd_mon_%s", gInfo->device_path_suffix);
+		for (char *p = hpd_thread_name; *p; ++p) if (*p == '/') *p = '_'; // Sanitize name
+
+		gInfo->hpd_thread = spawn_thread(hpd_event_thread_entry, hpd_thread_name,
 			B_NORMAL_PRIORITY + 1, gInfo); // Pass gInfo (current instance) as argument
 		if (gInfo->hpd_thread >= B_OK) {
 			resume_thread(gInfo->hpd_thread);
 			TRACE("init_common: HPD event thread (ID: %" B_PRId32 ") spawned and resumed for primary instance.\n", gInfo->hpd_thread);
 		} else {
-			status_t hpd_spawn_err = gInfo->hpd_thread;
+			status_t hpd_spawn_err = gInfo->hpd_thread; // Store error code
 			TRACE("init_common: WARNING - Failed to spawn HPD event thread: %s. Hotplug detection will be disabled.\n", strerror(hpd_spawn_err));
 			gInfo->hpd_thread_active = false; // Ensure it's marked inactive
 			gInfo->hpd_thread = -1; // Reset to invalid ID
-			// Non-fatal for now, but hotplug functionality will be missing.
+			// This is non-fatal for now, but hotplug functionality will be missing.
 		}
 	}
 	return B_OK;
@@ -230,16 +234,19 @@ uninit_common(void)
 {
 	if (gInfo == NULL) return; // Nothing to do if gInfo is already NULL
 
+	TRACE("uninit_common: Uninitializing instance for '%s' (is_clone: %d).\n",
+		gInfo->device_path_suffix, (int)gInfo->is_clone);
+
 	// Shutdown HPD thread for the primary instance
 	if (!gInfo->is_clone && gInfo->hpd_thread >= B_OK) {
 		TRACE("uninit_common: Signalling HPD thread (ID: %" B_PRId32 ") to terminate.\n", gInfo->hpd_thread);
 		gInfo->hpd_thread_active = false; // Signal the thread's loop to exit
 
-		// The HPD thread's call to INTEL_I915_WAIT_FOR_DISPLAY_CHANGE uses a timeout.
-		// Setting hpd_thread_active to false will cause the loop to terminate after the current
-		// IOCTL call completes or times out.
-		// If the kernel semaphore used by the IOCTL is tied to the device fd, closing the fd
-		// (for primary, this happens after UNINIT_ACCELERANT) might also cause the IOCTL to return.
+		// The HPD thread's IOCTL uses a timeout. Setting hpd_thread_active to false
+		// will cause the thread to exit its loop after the current IOCTL call completes or times out.
+		// If the kernel semaphore used by the WAIT_FOR_DISPLAY_CHANGE IOCTL is tied to the device fd,
+		// closing the fd (which happens for the primary instance after UNINIT_ACCELERANT returns)
+		// would also cause the IOCTL to return with an error, helping the thread to exit.
 		status_t thread_exit_status;
 		wait_for_thread(gInfo->hpd_thread, &thread_exit_status); // Wait for the thread to actually finish
 		TRACE("uninit_common: HPD thread (ID: %" B_PRId32 ") exited with status: 0x%lx (%s).\n",
@@ -251,11 +258,21 @@ uninit_common(void)
 	if (gInfo->framebuffer_base != NULL) {
 		area_id cloned_fb_area = area_for(gInfo->framebuffer_base);
 		if (cloned_fb_area >= B_OK) delete_area(cloned_fb_area);
+		gInfo->framebuffer_base = NULL;
 	}
-	if (gInfo->mode_list_area >= B_OK) delete_area(gInfo->mode_list_area);
-	if (gInfo->shared_info_area >= B_OK) delete_area(gInfo->shared_info_area);
+	if (gInfo->mode_list_area >= B_OK) {
+		delete_area(gInfo->mode_list_area);
+		gInfo->mode_list_area = -1;
+		gInfo->mode_list = NULL;
+	}
+	if (gInfo->shared_info_area >= B_OK) {
+		delete_area(gInfo->shared_info_area);
+		gInfo->shared_info_area = -1;
+		gInfo->shared_info = NULL;
+	}
 
-	// Close device file descriptor for cloned instances (primary fd closed by caller of UNINIT_ACCELERANT)
+	// Close device file descriptor for cloned instances.
+	// The primary instance's fd is closed by the app_server after UNINIT_ACCELERANT returns.
 	if (gInfo->is_clone) {
 		close(gInfo->device_fd);
 	} else {
@@ -267,7 +284,7 @@ uninit_common(void)
 	}
 
 	free(gInfo);
-	gInfo = NULL; // Set global pointer to NULL after freeing
+	gInfo = NULL; // Set global pointer to NULL after freeing for this instance context
 }
 
 /**
@@ -304,7 +321,7 @@ INIT_ACCELERANT(int fd)
 		TRACE("INIT_ACCELERANT: Mode list area %" B_PRId32 " (count %lu) cloned as %" B_PRId32 ".\n",
 			gInfo->shared_info->mode_list_area, gInfo->shared_info->mode_count, gInfo->mode_list_area);
 	} else {
-		if (gInfo && gInfo->shared_info) {
+		if (gInfo && gInfo->shared_info) { // gInfo and shared_info should exist if init_common succeeded
 			gInfo->shared_info->mode_count = 0; // Ensure consistent state
 		}
 		TRACE("INIT_ACCELERANT: No mode list area to clone from kernel shared_info, or shared_info invalid.\n");
@@ -319,31 +336,34 @@ INIT_ACCELERANT(int fd)
 ssize_t
 ACCELERANT_CLONE_INFO_SIZE(void)
 {
-	return B_PATH_NAME_LENGTH; // Store the device path suffix
+	// Store the device path suffix string.
+	return B_PATH_NAME_LENGTH;
 }
 
 /**
  * @brief Copies cloning information from the primary accelerant instance.
  * This info (device path suffix) will be used by app_server to initialize cloned instances.
- * @param data Pointer to a buffer where the clone info (char array) will be copied.
+ * @param data Pointer to a buffer (char array of size B_PATH_NAME_LENGTH) where the clone info will be copied.
  */
 void
 GET_ACCELERANT_CLONE_INFO(void *data)
 {
+	// Provide the device path suffix of the primary instance.
 	if (gInfo && gInfo->device_path_suffix[0] != '\0') {
 		strlcpy((char*)data, gInfo->device_path_suffix, B_PATH_NAME_LENGTH);
 	} else {
-		// Fallback if primary gInfo is somehow not set (should not happen if INIT_ACCELERANT succeeded)
+		// Fallback, though gInfo should be initialized if this hook is called.
+		// This indicates an issue with primary instance initialization.
 		strcpy((char*)data, "graphics/intel_i915/0"); // Default path for primary
 		TRACE("GET_ACCELERANT_CLONE_INFO: Warning - gInfo or path suffix not initialized, using placeholder '%s'.\n", (char*)data);
 	}
 }
 
 /**
- * @brief Initializes a cloned accelerant instance.
+ * @brief Initializes a cloned accelerant instance for a secondary display head.
  * Called by app_server for each additional display head.
  *
- * @param data Pointer to the clone info (device path suffix) from GET_ACCELERANT_CLONE_INFO.
+ * @param data Pointer to the clone info (device path suffix string) from GET_ACCELERANT_CLONE_INFO.
  * @return B_OK on success, or an error code.
  */
 status_t
@@ -367,23 +387,27 @@ CLONE_ACCELERANT(void *data)
 		return errno;
 	}
 
-	// Perform common initialization for this cloned instance
+	// Perform common initialization for this cloned instance.
 	// This will create a new gInfo for the clone.
-	status_t status = init_common(fd, true); // true: this is a clone
+	// The HPD thread is NOT spawned for cloned instances (is_clone = true).
+	status_t status = init_common(fd, true);
 	if (status != B_OK) {
 		TRACE("CLONE_ACCELERANT: init_common for clone failed: %s.\n", strerror(status));
 		close(fd); // Close the fd opened for this clone attempt
 		return status;
 	}
 
-	// Set the specific device path suffix and target_pipe for this clone instance
-	if (gInfo != NULL) { // gInfo should now point to the new clone's instance data
+	// Set the specific device path suffix and target_pipe for this clone instance.
+	// gInfo now points to the newly allocated structure for this clone.
+	if (gInfo != NULL) {
 		strlcpy(gInfo->device_path_suffix, path_suffix_for_clone, sizeof(gInfo->device_path_suffix));
 		const char* num_str = gInfo->device_path_suffix;
-		while (*num_str && !isdigit(*num_str)) num_str++;
+		while (*num_str && !isdigit(*num_str)) num_str++; // Find the numerical index
 		if (*num_str) {
 			int head_idx = atoi(num_str);
-			if (head_idx >= 0 && head_idx < I915_MAX_PIPES_USER) { // Assuming direct mapping
+			// Map head_idx to enum accel_pipe_id.
+			// Assumes accel_pipe_id values (A=0, B=1, C=2) match head_idx.
+			if (head_idx >= 0 && head_idx < I915_MAX_PIPES_USER) { // Using I915_MAX_PIPES_USER as a guard
 				gInfo->target_pipe = (enum accel_pipe_id)head_idx;
 			} else {
 				TRACE("CLONE_ACCELERANT: Parsed head index %d from suffix '%s' is out of range for target_pipe, defaulting to Pipe A.\n",
@@ -444,27 +468,36 @@ GET_ACCELERANT_DEVICE_INFO(accelerant_device_info *adi)
 		return B_ERROR;
 	}
 	adi->version = B_ACCELERANT_VERSION;
-	strcpy(adi->name, "Intel i915 Graphics");
+	strcpy(adi->name, "Intel i915 Graphics"); // A more descriptive name
 
 	uint16 dev_id = gInfo->shared_info->device_id;
 	const char* chipset_family_string = "Unknown Intel Gen";
 	// Determine chipset family string based on graphics generation or specific device ID ranges
+	// This can be expanded with more IS_XYZ macros for other generations.
 	if (IS_GEN7(dev_id)) chipset_family_string = "Intel Gen7 (IvyBridge/Haswell)";
 	else if (gInfo->shared_info->graphics_generation == 8) chipset_family_string = "Intel Gen8 (Broadwell)";
 	else if (gInfo->shared_info->graphics_generation == 9) chipset_family_string = "Intel Gen9 (Skylake/KabyLake/CoffeeLake/CometLake)";
-	// Add more specific checks or use graphics_generation for other gens if available
+	else if (gInfo->shared_info->graphics_generation == 11) chipset_family_string = "Intel Gen11 (IceLake/JasperLake)";
+	else if (gInfo->shared_info->graphics_generation == 12) chipset_family_string = "Intel Gen12 (TigerLake/AlderLake)";
+	else if (gInfo->shared_info->graphics_generation != 0) { // If generation is known but not specifically named above
+		snprintf(adi->chipset, sizeof(adi->chipset), "Intel Gen%u Graphics (DevID: 0x%04x, Rev: 0x%02x)",
+			gInfo->shared_info->graphics_generation, dev_id, gInfo->shared_info->revision);
+		goto skip_default_chipset_format;
+	}
 
 	snprintf(adi->chipset, sizeof(adi->chipset), "%s (DevID: 0x%04x, Rev: 0x%02x)",
 		chipset_family_string, dev_id, gInfo->shared_info->revision);
+
+skip_default_chipset_format:
 	strcpy(adi->serial_no, "Not available"); // Standard for PCI devices
 
-	// Report memory size. This usually refers to the GTT aperture size for integrated graphics,
-	// or explicitly set framebuffer size if the kernel driver pre-allocates a global one.
-	adi->memory = gInfo->shared_info->gtt_size; // Default to GTT size
+	// Report memory size. This usually refers to the GTT aperture size for integrated graphics.
+	// If a specific framebuffer_size is provided and seems valid, prefer that.
+	adi->memory = gInfo->shared_info->gtt_size;
 	if (gInfo->shared_info->framebuffer_size > 0 && gInfo->shared_info->framebuffer_base != NULL) {
-		// If a specific framebuffer was mapped, prefer its size.
 		adi->memory = gInfo->shared_info->framebuffer_size;
 	}
+
 
 	// DAC speed is a somewhat legacy concept for modern digital interfaces.
 	// Report based on max pixel clock if available from shared_info.
@@ -473,17 +506,19 @@ GET_ACCELERANT_DEVICE_INFO(accelerant_device_info *adi)
 	} else {
 		// Fallback to a generic high value if max_pixel_clock is not populated.
 		adi->dac_speed = 350; // Default in MHz (common for DVI single link)
-		if (gInfo->shared_info->graphics_generation >= 9) adi->dac_speed = 600; // Higher for newer generations
+		if (gInfo->shared_info->graphics_generation >= 9) adi->dac_speed = 600; // Higher arbitrary default for newer generations
 	}
+
 	TRACE("GET_ACCELERANT_DEVICE_INFO: Name: '%s', Chipset: '%s', Memory: %lu bytes, DAC Speed: %lu MHz.\n",
 		adi->name, adi->chipset, adi->memory, adi->dac_speed);
 	return B_OK;
 }
 
 /**
- * @brief Returns the VBlank retrace semaphore for the current accelerant instance's target pipe.
- * The actual hook in get_accelerant_hook points to intel_i915_accelerant_retrace_semaphore in hooks.c,
- * which uses a per-pipe IOCTL. This direct implementation is a fallback.
+ * @brief Returns the VBlank retrace semaphore.
+ * Note: The actual hook returned by get_accelerant_hook points to
+ * intel_i915_accelerant_retrace_semaphore in hooks.c, which uses a per-pipe IOCTL.
+ * This direct implementation here is a fallback and likely refers to a legacy global semaphore.
  */
 sem_id
 ACCELERANT_RETRACE_SEMAPHORE(void)
@@ -492,7 +527,6 @@ ACCELERANT_RETRACE_SEMAPHORE(void)
 		TRACE("ACCELERANT_RETRACE_SEMAPHORE (direct call): Accelerant not initialized.\n");
 		return B_BAD_VALUE;
 	}
-	// This is a fallback. The proper hook in hooks.c should call the per-pipe IOCTL.
 	TRACE("ACCELERANT_RETRACE_SEMAPHORE (direct call): Returning global vblank_sem %" B_PRId32 " from shared_info.\n", gInfo->shared_info->vblank_sem);
 	return gInfo->shared_info->vblank_sem;
 }
@@ -502,9 +536,9 @@ ACCELERANT_RETRACE_SEMAPHORE(void)
  * This thread runs for the primary accelerant instance only. It periodically calls
  * an IOCTL to wait for display connection change events from the kernel.
  * Upon detecting an event, it updates shared information about connector status and EDID,
- * and notifies the app_server.
+ * and notifies the app_server via a B_SCREEN_CHANGED BMessage.
  *
- * @param data Pointer to the accelerant_info structure for this instance.
+ * @param data Pointer to the accelerant_info structure for the primary instance.
  * @return B_OK when the thread exits normally.
  */
 static int32
@@ -535,32 +569,31 @@ hpd_event_thread_entry(void* data)
 
 				uint32 new_ports_connected_mask = 0; // Mask to build current connection state
 
-				// Iterate through all user-space port IDs to refresh their status.
+				// Iterate through all known user-space port IDs to refresh their status.
 				// TODO: This could be optimized. If changed_hpd_mask provides enough detail
 				// to map directly to specific user_port_ids that changed, we could query only those.
 				// For now, refreshing all ensures shared_info is fully up-to-date.
-				for (uint32 user_port_id_idx = 0; user_port_id_idx < I915_MAX_PORTS_USER; user_port_id_idx++) {
-					// Assuming i915_port_id_user enum values (A, B, C...) correspond to indices 0, 1, 2...
-					// This requires I915_PORT_ID_USER_A to be 0 or a similar consistent mapping.
-					// The connector_id passed to GET_CONNECTOR_INFO should be the kernel's enum intel_port_id_priv.
-					// For simplicity, we assume a direct mapping from the loop index to this kernel ID for now.
-					if (user_port_id_idx == I915_PORT_ID_USER_NONE && I915_PORT_ID_USER_NONE == 0) continue; // Skip NONE if it's 0
-
+				// This also helps if the mapping between kernel HPD bits and user_port_id is not 1:1.
+				for (uint32 user_port_id_val = I915_PORT_ID_USER_A; user_port_id_val < I915_MAX_PORTS_USER; user_port_id_val++) {
 					intel_i915_get_connector_info_args conn_args;
-					conn_args.connector_id = user_port_id_idx; // This assumes user_port_id_idx maps to a valid kernel port ID
+					// The connector_id passed to GET_CONNECTOR_INFO should be the kernel's enum intel_port_id_priv.
+					// We assume i915_port_id_user enum values map directly to the kernel's port identifiers.
+					conn_args.connector_id = user_port_id_val;
 
 					if (ioctl(localGInfo->device_fd, INTEL_I915_GET_CONNECTOR_INFO, &conn_args, sizeof(conn_args)) == B_OK) {
 						if (conn_args.is_connected) {
 							// Build a bitmask of currently connected ports.
-							// The bit position should ideally align with how changed_hpd_mask is structured by the kernel.
-							// Example: If user_port_id_idx 0 (PORT_A) corresponds to HPD bit 0.
-							if (user_port_id_idx < 32) { // Ensure it fits in a uint32 mask
-								new_ports_connected_mask |= (1 << user_port_id_idx);
+							// The bit position should ideally align with how changed_hpd_mask is structured by the kernel
+							// (i.e., based on i915_hpd_line_identifier).
+							// For simplicity here, we use user_port_id_val as the bit index.
+							// This requires user_port_id_val to be < 32.
+							if (user_port_id_val < 32) {
+								new_ports_connected_mask |= (1 << user_port_id_val);
 							}
 						}
 
-						// Update EDID info in shared_info for the pipe this connector is currently driving, if any.
-						// shared_info.edid_infos is indexed by pipe ID (enum i915_pipe_id_user).
+						// Update EDID info in shared_info for the corresponding pipe if the connector is active on one.
+						// shared_info->edid_infos is indexed by pipe ID (enum i915_pipe_id_user).
 						if (conn_args.current_pipe_id < MAX_PIPES_I915 && conn_args.current_pipe_id != I915_PIPE_USER_INVALID) {
 							uint32 pipe_idx = conn_args.current_pipe_id; // This is already enum i915_pipe_id_user from kernel
 							localGInfo->shared_info->has_edid[pipe_idx] = conn_args.edid_valid;
@@ -573,19 +606,19 @@ hpd_event_thread_entry(void* data)
 							// Mark that this pipe's EDID might need reprocessing by app_server or display prefs.
 							localGInfo->shared_info->pipe_needs_edid_reprobe[pipe_idx] = true;
 							TRACE("HPD: Updated EDID for pipe %u (connector user_id %u, name '%s'): EDID valid: %d\n",
-								pipe_idx, user_port_id_idx, conn_args.name, conn_args.edid_valid);
+								pipe_idx, user_port_id_val, conn_args.name, conn_args.edid_valid);
 						} else if (conn_args.is_connected) {
 							// This connector is connected but not currently assigned to an active pipe.
 							// Its EDID (in conn_args.edid_data) is available if app_server queries GET_CONNECTOR_INFO.
 							TRACE("HPD: Connector '%s' (user_id %u) connected, EDID valid: %d, but not currently assigned to a pipe.\n",
-								conn_args.name, user_port_id_idx, conn_args.edid_valid);
+								conn_args.name, user_port_id_val, conn_args.edid_valid);
 						}
 					} else {
-						// This might happen if user_port_id_idx doesn't map to a valid kernel connector.
-						// TRACE("HPD: Failed to get connector info for user_port_id_idx %u.\n", user_port_id_idx);
+						// This might happen if user_port_id_val doesn't map to a valid kernel connector.
+						// TRACE("HPD: Failed to get connector info for user_port_id %u.\n", user_port_id_val); // Can be noisy
 					}
 				}
-				// Update the master connection status mask in shared_info.
+				// Update the overall connection status mask in shared_info.
 				localGInfo->shared_info->ports_connected_status_mask = new_ports_connected_mask;
 				TRACE("HPD: Updated shared_info->ports_connected_status_mask to 0x%lx based on current connector states.\n", new_ports_connected_mask);
 
@@ -606,7 +639,8 @@ hpd_event_thread_entry(void* data)
 			// Timeout is expected, allows checking hpd_thread_active. Loop again.
 			// TRACE("HPD: WAIT_FOR_DISPLAY_CHANGE timed out (normal).\n"); // This log can be very noisy if enabled.
 		} else if (ioctl_status == B_INTERRUPTED || ioctl_status == B_BAD_SEM_ID) {
-			// These errors are expected during shutdown if the thread is interrupted or the underlying semaphore is deleted.
+			// These errors are expected during shutdown when the semaphore is deleted
+			// or the thread is interrupted by kill_thread implicitly by area deletion or process exit.
 			TRACE("HPD: WAIT_FOR_DISPLAY_CHANGE interrupted or semaphore deleted; thread will exit.\n");
 			break; // Exit the loop, thread will terminate.
 		} else {
@@ -636,6 +670,7 @@ status_t intel_i915_acquire_engine(uint32 capabilities, uint32 max_wait, sync_to
 			if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO, &args, sizeof(args)) == 0) {
 				st->counter = args.seqno;
 			} else {
+				// Fallback or error
 				st->counter = gAccelLastSubmittedSeqno;
 				TRACE("acquire_engine: FLUSH_AND_GET_SEQNO failed, using cached seqno %lu.\n", gAccelLastSubmittedSeqno);
 			}
@@ -650,6 +685,7 @@ status_t intel_i915_acquire_engine(uint32 capabilities, uint32 max_wait, sync_to
 status_t intel_i915_release_engine(engine_token *et, sync_token *st) {
 	if (!gEngineLockInited) return B_NO_INIT;
 	if (st != NULL) {
+		// Get the latest sequence number for this sync_token
 		st->engine_id = RCS0;
 		intel_i915_gem_flush_and_get_seqno_args args;
 		args.engine_id = RCS0;
@@ -727,11 +763,11 @@ status_t intel_i915_get_sync_token(engine_token *et, sync_token *st) {
 status_t intel_i915_sync_to_token(sync_token *st) {
 	TRACE("SYNC_TO_TOKEN: Engine %lu, counter %" B_PRIu64 ".\n", st->engine_id, st->counter);
 	if (gInfo == NULL || gInfo->device_fd < 0 || st == NULL) return B_BAD_VALUE;
-	if (st->engine_id != RCS0) {
+	if (st->engine_id != RCS0) { // Assuming only RCS0 for now
 		TRACE("SYNC_TO_TOKEN: Invalid engine_id %lu (expected RCS0).\n", st->engine_id);
 		return B_BAD_VALUE;
 	}
-	if (st->counter == 0) {
+	if (st->counter == 0) { // No work to sync to
 		TRACE("SYNC_TO_TOKEN: Counter is 0, no sync needed.\n");
 		return B_OK;
 	}

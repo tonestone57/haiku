@@ -6,6 +6,33 @@
  *		Jules Maintainer
  */
 
+/*
+ * 2D Acceleration for Intel Graphics
+ *
+ * This file implements 2D drawing operations (fills, blits, lines) using the
+ * Intel blitter engine via GEM (Graphics Execution Manager) command buffers.
+ *
+ * Synchronization:
+ * Currently, synchronization relies on PIPE_CONTROL commands with CS_STALL
+ * emitted at the end of each batch buffer. This ensures commands are completed
+ * before the function returns or before subsequent CPU access to affected memory.
+ * More advanced explicit synchronization using fences (like Linux DRM's syncobj
+ * or dma-fence) could offer performance benefits by allowing greater CPU/GPU
+ * parallelism, but would require significant enhancements to Haiku's i915 kernel
+ * driver IOCTL API and potentially a kernel-level fence framework. Such features
+ * are not inferred to be present in the current Haiku i915 interface.
+ *
+ * Batch Buffer Optimizations:
+ * The primary performance optimization for CPU-bound 2D workloads is the batching
+ * of multiple primitive operations (e.g., rectangle fills) into a single command
+ * buffer, which is then submitted via one ioctl(EXECBUFFER) call. This amortizes
+ * the overhead of the ioctl and GPU submission. The XY_COLOR_BLT and
+ * XY_SRC_COPY_BLT commands used are largely self-contained, limiting scope for
+ * state-hoisting optimizations typical in 3D pipelines. The current fixed-size
+ * batching (max_ops_per_batch) is a heuristic for balancing IOCTL overhead
+ * against command buffer size and latency.
+ */
+
 #include "accelerant.h"       // For gInfo, accelerant_info, IOCTL codes and args
 #include <unistd.h>           // For ioctl
 #include <syslog.h>           // For syslog
@@ -530,7 +557,8 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 #define BLT_ROP_PATCOPY		(0xF0 << 16) // DW0 Bits 23:16 = 0xF0 (Pattern ROP)
 #define BLT_ROP_SRCCOPY		(0xCC << 16) // DW0 Bits 23:16 = 0xCC (Source ROP)
 #define BLT_ROP_DSTINVERT	(0x55 << 16) // DW0 Bits 23:16 = 0x55 (Destination Invert ROP)
-// PRM Verification (Gen8+): Confirm ROP field (Bits 23:16) is consistent. Standard ROP values (F0, CC, 55) are common.
+#define BLT_ROP_PATXOR		(0x5A << 16) // DW0 Bits 23:16 = 0x5A (Pattern XOR Destination); P ^ D
+// PRM Verification (Gen8+): Confirm ROP field (Bits 23:16) is consistent. Standard ROP values (F0, CC, 55, 5A) are common.
 
 // For XY_COLOR_BLT & XY_SRC_COPY_BLT on Gen7+, DW0 bits:
 #define BLT_WRITE_RGB		(1 << 20) // DW0 Bit 20: RGB Write Enable (often called "Color Write Enable")
@@ -1274,6 +1302,73 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 		destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
 	}
 }
+
+// intel_i915_fill_rectangle_patxor fills a list of rectangles using the
+// Pattern XOR (PATXOR) raster operation. This is typically used for
+// implementing B_OP_XOR drawing mode for ephemeral drawing like selection
+// marquees or rubber-banding, where drawing the same shape again with the
+// same color restores the original content.
+// The 'color' parameter serves as the pattern for the XOR operation.
+void intel_i915_fill_rectangle_patxor(engine_token *et, uint32 color, fill_rect_params *list, uint32 count,
+	bool enable_hw_clip) {
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
+	// _log_tiling_generalization_status(); // Called by any primary fill/blit function
+	uint8_t gen = gInfo->shared_info->graphics_generation;
+
+	const size_t max_ops_per_batch = 160;
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
+
+	for (size_t batch = 0; batch < num_batches; batch++) {
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
+		size_t cmd_dwords_per_rect = 5; // XY_COLOR_BLT command length
+		size_t pipe_control_dwords = 4;
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1;
+		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
+
+		uint32 cmd_handle; area_id k_area, c_area = -1; uint32* cpu_buf;
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area, (void**)&cpu_buf) != B_OK) return;
+		c_area = area_for(cpu_buf);
+
+		uint32 cur_dw_idx = 0;
+		for (size_t i = 0; i < current_batch_count; i++) {
+			fill_rect_params *rect = &list[batch * max_ops_per_batch + i];
+			if (rect->right < rect->left || rect->bottom < rect->top) continue;
+
+			// DW0: Using BLT_ROP_PATXOR
+			uint32 cmd_dw0 = XY_COLOR_BLT_CMD_OPCODE | XY_COLOR_BLT_LENGTH | BLT_ROP_PATXOR;
+			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
+			cmd_dw0 |= depth_flags;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// For PATXOR, typically only color channels are affected. Alpha is usually preserved from destination.
+				// If Haiku's B_OP_XOR implies alpha modification, BLT_WRITE_ALPHA might be needed.
+			}
+			if (enable_hw_clip) {
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
+			}
+
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (gen == 7 || gen == 8 || gen == 9) {
+					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				}
+			}
+			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row; // Dest pitch
+			cpu_buf[cur_dw_idx++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16); // Dest X1, Y1
+			cpu_buf[cur_dw_idx++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16); // Dest X2, Y2
+			cpu_buf[cur_dw_idx++] = color; // Pattern color for XOR
+		}
+		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
+
+		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("fill_rectangle_patxor: EXECBUFFER failed.\n");
+		destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
+	}
+}
+
 
 void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count, bool enable_hw_clip) {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;

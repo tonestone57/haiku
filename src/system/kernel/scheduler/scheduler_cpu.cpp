@@ -1636,6 +1636,18 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		float score = (1.0f - irqTargetFactor) * threadEffectiveLoad
 						   + irqTargetFactor * normalizedExistingIrqLoad;
 
+		// Add bonus for energy efficiency (lower score is better)
+		uint32 energyEfficiency = currentCPU->Core()->EnergyEfficiency();
+		const float ENERGY_EFFICIENCY_WEIGHT_IRQ = 0.05f; // Small factor
+		const float EFFICIENCY_NORMALIZATION_FACTOR = 10000.0f; // Tune this based on typical efficiency values
+
+		if (energyEfficiency > 0) {
+			float efficiencyContribution = ((float)energyEfficiency / EFFICIENCY_NORMALIZATION_FACTOR) * ENERGY_EFFICIENCY_WEIGHT_IRQ;
+			score -= efficiencyContribution; // Higher efficiency -> lower score -> more preferred
+			TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: CPU %" B_PRId32 " (Core %" B_PRId32 ", Eff %" B_PRIu32 ") gets efficiency bonus %f, score now %f\n",
+				currentCPU->ID(), currentCPU->Core()->ID(), energyEfficiency, efficiencyContribution, score);
+		}
+
 		// If this CPU is where the affinitized task is running, give it a significant bonus
 		if (currentCPU == affinitizedTaskRunningCPU) {
 			score *= 0.1f; // Strong preference (e.g., reduce score by 90%)

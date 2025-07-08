@@ -1159,6 +1159,288 @@ reschedule(int32 nextState)
 }
 
 
+// --- Mechanism A: Task-Contextual IRQ Re-evaluation Helper ---
+// Define constants for Mechanism A
+#define IRQ_INTERFERENCE_LOAD_THRESHOLD (kMaxLoad / 20) // e.g., 50 for kMaxLoad = 1000
+#define DYNAMIC_IRQ_MOVE_COOLDOWN (150000)          // 150ms
+
+static CPUEntry*
+_find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, CPUEntry* currentOwnerCpu)
+{
+	// Try to find a suitable alternative CPU for an IRQ that's bothering a latency-sensitive task.
+	// Priority:
+	// 1. Other SMT siblings on the same core (if not also running sensitive tasks).
+	// 2. Other cores in the same package (prefer E-cores if IRQ is light, or less loaded P-cores).
+	// 3. Cores in other packages (similar preference).
+	// Must have capacity for irqToMove->load.
+
+	CPUEntry* bestAlternative = NULL;
+	float bestAlternativeScore = 1e9; // Lower is better (similar to SelectTargetCPUForIRQ)
+
+	CoreEntry* ownerCore = currentOwnerCpu->Core();
+
+	for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+		CPUEntry* candidateCpu = CPUEntry::GetCPU(i);
+		if (candidateCpu == currentOwnerCpu || gCPU[i].disabled || candidateCpu->Core() == NULL)
+			continue;
+
+		// Check if candidate CPU is running a highly latency-sensitive task itself
+		Thread* runningOnCandidate = gCPU[i].running_thread;
+		bool candidateIsSensitive = false;
+		if (runningOnCandidate != NULL && runningOnCandidate->scheduler_data != NULL) {
+			ThreadData* td = runningOnCandidate->scheduler_data;
+			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || td->LatencyNice() < -10) {
+				candidateIsSensitive = true;
+			}
+		}
+		if (candidateIsSensitive)
+			continue; // Don't move disruptive IRQ to another sensitive context
+
+		// Check capacity
+		int32 dynamicMaxLoad = scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
+		if (candidateCpu->CalculateTotalIrqLoad() + irqToMove->load >= dynamicMaxLoad)
+			continue; // Not enough IRQ capacity
+
+		// Simple scoring: prefer less IRQ-loaded, then less thread-loaded.
+		// This is a basic heuristic for "quiet".
+		float score = (float)candidateCpu->CalculateTotalIrqLoad() * 0.7f + candidateCpu->GetInstantaneousLoad() * 0.3f;
+
+		// Bonus for E-cores if IRQ is not extremely heavy, or if current is P and target E
+		if (candidateCpu->Core()->Type() == CORE_TYPE_LITTLE) {
+			if (irqToMove->load < IRQ_INTERFERENCE_LOAD_THRESHOLD * 2) // Heuristic for "not too heavy"
+				score *= 0.8f; // Prefer E-core
+			else if (ownerCore->Type() == CORE_TYPE_BIG || ownerCore->Type() == CORE_TYPE_UNIFORM_PERFORMANCE)
+				score *= 0.9f; // Prefer moving from P to E even if IRQ is heavier
+		}
+
+
+		if (candidateCpu->Core() == ownerCore) // Same core (SMT sibling)
+			score *= 0.5f; // Strong preference for same core
+		else if (candidateCpu->Core()->Package() == ownerCore->Package()) // Same package
+			score *= 0.75f;
+
+		if (score < bestAlternativeScore) {
+			bestAlternativeScore = score;
+			bestAlternative = candidateCpu;
+		}
+	}
+	if (bestAlternative != NULL) {
+		TRACE_SCHED_IRQ_DYNAMIC("AltIRQCPU: Found alt CPU %d for IRQ %d (load %d) from CPU %d. Score %f\n",
+			bestAlternative->ID(), irqToMove->irq, irqToMove->load, currentOwnerCpu->ID(), bestAlternativeScore);
+	}
+	return bestAlternative;
+}
+
+
+void
+scheduler_reschedule(int32 nextState)
+{
+	ASSERT(!are_interrupts_enabled());
+	SCHEDULER_ENTER_FUNCTION();
+	if (!sSchedulerEnabled) {
+		Thread* thread = thread_get_current_thread();
+		if (thread != NULL && nextState != B_THREAD_READY)
+			panic("scheduler_reschedule_no_op() called in non-ready thread");
+		return;
+	}
+
+	// --- Original reschedule() logic up to choosing nextThread ---
+	// (This includes updating oldThread's state and EEVDF params,
+	// choosing nextThread from runqueue, and work-stealing attempt if needed)
+	// ... (Assume this part of reschedule() is present as before) ...
+
+	int32 thisCPUId = smp_get_current_cpu();
+	gCPU[thisCPUId].invoke_scheduler = false;
+	CPUEntry* cpu = CPUEntry::GetCPU(thisCPUId);
+	Thread* oldThread = thread_get_current_thread();
+	ThreadData* oldThreadData = oldThread->scheduler_data;
+	oldThreadData->StopCPUTime();
+	oldThread->state = nextState;
+	oldThreadData->SetStolenInterruptTime(gCPU[thisCPUId].interrupt_time);
+	bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum;
+
+	if (!oldThreadData->IsIdle()) {
+		if (nextState == THREAD_STATE_WAITING || nextState == THREAD_STATE_SLEEPING) {
+			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
+		}
+		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+		if (weight <= 0) weight = 1;
+		uint32 coreCapacity = cpu->Core()->PerformanceCapacity() > 0 ? cpu->Core()->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
+		uint64 numerator = (uint64)actualRuntime * coreCapacity * SCHEDULER_WEIGHT_SCALE;
+		uint64 denominator = (uint64)SCHEDULER_NOMINAL_CAPACITY * weight;
+		bigtime_t weightedRuntimeContribution = (denominator == 0) ? 0 : numerator / denominator;
+		oldThreadData->AddVirtualRuntime(weightedRuntimeContribution);
+		oldThreadData->AddLag(-weightedRuntimeContribution);
+	}
+
+	bool shouldReEnqueueOldThread = false;
+	switch (nextState) {
+		case B_THREAD_RUNNING:
+		case B_THREAD_READY: {
+			shouldReEnqueueOldThread = true;
+			CPUSet oldThreadAffinity = oldThreadData->GetCPUMask();
+			if (oldThreadData->IsIdle() || (!oldThreadAffinity.IsEmpty() && !oldThreadAffinity.GetBit(thisCPUId))) {
+				shouldReEnqueueOldThread = false;
+				if (!oldThreadData->IsIdle() && oldThreadData->Core() == cpu->Core()) oldThreadData->UnassignCore(false);
+			} else {
+				oldThreadData->Continues();
+				oldThreadData->UpdateEevdfParameters(cpu, false, true);
+			}
+			break;
+		}
+		case THREAD_STATE_FREE_ON_RESCHED: oldThreadData->Dies(); break;
+		default: oldThreadData->GoesAway(); break;
+	}
+	oldThread->has_yielded = false;
+
+	ThreadData* nextThreadData = NULL;
+	cpu->LockRunQueue();
+	if (gCPU[thisCPUId].disabled) {
+		if (oldThread != NULL && !oldThreadData->IsIdle()) {
+			if (oldThreadData->IsEnqueued() && oldThreadData->Core() == cpu->Core()) {
+				cpu->RemoveThread(oldThreadData); oldThreadData->MarkDequeued();
+			}
+			if (oldThreadData->Core() == cpu->Core()) oldThreadData->UnassignCore(true);
+			cpu->UnlockRunQueue();
+			atomic_set((int32*)&oldThread->state, B_THREAD_READY); scheduler_enqueue_in_run_queue(oldThread);
+			cpu->LockRunQueue();
+		}
+		nextThreadData = cpu->PeekIdleThread();
+		if (nextThreadData == NULL) panic("reschedule: No idle thread on disabling CPU %" B_PRId32 "!", thisCPUId);
+	} else {
+		ThreadData* oldThreadToConsider = (shouldReEnqueueOldThread && !oldThreadData->IsIdle()) ? oldThreadData : NULL;
+		nextThreadData = cpu->ChooseNextThread(oldThreadToConsider, false, 0);
+		if (nextThreadData->IsIdle() && !gSingleCore) {
+			bool shouldAttemptSteal = (system_time() >= cpu->fNextStealAttemptTime);
+			if (gCurrentMode != NULL && gCurrentMode->is_cpu_effectively_parked != NULL && gCurrentMode->is_cpu_effectively_parked(cpu)) {
+				shouldAttemptSteal = false;
+			}
+			if (shouldAttemptSteal) {
+				cpu->UnlockRunQueue(); ThreadData* stolen = scheduler_try_work_steal(cpu); cpu->LockRunQueue();
+				if (stolen != NULL) {
+					InterruptsSpinLocker sl(stolen->GetThread()->scheduler_lock);
+					stolen->UpdateEevdfParameters(cpu, true, false);
+					sl.Unlock();
+					nextThreadData = stolen; cpu->fNextStealAttemptTime = system_time() + kStealSuccessCooldownPeriod;
+					if (stolen->Core() != cpu->Core()) {
+						InterruptsSpinLocker l(stolen->GetThread()->scheduler_lock);
+						if (stolen->Core() != NULL) stolen->UnassignCore(false);
+						stolen->MarkEnqueued(cpu->Core());
+						l.Unlock();
+					} else if (!stolen->IsEnqueued()) {
+						InterruptsSpinLocker l(stolen->GetThread()->scheduler_lock); stolen->MarkEnqueued(cpu->Core()); l.Unlock();
+					}
+					atomic_add(&cpu->fTotalThreadCount, 1);
+				} else {
+					cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
+				}
+			}
+		}
+	}
+	if (!gCPU[thisCPUId].disabled) cpu->_UpdateMinVirtualRuntime();
+	cpu->UnlockRunQueue();
+	Thread* nextThread = nextThreadData->GetThread();
+	ASSERT(nextThread != NULL);
+	// --- End of original reschedule logic up to choosing nextThread ---
+
+	// --- Mechanism A: Task-Contextual IRQ Re-evaluation ---
+	if (nextThread != NULL && !nextThreadData->IsIdle() && nextThread->cpu != NULL) {
+		bool isHighlyLatencySensitive = (nextThread->priority >= B_URGENT_DISPLAY_PRIORITY
+			|| (nextThread->scheduler_data != NULL && nextThread->scheduler_data->LatencyNice() < -10));
+
+		if (isHighlyLatencySensitive) {
+			TRACE_SCHED_IRQ_DYNAMIC("Resched: Next T%" B_PRId32 " is latency sensitive. Checking IRQs on CPU %" B_PRId32 "\n", nextThread->id, thisCPUId);
+			CPUEntry* currentCpuEntry = CPUEntry::GetCPU(thisCPUId); // Same as 'cpu'
+			irq_assignment* irqsToPotentiallyMove[MAX_IRQS_PER_CPU]; // Max possible IRQs on one CPU
+			int32 moveCount = 0;
+			bigtime_t now = system_time();
+
+			// Collect IRQs to check/move first to avoid issues with modifying list under lock
+			cpu_ent* cpuSt = &gCPU[thisCPUId];
+			SpinLocker irqListLocker(cpuSt->irqs_lock);
+			irq_assignment* assignedIrq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
+			while (assignedIrq != NULL && moveCount < MAX_IRQS_PER_CPU) {
+				if (assignedIrq->load >= IRQ_INTERFERENCE_LOAD_THRESHOLD) {
+					bool isExplicitlyColocated = false;
+					if (sIrqTaskAffinityMap != NULL) {
+						InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
+						thread_id mappedTid;
+						if (sIrqTaskAffinityMap->Lookup(assignedIrq->irq, &mappedTid) == B_OK && mappedTid == nextThread->id) {
+							isExplicitlyColocated = true;
+						}
+					} // affinityMapLocker releases
+
+					if (!isExplicitlyColocated && now >= atomic_load_64(&gIrqLastFollowMoveTime[assignedIrq->irq]) + DYNAMIC_IRQ_MOVE_COOLDOWN) {
+						irqsToPotentiallyMove[moveCount++] = assignedIrq;
+					}
+				}
+				assignedIrq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, assignedIrq);
+			}
+			irqListLocker.Unlock();
+
+			// Now attempt to move collected IRQs
+			for (int i = 0; i < moveCount; ++i) {
+				irq_assignment* irqToMove = irqsToPotentiallyMove[i];
+				CPUEntry* altCPU = _find_quiet_alternative_cpu_for_irq(irqToMove, currentCpuEntry);
+				if (altCPU != NULL) {
+					bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqToMove->irq]);
+					// Re-check cooldown just before CAS in case of races, though less likely here.
+					if (now >= lastRecordedMoveTime + DYNAMIC_IRQ_MOVE_COOLDOWN) {
+						if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], lastRecordedMoveTime, now)) {
+							TRACE_SCHED_IRQ_DYNAMIC("Resched: Moving IRQ %d (load %d) from CPU %d to altCPU %d for T%" B_PRId32 "\n",
+								irqToMove->irq, irqToMove->load, thisCPUId, altCPU->ID(), nextThread->id);
+							assign_io_interrupt_to_cpu(irqToMove->irq, altCPU->ID());
+						} else {
+							TRACE_SCHED_IRQ_DYNAMIC("Resched: CAS failed for IRQ %d, move deferred.\n", irqToMove->irq);
+						}
+					}
+				}
+			}
+		}
+	}
+	// --- End Mechanism A ---
+
+
+	if (nextThread != oldThread)
+		acquire_spinlock(&nextThread->scheduler_lock);
+
+	// ... (rest of reschedule() logic: TRACE_SCHED, T, Notify, Assertions, StartCPUTime, TrackActivity, StartQuantumTimer, etc.)
+	TRACE_SCHED("reschedule: cpu %" B_PRId32 " selected nextT %" B_PRId32 " (VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ")\n",
+		thisCPUId, nextThread->id, nextThreadData->VirtualDeadline(), nextThreadData->Lag(), nextThreadData->EligibleTime());
+	T(ScheduleThread(nextThread, oldThread));
+	NotifySchedulerListeners(&SchedulerListener::ThreadScheduled, oldThread, nextThread);
+	if (!nextThreadData->IsIdle()) {
+		ASSERT(nextThreadData->Core() == cpu->Core() && "Scheduled non-idle EEVDF thread not on correct core!");
+	} else {
+		ASSERT(nextThreadData->Core() == cpu->Core() && "Idle EEVDF thread not on correct core!");
+	}
+	nextThread->state = B_THREAD_RUNNING;
+	nextThreadData->StartCPUTime();
+	cpu->TrackActivity(oldThreadData, nextThreadData);
+	bigtime_t sliceForTimer = 0;
+	if (!nextThreadData->IsIdle()) {
+		sliceForTimer = nextThreadData->SliceDuration();
+		nextThreadData->StartQuantum(sliceForTimer);
+	} else {
+		sliceForTimer = kLoadMeasureInterval * 2;
+		nextThreadData->StartQuantum(B_INFINITE_TIMEOUT);
+	}
+	cpu->StartQuantumTimer(nextThreadData, gCPU[thisCPUId].preempted, sliceForTimer);
+	gCPU[thisCPUId].preempted = false;
+	if (!nextThreadData->IsIdle()) {
+		nextThreadData->Continues();
+	} else if (gCurrentMode != NULL) {
+		gCurrentMode->rebalance_irqs(true);
+	}
+	SCHEDULER_EXIT_FUNCTION();
+	// --- End of original reschedule logic ---
+
+	if (nextThread != oldThread) {
+		switch_thread(oldThread, nextThread);
+	}
+}
+
+
 void
 scheduler_reschedule(int32 nextState)
 {
@@ -1852,49 +2134,91 @@ scheduler_irq_balance_event(timer* /* unused */)
 	int32 maxIrqLoad = -1;
 	int32 minIrqLoad = 0x7fffffff;
 	int32 enabledCpuCount = 0;
+
+	CoreEntry* preferredTargetCoreForPS = NULL;
+	if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && Scheduler::sSmallTaskCore != NULL) {
+		CoreEntry* stc = Scheduler::sSmallTaskCore;
+		// Check if STC itself is valid and has some IRQ capacity
+		// (simplified check: just ensure it's enabled and not defunct)
+		bool stcHasEnabledCpu = false;
+		if (!stc->IsDefunct()) {
+			CPUSet stcCPUs = stc->CPUMask();
+			for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+				if (stcCPUs.GetBit(i) && gCPUEnabled.GetBit(i)) {
+					stcHasEnabledCpu = true;
+					break;
+				}
+			}
+		}
+		if (stcHasEnabledCpu) {
+			preferredTargetCoreForPS = stc;
+			TRACE_SCHED_IRQ("IRQBalance(PS): Preferred target core for IRQ consolidation is STC %" B_PRId32 " (Type %d)\n",
+				stc->ID(), stc->Type());
+		}
+	}
+
+
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!gCPUEnabled.GetBit(i))
 			continue;
 		enabledCpuCount++;
 		CPUEntry* currentCpu = CPUEntry::GetCPU(i);
 		int32 currentTotalIrqLoad = currentCpu->CalculateTotalIrqLoad();
+
 		if (sourceCpuMaxIrq == NULL || currentTotalIrqLoad > maxIrqLoad) {
 			maxIrqLoad = currentTotalIrqLoad;
 			sourceCpuMaxIrq = currentCpu;
 		}
-		if (targetCandidateCpuMinIrq == NULL || currentTotalIrqLoad < minIrqLoad) {
-			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) {
-				minIrqLoad = currentTotalIrqLoad;
-				targetCandidateCpuMinIrq = currentCpu;
+
+		// Logic for targetCandidateCpuMinIrq with PS mode preference
+		bool isPreferredTarget = (preferredTargetCoreForPS != NULL && currentCpu->Core() == preferredTargetCoreForPS);
+		int32 effectiveLoadForComparison = currentTotalIrqLoad;
+		if (isPreferredTarget) {
+			// Make preferred target appear more attractive by reducing its effective load for comparison
+			effectiveLoadForComparison -= kMaxLoad / 4; // Example: 25% load reduction bonus
+			if (effectiveLoadForComparison < 0) effectiveLoadForComparison = 0;
+		} else if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && preferredTargetCoreForPS != NULL && currentCpu->Core()->Type() != CORE_TYPE_LITTLE) {
+			// If there's a preferred STC (likely LITTLE) and this CPU is not on a LITTLE core, make it less attractive
+			effectiveLoadForComparison += kMaxLoad / 4; // Example: 25% load penalty
+		}
+
+
+		if (targetCandidateCpuMinIrq == NULL || effectiveLoadForComparison < minIrqLoad) {
+			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) { // Don't pick source as target unless it's the only option
+				minIrqLoad = effectiveLoadForComparison; // Store the effective load for comparison
+				targetCandidateCpuMinIrq = currentCpu;    // Store the actual CPU
 			}
 		}
 	}
-	if (targetCandidateCpuMinIrq == NULL || targetCandidateCpuMinIrq == sourceCpuMaxIrq) {
-		if (enabledCpuCount > 1 && sourceCpuMaxIrq != NULL) {
-			targetCandidateCpuMinIrq = NULL;
-			minIrqLoad = 0x7fffffff;
-			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-				if (!gCPUEnabled.GetBit(i) || CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
-					continue;
-				CPUEntry* potentialTarget = CPUEntry::GetCPU(i);
-				int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
-				if (targetCandidateCpuMinIrq == NULL || potentialTargetLoad < minIrqLoad) {
-					targetCandidateCpuMinIrq = potentialTarget;
-					minIrqLoad = potentialTargetLoad;
-				}
+
+	// If after preferring STC/LITTLEs, the target is still the source, try to find any other valid target.
+	if (targetCandidateCpuMinIrq == NULL || (targetCandidateCpuMinIrq == sourceCpuMaxIrq && enabledCpuCount > 1)) {
+		minIrqLoad = 0x7fffffff; // Reset minLoad for a general search
+		CPUEntry* generalFallbackTarget = NULL;
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (!gCPUEnabled.GetBit(i) || CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
+				continue;
+			CPUEntry* potentialTarget = CPUEntry::GetCPU(i);
+			int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
+			if (generalFallbackTarget == NULL || potentialTargetLoad < minIrqLoad) {
+				generalFallbackTarget = potentialTarget;
+				minIrqLoad = potentialTargetLoad; // Here minIrqLoad is actual load for fallback
 			}
-		} else {
-			targetCandidateCpuMinIrq = NULL;
 		}
+		targetCandidateCpuMinIrq = generalFallbackTarget;
 	}
+
 	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
-		TRACE("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
+		TRACE_SCHED_IRQ("Proactive IRQ: No suitable distinct source/target pair or no CPUs enabled.\n");
 		add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 		return B_HANDLED_INTERRUPT;
 	}
-	if (maxIrqLoad > gHighAbsoluteIrqThreshold && maxIrqLoad > minIrqLoad + gSignificantIrqLoadDifference) {
-		TRACE("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (IRQ load %" B_PRId32 ")\n",
-			sourceCpuMaxIrq->ID(), maxIrqLoad, targetCandidateCpuMinIrq->ID(), minIrqLoad);
+
+	// Use actual load of the chosen target for imbalance check, not its effective load used for selection.
+	int32 actualTargetMinIrqLoad = targetCandidateCpuMinIrq->CalculateTotalIrqLoad();
+	if (maxIrqLoad > gHighAbsoluteIrqThreshold && maxIrqLoad > actualTargetMinIrqLoad + gSignificantIrqLoadDifference) {
+		TRACE_SCHED_IRQ("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (Actual IRQ load %" B_PRId32 ")\n",
+			sourceCpuMaxIrq->ID(), maxIrqLoad, targetCandidateCpuMinIrq->ID(), actualTargetMinIrqLoad);
 		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
 		int32 candidateCount = 0;
 		{

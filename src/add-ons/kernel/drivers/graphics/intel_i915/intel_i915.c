@@ -1368,7 +1368,18 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 
 	uint32 active_pipe_count = 0;
 	uint32 required_cdclk_khz = 0;
-	bool dpll_reserved[MAX_HW_DPLLS] = {false}; // Simple DPLL reservation tracking for this check pass
+	// More detailed temporary DPLL state for checking within this ioctl call
+	struct temp_dpll_check_state {
+		bool is_reserved_for_new_config;
+		intel_clock_params_t programmed_params;
+		enum pipe_id_priv user_pipe; // First pipe claiming this DPLL in this config
+	} temp_dpll_info[MAX_HW_DPLLS];
+
+	for (uint32 i = 0; i < MAX_HW_DPLLS; i++) {
+		temp_dpll_info[i].is_reserved_for_new_config = false;
+		memset(&temp_dpll_info[i].programmed_params, 0, sizeof(intel_clock_params_t));
+		temp_dpll_info[i].user_pipe = PRIV_PIPE_INVALID;
+	}
 
 	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
 		planned_configs[i].user_config = NULL;
@@ -1419,7 +1430,50 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 			status = B_BAD_VALUE;
 			goto check_done_release_gem;
 		}
-		// TODO: More detailed connector validation (is it physically present? VBT mapping to pipe?)
+
+		intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo,
+			(enum intel_port_id_priv)current_user_config->connector_id);
+
+		if (port_state == NULL || !port_state->connected) {
+			TRACE("    Error: Pipe %u assigned to disconnected or non-existent port %u\n", pipe, current_user_config->connector_id);
+			status = B_BAD_VALUE;
+			goto check_done_release_gem;
+		}
+
+		if (!port_state->edid_valid || port_state->num_modes == 0) {
+			TRACE("    Warning: Pipe %u, Port %u has no valid EDID or no modes. Mode validation skipped (will try to force).\n",
+				pipe, port_state->logical_port_id);
+			// Allowing to proceed, but clock calculation might fail if mode is unreasonable
+			// or a default/forced mode might be used by later stages.
+		} else {
+			bool mode_supported_by_connector = false;
+			for (int m = 0; m < port_state->num_modes; m++) {
+				// Compare key timing parameters. Allow small pixel clock deviation.
+				if (port_state->modes[m].timing.h_display == current_user_config->mode.timing.h_display &&
+					port_state->modes[m].timing.v_display == current_user_config->mode.timing.v_display &&
+					abs((int32)port_state->modes[m].timing.pixel_clock - (int32)current_user_config->mode.timing.pixel_clock) <= 1000) {
+					// TODO: Deeper validation of hsync/vsync etc. if necessary for stricter matching.
+					// For now, if resolution and approx refresh (via pixel clock) match, consider it supported.
+					// It's also good practice to copy the exact EDID mode timings to ensure what's programmed
+					// is exactly what the monitor advertised, if a match is found.
+					// current_user_config->mode.timing = port_state->modes[m].timing; // Overwrite with exact EDID timings
+					mode_supported_by_connector = true;
+					TRACE("    Mode %dx%d @ %ukHz found in EDID for port %u\n",
+						current_user_config->mode.timing.h_display, current_user_config->mode.timing.v_display,
+						current_user_config->mode.timing.pixel_clock, port_state->logical_port_id);
+					break;
+				}
+			}
+			if (!mode_supported_by_connector) {
+				TRACE("    Error: Mode %dx%d @ %ukHz not supported by connector %u (EDID modes checked: %d)\n",
+					current_user_config->mode.timing.h_display, current_user_config->mode.timing.v_display,
+					current_user_config->mode.timing.pixel_clock, port_state->logical_port_id, port_state->num_modes);
+				status = B_BAD_VALUE;
+				goto check_done_release_gem;
+			}
+		}
+		// TODO: VBT validation for pipe-port mapping if VBT data allows.
+
 
 		// Validate framebuffer GEM handle
 		if (current_user_config->fb_gem_handle == 0) {
@@ -1470,52 +1524,91 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 				status = B_ERROR; // Internal error essentially
 				goto check_done_release_transcoders;
 			}
-			if (dpll_reserved[planned_configs[pipe].assigned_dpll_id]) {
-				// This is a simplified check. A real check would compare if the *existing reservation*
-				// is for the *exact same clock frequency*. If so, it can be shared.
-				// For now, any prior reservation means conflict if it's not for the same pipe.
-				// And even for the same pipe, if the mode changes, it might need re-eval.
-				// The current Haiku i915 driver's `dplls[id].user_pipe` is not robust enough for this check alone.
-				TRACE("    Error: DPLL ID %d for pipe %u is already reserved by another pipe in this config.\n",
-					planned_configs[pipe].assigned_dpll_id, pipe);
-				status = B_BUSY; // Resource conflict
+			if (planned_configs[pipe].assigned_dpll_id >= MAX_HW_DPLLS) { // Should be caught by calc_clocks ideally
+				TRACE("    Error: Pipe %u selected invalid DPLL ID %d\n", pipe, planned_configs[pipe].assigned_dpll_id);
+				status = B_ERROR;
 				goto check_done_release_transcoders;
 			}
-			dpll_reserved[planned_configs[pipe].assigned_dpll_id] = true;
+
+			if (temp_dpll_info[planned_configs[pipe].assigned_dpll_id].is_reserved_for_new_config) {
+				// DPLL already claimed by another pipe in this new configuration.
+				// Check if the programming is identical (allowing sharing).
+				// This is a very simplified check. Real sharing depends on PLL type and exact params.
+				const intel_clock_params_t* existing_params =
+					&temp_dpll_info[planned_configs[pipe].assigned_dpll_id].programmed_params;
+				const intel_clock_params_t* new_params = &planned_configs[pipe].clock_params;
+
+				// Example simplified comparison: must be same VCO, P1, P2 for WRPLLs. More fields for others.
+				// A full memcmp might be too strict if some non-critical fields differ.
+				if (existing_params->dpll_vco_khz != new_params->dpll_vco_khz ||
+					existing_params->wrpll_p1 != new_params->wrpll_p1 || // Example fields
+					existing_params->wrpll_p2 != new_params->wrpll_p2) {
+					TRACE("    Error: DPLL ID %d conflict for pipe %u. Current user pipe %d. New req pipe %u.\n",
+						planned_configs[pipe].assigned_dpll_id,
+						temp_dpll_info[planned_configs[pipe].assigned_dpll_id].user_pipe, pipe);
+					TRACE("      Existing VCO: %u, P1: %u, P2: %u. New VCO: %u, P1: %u, P2: %u\n",
+						existing_params->dpll_vco_khz, existing_params->wrpll_p1, existing_params->wrpll_p2,
+						new_params->dpll_vco_khz, new_params->wrpll_p1, new_params->wrpll_p2);
+					status = B_BUSY; // Resource conflict
+					goto check_done_release_transcoders;
+				}
+				TRACE("    Info: Pipe %u sharing DPLL ID %d with pipe %d (compatible settings)\n",
+					pipe, planned_configs[pipe].assigned_dpll_id,
+					temp_dpll_info[planned_configs[pipe].assigned_dpll_id].user_pipe);
+				// Add current pipe to user_pipe_mask for the temp_dpll_info if tracking multiple users
+			} else {
+				temp_dpll_info[planned_configs[pipe].assigned_dpll_id].is_reserved_for_new_config = true;
+				temp_dpll_info[planned_configs[pipe].assigned_dpll_id].programmed_params = planned_configs[pipe].clock_params;
+				temp_dpll_info[planned_configs[pipe].assigned_dpll_id].user_pipe = pipe;
+				TRACE("    Pipe %u reserved DPLL ID %d\n", pipe, planned_configs[pipe].assigned_dpll_id);
+			}
 		}
 		// TODO: Mode validation against connector EDID (display.c has intel_i915_parse_edid)
 	}
 
 	// Pass 2: Global checks
 	if (active_pipe_count > 0) {
-		if (required_cdclk_khz > devInfo->current_cdclk_freq_khz) {
-			TRACE("  CDCLK change required: current %u kHz, needed %u kHz\n",
-				devInfo->current_cdclk_freq_khz, required_cdclk_khz);
-			// This implies a full modeset for all pipes might be needed if CDCLK changes.
-			// The commit phase will handle this.
+		// CDCLK Feasibility (conceptual - needs platform min/max CDCLK values)
+		if (required_cdclk_khz > 0) { // Only check if some CDCLK is actually required
+			// Example: uint32 platform_max_cdclk = get_platform_max_cdclk(devInfo);
+			// if (required_cdclk_khz > platform_max_cdclk) {
+			// 	TRACE("    Error: Required CDCLK %u kHz exceeds platform max %u kHz\n",
+			//		required_cdclk_khz, platform_max_cdclk);
+			// 	status = B_UNSUPPORTED;
+			// 	goto check_done_release_all_resources;
+			// }
+			if (required_cdclk_khz > devInfo->current_cdclk_freq_khz) {
+				TRACE("  CDCLK change will be required: current %u kHz, new target %u kHz\n",
+					devInfo->current_cdclk_freq_khz, required_cdclk_khz);
+			}
 		}
 
-		// Placeholder for actual bandwidth check
-		// status = i915_check_display_bandwidth(devInfo, active_pipe_count, pipe_configs_kernel_copy);
-		// if (status != B_OK) {
-		// 	TRACE("    Error: Bandwidth check failed: %s\n", strerror(status));
-		// 	goto check_done_release_all_resources;
-		// }
+		// Bandwidth Check
+		status = i915_check_display_bandwidth(devInfo, active_pipe_count, planned_configs);
+		if (status != B_OK) {
+			TRACE("    Error: Bandwidth check failed: %s\n", strerror(status));
+			goto check_done_release_all_resources;
+		}
 	}
 	TRACE("i915_set_display_config_ioctl_handler: Check Phase completed with status: %s\n", strerror(status));
 
 	// If only testing, or if checks failed, prepare to return.
 	if ((args->flags & I915_DISPLAY_CONFIG_TEST_ONLY) || status != B_OK) {
 		// Release resources acquired during this check phase
-check_done_release_all_resources: // Fall through for error cases
+check_done_release_all_resources:
 		for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
 			if (planned_configs[i].assigned_transcoder != PRIV_TRANSCODER_INVALID) {
+				// Only release if it was actually acquired by this call,
+				// not if it was already in use by another pipe not part of this transaction.
+				// The i915_release_transcoder should be safe.
 				i915_release_transcoder(devInfo, planned_configs[i].assigned_transcoder);
 			}
-			// Simple DPLL release for now, would be more complex with a real manager
+			// DPLLs in temp_dpll_info are only for this transaction's check, no actual hw state changed yet.
+			// So, no explicit "release" needed for temp_dpll_info beyond letting it go out of scope.
+			// If devInfo->dplls[] was modified for reservation, that would need rollback.
+			// Current simplified model with temp_dpll_info doesn't modify devInfo->dplls in check phase.
 			if (planned_configs[i].assigned_dpll_id != -1) {
-				// This doesn't really "release" in the current Haiku model other than clearing a flag
-				// if the commit phase was smarter. For now, just mark as not reserved for *this check*.
+				// No actual release needed for temp_dpll_info, it's stack/local.
 			}
 		}
 check_done_release_transcoders: // Fall through for some error cases

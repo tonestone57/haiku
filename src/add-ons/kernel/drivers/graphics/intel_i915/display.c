@@ -1280,3 +1280,76 @@ intel_display_get_port_by_id(intel_i915_device_info* devInfo, enum intel_port_id
 	}
 	return NULL;
 }
+
+
+// --- Bandwidth Check (Simplified Implementation) ---
+// Forward declare the struct if its definition is primarily in intel_i915.c's ioctl handler
+// Ideally, this struct (or relevant parts for bandwidth calc) would be in a shared header.
+struct planned_pipe_config {
+	const struct i915_display_pipe_config* user_config;
+	struct intel_i915_gem_object* fb_gem_obj;
+	intel_clock_params_t clock_params;
+	enum transcoder_id_priv assigned_transcoder;
+	int assigned_dpll_id;
+	bool needs_modeset;
+};
+
+
+status_t
+i915_check_display_bandwidth(intel_i915_device_info* devInfo,
+	uint32 num_active_pipes, const struct planned_pipe_config planned_configs[])
+{
+	if (devInfo == NULL || (num_active_pipes > 0 && planned_configs == NULL))
+		return B_BAD_VALUE;
+
+	if (num_active_pipes == 0)
+		return B_OK;
+
+	uint64 total_pixel_data_rate_bytes_sec = 0;
+	uint32 gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+
+	for (enum pipe_id_priv pipe = PRIV_PIPE_A; pipe < PRIV_MAX_PIPES; pipe++) {
+		if (planned_configs[pipe].user_config != NULL && planned_configs[pipe].user_config->active) {
+			const display_mode* dm = &planned_configs[pipe].user_config->mode;
+			uint32 bpp_bytes = get_bpp_from_colorspace(dm->space) / 8;
+			if (bpp_bytes == 0) bpp_bytes = 4; // Default to 32bpp if unknown
+
+			// Approximate refresh rate if not directly available.
+			// dm->timing.pixel_clock is in kHz.
+			uint64 refresh_hz = 60; // Default
+			if (dm->timing.h_total > 0 && dm->timing.v_total > 0 && dm->timing.pixel_clock > 0) {
+				refresh_hz = (uint64)dm->timing.pixel_clock * 1000 / (dm->timing.h_total * dm->timing.v_total);
+			}
+			if (refresh_hz == 0) refresh_hz = 60; // Sanity default
+
+			uint64 pipe_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz * bpp_bytes;
+			total_pixel_data_rate_bytes_sec += pipe_data_rate;
+			TRACE("BWCheck: Pipe %d mode %dx%d @ %" B_PRIu64 "Hz, %ubpp -> %" B_PRIu64 " B/s\n",
+				pipe, dm->timing.h_display, dm->timing.v_display, refresh_hz, bpp_bytes * 8, pipe_data_rate);
+		}
+	}
+
+	// These are very rough, conservative, placeholder thresholds (Bytes/second)
+	// Real limits depend on memory type (DDR3/4/LPDDR), channels, frequency, CDCLK, specific SKU.
+	uint64 platform_bw_limit_bytes_sec = 0;
+	if (gen >= 9) { // Skylake+
+		platform_bw_limit_bytes_sec = 15 * 1024 * 1024 * 1024; // ~15 GB/s
+	} else if (gen == 8) { // Broadwell
+		platform_bw_limit_bytes_sec = 12 * 1024 * 1024 * 1024; // ~12 GB/s
+	} else if (gen == 7) { // Ivy/Haswell
+		platform_bw_limit_bytes_sec = 10 * 1024 * 1024 * 1024; // ~10 GB/s
+	} else { // Older
+		platform_bw_limit_bytes_sec = 5 * 1024 * 1024 * 1024;  // ~5 GB/s
+	}
+
+	TRACE("BWCheck: Total required B/s: %" B_PRIu64 ", Platform Limit Approx: %" B_PRIu64 " B/s (Gen %u)\n",
+		total_pixel_data_rate_bytes_sec, platform_bw_limit_bytes_sec, gen);
+
+	if (total_pixel_data_rate_bytes_sec > platform_bw_limit_bytes_sec) {
+		TRACE("BWCheck: Error - Required display bandwidth exceeds approximate platform limit.\n");
+		return B_NO_MEMORY; // Using B_NO_MEMORY as a proxy for "out of bandwidth resources"
+	}
+
+	return B_OK;
+}
+// --- End Bandwidth Check ---

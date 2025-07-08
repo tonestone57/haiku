@@ -67,6 +67,11 @@ status_t intel_display_set_plane_offset(intel_i915_device_info* devInfo,
 status_t intel_display_load_palette(intel_i915_device_info* devInfo,
 	enum pipe_id_priv pipe, uint8_t first_color_index, uint16_t count, const uint8_t* color_data);
 
+// Bandwidth Check (declaration)
+struct planned_pipe_config; // Forward declaration if not fully defined here
+status_t i915_check_display_bandwidth(intel_i915_device_info* devInfo,
+	uint32 num_active_pipes, const struct planned_pipe_config planned_configs[]);
+
 
 #ifdef __cplusplus
 }

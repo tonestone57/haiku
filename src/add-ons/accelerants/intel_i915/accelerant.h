@@ -101,6 +101,31 @@ typedef struct {
 #define ACCELERANT_DISPLAY_CONFIG_TEST_ONLY (1 << 0) /**< If set, the configuration is validated by the kernel
                                                           but not actually applied (hardware state is not changed). */
 
+/**
+ * @brief Accelerant hook feature code for retrieving the current multi-monitor display configuration.
+ * The 'data' parameter for get_accelerant_hook with this feature should be NULL.
+ * The returned function pointer will have the signature:
+ *   status_t (*get_config_hook)(accelerant_get_display_configuration_args* args);
+ */
+#define INTEL_ACCELERANT_GET_DISPLAY_CONFIGURATION (B_ACCELERANT_PRIVATE_OFFSET + 101)
+
+/**
+ * @brief Argument structure for the INTEL_ACCELERANT_GET_DISPLAY_CONFIGURATION hook.
+ * Used by clients (e.g., app_server) to query the current display setup.
+ */
+typedef struct {
+	// Input
+	uint32 max_configs_to_get; /**< The maximum number of 'accelerant_display_config' entries
+	                                the 'configs_out_ptr' buffer can hold. */
+	accelerant_display_config* configs_out_ptr; /**< Pointer to an array allocated by the caller,
+	                                                 to be filled with the current display configurations. */
+	// Output
+	uint32 num_configs_returned; /**< Actual number of active display configurations written to 'configs_out_ptr'. */
+	uint32 primary_pipe_id_returned_user; /**< The user-space pipe ID (enum i915_pipe_id_user)
+	                                           of the current primary display. I915_PIPE_USER_INVALID if none. */
+	uint64 reserved[4];
+} accelerant_get_display_configuration_args;
+
 
 // --- Args for INTEL_I915_GET_CONNECTOR_INFO IOCTL ---
 #define MAX_EDID_MODES_PER_PORT_ACCEL 32 /**< Max number of EDID modes to return to userspace for a single connector. */
@@ -184,6 +209,28 @@ struct i915_set_display_config_args {
 
 /** @brief Flag for i915_set_display_config_args.flags: Validate but do not apply the configuration. */
 #define I915_DISPLAY_CONFIG_TEST_ONLY (1 << 0)
+
+/**
+ * @brief Argument structure for the INTEL_I915_GET_DISPLAY_CONFIG ioctl.
+ * Used by userspace to query the kernel's current understanding of the
+ * active display configuration.
+ */
+struct i915_get_display_config_args {
+	// Output fields (filled by kernel)
+	uint32 num_pipe_configs; /**< Number of active pipe configurations returned in the array
+	                              pointed to by pipe_configs_ptr. */
+	uint32 primary_pipe_id;  /**< Kernel's idea of the primary pipe (enum i915_pipe_id_user),
+	                              or I915_PIPE_USER_INVALID if none. */
+
+	// Input/Output field
+	uint64 pipe_configs_ptr; /**< Input: User-space pointer to an array large enough to hold
+	                              at least 'num_pipe_configs' (max I915_MAX_PIPES_USER) entries
+	                              of 'i915_display_pipe_config'.
+	                              Output: Kernel writes the current configurations here. */
+	uint32 max_pipe_configs_to_get; /**< Input: Max number of pipe_config entries the user buffer can hold.
+	                                     Kernel will not write more than this. */
+	uint64 reserved[3];      /**< Reserved for future expansion, zero-fill. */
+};
 
 
 // --- Other IOCTL Argument Structures ---

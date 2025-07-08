@@ -541,6 +541,15 @@ typedef struct {
 	// HPD Event Handling (only used by the primary accelerant instance)
 	thread_id					hpd_thread;         /**< ID of the HPD monitoring thread. Initialized to -1. */
 	volatile bool				hpd_thread_active;  /**< Flag to signal the HPD thread to terminate. */
+
+	/** @brief Information about framebuffers managed by the accelerant for each pipe. */
+	struct pipe_framebuffer_info {
+		uint32 gem_handle;   /**< GEM handle for the framebuffer BO. 0 if not allocated. */
+		uint32 width;        /**< Width of the allocated framebuffer in pixels. */
+		uint32 height;       /**< Height of the allocated framebuffer in pixels. */
+		uint32 format_bpp;   /**< Bits per pixel of the allocated framebuffer. */
+	} pipe_framebuffers[I915_MAX_PIPES_USER]; /**< Indexed by enum i915_pipe_id_user */
+
 } accelerant_info;
 
 extern accelerant_info *gInfo; // Global instance pointer, one per loaded accelerant (primary or clone)

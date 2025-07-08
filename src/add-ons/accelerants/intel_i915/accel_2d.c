@@ -786,8 +786,9 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count,
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA is needed/desired for 32bpp PATCOPY, add it here.
-				// Typically for PATCOPY, alpha is either from pattern (if ROP supports it) or ignored.
+				// For PATCOPY, the pattern color (uint32 color) is used.
+				// If its alpha component should be written, BLT_WRITE_ALPHA would be needed.
+				// Current assumption is that 'color' is effectively XRGB for fills.
 			}
 			if (enable_hw_clip) {
 				// This assumes BLT_CLIPPING_ENABLE is DW0 Bit 10.
@@ -890,8 +891,7 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA (Bit 21) is needed to copy source alpha
-				// (when not chroma-keyed out), it should be added here. Current setup preserves dest alpha.
+				cmd_dw0 |= BLT_WRITE_ALPHA; // Enable Alpha channel writes for 32bpp SRCCOPY
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
@@ -903,23 +903,19 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 				}
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
-			// DW1: Destination Pitch
+			// DW1: Destination Pitch. Also Source Pitch if not specified otherwise (e.g. in DW1[31:16]).
+			// For screen-to-screen blits, src and dest pitch are the same.
+			// If supporting blits between surfaces with different pitches, Source Pitch might need
+			// to be explicitly set, typically in DW1[31:16] for XY_SRC_COPY_BLT on Gen7+.
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
 			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
 			// DW3: Destination X2 (right), Y2 (bottom)
 			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF) | (((blit->dest_top + blit->height) & 0xFFFF) << 16);
-			// DW4: Source Base Address (GTT offset)
-			// PRM Verification (Gen8+): Ensure GTT offset is still the way to specify source/dest for blitter.
-			// Some newer gens might use more complex surface state binding. For basic FB to FB, GTT offset is common.
+			// DW4: Destination Base Address (GTT offset).
+			// For screen-to-screen blits, source and destination are on the same surface (framebuffer).
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical;
-			// DW5: Source X1 (left), Y1 (top), Source Pitch (often in this DWord or implied by Dest Pitch if same surface)
-			// The current command structure assumes source pitch is same as dest pitch for FB-to-FB blits.
-			// If separate source pitch is needed, command structure might differ or require another DWord.
-			// PRM Verification (Gen8+): Confirm how source pitch is handled if different from dest pitch.
-			// For this command (XY_SRC_COPY_BLT), DW5 typically only holds Src X1, Y1. Src Pitch is often in DW1 (like Dest Pitch) or a separate field.
-			// The Linux i915 driver often sets bits [31:16] of DW1 for Source Pitch if different.
-			// Here, we assume src pitch == dest pitch, which is gInfo->shared_info->bytes_per_row.
+			// DW5: Source X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
 		}
 
@@ -1171,7 +1167,9 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA is desired for 32bpp PATCOPY, add here.
+				// For PATCOPY, the pattern color (uint32 color) is used.
+				// If its alpha component should be written, BLT_WRITE_ALPHA would be needed.
+				// Current assumption is that 'color' is effectively XRGB for fills.
 			}
 			if (enable_hw_clip) {
 				// Assumes DW0 Bit 10 for clipping.
@@ -1239,8 +1237,9 @@ void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint3
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				// PRM Verification (Gen8+): DSTINVERT typically inverts all enabled channels.
-				// If alpha should also be inverted (and BLT_WRITE_ALPHA is the control), add it.
+				// For DSTINVERT, if alpha should also be inverted, BLT_WRITE_ALPHA would be needed.
+				// Typically, inversion applies to all enabled write channels.
+				// Consider adding BLT_WRITE_ALPHA here as well for consistent 32bpp ARGB inversion.
 			}
 			if (enable_hw_clip) {
 				// Assumes DW0 Bit 10 for clipping.
@@ -1307,9 +1306,7 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				// PRM Verification (Gen8+): If BLT_WRITE_ALPHA (Bit 21) is needed/desired for 32bpp SRCCOPY
-				// to copy source alpha to destination, it should be added here.
-				// Current setup preserves destination alpha.
+				cmd_dw0 |= BLT_WRITE_ALPHA; // Enable Alpha channel writes for 32bpp SRCCOPY
 			}
 			if (enable_hw_clip) {
 				// Assumes DW0 Bit 10 for clipping.
@@ -1326,17 +1323,18 @@ void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint3
 				}
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
-			// DW1: Destination Pitch (also used for Source Pitch if not otherwise specified)
-			// PRM Verification (Gen8+): Confirm if DW1 Bit [31:16] is available for separate Source Pitch
-			// if needed, or if XY_SRC_COPY_BLT has another way or requires a different command for it.
-			// Current code assumes SrcPitch == DstPitch.
+			// DW1: Destination Pitch. Also Source Pitch if not specified otherwise (e.g. in DW1[31:16]).
+			// For screen-to-screen blits, src and dest pitch are the same.
+			// If supporting blits between surfaces with different pitches, Source Pitch might need
+			// to be explicitly set, typically in DW1[31:16] for XY_SRC_COPY_BLT on Gen7+.
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row; // Dest pitch
 			// DW2: Destination X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
 			// DW3: Destination X2 (right), Y2 (bottom)
 			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF) | (((blit->dest_top + blit->height) & 0xFFFF) << 16);
-			// DW4: Source Base Address (GTT offset)
-			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical; // Source GTT offset (assuming same FB)
+			// DW4: Destination Base Address (GTT offset).
+			// For screen-to-screen blits, source and destination are on the same surface (framebuffer).
+			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical;
 			// DW5: Source X1 (left), Y1 (top)
 			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
 		}

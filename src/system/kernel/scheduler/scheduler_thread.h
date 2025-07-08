@@ -27,11 +27,8 @@ namespace Scheduler {
 // to adjust the base slice duration.
 
 #include "EevdfRunQueue.h" // For EevdfRunQueueLink
-// RunQueue.h and RunQueueLinkImpl are likely no longer needed for EEVDF.
-// #include "RunQueue.h"
 
 struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData> {
-	// Removed: , RunQueueLinkImpl<ThreadData>
 friend class Scheduler::EevdfGetLink; // Allow EevdfGetLink to access fEevdfLink
 private:
 	inline	void		_InitBase();
@@ -83,10 +80,6 @@ public:
 	inline	bool		HasQuantumEnded(bool wasPreempted, bool hasYielded);
 
 	// --- MLFQ Specific --- (REMOVED)
-	/*
-	inline	int			CurrentMLFQLevel() const;
-	inline	void		SetMLFQLevel(int level);
-	*/
 	// --- Load Balancing Specific ---
 	inline	bigtime_t	LastMigrationTime() const;
 	inline	void		SetLastMigrationTime(bigtime_t time);
@@ -152,8 +145,6 @@ public:
 
 
 	// Static utility methods
-	// static	int			MapPriorityToMLFQLevel(int32 priority); // Obsolete
-	// static	bigtime_t	GetBaseQuantumForLevel(int mlfqLevel); // Obsolete
 
 
 private:
@@ -187,8 +178,6 @@ private:
 			Thread*		fThread;
 
 	// MLFQ specific fields (REMOVED)
-			// int			fCurrentMlfqLevel;
-			// bigtime_t	fTimeEnteredCurrentLevel;
 
 	// Cached effective priority. Recalculated by _ComputeEffectivePriority().
 	mutable	int32		fEffectivePriority;

@@ -51,7 +51,6 @@ ThreadData::_InitBase()
 	fReady = false;
 
 	// MLFQ specific (REMOVED)
-	// fTimeEnteredCurrentLevel = 0;
 
 
 	// Load estimation

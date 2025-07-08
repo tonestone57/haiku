@@ -546,6 +546,58 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 }
 
 
+/*
+ * Calculates the dynamic quantum (timeslice) for this thread.
+ *
+ * This function implements Haiku's hybrid approach to timeslice determination
+ * within the EEVDF scheduling framework. It differs from a "classic" EEVDF/CFS
+ * slice calculation (which is often `(thread_weight / total_runqueue_weight) * target_latency_period`).
+ * Instead, Haiku's method aims to provide both a predictable base timeslice
+ * related to broad priority categories and fine-grained user/system control
+ * over interactivity vs. throughput trade-offs.
+ *
+ * The calculation proceeds as follows:
+ * 1. Base Slice: A `baseSlice` is determined from `kBaseQuanta[]` (defined in
+ *    scheduler_defs.h). The thread's fine-grained priority is mapped to a
+ *    coarser "effective level" by `MapPriorityToEffectiveLevel()`, which then
+ *    indexes `kBaseQuanta`. This provides a foundational timeslice (e.g.,
+ *    2.5ms to 10ms) based on the general class of the thread (idle, low,
+ *    normal, real-time tiers). This component may reflect legacy behavior or
+ *    a desire for certain priority categories to have specific baseline runtimes.
+ *
+ * 2. Latency-Nice Modulation: The `baseSlice` is then modulated by the thread's
+ *    `fLatencyNice` value (ranging from -20 for high responsiveness to +19 for
+ *    high throughput).
+ *    - `fLatencyNice` is mapped to a multiplicative `factor` via
+ *      `gLatencyNiceFactors[]` (scaled by 1024, where a nice of 0 gives a
+ *      factor of 1024/1024 = 1.0).
+ *    - `modulatedSlice = (baseSlice * factor) / 1024;`
+ *    - A negative `fLatencyNice` results in a shorter slice than `baseSlice`.
+ *    - A positive `fLatencyNice` results in a longer slice than `baseSlice`.
+ *    This allows explicit tuning of a thread's timeslice length to adjust its
+ *    responsiveness characteristics.
+ *
+ * 3. Clamping: The final `modulatedSlice` is clamped between system-defined
+ *    minimum (`kMinSliceGranularity`, e.g., 1ms) and maximum
+ *    (`kMaxSliceDuration`, e.g., 100ms) values. This prevents excessively
+ *    short slices (which increase scheduling overhead) or overly long slices
+ *    (which can starve other threads).
+ *
+ * Relationship to EEVDF Core:
+ * While this slice calculation method is not based on the current runqueue load,
+ * the resulting `SliceDuration` is a key input for the EEVDF mechanics:
+ * - It's used to calculate the thread's `fVirtualDeadline`
+ *   (`EligibleTime + SliceDuration`).
+ * - It determines the `weightedSliceEntitlement` that contributes to `fLag`.
+ * The core EEVDF logic (ordering by virtual deadline, virtual runtime progression
+ * based on actual weighted runtime, and lag-based eligibility) still ensures that,
+ * over time, threads receive CPU time proportional to their weights, achieving
+ * weighted fairness. The slice duration calculated here primarily influences how
+ * frequently a thread is considered for execution and for how long it runs
+ * when picked, rather than its ultimate long-term CPU share.
+ *
+ * Idle threads are a special case and return `B_INFINITE_TIMEOUT`.
+ */
 bigtime_t
 ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 {

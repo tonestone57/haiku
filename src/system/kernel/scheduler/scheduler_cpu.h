@@ -17,9 +17,9 @@
 
 #include <cpufreq.h>
 
-#include "scheduler_common.h"
+#include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
-#include "EevdfRunQueue.h" // Changed from RunQueue.h
+#include "EevdfRunQueue.h"
 #include "scheduler_profiler.h"
 
 
@@ -125,6 +125,7 @@ private:
 						bool			fUpdateLoadEvent;
 
 						friend class DebugDumper;
+						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 } CACHE_LINE_ALIGN;
 
 
@@ -195,8 +196,6 @@ public:
 	// affects the SMT-aware desirability (and thus heap key) of other siblings.
 	// It iterates all CPUs on this core and triggers a recalculation of their
 	// SMT-aware heap key and updates their position in fCPUHeap.
-	// Must be called with fCPULock held if called from a context that doesn't already hold it,
-	// though typically CPUEntry::UpdateInstantaneousLoad calls this, and this function acquires fCPULock.
 						void			CpuInstantaneousLoadChanged(CPUEntry* changedCpu);
 
 private:
@@ -210,7 +209,7 @@ private:
 
 						int32			fCPUCount;
 						CPUSet			fCPUSet;
-						int32			fIdleCPUCount;
+						int32			fIdleCPUCount; // Protected by fCPULock
 						CPUPriorityHeap	fCPUHeap;
 						spinlock		fCPULock;
 

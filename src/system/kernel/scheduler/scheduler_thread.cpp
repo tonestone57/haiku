@@ -160,39 +160,83 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 	}
 	// Note: Priority change related vruntime scaling should happen *before* this call.
 
-	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice %" B_PRId64 ", refMinVR %" B_PRId64 ", VR set to %" B_PRId64 " (was %" B_PRId64 ")\n",
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice_wall_clock %" B_PRId64 ", refMinVR_norm %" B_PRId64 ", VR_norm set to %" B_PRId64 " (was %" B_PRId64 ")\n",
 		this->GetThread()->id, newSliceDuration, reference_min_vruntime, this->VirtualRuntime(), currentVRuntime);
 
-	// 4. Update Lag
+	// 4. Update Lag (fLag now represents normalized weighted work deficit/surplus)
 	int32 weight = scheduler_priority_to_weight(this->GetBasePriority());
 	if (weight <= 0) weight = 1;
-	bigtime_t weightedSliceEntitlement = (this->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
+
+	uint32 contextCoreCapacity = SCHEDULER_NOMINAL_CAPACITY;
+	if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity > 0) {
+		contextCoreCapacity = contextCpu->Core()->fPerformanceCapacity;
+	} else if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity == 0) {
+		TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 ", contextCpu Core %" B_PRId32 " has 0 capacity! Using nominal %u for entitlement calc.\n",
+			this->GetThread()->id, contextCpu->Core()->ID(), SCHEDULER_NOMINAL_CAPACITY);
+	} else if (contextCpu == NULL) {
+		// This implies we are using gGlobalMinVirtualRuntime, which is normalized.
+		// The slice entitlement should also be normalized against nominal capacity.
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", contextCpu is NULL, using nominal capacity %u for entitlement calc.\n",
+			this->GetThread()->id, SCHEDULER_NOMINAL_CAPACITY);
+	}
+
+
+	// Convert wall-clock SliceDuration to normalized work equivalent on contextCpu (or nominal)
+	// normalizedSliceWork = SliceDuration_wall_clock * contextCoreCapacity / SCHEDULER_NOMINAL_CAPACITY
+	uint64 normalizedSliceWork_num = (uint64)this->SliceDuration() * contextCoreCapacity;
+	uint64 normalizedSliceWork_den = SCHEDULER_NOMINAL_CAPACITY;
+	bigtime_t normalizedSliceWork = (normalizedSliceWork_den == 0) ? 0 : normalizedSliceWork_num / normalizedSliceWork_den;
+
+	bigtime_t weightedNormalizedSliceEntitlement = (normalizedSliceWork * SCHEDULER_WEIGHT_SCALE) / weight;
 
 	if (isRequeue) {
-		this->AddLag(weightedSliceEntitlement);
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag ADDED %" B_PRId64 " -> new lag %" B_PRId64 "\n",
-			this->GetThread()->id, weightedSliceEntitlement, this->Lag());
+		this->AddLag(weightedNormalizedSliceEntitlement);
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag_norm ADDED %" B_PRId64 " (from normSliceWork %" B_PRId64 ") -> new lag_norm %" B_PRId64 "\n",
+			this->GetThread()->id, weightedNormalizedSliceEntitlement, normalizedSliceWork, this->Lag());
 	} else {
-		this->SetLag(weightedSliceEntitlement - (this->VirtualRuntime() - reference_min_vruntime));
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag SET to %" B_PRId64 " (wSlice %" B_PRId64 ", VR %" B_PRId64 ", refMinVR %" B_PRId64 ")\n",
-			this->GetThread()->id, this->Lag(), weightedSliceEntitlement, this->VirtualRuntime(), reference_min_vruntime);
+		this->SetLag(weightedNormalizedSliceEntitlement - (this->VirtualRuntime() - reference_min_vruntime));
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag_norm SET to %" B_PRId64 " (wNormSliceEnt %" B_PRId64 ", VR_norm %" B_PRId64 ", refMinVR_norm %" B_PRId64 ")\n",
+			this->GetThread()->id, this->Lag(), weightedNormalizedSliceEntitlement, this->VirtualRuntime(), reference_min_vruntime);
 	}
 
-	// 5. Update Eligible Time
+	// 5. Update Eligible Time (fEligibleTime is wall-clock)
 	if (this->IsRealTime()) {
 		this->SetEligibleTime(system_time());
-	} else if (this->Lag() >= 0) {
+	} else if (this->Lag() >= 0) { // Lag is normalized weighted work
 		this->SetEligibleTime(system_time());
 	} else {
-		bigtime_t delay = (-this->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
-		delay = min_c(delay, (bigtime_t)SCHEDULER_TARGET_LATENCY * 2);
-		this->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+		// Convert normalized weighted work deficit back to wall-clock delay
+		// Deficit_norm_weighted = -this->Lag()
+		// Deficit_norm_unweighted = (Deficit_norm_weighted * weight) / SCHEDULER_WEIGHT_SCALE
+		// WallClockDelay_on_target = (Deficit_norm_unweighted * SCHEDULER_NOMINAL_CAPACITY) / targetCoreCapacity
+		// Combined: (-this->Lag() * weight * SCHEDULER_NOMINAL_CAPACITY) / (SCHEDULER_WEIGHT_SCALE * targetCoreCapacity)
+
+		uint32 targetCoreCapacity = contextCoreCapacity; // Use the same capacity as for entitlement.
+		                                                 // If contextCpu was NULL, nominal is used.
+
+		uint64 delayNumerator = (uint64)(-this->Lag()) * weight * SCHEDULER_NOMINAL_CAPACITY;
+		uint64 delayDenominator = (uint64)SCHEDULER_WEIGHT_SCALE * targetCoreCapacity;
+		bigtime_t wallClockDelay;
+
+		if (delayDenominator == 0) { // Should be impossible
+			wallClockDelay = SCHEDULER_TARGET_LATENCY * 2;
+			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 " - Denominator zero in eligibility delay calc! lag_norm %" B_PRId64 ", weight %" B_PRId32 ", targetCap %" B_PRIu32 "\n",
+				this->GetThread()->id, this->Lag(), weight, targetCoreCapacity);
+		} else {
+			wallClockDelay = delayNumerator / delayDenominator;
+		}
+
+		wallClockDelay = min_c(wallClockDelay, (bigtime_t)SCHEDULER_TARGET_LATENCY * 2);
+		this->SetEligibleTime(system_time() + max_c(wallClockDelay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", neg_lag_norm %" B_PRId64 ", targetCap %" B_PRIu32 ", calculated wallClockDelay %" B_PRId64 "\n",
+			this->GetThread()->id, this->Lag(), targetCoreCapacity, wallClockDelay);
 	}
-	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time set to %" B_PRId64 "\n",
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time_wall_clock set to %" B_PRId64 "\n",
 		this->GetThread()->id, this->EligibleTime());
 
-	// 6. Update Virtual Deadline
-	this->SetVirtualDeadline(this->EligibleTime() + this->SliceDuration());
+	// 6. Update Virtual Deadline (fVirtualDeadline is wall-clock)
+	// It's the wall-clock time by which the wall-clock SliceDuration should complete.
+	this->SetVirtualDeadline(this->EligibleTime() + this->SliceDuration()); // SliceDuration is still wall-clock
 	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", VD set to %" B_PRId64 "\n",
 		this->GetThread()->id, this->VirtualDeadline());
 }

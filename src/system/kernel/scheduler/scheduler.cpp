@@ -846,16 +846,51 @@ reschedule(int32 nextState)
 
 		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
 		if (weight <= 0)
-			weight = 1;
-		bigtime_t weightedRuntime = (actualRuntime * SCHEDULER_WEIGHT_SCALE) / weight;
+			weight = 1; // Prevent division by zero or negative weight issues
 
-		oldThreadData->AddVirtualRuntime(weightedRuntime);
-		TRACE_SCHED("reschedule: oldT %" B_PRId32 " ran for %" B_PRId64 "us, vruntime advanced by %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 ")\n",
-			oldThread->id, actualRuntime, weightedRuntime, oldThreadData->VirtualRuntime(), weight);
+		// Capacity normalization for fVirtualRuntime advancement
+		uint32 coreCapacity = SCHEDULER_NOMINAL_CAPACITY; // Default to nominal capacity
+		CoreEntry* runningCore = oldThreadData->Core();
+		if (runningCore != NULL && runningCore->fPerformanceCapacity > 0) {
+			coreCapacity = runningCore->fPerformanceCapacity;
+		} else if (runningCore != NULL && runningCore->fPerformanceCapacity == 0) {
+			// This case should ideally not happen if cores are initialized properly.
+			// Warn and use nominal to prevent division by zero if nominal was also 0.
+			TRACE_SCHED_WARNING("reschedule: oldT %" B_PRId32 " on Core %" B_PRId32 " has 0 performance capacity! Using nominal %u.\n",
+				oldThread->id, runningCore->ID(), SCHEDULER_NOMINAL_CAPACITY);
+		} else if (runningCore == NULL) {
+			// Should not happen for a thread that was just running.
+			TRACE_SCHED_WARNING("reschedule: oldT %" B_PRId32 " has NULL CoreEntry! Using nominal capacity %u for VR update.\n",
+				oldThread->id, SCHEDULER_NOMINAL_CAPACITY);
+		}
 
-		oldThreadData->AddLag(-weightedRuntime);
-		TRACE_SCHED("reschedule: oldT %" B_PRId32 " lag reduced by %" B_PRId64 " (weighted actual) to %" B_PRId64 "\n",
-			oldThread->id, weightedRuntime, oldThreadData->Lag());
+		// actualRuntime is wall-clock time.
+		// normalizedWorkEquivalentTime = actualRuntime * coreCapacity / SCHEDULER_NOMINAL_CAPACITY
+		// weightedRuntimeContribution = (normalizedWorkEquivalentTime * SCHEDULER_WEIGHT_SCALE) / weight
+		// Combined: (actualRuntime * coreCapacity * SCHEDULER_WEIGHT_SCALE) / (SCHEDULER_NOMINAL_CAPACITY * weight)
+		uint64 numerator = (uint64)actualRuntime * coreCapacity * SCHEDULER_WEIGHT_SCALE;
+		uint64 denominator = (uint64)SCHEDULER_NOMINAL_CAPACITY * weight;
+		bigtime_t weightedRuntimeContribution;
+
+		if (denominator == 0) {
+			// This should be practically impossible given SCHEDULER_NOMINAL_CAPACITY is 1024 and weight is >= 1.
+			weightedRuntimeContribution = 0;
+			TRACE_SCHED_WARNING("reschedule: oldT %" B_PRId32 " - denominator zero in VR update! actualRuntime %" B_PRId64 ", coreCap %" B_PRIu32 ", weight %" B_PRId32 "\n",
+				oldThread->id, actualRuntime, coreCapacity, weight);
+		} else {
+			weightedRuntimeContribution = numerator / denominator;
+		}
+
+		oldThreadData->AddVirtualRuntime(weightedRuntimeContribution);
+		TRACE_SCHED("reschedule: oldT %" B_PRId32 " ran %" B_PRId64 "us (wall), coreCap %" B_PRIu32 ", normWorkEqTime ~%" B_PRId64 "us, vruntime advanced by %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 ")\n",
+			oldThread->id, actualRuntime, coreCapacity, ((uint64)actualRuntime * coreCapacity) / SCHEDULER_NOMINAL_CAPACITY,
+			weightedRuntimeContribution, oldThreadData->VirtualRuntime(), weight);
+
+		// Lag is reduced by the capacity-normalized weighted runtime.
+		// This implies that fLag is also a measure against normalized work.
+		oldThreadData->AddLag(-weightedRuntimeContribution);
+		TRACE_SCHED("reschedule: oldT %" B_PRId32 " lag reduced by %" B_PRId64 " (normalized weighted) to %" B_PRId64 "\n",
+			oldThread->id, weightedRuntimeContribution, oldThreadData->Lag());
 	}
 
 	bool shouldReEnqueueOldThread = false;

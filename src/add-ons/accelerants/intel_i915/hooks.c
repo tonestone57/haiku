@@ -747,43 +747,50 @@ accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void
 // If app_server wants them clipped, it should pass pre-clipped coordinates or use a
 // generic clipping mechanism if available for these specific hooks (unlikely for line array).
 
-// Re-defining accel_draw_line_array and accel_draw_line to be the "unclipped" ones
-// as per the new wrapper pattern.
-
 // This is the function returned by get_accelerant_hook for B_DRAW_LINE_ARRAY
+// Note: The standard B_DRAW_LINE_ARRAY hook takes (engine_token *et, uint32 count, uint8 *list, uint32 color)
+// The 'list' is effectively an array of {x1,y1,x2,y2} sets.
+// Clipping is typically handled by B_SET_CLIPPING_RECTS.
 static void
 accel_draw_line_array(engine_token* et, uint32 count, uint8 *raw_list, uint32 color)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0 || raw_list == NULL)
 		return;
 
-	uint16* line_list = (uint16*)raw_list;
-	// Conceptual: check if global hardware clipping is enabled for the 2D blitter
-	// This state would be managed by the B_SET_CLIPPING_RECTS hook.
-	bool hw_clip_enabled_for_blitter = false; // Assume false unless B_SET_CLIPPING_RECTS sets it
-	// if (gInfo->shared_info->hw_blitter_clip_enabled) hw_clip_enabled_for_blitter = true;
+	uint16* line_list_coords = (uint16*)raw_list;
 
+	// Conceptual: Check if global hardware clipping (for 2D blitter) is enabled.
+	// This state would be managed by the B_SET_CLIPPING_RECTS hook implementation.
+	bool hw_clip_enabled_for_blitter = false;
+	general_rect active_clip_rect = {0,0,0,0}; // Placeholder for the active clip rect
+	uint32 num_active_clip_rects = 0;
 
-	// TODO: Batch H/V lines and Angled lines separately for efficiency.
-	// For now, calling per line. This is INEFFICIENT for angled lines.
+	// if (gInfo->shared_info->hw_blitter_clip_is_active) { // Conceptual field
+	//     hw_clip_enabled_for_blitter = true;
+	//     active_clip_rect = gInfo->shared_info->hw_blitter_clip_rect; // Conceptual
+	//     num_active_clip_rects = 1;
+	// }
+	// For now, we assume no clipping for simplicity of the hook update.
+	// A full implementation would fetch the current clipping state.
+
+	// TODO: Optimize by batching H/V lines and Angled lines separately.
+	// Current implementation calls drawing functions per line, which is inefficient for angled lines.
 	for (uint32 i = 0; i < count; i++) {
-		uint16 x1 = line_list[i * 4 + 0];
-		uint16 y1 = line_list[i * 4 + 1];
-		uint16 x2 = line_list[i * 4 + 2];
-		uint16 y2 = line_list[i * 4 + 3];
+		uint16 x1 = line_list_coords[i * 4 + 0];
+		uint16 y1 = line_list_coords[i * 4 + 1];
+		uint16 x2 = line_list_coords[i * 4 + 2];
+		uint16 y2 = line_list_coords[i * 4 + 3];
 
 		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical
-			// intel_i915_draw_hv_lines uses the blitter.
-			// It respects the global blitter clip rect if its 'enable_hw_clip' is true.
-			intel_i915_draw_hv_lines(et, color, &line_list[i*4], 1, hw_clip_enabled_for_blitter);
+			// intel_i915_draw_hv_lines uses the blitter and respects its own 'enable_hw_clip'
+			intel_i915_draw_hv_lines(et, color, &line_list_coords[i*4], 1, hw_clip_enabled_for_blitter);
 		} else { // Angled line
 			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
 			// intel_i915_draw_line_arbitrary uses the 3D pipe.
-			// It needs its own clipping (e.g. scissor rect).
-			// For now, pass NULL for clip_rects, meaning no specific 3D scissor beyond screen bounds.
-			// A more advanced version would take clip_rects from a B_SET_CLIPPING_RECTS hook
-			// and convert them to scissor for the 3D pipe.
-			intel_i915_draw_line_arbitrary(et, &params, color, NULL, 0);
+			// It takes general_rect for clipping.
+			intel_i915_draw_line_arbitrary(et, &params, color,
+				(hw_clip_enabled_for_blitter ? &active_clip_rect : NULL),
+				(hw_clip_enabled_for_blitter ? 1 : 0));
 		}
 	}
 }
@@ -795,9 +802,15 @@ accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, ui
 	if (gInfo == NULL || gInfo->device_fd < 0)
 		return;
 
-	// Conceptual: check if global hardware clipping is enabled for the 2D blitter
 	bool hw_clip_enabled_for_blitter = false;
-	// if (gInfo->shared_info->hw_blitter_clip_enabled) hw_clip_enabled_for_blitter = true;
+	general_rect active_clip_rect = {0,0,0,0};
+	uint32 num_active_clip_rects = 0;
+	// if (gInfo->shared_info->hw_blitter_clip_is_active) { // Conceptual
+	//     hw_clip_enabled_for_blitter = true;
+	//     active_clip_rect = gInfo->shared_info->hw_blitter_clip_rect;
+	//     num_active_clip_rects = 1;
+	// }
+
 
 	if (pattern == 0xff) { // Solid pattern
 		if (x1 == x2 || y1 == y2) { // Horizontal or Vertical line
@@ -805,10 +818,54 @@ accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, ui
 			intel_i915_draw_hv_lines(et, color, line_coords, 1, hw_clip_enabled_for_blitter);
 		} else { // Angled line
 			line_params params = {(int16)x1, (int16)y1, (int16)x2, (int16)y2};
-			intel_i915_draw_line_arbitrary(et, &params, color, NULL, 0);
+			intel_i915_draw_line_arbitrary(et, &params, color,
+				(hw_clip_enabled_for_blitter ? &active_clip_rect : NULL),
+				(hw_clip_enabled_for_blitter ? 1 : 0));
 		}
 	} else {
 		TRACE("accel_draw_line: Patterned lines not implemented.\n");
+	}
+}
+
+// --- Add new polygon filling hooks ---
+
+static void
+accel_fill_triangle(engine_token *et, uint32 color, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint16 x3, uint16 y3,
+	const general_rect *clip_rects, uint32 num_clip_rects)
+{
+	fill_triangle_params tri;
+	tri.x1 = x1; tri.y1 = y1;
+	tri.x2 = x2; tri.y2 = y2;
+	tri.x3 = x3; tri.y3 = y3;
+	intel_i915_fill_triangle_list(et, &tri, 1, color, clip_rects, num_clip_rects);
+}
+
+static void
+accel_fill_polygon(engine_token *et, uint32 count, const uint32 *poly_counts, const int16 *poly_points_raw,
+    uint32 color, const general_rect *clip_rects, uint32 num_clip_rects)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0 || poly_counts == NULL || poly_points_raw == NULL)
+		return;
+
+	const int16* current_poly_points = poly_points_raw;
+	for (uint32 i = 0; i < count; i++) {
+		uint32 num_vertices = poly_counts[i];
+		if (num_vertices < 3) {
+			current_poly_points += num_vertices * 2; // Advance pointer
+			continue;
+		}
+
+		if (num_vertices == 3) {
+			fill_triangle_params tri;
+			tri.x1 = current_poly_points[0]; tri.y1 = current_poly_points[1];
+			tri.x2 = current_poly_points[2]; tri.y2 = current_poly_points[3];
+			tri.x3 = current_poly_points[4]; tri.y3 = current_poly_points[5];
+			intel_i915_fill_triangle_list(et, &tri, 1, color, clip_rects, num_clip_rects);
+		} else {
+			// Assuming convex, call the convex polygon filler
+			intel_i915_fill_convex_polygon(et, current_poly_points, num_vertices, color, clip_rects, num_clip_rects);
+		}
+		current_poly_points += num_vertices * 2; // Advance pointer to the start of the next polygon's points
 	}
 }
 
@@ -860,8 +917,10 @@ get_accelerant_hook(uint32 feature, void *data)
 		// B_FILL_SPAN_CLIPPED is not a standard hook.
 		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)accel_s2s_transparent_blit_unclipped;
 		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
-		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array; // Will call unclipped internal version
-		case B_DRAW_LINE: return (void*)accel_draw_line;       // Will call unclipped internal version
+		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array;
+		case B_DRAW_LINE: return (void*)accel_draw_line;
+		case B_FILL_POLYGON: return (void*)accel_fill_polygon;
+		// case B_FILL_TRIANGLE_LIST: return (void*)accel_fill_triangle_list_hook; // If such a hook exists
 		default: TRACE("get_accelerant_hook: unknown feature 0x%lx\n", feature); return NULL;
 	}
 }

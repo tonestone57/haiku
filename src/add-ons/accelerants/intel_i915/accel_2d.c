@@ -112,6 +112,196 @@ err_close_bo:
 }
 
 
+// --- Polygon Filling Functions (Conceptual Stubs) ---
+
+void
+intel_i915_fill_triangle_list(engine_token *et,
+    const fill_triangle_params triangle_list[], uint32 num_triangles,
+    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || num_triangles == 0 || triangle_list == NULL) {
+		TRACE("fill_triangle_list: Invalid params or not initialized.\n");
+		return;
+	}
+
+	TRACE("fill_triangle_list: %lu triangles, color 0x%lx. 3D Pipe (STUBBED).\n",
+		num_triangles, color);
+
+	// TODO: Full implementation using 3D pipeline (similar to conceptual arbitrary line drawing)
+	// - Acquire Engine, Get Batch Buffer
+	// - For each triangle (or batch):
+	//   - Setup Vertex Buffer: 3 vertices (x1,y1), (x2,y2), (x3,y3)
+	// - Setup 3D Pipeline States:
+	//   - Dest Surface State (framebuffer)
+	//   - Solid Color VS & PS (reuse from line drawing)
+	//   - VS/PS Constants (for color)
+	//   - Vertex Elements
+	//   - Viewport, Scissor (from clip_rects), Blend (opaque), Depth/Stencil (disabled)
+	//   - Rasterization state (CULLMODE_NONE or CULLMODE_BACK depending on winding)
+	// - Emit 3DPRIMITIVE (_3DPRIM_TRIANGLELIST)
+	// - Emit PIPE_CONTROL for sync
+	// - Submit Batch Buffer
+	// - Release Engine
+
+	uint8_t gen = gInfo->shared_info->graphics_generation;
+	if (gen < 7) { // Basic 3D pipeline for this is generally targeted at Gen7+
+		TRACE("fill_triangle_list: Polygon fill via 3D pipe not supported/implemented for Gen < 7. No-op.\n");
+		return;
+	}
+
+	// TODO: Acquire engine (ACQUIRE_ENGINE(et);)
+	// For now, this stub will process one triangle at a time to show the flow.
+	// A real implementation should batch multiple triangles into a single command buffer
+	// and a single vertex buffer if possible for efficiency.
+
+	for (uint32 i = 0; i < num_triangles; i++) {
+		const fill_triangle_params* current_tri = &triangle_list[i];
+
+		// 1. Prepare Vertex Data for this triangle
+		// Using scaled_blit_vertex for {x,y,z,w, u,v} struct. u,v can be zero for solid fill.
+		// Z=0, W=1 for 2D screen-space rendering.
+		// Vertices should be in screen coordinates. VS will handle transformation to clip space.
+		scaled_blit_vertex vb_data[3];
+		vb_data[0] = (scaled_blit_vertex){(float)current_tri->x1, (float)current_tri->y1, 0.0f, 1.0f, 0.0f, 0.0f};
+		vb_data[1] = (scaled_blit_vertex){(float)current_tri->x2, (float)current_tri->y2, 0.0f, 1.0f, 0.0f, 0.0f};
+		vb_data[2] = (scaled_blit_vertex){(float)current_tri->x3, (float)current_tri->y3, 0.0f, 1.0f, 0.0f, 0.0f};
+
+		uint32_t vb_handle = 0;
+		area_id k_area_vb = -1; // Kernel area_id for the mmap of VB
+		void* cpu_addr_vb_clone = NULL; // CPU address of cloned VB area (not used after upload)
+		uint64_t vb_gtt_offset = 0;
+		status_t vb_status = create_and_upload_gem_bo(vb_data, sizeof(vb_data),
+			I915_BO_ALLOC_CACHING_WC, // Suitable for CPU write, GPU read
+			&vb_handle, &k_area_vb, &cpu_addr_vb_clone, &vb_gtt_offset);
+
+		if (vb_status != B_OK) {
+			TRACE("fill_triangle_list: Failed to create/upload vertex buffer for tri %u: %s\n", i, strerror(vb_status));
+			continue; // Skip this triangle
+		}
+		// cpu_addr_vb_clone is already unmapped by create_and_upload_gem_bo
+
+		// 2. Create and populate command buffer
+		size_t cmd_dwords_estimate = 150; // Rough estimate for states + 1 triangle
+		size_t cmd_buffer_size = cmd_dwords_estimate * sizeof(uint32);
+		uint32 cmd_handle_batch = 0; // Different from vb_handle
+		area_id k_area_cmd = -1, c_area_cmd = -1;
+		uint32* cs_start = NULL;
+		uint32* cs = NULL;
+
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle_batch, &k_area_cmd, (void**)&cs_start) != B_OK) {
+			TRACE("fill_triangle_list: Failed to create command buffer for tri %u.\n", i);
+			if (vb_handle != 0) { // Clean up VB if cmd buffer fails
+				intel_i915_gem_close_args close_args = { vb_handle };
+				ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+			}
+			continue; // Skip this triangle
+		}
+		c_area_cmd = area_for(cs_start);
+		cs = cs_start;
+
+		// --- Conceptual Command Stream Construction for one triangle ---
+		// Note: Many commands (STATE_BASE_ADDRESS, SURFACE_STATE, BINDING_TABLE, SHADERS, VF/VE, VIEWPORT, BLEND, DEPTH, RASTER)
+		// would ideally be set up once if multiple triangles are batched, or if a graphics context is maintained.
+		// For this per-triangle stub, they are conceptually repeated.
+
+		TRACE("    TODO (Conceptual): Emit PIPELINE_SELECT (3D).\n");
+		TRACE("    TODO (Conceptual): Emit STATE_BASE_ADDRESS (Surface State Base, Dynamic State Base, etc.).\n");
+		TRACE("    TODO (Conceptual): Emit RENDER_SURFACE_STATE for destination (framebuffer as Render Target) into SSB.\n");
+		//      - Base Address: gInfo->shared_info->framebuffer_physical
+		//      - Width/Height/Pitch/Tiling/Format from gInfo->shared_info
+		TRACE("    TODO (Conceptual): Emit BINDING_TABLE_STATE (for Render Target) and 3DSTATE_BINDING_TABLE_POINTERS.\n");
+		TRACE("    TODO (Conceptual): Emit shader states (3DSTATE_VS, 3DSTATE_PS, MEDIA_VFE_STATE).\n");
+		TRACE("    TODO (Conceptual): Emit 3DSTATE_CONSTANT_PS to load 'color' (converted to float RGBA).\n");
+		TRACE("    TODO (Conceptual): Emit 3DSTATE_VERTEX_BUFFERS (using vb_gtt_offset, stride sizeof(scaled_blit_vertex)).\n");
+		TRACE("    TODO (Conceptual): Emit 3DSTATE_VERTEX_ELEMENTS (for position R32G32_FLOAT or R32G32B32A32_FLOAT from VB).\n");
+		TRACE("    TODO (Conceptual): Emit Viewport state (to screen dimensions).\n");
+		TRACE("    TODO (Conceptual): Emit Scissor state (from clip_rects if num_clip_rects > 0, else to screen/dest bounds).\n");
+		//      if (num_clip_rects > 0) { /* Emit 3DSTATE_SCISSOR_RECTANGLE using clip_rects[0] */ }
+		TRACE("    TODO (Conceptual): Emit Blend state (opaque), Depth/Stencil state (disabled), Raster state (CULL_NONE).\n");
+
+		TRACE("    TODO (Conceptual): Emit 3DPRIMITIVE (_3DPRIM_TRIANGLELIST, vertex_count=3, start_vertex=0).\n");
+		//      Example: *cs++ = (CMD_3DPRIMITIVE | _3DPRIM_TRIANGLELIST | (num_dwords_for_prim_cmd - 2));
+		//               *cs++ = 3; // Vertex Count per Instance
+		//               *cs++ = 0; // Start Vertex Location
+		//               *cs++ = 1; // Instance Count
+		//               *cs++ = 0; // Start Instance Location
+		//               *cs++ = 0; // Vertex Buffer Index
+
+		cs = emit_pipe_control(cs, PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH | PIPE_CONTROL_CS_STALL, 0,0,0);
+		*cs++ = MI_BATCH_BUFFER_END;
+		// --- End Conceptual Command Stream ---
+
+		uint32_t current_batch_len_dwords = cs - cs_start;
+		intel_i915_gem_execbuffer_args exec_args = { cmd_handle_batch, current_batch_len_dwords * sizeof(uint32), RCS0 };
+		// TODO: Add relocations for vb_gtt_offset and any GTT offsets for shaders, state heaps.
+
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
+			TRACE("fill_triangle_list: EXECBUFFER failed for tri %u.\n", i);
+		}
+
+		destroy_cmd_buffer(cmd_handle_batch, c_area_cmd, cs_start);
+		if (vb_handle != 0) { // Destroy the temporary Vertex Buffer GEM object for this triangle
+			intel_i915_gem_close_args close_args = { vb_handle };
+			ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+		}
+	}
+	// TODO: Release engine (RELEASE_ENGINE(et, NULL);)
+	return;
+}
+
+void
+intel_i915_fill_convex_polygon(engine_token *et,
+    const int16 coords[], uint32 num_vertices, // coords is [x0,y0, x1,y1, ...]
+    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
+{
+	if (gInfo == NULL || gInfo->device_fd < 0 || num_vertices < 3 || coords == NULL) {
+		TRACE("fill_convex_polygon: Invalid params (num_vertices %lu) or not initialized.\n", num_vertices);
+		return;
+	}
+
+	TRACE("fill_convex_polygon: %lu vertices, color 0x%lx. 3D Pipe (STUBBED).\n",
+		num_vertices, color);
+
+	if (num_vertices > 200) { // Arbitrary limit for simple stack-based triangulation
+		TRACE("fill_convex_polygon: Too many vertices (%lu) for simple VLA-based triangulation stub.\n", num_vertices);
+		return;
+	}
+
+	// Simple Triangulation: Create a triangle fan from V0.
+	// (V0,V1,V2), (V0,V2,V3), ..., (V0,V(n-2),V(n-1))
+	// This requires (num_vertices - 2) triangles.
+	if (num_vertices >= 3) {
+		uint32 num_triangles = num_vertices - 2;
+		// Using VLA for simplicity in stub; real code might use malloc or batching.
+		uint32 num_triangles = num_vertices - 2;
+		fill_triangle_params current_triangle;
+
+		TRACE("  fill_convex_polygon: Triangulating into %lu triangles (fan from V0).\n", num_triangles);
+
+		for (uint32 i = 0; i < num_triangles; i++) {
+			// Triangle V0, V(i+1), V(i+2)
+			current_triangle.x1 = coords[0];                    // V0.x
+			current_triangle.y1 = coords[1];                    // V0.y
+			current_triangle.x2 = coords[(i + 1) * 2 + 0];      // V(i+1).x
+			current_triangle.y2 = coords[(i + 1) * 2 + 1];      // V(i+1).y
+			current_triangle.x3 = coords[(i + 2) * 2 + 0];      // V(i+2).x
+			current_triangle.y3 = coords[(i + 2) * 2 + 1];      // V(i+2).y
+
+			TRACE("    Triangle %lu: (%d,%d)-(%d,%d)-(%d,%d)\n", i,
+				current_triangle.x1, current_triangle.y1,
+				current_triangle.x2, current_triangle.y2,
+				current_triangle.x3, current_triangle.y3);
+
+			// Call the (currently stubbed) triangle list filler for this single triangle.
+			// A more optimized version would collect all 'num_triangles' into an array
+			// and make a single call to intel_i915_fill_triangle_list.
+			intel_i915_fill_triangle_list(et, &current_triangle, 1, color, clip_rects, num_clip_rects);
+		}
+	}
+	return;
+}
+
+
 // New function for drawing arbitrary lines using the 3D pipeline (conceptual stub)
 void
 intel_i915_draw_line_arbitrary(engine_token *et,

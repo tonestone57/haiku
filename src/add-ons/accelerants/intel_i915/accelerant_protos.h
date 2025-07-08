@@ -54,6 +54,23 @@ extern void intel_i915_draw_line_arbitrary(engine_token *et,
     const line_params *line, uint32 color,
     const general_rect* clip_rects, uint32 num_clip_rects); // Using general_rect for clip_rects for consistency with other hooks
 
+// Structures and functions for polygon/triangle filling
+typedef struct {
+	int16 x1, y1;
+	int16 x2, y2;
+	int16 x3, y3;
+} fill_triangle_params;
+
+extern void intel_i915_fill_triangle_list(engine_token *et,
+    const fill_triangle_params triangle_list[], uint32 num_triangles,
+    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects);
+
+// Optional: for convex polygons (would likely triangulate and call the above)
+extern void intel_i915_fill_convex_polygon(engine_token *et,
+    const int16 coords[], uint32 num_vertices, // coords is [x0,y0, x1,y1, ...]
+    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects);
+
+
 #ifdef __cplusplus
 }
 #endif

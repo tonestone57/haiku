@@ -10,14 +10,16 @@
 
 #include <Accelerant.h>
 #include <Drivers.h>
-#include <graphic_driver.h>
+#include <graphic_driver.h> // For display_mode, color_space
+#include <edid.h>          // For edid1_info
 
-// IOCTL codes
+// IOCTL codes for communication with the intel_i915 kernel driver
 #define INTEL_I915_IOCTL_BASE (B_GRAPHIC_DRIVER_IOCTL_BASE + 0x1000)
 enum {
 	INTEL_I915_GET_SHARED_INFO = INTEL_I915_IOCTL_BASE,
-	INTEL_I915_SET_DISPLAY_MODE,
+	INTEL_I915_SET_DISPLAY_MODE, // Legacy/simple mode set
 
+	// GEM (Graphics Execution Manager) IOCTLs
 	INTEL_I915_IOCTL_GEM_CREATE,
 	INTEL_I915_IOCTL_GEM_MMAP_AREA,
 	INTEL_I915_IOCTL_GEM_CLOSE,
@@ -26,8 +28,9 @@ enum {
 	INTEL_I915_IOCTL_GEM_CONTEXT_CREATE,
 	INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY,
 	INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO,
+	INTEL_I915_IOCTL_GEM_GET_INFO,
 
-	// Display and Mode Setting IOCTLs
+	// Display, Mode Setting, and Cursor IOCTLs
 	INTEL_I915_GET_DPMS_MODE,
 	INTEL_I915_SET_DPMS_MODE,
 	INTEL_I915_MOVE_DISPLAY_OFFSET,
@@ -37,163 +40,174 @@ enum {
 	INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
 	INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT,
 	INTEL_I915_IOCTL_MODE_PAGE_FLIP,
-	INTEL_I915_IOCTL_GEM_GET_INFO,
 
-	// Multi-monitor and Hotplug IOCTLs (from intel_extreme adaptation)
-	// Note: These were previously defined for intel_extreme.
-	// Re-using numbers here, ensure they are unique if both drivers can be present.
-	// Or, better, use a distinct base for i915 specific multi-monitor ioctls if needed.
-	// For now, assuming these numbers are available under INTEL_I915_IOCTL_BASE.
-	INTEL_I915_GET_DISPLAY_COUNT,      // = INTEL_I915_IOCTL_BASE + 100 (example)
-	INTEL_I915_GET_DISPLAY_INFO,
-	INTEL_I915_SET_DISPLAY_CONFIG,     // Ensure this is correctly numbered relative to others
-	INTEL_I915_GET_DISPLAY_CONFIG,
-	INTEL_I915_PROPOSE_DISPLAY_CONFIG,    // User-space might call this to validate a whole setup
-	INTEL_I915_SET_EDID_FOR_PROPOSAL,
-	INTEL_I915_WAIT_FOR_DISPLAY_CHANGE,
-	INTEL_I915_PROPOSE_SPECIFIC_MODE, // Kernel IOCTL backing the PROPOSE_DISPLAY_MODE accelerant hook
-	INTEL_I915_GET_PIPE_DISPLAY_MODE,
-	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE,
-	INTEL_I915_GET_CONNECTOR_INFO, // New IOCTL
-	// Add new IOCTL number if it wasn't already in the enum
-	// For example, if the list above is contiguous:
-	// INTEL_I915_SET_DISPLAY_CONFIG_NEW // (if the one above was a placeholder)
+	// Multi-monitor, Connector, and Hotplug IOCTLs
+	INTEL_I915_GET_DISPLAY_COUNT,      // Potentially legacy, count derived from shared_info
+	INTEL_I915_GET_DISPLAY_INFO,       // Potentially legacy/per-pipe via GET_CONNECTOR_INFO
+	INTEL_I915_SET_DISPLAY_CONFIG,     // Kernel IOCTL for applying a multi-monitor configuration
+	INTEL_I915_GET_DISPLAY_CONFIG,     // Kernel IOCTL to retrieve current multi-monitor config (if implemented)
+	INTEL_I915_PROPOSE_DISPLAY_CONFIG, // Kernel IOCTL for validating a multi-monitor config (if implemented)
+	INTEL_I915_SET_EDID_FOR_PROPOSAL,  // Legacy/debug for ProposeDisplayMode
+	INTEL_I915_WAIT_FOR_DISPLAY_CHANGE,// Kernel IOCTL for HPD event waiting
+	INTEL_I915_PROPOSE_SPECIFIC_MODE,  // Kernel IOCTL backing PROPOSE_DISPLAY_MODE hook
+	INTEL_I915_GET_PIPE_DISPLAY_MODE,  // Kernel IOCTL to get mode for a specific pipe
+	INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE, // Kernel IOCTL for per-pipe retrace semaphore
+	INTEL_I915_GET_CONNECTOR_INFO,     // Kernel IOCTL to get detailed info about a connector
 };
 
-// --- Args for INTEL_I915_GET_CONNECTOR_INFO ---
-#define MAX_EDID_MODES_PER_PORT_ACCEL 32 // Max modes to return to userspace
-#define I915_CONNECTOR_NAME_LEN 32
+// --- Accelerant Hook Feature Codes ---
 
+/**
+ * @brief Accelerant hook feature code for setting a complete multi-monitor display configuration.
+ * This hook allows specifying modes, active states, positions, and framebuffer GEM handles
+ * for multiple display pipes simultaneously. It's the preferred method for multi-monitor setups.
+ * Data passed to this hook should be a pointer to an array of 'accelerant_display_config' structures,
+ * with the count specified as part of the call (details TBD by actual hook signature).
+ */
+#define INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION (B_ACCELERANT_PRIVATE_OFFSET + 100)
+
+// --- Structures for Accelerant Hooks and IOCTLs ---
+
+/**
+ * @brief Configuration for a single display pipe/CRTC, used by the
+ * INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION hook.
+ */
+typedef struct {
+	uint32 pipe_id;      /**< Pipe identifier (from enum i915_pipe_id_user). */
+	bool   active;       /**< True if this pipe should be active. */
+	display_mode mode;   /**< Standard Haiku display_mode structure for this pipe. */
+	uint32 connector_id; /**< Connector identifier (from enum i915_port_id_user) this pipe should drive. */
+	uint32 fb_gem_handle;/**< User-space GEM handle for the framebuffer. The caller is responsible
+	                          for ensuring this BO is valid and appropriately sized/formatted for the mode. */
+	int32  pos_x;        /**< X position of this display in the virtual desktop. */
+	int32  pos_y;        /**< Y position of this display in the virtual desktop. */
+} accelerant_display_config;
+
+/**
+ * @brief Flags for the INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION hook.
+ */
+#define ACCELERANT_DISPLAY_CONFIG_TEST_ONLY (1 << 0) /**< Validate the configuration but do not apply it. */
+
+
+// --- Args for INTEL_I915_GET_CONNECTOR_INFO IOCTL ---
+#define MAX_EDID_MODES_PER_PORT_ACCEL 32 // Max modes to return to userspace from a single connector's EDID
+#define I915_CONNECTOR_NAME_LEN 32       // Max length for connector name (e.g., "DP-1")
 typedef struct {
 	// Input
-	uint32 connector_id; // Kernel's enum intel_port_id_priv value, or a stable index
+	uint32 connector_id; /**< Kernel's internal connector identifier (typically enum intel_port_id_priv). */
 
 	// Output
-	uint32 type;         // enum i915_port_id_user (maps to kernel's intel_output_type_priv)
-	bool   is_connected;
-	bool   edid_valid;
-	uint8  edid_data[256]; // First two blocks (128 bytes each) of EDID
-	uint32 num_edid_modes;
-	display_mode edid_modes[MAX_EDID_MODES_PER_PORT_ACCEL];
-	display_mode current_mode; // Current mode if active on a pipe
-	uint32 current_pipe_id;    // Kernel's enum pipe_id_priv if active, else I915_PIPE_USER_INVALID
-	char   name[I915_CONNECTOR_NAME_LEN]; // e.g., "DP-1", "HDMI-A"
-	uint32 reserved[4];
+	uint32 type;         /**< Type of the connector (user-space enum i915_port_id_user, maps to kernel's intel_output_type_priv). */
+	bool   is_connected; /**< True if a display is physically connected to this port. */
+	bool   edid_valid;   /**< True if valid EDID data was retrieved from the connected display. */
+	uint8  edid_data[256];/**< Raw EDID data (first two blocks, 128 bytes each). */
+	uint32 num_edid_modes;/**< Number of display modes parsed from EDID, stored in edid_modes. */
+	display_mode edid_modes[MAX_EDID_MODES_PER_PORT_ACCEL]; /**< Array of display modes derived from EDID. */
+	display_mode current_mode; /**< Current mode if this connector is active on a pipe. Zeroed if not active. */
+	uint32 current_pipe_id;    /**< Kernel's pipe ID (enum pipe_id_priv) this connector is driven by, or I915_PIPE_USER_INVALID. */
+	char   name[I915_CONNECTOR_NAME_LEN]; /**< Human-readable connector name (e.g., "DP-1", "HDMI-A"). */
+	uint32 reserved[4];  /**< Reserved for future use. */
 } intel_i915_get_connector_info_args;
 
 
-// --- IOCTL Structures for INTEL_I915_SET_DISPLAY_CONFIG ---
+// --- IOCTL Structures for INTEL_I915_SET_DISPLAY_CONFIG (Kernel Interface) ---
 
-/* Matches enum pipe_id_priv from intel_i915_priv.h (kernel) */
-/* Userspace should use these symbolic names or their underlying values */
+/**
+ * @brief User-space identifiers for display pipes (CRTCs).
+ * These should correspond to the kernel's internal pipe identifiers (enum pipe_id_priv).
+ */
 enum i915_pipe_id_user {
-	I915_PIPE_USER_A = 0,
-	I915_PIPE_USER_B,
-	I915_PIPE_USER_C,
-	I915_PIPE_USER_D,
-	I915_PIPE_USER_INVALID = 0xFFFFFFFF, // For no preference or invalid state
-	I915_MAX_PIPES_USER // Should map to PRIV_MAX_PIPES in kernel, ensure this is last if used as count
-};
-
-/* Matches enum intel_port_id_priv from intel_i915_priv.h (kernel) */
-/* Userspace should use these symbolic names or their underlying values */
-enum i915_port_id_user {
-	I915_PORT_ID_USER_NONE = 0,
-	I915_PORT_ID_USER_A,
-	I915_PORT_ID_USER_B,
-	I915_PORT_ID_USER_C,
-	I915_PORT_ID_USER_D,
-	I915_PORT_ID_USER_E,
-	I915_PORT_ID_USER_F,
-	I915_MAX_PORTS_USER // Should map to PRIV_MAX_PORTS in kernel
+	I915_PIPE_USER_A = 0, // Corresponds to PRIV_PIPE_A
+	I915_PIPE_USER_B,     // Corresponds to PRIV_PIPE_B
+	I915_PIPE_USER_C,     // Corresponds to PRIV_PIPE_C
+	I915_PIPE_USER_D,     // Corresponds to PRIV_PIPE_D
+	I915_PIPE_USER_INVALID = 0xFFFFFFFF, /**< Indicates no specific pipe or an invalid state. */
+	I915_MAX_PIPES_USER   /**< Number of user-space pipe identifiers. Should align with kernel's max pipes. */
 };
 
 /**
- * struct i915_display_pipe_config
- * Configuration for a single display pipe/CRTC.
- * Passed as part of an array to the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+ * @brief User-space identifiers for display connectors/ports.
+ * These should correspond to the kernel's internal port identifiers (enum intel_port_id_priv).
+ */
+enum i915_port_id_user {
+	I915_PORT_ID_USER_NONE = 0, // Corresponds to PRIV_PORT_ID_NONE
+	I915_PORT_ID_USER_A,        // Corresponds to PRIV_PORT_A (e.g., eDP-1 or DP-1)
+	I915_PORT_ID_USER_B,        // Corresponds to PRIV_PORT_B
+	I915_PORT_ID_USER_C,        // Corresponds to PRIV_PORT_C
+	I915_PORT_ID_USER_D,        // Corresponds to PRIV_PORT_D
+	I915_PORT_ID_USER_E,        // Corresponds to PRIV_PORT_E
+	I915_PORT_ID_USER_F,        // Corresponds to PRIV_PORT_F (newer gens)
+	I915_MAX_PORTS_USER         /**< Number of user-space port identifiers. Should align with kernel's max ports. */
+};
+
+/**
+ * @brief Configuration for a single display pipe/CRTC for the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
  */
 struct i915_display_pipe_config {
-	uint32 pipe_id;      // Pipe identifier (from enum i915_pipe_id_user)
-	bool   active;       // True if this pipe should be active.
-
-	struct display_mode mode; // Standard Haiku display_mode structure.
-
-	uint32 connector_id; // Connector identifier (from enum i915_port_id_user)
-
-	uint32 fb_gem_handle;    // User-space GEM handle for the framebuffer.
-
-	int32  pos_x;
-	int32  pos_y;
-
-	uint32 reserved[4]; // For future expansion, zero-fill.
+	uint32 pipe_id;      /**< Pipe identifier (from enum i915_pipe_id_user). */
+	bool   active;       /**< True if this pipe should be active. */
+	struct display_mode mode; /**< Standard Haiku display_mode structure. */
+	uint32 connector_id; /**< Connector identifier (from enum i915_port_id_user). */
+	uint32 fb_gem_handle;    /**< User-space GEM handle for the framebuffer. */
+	int32  pos_x;        /**< X position in the virtual desktop. */
+	int32  pos_y;        /**< Y position in the virtual desktop. */
+	uint32 reserved[4];  /**< Reserved for future expansion, zero-fill. */
 };
 
 /**
- * struct i915_set_display_config_args
- * Argument structure for the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
+ * @brief Argument structure for the INTEL_I915_SET_DISPLAY_CONFIG ioctl.
  */
 struct i915_set_display_config_args {
-	uint32 num_pipe_configs;
-	uint32 flags;             // e.g., I915_DISPLAY_CONFIG_TEST_ONLY
-
-	uint64 pipe_configs_ptr;  // User-space pointer to array of i915_display_pipe_config.
-	uint32 primary_pipe_id;   // User's preferred primary pipe (from enum i915_pipe_id_user).
-	                          // Set to I915_PIPE_USER_INVALID for no preference.
-	uint64 reserved[3];       // For future expansion, zero-fill (one u64 slot used by primary_pipe_id if uint64 was intended for alignment).
-	                          // If uint64 reserved[4] was strict, then primary_pipe_id needs to be part of a packed struct or careful placement.
-	                          // Assuming for now it can replace part of the reserved space.
+	uint32 num_pipe_configs; /**< Number of entries in the pipe_configs_ptr array. */
+	uint32 flags;            /**< Flags for the operation (e.g., I915_DISPLAY_CONFIG_TEST_ONLY). */
+	uint64 pipe_configs_ptr; /**< User-space pointer to an array of i915_display_pipe_config. */
+	uint32 primary_pipe_id;  /**< User's preferred primary pipe (enum i915_pipe_id_user), or I915_PIPE_USER_INVALID. */
+	uint64 reserved[3];      /**< Reserved for future expansion, zero-fill. */
 };
 
-// Flags for i915_set_display_config_args.flags
-#define I915_DISPLAY_CONFIG_TEST_ONLY (1 << 0) // Validate but do not apply.
+/** @brief Flag for i915_set_display_config_args.flags: Validate but do not apply the configuration. */
+#define I915_DISPLAY_CONFIG_TEST_ONLY (1 << 0)
 
 
-// Args for INTEL_I915_PROPOSE_SPECIFIC_MODE
+// --- Other IOCTL Argument Structures ---
 typedef struct {
-	display_mode target_mode; // Input: mode to propose
-	display_mode low_bound;   // Input: lower bound for proposal
-	display_mode high_bound;  // Input: upper bound for proposal
-	display_mode result_mode; // Output: proposed/sanitized mode
-	uint8_t      pipe_id;     // Input: which pipe this proposal is for
-	// magic number can be added if desired for validation
+	display_mode target_mode;
+	display_mode low_bound;
+	display_mode high_bound;
+	display_mode result_mode;
+	uint8_t      pipe_id; // Kernel's enum pipe_id_priv expected
 } intel_i915_propose_specific_mode_args;
 
-// Args for INTEL_I915_GET_PIPE_DISPLAY_MODE
 typedef struct {
-	uint8_t      pipe_id;     // Input: which pipe to query
-	display_mode pipe_mode;   // Output: the mode of that pipe
+	uint8_t      pipe_id; // Kernel's enum pipe_id_priv expected
+	display_mode pipe_mode;
 } intel_i915_get_pipe_display_mode_args;
 
-// Args for INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE
 typedef struct {
-	uint8_t pipe_id;  // Input
-	sem_id  sem;      // Output
+	uint8_t pipe_id; // Kernel's enum pipe_id_priv expected
+	sem_id  sem;
 } intel_i915_get_retrace_semaphore_args;
 
-
-// Structures for the new multi-monitor IOCTLs
-// (These mirror structures in intel_i915_priv.h for user-kernel boundary)
+// Legacy/placeholder multi-monitor structures from intel_extreme (may be superseded by SET_DISPLAY_CONFIG)
+#ifndef MAX_PIPES_I915
+#define MAX_PIPES_I915 4 // Default number of pipes, should match kernel's PRIV_MAX_PIPES
+#endif
 
 struct intel_i915_display_identifier {
-	uint32		pipe_index; // Refers to pipe_index enum (e.g. INTEL_PIPE_A from intel_extreme.h, or a new i915 specific one)
+	uint32		pipe_index; // Typically refers to enum i915_pipe_id_user
 };
-
 struct intel_i915_single_display_config {
 	intel_i915_display_identifier	id;
 	display_mode					mode;
 	bool							is_active;
 	int32							pos_x;
 	int32							pos_y;
-	// bool						is_primary; // Optional
 };
-
 struct intel_i915_multi_display_config {
-	uint32								magic; // Should be INTEL_I915_PRIVATE_DATA_MAGIC or similar
+	uint32								magic;
 	uint32								display_count;
-	intel_i915_single_display_config	configs[MAX_PIPES_I915]; // Use consistent MAX_PIPES define
+	intel_i915_single_display_config	configs[MAX_PIPES_I915];
 };
-
 struct intel_i915_display_info_params {
 	uint32							magic;
 	intel_i915_display_identifier	id;
@@ -203,108 +217,61 @@ struct intel_i915_display_info_params {
 	edid1_info						edid_data; // From <edid.h>
 	display_mode					current_mode;
 };
-
 struct intel_i915_set_edid_for_proposal_params {
 	uint32		magic;
 	edid1_info	edid;
 	bool		use_it;
 };
 
+/** @brief Argument structure for INTEL_I915_WAIT_FOR_DISPLAY_CHANGE IOCTL. */
 struct i915_display_change_event_ioctl_data {
-	uint32 version;
-	uint32 changed_hpd_mask; // Bitmask of i915_hpd_line_identifier that had events
-	uint64 timeout_us;
+	uint32 version;          /**< API version, user sets to 0. */
+	uint32 changed_hpd_mask; /**< Output: Bitmask of kernel's i915_hpd_line_identifier that had events. */
+	uint64 timeout_us;       /**< Input: Timeout for waiting, 0 for indefinite (if supported by kernel). */
 };
 
 
-// Args for INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY
+// --- 2D/Cursor/PageFlip IOCTL Argument Structures ---
 typedef struct {
 	uint32_t low_color;
 	uint32_t high_color;
-	uint32_t mask; // Which channels to compare
+	uint32_t mask;
 	bool enable;
 } intel_i915_set_blitter_chroma_key_args;
 
-// Args for INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT
 typedef struct {
 	uint16_t x1;
 	uint16_t y1;
 	uint16_t x2; // inclusive
 	uint16_t y2; // inclusive
-	bool enable; // If false, IOCTL might set a wide-open rect. Actual clipping is per-command.
+	bool enable;
 } intel_i915_set_blitter_hw_clip_rect_args;
 
-// Args for INTEL_I915_IOCTL_MODE_PAGE_FLIP
-/**
- * @flags: Bitmask of flags for the page flip operation.
- *         I915_PAGE_FLIP_EVENT: Request a notification event when the flip completes.
- * @user_data: Arbitrary data passed by userspace, returned with the completion event.
- *             Useful for correlating flips with userspace requests.
- * @reserved0-3: Reserved for future extensions (e.g., sync fence FDs).
- */
-#define I915_PAGE_FLIP_EVENT (1 << 0) // Request event upon flip completion
-
+#define I915_PAGE_FLIP_EVENT (1 << 0) /**< Flag for intel_i915_page_flip_args: Request event upon flip completion. */
 typedef struct {
-	uint32_t pipe_id;    // Kernel's pipe_id_priv for the CRTC to flip.
-	uint32_t fb_handle;  // GEM handle of the framebuffer to scan out.
-	uint32_t flags;      // Flags for the flip (e.g., I915_PAGE_FLIP_EVENT).
-	uint64_t user_data;  // Userspace data for event correlation.
-	sem_id   completion_sem; // (Optional) Semaphore to release upon flip completion if I915_PAGE_FLIP_EVENT is set. Set to < 0 if not used.
-	// Reserved fields for future use (e.g., sync objects for explicit synchronization).
-	uint32_t reserved0;  // Unused, set to 0.
-	uint32_t reserved1;  // Unused, set to 0.
-	uint64_t reserved2;  // Unused, set to 0.
-	uint64_t reserved3;  // Unused, set to 0.
+	uint32_t pipe_id;    // Kernel's enum pipe_id_priv
+	uint32_t fb_handle;
+	uint32_t flags;
+	uint64_t user_data;
+	sem_id   completion_sem; // Optional
+	uint32_t reserved0;
+	uint32_t reserved1;
+	uint64_t reserved2;
+	uint64_t reserved3;
 } intel_i915_page_flip_args;
 
-/**
- * @event_type: Type of the event (e.g., a value indicating flip completion).
- * @pipe_id: The pipe (CRTC) on which the flip occurred.
- * @user_data: The user_data supplied in the flip request.
- * @tv_sec, @tv_usec: Timestamp of when the flip physically occurred (scanout switched).
- */
-// Event structure for page flip completion (if I915_PAGE_FLIP_EVENT is used).
-// This is a conceptual structure for the data that would be delivered.
-// The actual Haiku event delivery mechanism (e.g., user_event, message port)
-// would determine the final structure format readable by userspace.
 typedef struct {
-	// If using Haiku's generic user_event system:
-	// struct user_event base; // Would contain type, flags, etc.
-	// uint32_t user_token;   // Could map to pipe_id or a specific event sub-type.
-	// bigtime_t timestamp;    // Kernel timestamp.
-	// uint32_t what;         // Custom 'what' code for this event type.
-	// int32 int_val;          // Could be used for pipe_id.
-	// int64 long_val;         // Could be used for user_data.
-
-	// For a custom event structure more aligned with DRM:
-	uint32_t event_type; // Example: I915_EVENT_TYPE_FLIP_COMPLETE
+	uint32_t event_type; // e.g., I915_EVENT_TYPE_FLIP_COMPLETE
 	uint32_t pipe_id;
 	uint64_t user_data;
-	uint32_t tv_sec;     // Timestamp of flip (seconds part of gettimeofday)
-	uint32_t tv_usec;    // Timestamp of flip (microseconds part of gettimeofday)
+	uint32_t tv_sec;
+	uint32_t tv_usec;
 } intel_i915_event_page_flip;
 
-/**
- * Arguments for INTEL_I915_IOCTL_GEM_GET_INFO.
- * Used to query properties of a GEM buffer object.
- *
- * @handle: (Input) Handle of the GEM object to query.
- * @size: (Output) Total allocated size of the object in bytes (page-aligned, tile-geometry-aligned).
- * @tiling_mode: (Output) Current tiling mode (see enum i915_tiling_mode in intel_i915_priv.h).
- * @stride: (Output) Stride (pitch) of the buffer in bytes. Valid for dimensioned buffers.
- * @bits_per_pixel: (Output) Bits per pixel if created as a dimensioned buffer, otherwise 0.
- * @width_px: (Output) Width in pixels if created as a dimensioned buffer, otherwise 0.
- * @height_px: (Output) Height in pixels if created as a dimensioned buffer, otherwise 0.
- * @cpu_caching: (Output) Requested CPU caching mode for the object (see enum i915_caching_mode).
- * @gtt_mapped: (Output) True if the object is currently mapped into the GTT.
- * @gtt_offset_pages: (Output) GTT page offset if gtt_mapped is true, otherwise undefined.
- * @creation_flags: (Output) Original flags used when the object was created.
- * @reserved0, @reserved1: Reserved for future use, set to 0.
- */
+
+// --- GEM IOCTL Argument Structures ---
 typedef struct {
-	// Input
 	uint32_t handle;
-	// Output
 	uint64_t size;
 	uint32_t tiling_mode;
 	uint32_t stride;
@@ -319,27 +286,27 @@ typedef struct {
 	uint32_t reserved1;
 } intel_i915_gem_info_args;
 
-
-// Enum for accelerant-side pipe identification
+/**
+ * @brief Accelerant-side identifiers for display pipes.
+ * Should map 1:1 to kernel's `enum pipe_id_priv` for IOCTL calls.
+ */
 enum accel_pipe_id {
 	ACCEL_PIPE_A = 0,
 	ACCEL_PIPE_B = 1,
 	ACCEL_PIPE_C = 2,
+	// ACCEL_PIPE_D, // Uncomment if supporting 4 pipes consistently
 	ACCEL_PIPE_INVALID = -1
-	// This should map to the kernel's enum pipe_id_priv
 };
 
-// Args for INTEL_I915_SET_INDEXED_COLORS
 typedef struct {
-	uint32_t pipe;
+	uint32_t pipe; // Kernel's enum pipe_id_priv
 	uint8_t  first_color;
 	uint16_t count;
 	uint64_t user_color_data_ptr;
 } intel_i915_set_indexed_colors_args;
 
-// Args for INTEL_I915_MOVE_DISPLAY_OFFSET
 typedef struct {
-	uint32_t pipe;
+	uint32_t pipe; // Kernel's enum pipe_id_priv
 	uint16_t x;
 	uint16_t y;
 } intel_i915_move_display_args;
@@ -349,16 +316,13 @@ typedef struct {
 } intel_i915_get_shared_area_info_args;
 
 typedef struct {
-	uint64 size;    // Input: Desired size if not using dimensions, or min size. Output: Padded size for linear.
-	uint32 flags;   // Input: Standard BO_ALLOC flags (tiling, caching, etc.)
-	uint32 handle;  // Output: Handle to the created object
-	uint64 actual_allocated_size; // Output: Actual size allocated by kernel (especially for tiled)
-
-	// New fields for dimensioned buffer creation
-	uint32 width_px;        // Input: Width in pixels (optional, for dimensioned BOs)
-	uint32 height_px;       // Input: Height in pixels (optional)
-	uint32 bits_per_pixel;  // Input: Bits per pixel (optional)
-	// Tiling mode is inferred from 'flags' (I915_BO_ALLOC_TILED_X/Y)
+	uint64 size;
+	uint32 flags;
+	uint32 handle;
+	uint64 actual_allocated_size;
+	uint32 width_px;
+	uint32 height_px;
+	uint32 bits_per_pixel;
 } intel_i915_gem_create_args;
 
 typedef struct {
@@ -382,11 +346,11 @@ typedef struct {
 typedef struct {
 	uint32 cmd_buffer_handle;
 	uint32 cmd_buffer_length;
-	uint32 engine_id;
-	uint32 flags;
+	uint32 engine_id; // e.g., RCS0
+	uint32 flags;     // e.g., for exec options
 	uint64 relocations_ptr;
 	uint32 relocation_count;
-	uint32 context_handle;
+	uint32 context_handle; // 0 for default context
 } intel_i915_gem_execbuffer_args;
 
 typedef struct {
@@ -396,24 +360,24 @@ typedef struct {
 } intel_i915_gem_wait_args;
 
 typedef struct {
-	uint32 handle;
-	uint32 flags;
+	uint32 handle; // Output: handle of created context
+	uint32 flags;  // Input: context creation flags (e.g., for PPGTT)
 } intel_i915_gem_context_create_args;
 
 typedef struct {
-	uint32 handle;
+	uint32 handle; // Handle of context to destroy
 } intel_i915_gem_context_destroy_args;
 
 typedef struct {
 	uint32 engine_id;
-	uint32 seqno;
+	uint32 seqno; // Output: sequence number
 } intel_i915_gem_flush_and_get_seqno_args;
 
 typedef struct {
 	bool		is_visible;
 	uint16_t	x;
 	uint16_t	y;
-	uint32_t	pipe;
+	uint32_t	pipe; // Kernel's enum pipe_id_priv
 } intel_i915_set_cursor_state_args;
 
 typedef struct {
@@ -423,151 +387,141 @@ typedef struct {
 	uint16_t	hot_y;
 	uint64_t	user_bitmap_ptr;
 	size_t		bitmap_size;
-	uint32_t	pipe;
+	uint32_t	pipe; // Kernel's enum pipe_id_priv
 } intel_i915_set_cursor_bitmap_args;
 
 typedef struct {
-	uint32_t pipe;
-	uint32_t mode;
+	uint32_t pipe; // Kernel's enum pipe_id_priv
+	uint32_t mode; // Output: DPMS mode
 } intel_i915_get_dpms_mode_args;
 
 typedef struct {
-	uint32_t pipe;
-	uint32_t mode;
+	uint32_t pipe; // Kernel's enum pipe_id_priv
+	uint32_t mode; // Input: DPMS mode to set
 } intel_i915_set_dpms_mode_args;
 
-// For intel_i915_gem_create_args:
-// The 'size' field is an input from the user. If creating a non-dimensioned
-// buffer (e.g., a shader program or scratch space), this is the primary size.
-// If creating a dimensioned buffer (width_px, height_px, bits_per_pixel are non-zero),
-// 'size' can be 0, or if non-zero, it can act as a minimum requested size; the kernel
-// will calculate the actual needed size based on dimensions and tiling, which might be larger.
-// 'actual_allocated_size' is an output from the kernel indicating the true, page-aligned
-// (and tile-geometry-aligned if applicable) size of the allocated buffer object.
 
+// --- Kernel IP Version Structure (mirrored for shared_info) ---
+struct intel_ip_version {
+	uint8_t ver;  /**< IP Major Version (e.g., 9 for Gen9). */
+	uint8_t rel;  /**< IP Release/Minor Version. */
+	uint8_t step; /**< IP Stepping. */
+};
+
+// --- Tiling Mode Enum (mirrored for shared_info) ---
+enum i915_tiling_mode {
+	I915_TILING_NONE = 0, /**< Linear (no tiling). */
+	I915_TILING_X,        /**< X-tiling. */
+	I915_TILING_Y,        /**< Y-tiling. */
+};
+
+// --- Shared Info Structure (must match kernel's intel_i915_shared_info) ---
 typedef struct {
-	area_id			regs_clone_area;
-	uintptr_t		mmio_physical_base;
-	size_t			mmio_size;
-	uintptr_t		gtt_physical_base;
-	size_t			gtt_size;
-	area_id			framebuffer_area;
-	void*			framebuffer;
-	uint64			framebuffer_physical;
-	size_t			framebuffer_size;
-	uint32			bytes_per_row;
-	display_mode	current_mode;
-	// Add tiling mode for current_mode's framebuffer:
-	enum i915_tiling_mode fb_tiling_mode; // Populated by kernel based on FB's properties
-	uint8_t			graphics_generation; // Populated by kernel (e.g., 7 for Gen7, 8 for Gen8)
-	area_id			mode_list_area;
-	uint32			mode_count;
-	sem_id			vblank_sem;
-	uint16			vendor_id;
-	uint16			device_id;
-	uint8			revision;
-	uint8			primary_edid_block[128];
-	bool			primary_edid_valid;
-	uint32			min_pixel_clock;
-	uint32			max_pixel_clock;
-	display_mode	preferred_mode_suggestion;
+	// Core device and memory map info
+	area_id			regs_clone_area;    /**< Area ID for MMIO registers (cloneable by accelerant). */
+	uintptr_t		mmio_physical_base; /**< Physical base address of MMIO BAR. */
+	size_t			mmio_size;          /**< Size of MMIO BAR. */
+	uintptr_t		gtt_physical_base;  /**< Physical base address of GTT BAR (if separate). */
+	size_t			gtt_size;           /**< Size of GTT BAR. */
+	area_id			framebuffer_area;   /**< Area ID for the primary framebuffer (if pre-allocated by kernel). */
+	void*			framebuffer;        /**< Kernel virtual address of the primary framebuffer. */
+	uint64			framebuffer_physical;/**< Physical address of the primary framebuffer. */
+	size_t			framebuffer_size;   /**< Size of the primary framebuffer allocation. */
+	uint32			bytes_per_row;      /**< Bytes per row for the primary display mode. */
+	display_mode	current_mode;       /**< Current mode of the primary display (legacy, see pipe_display_configs). */
+	enum i915_tiling_mode fb_tiling_mode; /**< Tiling mode of the primary framebuffer. */
+	uint8_t			graphics_generation;/**< Detected graphics generation (e.g., 7, 8, 9). */
+	area_id			mode_list_area;     /**< Area ID for the kernel-generated mode list. */
+	uint32			mode_count;         /**< Number of modes in the mode_list. */
+	sem_id			vblank_sem;         /**< Global VBlank semaphore (legacy, see per-pipe sems). */
+	uint16			vendor_id;          /**< PCI Vendor ID (0x8086). */
+	uint16			device_id;          /**< PCI Device ID. */
+	uint8			revision;           /**< PCI Revision ID. */
+	uint8			primary_edid_block[128]; /**< First block of EDID for primary display (legacy). */
+	bool			primary_edid_valid;    /**< True if primary_edid_block is valid (legacy). */
+	uint32			min_pixel_clock;    /**< Minimum supported pixel clock (kHz). */
+	uint32			max_pixel_clock;    /**< Maximum supported pixel clock (kHz). */
+	display_mode	preferred_mode_suggestion; /**< Kernel's preferred mode suggestion. */
 
-	// --- Extended Hardware Capabilities (for Mesa/Gallium & general driver use) ---
-	// Tiling capabilities
-	uint32			supported_tiling_modes;     // Bitmask: (1<<I915_TILING_NONE) | (1<<I915_TILING_X) | (1<<I915_TILING_Y)
-	                                            // Indicates tiling modes supported for GEM BOs.
+	// Extended Hardware Capabilities (for Mesa/Gallium & general driver use)
+	uint32			supported_tiling_modes;     /**< Bitmask of supported GEM BO tiling modes ( (1<<I915_TILING_NONE) | ... ). */
+	uint32			max_texture_2d_width;       /**< Maximum width for a 2D texture/surface. */
+	uint32			max_texture_2d_height;      /**< Maximum height for a 2D texture/surface. */
+	uint64			max_bo_size_bytes;          /**< Maximum size for a single GEM Buffer Object. */
+	uint32			base_address_alignment_bytes; /**< Required alignment for BO base addresses. */
+	uint32			pitch_alignment_bytes;      /**< Minimum pitch (stride) alignment in bytes. */
+	uint32			platform_engine_mask;       /**< Bitmask of available hardware engines (RCS0, BCS0, etc.). */
+	struct intel_ip_version graphics_ip;        /**< Graphics IP (Render Engine) version. */
+	struct intel_ip_version media_ip;           /**< Media IP (Video Engine) version. */
+	uint8_t			gt_type;                    /**< Graphics tier (GT1, GT2, GT3, etc.). */
+	bool			has_llc;                    /**< True if CPU and GPU share a Last Level Cache. */
+	uint8_t			dma_mask_size;              /**< DMA addressable bits (e.g., 39 for 512GB). */
+	bool			has_l3_dpf;                 /**< True if L3 Dynamic Parity Feature is present. */
+	bool			has_logical_ring_contexts;  /**< True if Execlists (logical ring contexts) are supported. */
+	bool			has_gt_uc;                  /**< True if GuC (Graphics microController) is supported. */
+	bool			has_reset_engine;           /**< True if engine reset capability is supported. */
+	bool			has_64bit_reloc;            /**< True if 64-bit relocations in batch buffers are supported. */
+	uint8_t			ppgtt_type;                 /**< Type of PPGTT supported (enum intel_ppgtt_type from kernel). */
+	uint8_t			ppgtt_size_bits;            /**< Effective addressable bits for PPGTT. */
 
-	// Surface/Buffer limits
-	uint32			max_texture_2d_width;       // Maximum width for a 2D texture/surface.
-	uint32			max_texture_2d_height;      // Maximum height for a 2D texture/surface.
-	uint64			max_bo_size_bytes;          // Maximum size for a single GEM Buffer Object.
-	uint32			base_address_alignment_bytes; // Required alignment for BO base addresses (usually page size).
-	uint32			pitch_alignment_bytes;      // Minimum pitch (stride) alignment in bytes.
+	// Multi-monitor and Hotplug related fields
+	struct per_pipe_display_info_accel {
+		addr_t		frame_buffer_base;   /**< User-space address if FB is mapped (often not directly used by accelerant). */
+		uint32		frame_buffer_offset; /**< GTT page offset for this pipe's framebuffer BO. */
+		display_mode current_mode;       /**< Current display mode for this pipe. */
+		uint32		bytes_per_row;      /**< Current stride for this pipe's framebuffer. */
+		uint16		bits_per_pixel;     /**< Bits per pixel for this pipe's mode. */
+		bool		is_active;          /**< True if this pipe is currently active. */
+		uint32		connector_id;       /**< Kernel's connector ID (enum intel_port_id_priv) this pipe is driving. */
+	} pipe_display_configs[MAX_PIPES_I915]; /**< Per-pipe configuration array, indexed by kernel's enum pipe_id_priv. */
 
-	// Hardware/Platform Identification & Core Features
-	uint32			platform_engine_mask;       // Bitmask of available hardware engines (RCS0, BCS0, etc.).
-	struct intel_ip_version graphics_ip;        // Graphics IP (Render Engine) version (ver.rel.step).
-	struct intel_ip_version media_ip;           // Media IP (Video Engine) version (ver.rel.step).
-	uint8_t			gt_type;                    // Graphics tier (GT1, GT2, GT3, etc.).
+	uint32			active_display_count; /**< Number of currently active display pipes. */
+	uint32			primary_pipe_index;   /**< Array index in pipe_display_configs for the current primary display. */
 
-	// Memory & Cache Features
-	bool			has_llc;                    // Has Last Level Cache shared with CPU.
-	uint8_t			dma_mask_size;              // DMA addressable bits (e.g., 39-bit for 512GB).
-	bool			has_l3_dpf;                 // Has L3 Dynamic Parity Feature.
+	edid1_info		edid_infos[MAX_PIPES_I915]; /**< EDID information for display connected to each pipe (if any). Indexed by pipe ID. */
+	bool			has_edid[MAX_PIPES_I915];   /**< True if edid_infos[pipe_idx] contains valid EDID. */
+	bool			pipe_needs_edid_reprobe[MAX_PIPES_I915]; /**< Flag set by HPD handler if EDID might be stale for a pipe. */
 
-	// Execution & Context Features
-	bool			has_logical_ring_contexts;  // Supports Execlists (logical ring contexts).
-	bool			has_gt_uc;                  // Has GuC (Graphics uController).
-	bool			has_reset_engine;           // Supports engine reset capability.
-	bool			has_64bit_reloc;            // Supports 64-bit relocations in batch buffers.
-	uint8_t			ppgtt_type;                 // Type of PPGTT supported (enum intel_ppgtt_type).
-	uint8_t			ppgtt_size_bits;            // Effective addressable bits for PPGTT.
-
-	// Add other boolean caps or specific feature parameters as needed by Mesa/Gallium
-	// For example:
-	// bool has_media_pipeline; (if distinct from general media_ip version)
-	// uint32_t max_render_targets;
-	// uint32_t max_threads_per_eu;
-	// etc.
-
-	// --- Multi-monitor and Hotplug related fields ---
-	// Note: MAX_PIPES_I915 should be defined (e.g. in intel_i915_priv.h or here)
-	// to match the number of pipes the driver attempts to manage (e.g., 3 or 4).
-	// For now, assume it's defined elsewhere, defaulting to 4 if not.
-	#ifndef MAX_PIPES_I915
-	#define MAX_PIPES_I915 4 // Default if not defined by kernel side
-	#endif
-	struct per_pipe_display_info_accel { // Renamed to avoid conflict if kernel has identical name
-		addr_t		frame_buffer_base;
-		uint32		frame_buffer_offset;
-		display_mode current_mode;
-		uint32		bytes_per_row;
-		uint16		bits_per_pixel;
-		bool		is_active;
-		uint32		connector_id; // Kernel's enum intel_port_id_priv (or mapped user equivalent) this pipe is driving
-	} pipe_display_configs[MAX_PIPES_I915];
-	uint32			active_display_count;
-	uint32			primary_pipe_index; // Array index (0-based)
-
-	edid1_info		edid_infos[MAX_PIPES_I915];
-	bool			has_edid[MAX_PIPES_I915];
-	bool			pipe_needs_edid_reprobe[MAX_PIPES_I915]; // True if HPD occurred and EDID should be re-read
-	uint32			ports_connected_status_mask;         // Bitmask indicating live hardware connection status per HPD line
-	                                                     // (e.g., (1 << I915_HPD_PORT_A) if connected)
-
-	edid1_info		temp_edid_for_proposal;
-	bool			use_temp_edid_for_proposal;
-
-	// Live HPD status from kernel. Each bit corresponds to an i915_hpd_line_identifier.
-	// Bit is 1 if connected, 0 if disconnected.
-	// User-space (app_server/accelerant) can poll this after being woken by
-	// INTEL_I915_WAIT_FOR_DISPLAY_CHANGE to quickly see current physical connections.
+	/**
+	 * @brief Bitmask indicating the current physical connection status of HPD-capable ports.
+	 * Each bit corresponds to a kernel HPD line identifier (e.g., from i915_hpd_line_identifier).
+	 * Updated by the accelerant's HPD thread after querying connectors.
+	 * App_server can use this to know which ports are currently connected.
+	 */
 	uint32			ports_connected_status_mask;
-	// End Multi-monitor and Hotplug fields
+
+	edid1_info		temp_edid_for_proposal; /**< Temporary EDID storage for ProposeDisplayMode hook (legacy). */
+	bool			use_temp_edid_for_proposal; /**< Flag for temp_edid_for_proposal (legacy). */
 
 } intel_i915_shared_info;
 
+// --- Accelerant's Global State Structure ---
 typedef struct {
-	int							device_fd;
-	bool						is_clone;
-	intel_i915_shared_info*		shared_info;
-	area_id						shared_info_area;
-	display_mode*				mode_list;
-	area_id						mode_list_area;
-	void*                       framebuffer_base;
-	char						device_path_suffix[B_PATH_NAME_LENGTH];
-	enum accel_pipe_id			target_pipe; // Which pipe this accelerant instance is for
+	int							device_fd;          /**< File descriptor for the kernel driver device. */
+	bool						is_clone;           /**< True if this is a cloned accelerant instance (for a secondary head). */
+	intel_i915_shared_info*		shared_info;        /**< Pointer to the memory-mapped shared info structure. */
+	area_id						shared_info_area;   /**< Area ID for the shared info. */
+	display_mode*				mode_list;          /**< Pointer to the list of supported display modes. */
+	area_id						mode_list_area;     /**< Area ID for the mode list. */
+	void*                       framebuffer_base;   /**< User-space pointer to the memory-mapped framebuffer (if applicable, often via GEM BOs now). */
+	char						device_path_suffix[B_PATH_NAME_LENGTH]; /**< Device path suffix (e.g., "graphics/intel_i915/0"). */
+	enum accel_pipe_id			target_pipe;        /**< For cloned instances, which display pipe this instance primarily controls. Maps to kernel pipe IDs. */
 
+	// Cursor state (per accelerant instance, applies to its target_pipe)
 	bool						cursor_is_visible;
 	uint16_t					cursor_current_x;
 	uint16_t					cursor_current_y;
 	uint16_t					cursor_hot_x;
 	uint16_t					cursor_hot_y;
 
-	uint32_t					cached_dpms_mode;
+	uint32_t					cached_dpms_mode;   /**< Cached DPMS mode for the target_pipe. */
+
+	// HPD Event Handling (only used by the primary accelerant instance)
+	thread_id					hpd_thread;         /**< ID of the HPD monitoring thread. Initialized to -1. */
+	volatile bool				hpd_thread_active;  /**< Flag to signal the HPD thread to terminate. */
 } accelerant_info;
 
-extern accelerant_info *gInfo;
+extern accelerant_info *gInfo; // Global instance pointer, one per loaded accelerant (primary or clone)
 extern "C" void* get_accelerant_hook(uint32 feature, void *data);
 
 #endif /* INTEL_I915_ACCELERANT_H */

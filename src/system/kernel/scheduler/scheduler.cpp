@@ -299,10 +299,12 @@ static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 // Cooldown period for IRQ follow-task logic to prevent excessive ping-ponging.
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
+#include <support/atomic.h> // For atomic operations
+
 // Tracks the last time an IRQ was moved by the follow-task mechanism.
 // MAX_IRQS should be available from <interrupts.h> or its includes.
-static bigtime_t gIrqLastFollowMoveTime[MAX_IRQS];
-static spinlock gIrqFollowTimeLock = B_SPINLOCK_INITIALIZER;
+static int64 gIrqLastFollowMoveTime[MAX_IRQS]; // Changed to int64 for atomic ops
+// static spinlock gIrqFollowTimeLock = B_SPINLOCK_INITIALIZER; // REMOVED
 // So, index 20 corresponds to latency_nice = 0, factor should be 1024.
 const int32 gLatencyNiceFactors[NUM_LATENCY_NICE_LEVELS] = {
     // latency_nice = -20 (index 0) to +19 (index 39)
@@ -1592,7 +1594,7 @@ scheduler_init()
 
 	// Initialize IRQ follow-task cooldown timestamps
 	for (int i = 0; i < MAX_IRQS; ++i) {
-		gIrqLastFollowMoveTime[i] = 0;
+		atomic_store_64(&gIrqLastFollowMoveTime[i], 0);
 	}
 }
 
@@ -2382,19 +2384,18 @@ scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
 		bigtime_t now = system_time();
 		bool allowMove = true;
 
-		InterruptsSpinLocker followTimeLocker(gIrqFollowTimeLock);
-		if (now < gIrqLastFollowMoveTime[irqVector] + kIrqFollowTaskCooldownPeriod) {
+		bigtime_t lastMove = atomic_load_64(&gIrqLastFollowMoveTime[irqVector]);
+		if (now < lastMove + kIrqFollowTaskCooldownPeriod) {
 			allowMove = false;
 			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64 ", cooldown %" B_PRId64 "). Skipping move.\n",
-				irqVector, migratedThreadId, gIrqLastFollowMoveTime[irqVector], now, kIrqFollowTaskCooldownPeriod);
+				irqVector, migratedThreadId, lastMove, now, kIrqFollowTaskCooldownPeriod);
 		} else {
-			// Not in cooldown. Optimistically update timestamp *before* calling assign.
-			// This ensures the cooldown starts even if assign_io_interrupt_to_cpu internally
-			// decides not to move (e.g., if it's already on the target, though our previous check handles this specific case).
-			// This is acceptable as it still prevents rapid re-evaluation by this logic if a move is intended.
-			gIrqLastFollowMoveTime[irqVector] = now;
+			// "Last writer wins" is acceptable for a cooldown timestamp.
+			// If two CPUs race here, both might pass the check using a slightly stale 'lastMove',
+			// and both might write 'now' (or slightly different 'now' values). The effect is minimal.
+			atomic_store_64(&gIrqLastFollowMoveTime[irqVector], now);
+			// allowMove remains true
 		}
-		followTimeLocker.Unlock();
 
 		if (allowMove) {
 			TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32 " (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 " (on core %" B_PRId32 ") for T %" B_PRId32 "\n",

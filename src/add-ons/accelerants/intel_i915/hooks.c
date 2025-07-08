@@ -135,12 +135,13 @@ intel_i915_propose_display_mode(display_mode *target, const display_mode *low, c
 
 /**
  * @brief Sets the display mode for the current accelerant instance's target pipe.
- * This is a legacy hook. For multi-monitor configurations, the
- * INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION hook should be used.
- * Calling this on an instance in a multi-monitor setup might have limited or
- * undefined effects, as the kernel expects full configurations via SET_DISPLAY_CONFIG.
+ * This is primarily a legacy hook. For robust multi-monitor configurations,
+ * the `INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION` hook should be used.
+ * Calling this hook in an active multi-monitor setup might only affect its `target_pipe`
+ * if the kernel can safely do so, or it might be rejected if it conflicts with
+ * the overall established multi-monitor configuration.
  *
- * @param mode_to_set The display_mode to attempt to set.
+ * @param mode_to_set The display_mode to attempt to set for the instance's target_pipe.
  * @return B_OK on success, or an error code.
  */
 static status_t
@@ -148,11 +149,12 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
 {
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
 
-	TRACE("SET_DISPLAY_MODE: Hook called for pipe %d. For multi-monitor setups, use ACCELERANT_SET_DISPLAY_CONFIGURATION hook.\n",
+	TRACE("SET_DISPLAY_MODE: Hook called for pipe %d. For comprehensive multi-monitor setups, use ACCELERANT_SET_DISPLAY_CONFIGURATION hook.\n",
 		gInfo->target_pipe);
-	// This IOCTL is simple and primarily for single-head or as a trigger after SET_DISPLAY_CONFIG.
-	// The kernel's INTEL_I915_SET_DISPLAY_MODE IOCTL handler determines the target pipe based on the
-	// driver instance associated with gInfo->device_fd.
+	// This IOCTL is simpler and intended for single-head scenarios or as a trigger
+	// by the kernel after a full configuration has been set by INTEL_I915_SET_DISPLAY_CONFIG.
+	// The kernel's INTEL_I915_SET_DISPLAY_MODE IOCTL handler determines the actual target pipe
+	// based on the driver instance (`devInfo`) associated with `gInfo->device_fd`.
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_MODE, mode_to_set, sizeof(display_mode));
 	if (status != B_OK) {
 		TRACE("SET_DISPLAY_MODE: IOCTL failed: %s\n", strerror(status));
@@ -163,11 +165,12 @@ intel_i915_set_display_mode(display_mode *mode_to_set)
 /**
  * @brief Retrieves the current display mode for the accelerant instance's target pipe.
  * It first attempts to get the mode via the INTEL_I915_GET_PIPE_DISPLAY_MODE IOCTL.
- * If that fails, it falls back to reading from the shared_info structure.
- * The shared_info reflects the state last set by a successful SET_DISPLAY_CONFIG or SET_DISPLAY_MODE.
+ * If that fails, it falls back to reading from the `shared_info` structure. The
+ * `shared_info->pipe_display_configs` array is the preferred fallback, then the
+ * legacy `shared_info->current_mode` for the primary pipe of the primary instance.
  *
  * @param current_mode Pointer to a display_mode structure to be filled.
- * @return B_OK on success, or an error code.
+ * @return B_OK on success, or an error code if the mode cannot be determined.
  */
 static status_t
 intel_i915_get_display_mode(display_mode *current_mode)
@@ -175,7 +178,7 @@ intel_i915_get_display_mode(display_mode *current_mode)
 	if (!gInfo || gInfo->device_fd < 0 || !current_mode) return B_BAD_VALUE;
 
 	intel_i915_get_pipe_display_mode_args args;
-	// Assumes gInfo->target_pipe (enum accel_pipe_id) maps to kernel's pipe ID enum.
+	// Assumes gInfo->target_pipe (enum accel_pipe_id) maps to kernel's pipe ID enum (enum pipe_id_priv).
 	args.pipe_id = gInfo->target_pipe;
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_GET_PIPE_DISPLAY_MODE, &args, sizeof(args));
@@ -184,8 +187,8 @@ intel_i915_get_display_mode(display_mode *current_mode)
 	} else {
 		TRACE("GET_DISPLAY_MODE: IOCTL INTEL_I915_GET_PIPE_DISPLAY_MODE failed for target_pipe %d: %s.\n",
 			gInfo->target_pipe, strerror(status));
-		// Fallback to shared_info. This is useful if the IOCTL fails or for a quick check,
-		// but shared_info is updated by the kernel *after* a successful modeset.
+		// Fallback to shared_info. This is less reliable than the IOCTL, especially for cloned instances,
+		// as shared_info is updated by the kernel *after* a successful modeset.
 		if (gInfo->shared_info) {
 			uint32 pipeArrayIndex = gInfo->target_pipe; // Assumes accel_pipe_id is a direct array index
 			                                          // for shared_info->pipe_display_configs.
@@ -751,5 +754,3 @@ intel_i915_set_display_configuration(
 
 	return status;
 }
-
-[end of src/add-ons/accelerants/intel_i915/hooks.c]

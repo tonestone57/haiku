@@ -2287,7 +2287,9 @@ scheduler_perform_load_balance()
 		int8 localIrqCount = 0;
 		thread_id migratedThId = threadToMove->GetThread()->id;
 
-		// Safely copy the IRQ list under the thread's scheduler lock.
+		// Safely copy the IRQ list.
+		// scheduler_perform_load_balance itself runs with interrupts disabled.
+		// The fAffinitizedIrqs array in ThreadData is protected by the thread's scheduler_lock.
 		InterruptsSpinLocker followTaskLocker(threadToMove->GetThread()->scheduler_lock);
 		const int32* affinitizedIrqsPtr = threadToMove->GetAffinitizedIrqs(localIrqCount);
 		if (localIrqCount > 0) {
@@ -2296,7 +2298,6 @@ scheduler_perform_load_balance()
 		followTaskLocker.Unlock();
 
 		if (localIrqCount > 0) {
-			// Pass the copied list to the modified function.
 			scheduler_maybe_follow_task_irqs(migratedThId, localIrqList, localIrqCount, targetCPU->Core(), targetCPU);
 		}
 	}
@@ -2819,5 +2820,3 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 
 // The following would typically be in a syscall table definition file:
 // SYSCALL(_user_set_irq_task_colocation, 3) // name, arg count
-
-[end of src/system/kernel/scheduler/scheduler.cpp]

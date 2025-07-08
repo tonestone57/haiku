@@ -510,6 +510,12 @@ typedef struct {
 
 	edid1_info		temp_edid_for_proposal;
 	bool			use_temp_edid_for_proposal;
+
+	// Live HPD status from kernel. Each bit corresponds to an i915_hpd_line_identifier.
+	// Bit is 1 if connected, 0 if disconnected.
+	// User-space (app_server/accelerant) can poll this after being woken by
+	// INTEL_I915_WAIT_FOR_DISPLAY_CHANGE to quickly see current physical connections.
+	uint32			ports_connected_status_mask;
 	// End Multi-monitor and Hotplug fields
 
 } intel_i915_shared_info;

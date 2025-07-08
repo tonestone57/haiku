@@ -1260,57 +1260,52 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			return_event_data.version = 0; // Initialize
 			return_event_data.changed_hpd_mask = 0;
 
-			// Atomically get and clear the global changed HPD lines mask before waiting
+			// Atomically get the current pending changes.
 			cpu_status lock_status = disable_interrupts();
 			acquire_spinlock(&sChangedHpdLinesMaskLock); // Assumes sChangedHpdLinesMaskLock is global in i915_hpd.c
 			return_event_data.changed_hpd_mask = sChangedHpdLinesMask;
-			sChangedHpdLinesMask = 0; // Clear it after reading
+			if (return_event_data.changed_hpd_mask != 0) {
+				// If changes are already pending, clear the mask and return immediately.
+				sChangedHpdLinesMask = 0;
+			}
 			release_spinlock(&sChangedHpdLinesMaskLock);
 			restore_interrupts(lock_status);
 
-			status_t status;
-			// sDisplayChangeEventSem is assumed global from i915_hpd.c
-			if (sDisplayChangeEventSem < B_OK) {
-				ERROR("INTEL_I915_WAIT_FOR_DISPLAY_CHANGE: HPD semaphore not initialized.\n");
-				return B_NO_INIT;
-			}
-
-			if (event_data_from_user.timeout_us == 0) {
-				// Indefinite wait, but only if no changes were pending before the wait.
-				if (return_event_data.changed_hpd_mask != 0) {
-					// Changes were already pending, return immediately.
-					status = B_OK;
-				} else {
-					status = acquire_sem(sDisplayChangeEventSem);
+			status_t status = B_OK;
+			if (return_event_data.changed_hpd_mask == 0) { // No changes were pending, so wait.
+				if (sDisplayChangeEventSem < B_OK) {
+					ERROR("WAIT_FOR_DISPLAY_CHANGE: HPD semaphore not initialized.\n");
+					return B_NO_INIT;
 				}
-			} else {
-				// Timed wait, but only if no changes were pending.
-				if (return_event_data.changed_hpd_mask != 0) {
-					status = B_OK; // Effectively a poll if changes were pending
+				if (event_data_from_user.timeout_us == 0) {
+					status = acquire_sem(sDisplayChangeEventSem);
 				} else {
 					status = acquire_sem_etc(sDisplayChangeEventSem, 1,
 						B_ABSOLUTE_TIMEOUT | B_CAN_INTERRUPT, event_data_from_user.timeout_us);
 				}
-			}
 
-			// If woken up (B_OK), or timed out with already pending changes,
-			// re-fetch the mask in case more HPD events occurred while preparing to return or during a brief sleep.
-			if (status == B_OK) {
-				lock_status = disable_interrupts();
-				acquire_spinlock(&sChangedHpdLinesMaskLock);
-				return_event_data.changed_hpd_mask |= sChangedHpdLinesMask; // OR with any new changes
-				sChangedHpdLinesMask = 0; // Clear again
-				release_spinlock(&sChangedHpdLinesMaskLock);
-				restore_interrupts(lock_status);
-			}
-			// If timed out (status == B_TIMED_OUT), return_event_data.changed_hpd_mask contains what was there before the wait.
+				// If woken up (B_OK, not timeout or error), re-fetch any new mask changes
+				// that might have occurred between the initial check and this wakeup.
+				if (status == B_OK) {
+					lock_status = disable_interrupts();
+					acquire_spinlock(&sChangedHpdLinesMaskLock);
+					return_event_data.changed_hpd_mask |= sChangedHpdLinesMask; // OR with new changes
+					sChangedHpdLinesMask = 0; // Clear again
+					release_spinlock(&sChangedHpdLinesMaskLock);
+					restore_interrupts(lock_status);
+				}
+			} // else: changes were already pending (return_event_data.changed_hpd_mask != 0), so status remains B_OK.
+
 
 			if (status == B_OK || status == B_TIMED_OUT) {
+				// If B_OK, changed_hpd_mask contains initial + any new changes.
+				// If B_TIMED_OUT, changed_hpd_mask contains only initial changes (which was 0 in this path if we waited).
+				// If initial changes were non-zero, we skipped acquire_sem, status is B_OK.
 				if (user_memcpy(buffer, &return_event_data, sizeof(return_event_data)) < B_OK)
 					return B_BAD_ADDRESS;
-				return B_OK; // Return B_OK for both successful acquire and timeout
+				return B_OK; // Return B_OK for both successful acquire and if changes were pending initially.
 			}
-			return status; // Other errors from acquire_sem_etc (e.g., B_INTERRUPTED, B_BAD_SEM_ID)
+			return status; // Other errors from acquire_sem_etc
 		}
 
 		default: return B_DEV_INVALID_IOCTL;

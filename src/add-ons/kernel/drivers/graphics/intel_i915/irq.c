@@ -85,10 +85,39 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF); // Mask all DE interrupts
 	devInfo->cached_deier_val = DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | DE_PCH_EVENT_IVB;
 	if (PRIV_MAX_PIPES > 2) devInfo->cached_deier_val |= DE_PIPEC_VBLANK_IVB;
+	// Add other HPD summary bits if they exist for CPU/DDI ports (e.g., DE_PORT_HOTPLUG_IVB on IVB+)
+	// devInfo->cached_deier_val |= DE_PORT_HOTPLUG_IVB; // Example for IVB+ direct DDI HPD
+	// devInfo->cached_deier_val |= DE_AUX_CHANNEL_A_IVB; // For DP short pulse on Port A etc.
+
 	intel_i915_write32(devInfo, DEIER, devInfo->cached_deier_val);
 	(void)intel_i915_read32(devInfo, DEIER); // Posting read
-	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 "
-", devInfo->cached_deier_val);
+	TRACE("irq_init: DEIER set to 0x%08" B_PRIx32 "\n", devInfo->cached_deier_val);
+
+	// Enable specific HPD sources at PCH or DDI level
+	// This is highly GEN-specific. Example for PCH-based HPD:
+	if (HAS_PCH_SPLIT(devInfo)) { // Macro indicating PCH is present and handles HPD
+		uint32 pch_hpd_en = 0;
+		// Assuming PCH_PORT_HOTPLUG_EN and bits like PORTB_HOTPLUG_ENABLE are defined
+		// These bits would map to I915_HPD_PORT_B, I915_HPD_PORT_C etc.
+		// This loop is conceptual; real mapping depends on VBT and port detection.
+		for (uint32 i = 0; i < devInfo->num_ports_detected; i++) {
+			intel_output_port_state* port = &devInfo->ports[i];
+			if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI) {
+				// Example: if port->logical_port_id == PRIV_PORT_B, enable PORTB_HOTPLUG_ENABLE
+				// This needs a mapping from port->logical_port_id to the PCH_PORT_HOTPLUG_EN bit.
+				// For now, let's assume we enable all potential digital PCH ports.
+				// pch_hpd_en |= get_pch_hpd_enable_bit(port->logical_port_id); // Placeholder
+			}
+		}
+		// A more direct approach for common PCH ports:
+		pch_hpd_en = PORTD_HOTPLUG_ENABLE | PORTC_HOTPLUG_ENABLE | PORTB_HOTPLUG_ENABLE;
+		// Add specific enable bits for other port types like CRT if they have HPD.
+		// intel_i915_write32(devInfo, PCH_PORT_HOTPLUG_EN, pch_hpd_en); // Write to PCH HPD enable register
+		// TRACE("irq_init: PCH_PORT_HOTPLUG_EN set to 0x%08" B_PRIx32 "\n", pch_hpd_en);
+		// For CPU/DDI based HPD (IVB+), individual DDI_BUF_CTL or HPD_CTL regs might need setup.
+		// This is often done in intel_ddi_init or similar.
+	}
+
 
 	// GT Interrupts & PM Interrupt Mask
 	intel_i915_write32(devInfo, PMIMR, 0xFFFFFFFF); // Mask all PM interrupts
@@ -281,28 +310,59 @@ intel_i915_interrupt_handler(void* data)
 		handledStatus = B_HANDLED_INTERRUPT;
 	}
 	if (active_de_irqs & DE_PIPEB_VBLANK_IVB) {
-		intel_i915_write32(devInfo, DEIIR, DE_PIPEB_VBLANK_IVB); // Ack VBLANK
-		intel_i915_handle_pipe_vblank(devInfo, PRIV_PIPE_B);
+		intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); // Ack PCH summary interrupt
 		handledStatus = B_HANDLED_INTERRUPT;
-	}
-	if (PRIV_MAX_PIPES > 2 && (active_de_irqs & DE_PIPEC_VBLANK_IVB)) {
-		intel_i915_write32(devInfo, DEIIR, DE_PIPEC_VBLANK_IVB); // Ack VBLANK
-		intel_i915_handle_pipe_vblank(devInfo, PRIV_PIPE_C);
-		handledStatus = B_HANDLED_INTERRUPT;
+		TRACE("IRQ: PCH Event detected (DEIIR: 0x%08lx)\n", de_iir);
+
+		// Read PCH HPD status (example for CPT/PPT style PCH)
+		// Actual registers depend on PCH generation (e.g., SDEISR, SDEIMR, PCH_PORT_HOTPLUG_STAT)
+		// This is a simplified conceptual flow.
+		if (HAS_PCH_SPLIT(devInfo)) { // Assuming this macro exists and is correct for PCHs with HPD
+			uint32 pch_hpd_stat = intel_i915_read32(devInfo, SDEISR); // Sideband Interrupt Status
+			uint32 pch_hpd_ack = 0;
+
+			// These bits and mappings are illustrative and need to match registers.h for the specific PCH
+			if (pch_hpd_stat & SDE_HOTPLUG_MASK_CPT) { // Check summary HPD bits for Port B, C, D etc.
+				uint32 port_stat = intel_i915_read32(devInfo, PCH_PORT_HOTPLUG_STAT); // Actual hotplug status
+
+				if (pch_hpd_stat & SDE_PORTB_HOTPLUG_CPT) {
+					pch_hpd_ack |= SDE_PORTB_HOTPLUG_CPT;
+					bool connected = (port_stat & PORTB_HOTPLUG_STATUS_INT) && (port_stat & PORTB_HOTPLUG_PRESENT_INT);
+					i915_queue_hpd_event(devInfo, I915_HPD_PORT_B, connected);
+					TRACE("IRQ: Port B HPD event, status 0x%lx, connected: %d\n", port_stat, connected);
+				}
+				if (pch_hpd_stat & SDE_PORTC_HOTPLUG_CPT) {
+					pch_hpd_ack |= SDE_PORTC_HOTPLUG_CPT;
+					bool connected = (port_stat & PORTC_HOTPLUG_STATUS_INT) && (port_stat & PORTC_HOTPLUG_PRESENT_INT);
+					i915_queue_hpd_event(devInfo, I915_HPD_PORT_C, connected);
+					TRACE("IRQ: Port C HPD event, status 0x%lx, connected: %d\n", port_stat, connected);
+				}
+				if (pch_hpd_stat & SDE_PORTD_HOTPLUG_CPT) {
+					pch_hpd_ack |= SDE_PORTD_HOTPLUG_CPT;
+					bool connected = (port_stat & PORTD_HOTPLUG_STATUS_INT) && (port_stat & PORTD_HOTPLUG_PRESENT_INT);
+					i915_queue_hpd_event(devInfo, I915_HPD_PORT_D, connected);
+					TRACE("IRQ: Port D HPD event, status 0x%lx, connected: %d\n", port_stat, connected);
+				}
+				// TODO: Add similar checks for other HPD sources like CRT_HOTPLUG_INT_STATUS if enabled/relevant
+				// Acknowledge PCH HPD status bits by writing them back
+				if (pch_hpd_ack != 0)
+					intel_i915_write32(devInfo, SDEISR, pch_hpd_ack);
+			}
+		}
+		// TODO: Handle CPU/DDI-based HPD events if DE_PORT_HOTPLUG_IVB or similar was set in active_de_irqs
+		// This would involve reading DDI-specific HPD status registers.
 	}
 
-	if (active_de_irqs & DE_PCH_EVENT_IVB) {
-		intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB);
-		handledStatus = B_HANDLED_INTERRUPT;
-		TRACE("IRQ: PCH Event
-");
-	}
 	// Ack any other potentially enabled DE IRQs that are not explicitly handled above
-	uint32 unhandled_de_irqs = active_de_irqs &
-		~(DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | (PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) | DE_PCH_EVENT_IVB);
+	// Ensure we don't re-ack bits already handled (like VBlank or the PCH summary bit)
+	uint32 already_acked_de_irqs = DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB |
+									(PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) |
+									DE_PCH_EVENT_IVB;
+	uint32 unhandled_de_irqs = active_de_irqs & ~already_acked_de_irqs;
+
 	if (unhandled_de_irqs) {
 		intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
-		handledStatus = B_HANDLED_INTERRUPT;
+		if (!handledStatus) handledStatus = B_HANDLED_INTERRUPT; // Mark as handled if not already
 	}
 
 	// GT Interrupt Handling

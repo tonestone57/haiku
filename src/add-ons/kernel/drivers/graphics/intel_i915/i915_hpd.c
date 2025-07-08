@@ -27,6 +27,35 @@ static spinlock sChangedHpdLinesMaskLock;
 
 // This function is called by the workqueue when dev->hotplug_work is scheduled.
 // It processes all pending HPD events from the queue.
+
+// Helper to find port_state by hpd_line. This is a placeholder.
+// A real implementation would use VBT data or a fixed mapping.
+static intel_output_port_state*
+find_port_for_hpd_line(intel_i915_device_info* devInfo, i915_hpd_line_identifier hpdLine)
+{
+	// Example: This assumes hpdLine enum values (I915_HPD_PORT_A=0, _B=1, etc.)
+	// can be used to infer a logical_port_id or hw_port_index.
+	// This mapping needs to be robust based on actual hardware and VBT.
+	enum intel_port_id_priv target_port_id = PRIV_PORT_ID_NONE;
+	switch (hpdLine) {
+		case I915_HPD_PORT_A: target_port_id = PRIV_PORT_A; break; // Or map to the port VBT says uses HPD_PIN_A
+		case I915_HPD_PORT_B: target_port_id = PRIV_PORT_B; break;
+		case I915_HPD_PORT_C: target_port_id = PRIV_PORT_C; break;
+		case I915_HPD_PORT_D: target_port_id = PRIV_PORT_D; break;
+		case I915_HPD_PORT_E: target_port_id = PRIV_PORT_E; break;
+		// Add other mappings for TC ports etc.
+		default: return NULL;
+	}
+
+	for (int i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].logical_port_id == target_port_id) {
+			return &devInfo->ports[i];
+		}
+	}
+	TRACE("find_port_for_hpd_line: No port found for HPD line %d (mapped to logical_port_id %d)\n", hpdLine, target_port_id);
+	return NULL;
+}
+
 static void
 i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_identifier hpdLine, bool connected)
 {
@@ -37,89 +66,108 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 
 	TRACE("i915_handle_hotplug_event: HPD line %d, Connected: %s\n", hpdLine, connected ? "yes" : "no");
 
-	// TODO: This mapping is highly dependent on VBT and hardware generation.
-	// For now, assume a simple mapping where I915_HPD_PORT_A maps to pipe_display_configs[0] (Pipe A's array index), etc.
-	// This needs to be made robust. The hpdLine might correspond to a connector that
-	// isn't directly 1:1 with a pipe until assignment by display manager or VBT.
-	// For simplicity, we'll use the hpdLine enum value directly as a pseudo-pipe-array-index,
-	// assuming I915_HPD_PORT_A = 0, I915_HPD_PORT_B = 1, etc. and that this matches
-	// how pipe_display_configs is indexed. This is a significant simplification.
-	uint32 arrayIndex = (uint32)hpdLine; // DANGEROUS: Assumes enum values match array indices 0,1,2,3...
-
-	if (arrayIndex >= MAX_PIPES_I915) { // Using MAX_PIPES_I915 from accelerant.h for shared_info arrays
-		ERROR("i915_handle_hotplug_event: Invalid hpdLine %d maps to out-of-bounds arrayIndex %u\n", hpdLine, arrayIndex);
+	intel_output_port_state* port_state = find_port_for_hpd_line(dev, hpdLine);
+	if (port_state == NULL) {
+		ERROR("i915_handle_hotplug_event: Could not find port for HPD line %d.\n", hpdLine);
 		return;
 	}
+	// The arrayIndex for shared_info arrays should correspond to the pipe the port is/was on,
+	// or a fixed mapping if the port isn't tied to a pipe yet.
+	// This is complex. For now, let's use port_state->logical_port_id as a proxy for array index,
+	// assuming a direct mapping (PORT_A=0, etc.) for shared_info arrays. This is NOT robust.
+	// A better way is for shared_info to be indexed by a stable connector ID or for app_server
+	// to map HPD line to its own display head concept.
+	// uint32 shared_info_idx = (uint32)port_state->logical_port_id - 1; // Example: If PRIV_PORT_A is 1
+	// This mapping needs to be consistent with how accelerant uses shared_info.
+	// Let's use the hpdLine as the bit index for ports_connected_status_mask,
+	// and a conceptual mapping for other shared_info arrays.
 
-	// It's generally safer for the kernel driver to only update shared_info
-	// and let the accelerant (triggered by user-space) handle framebuffer freeing.
-	// However, for disconnects, we must mark the pipe inactive.
-	// Using the accelerant_lock from shared_info to protect shared_info modifications.
-	// This lock needs to be initialized (e.g. in intel_i915.c device setup).
-	// For now, assume it's a valid mutex.
-	mutex_lock(&dev->shared_info->accelerant_lock);
+	// For pipe_needs_edid_reprobe, it should ideally be indexed by pipe if a pipe was associated.
+	// If not, perhaps a global "rescan displays" flag.
+	// For simplicity in this stub, let's assume hpdLine can map to a shared_info index.
+	uint32_t port_bit = (1 << hpdLine); // For ports_connected_status_mask
+
+	// Lock shared_info access
+	mutex_lock(&dev->shared_info->accelerant_lock); // Assuming this mutex exists and is initialized
+
+	port_state->connected = connected;
 
 	if (connected) {
-		TRACE("HPD Connect on arrayIndex %u\n", arrayIndex);
-		dev->shared_info->has_edid[arrayIndex] = false; // Force re-read by clearing current status
-		dev->shared_info->pipe_needs_edid_reprobe[arrayIndex] = true;
-		dev->shared_info->ports_connected_status_mask |= (1 << hpdLine); // Mark this HPD line as connected
+		TRACE("HPD Connect on port %d (HPD line %d)\n", port_state->logical_port_id, hpdLine);
+		dev->shared_info->ports_connected_status_mask |= port_bit;
 
-		// TODO: Implement actual user-space notification mechanism.
-		// This could involve a new IOCTL that app_server can block on,
-		// or a kernel message/event. For now, just a dprintf.
-		dprintf(DEVICE_NAME_PRIV ": Display connected on HPD line %u. User-space notification needed.\n", hpdLine);
+		// Attempt to read EDID
+		uint8 edid_buffer[PRIV_EDID_BLOCK_SIZE * 2]; // Allow for one extension block
+		memset(edid_buffer, 0, sizeof(edid_buffer));
+		status_t edid_status = B_ERROR;
+
+		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
+			// TODO: Use DP AUX read for DPCD and EDID (currently stubbed in intel_ddi.c)
+			// For now, try GMBus as a fallback if AUX channel is not specified or fails
+			if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
+				TRACE("  DP/eDP: Attempting EDID read via GMBus (AUX is typically preferred but stubbed).\n");
+				edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
+			} else {
+				TRACE("  DP/eDP: No GMBus pin for EDID, and AUX is stubbed.\n");
+			}
+		} else if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
+			edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
+		}
+
+		if (edid_status == B_OK) {
+			memcpy(port_state->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE); // Store block 0
+			port_state->edid_valid = true;
+			port_state->num_modes = intel_i915_parse_edid(port_state->edid_data, port_state->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+			if (port_state->num_modes > 0) {
+				port_state->preferred_mode = port_state->modes[0];
+			}
+			TRACE("  EDID read successful for port %d, %d modes found.\n", port_state->logical_port_id, port_state->num_modes);
+			// TODO: Handle EDID extensions if primary EDID indicates them.
+		} else {
+			TRACE("  EDID read failed for port %d (status: %s).\n", port_state->logical_port_id, strerror(edid_status));
+			port_state->edid_valid = false;
+			port_state->num_modes = 0;
+		}
+		// This part needs careful indexing if shared_info arrays are per-pipe vs per-connector
+		// Assuming a conceptual index `idx_for_shared_info` derived from port_state or hpdLine
+		// dev->shared_info->has_edid[idx_for_shared_info] = port_state->edid_valid;
+		// dev->shared_info->pipe_needs_edid_reprobe[idx_for_shared_info] = true;
 
 	} else { // Disconnected
-		TRACE("HPD Disconnect on arrayIndex %u\n", arrayIndex);
-		dev->shared_info->pipe_needs_edid_reprobe[arrayIndex] = false; // No need to reprobe a disconnected port
-		dev->shared_info->has_edid[arrayIndex] = false;
-		dev->shared_info->ports_connected_status_mask &= ~(1 << hpdLine); // Mark this HPD line as disconnected
+		TRACE("HPD Disconnect on port %d (HPD line %d)\n", port_state->logical_port_id, hpdLine);
+		dev->shared_info->ports_connected_status_mask &= ~port_bit;
+		port_state->edid_valid = false;
+		port_state->num_modes = 0;
+		memset(&port_state->preferred_mode, 0, sizeof(display_mode));
 
-		if (dev->shared_info->pipe_display_configs[arrayIndex].is_active) {
-			dev->shared_info->pipe_display_configs[arrayIndex].is_active = false;
-			// Framebuffer associated with this pipe will be freed by intel_set_display_mode
-			// when it processes the updated configuration.
-
-			// Update active_display_count - recalculate based on all current .is_active flags
-			uint32 currentActiveCount = 0;
-			for (int i = 0; i < MAX_PIPES_I915; i++) {
-				if (dev->shared_info->pipe_display_configs[i].is_active) {
-					currentActiveCount++;
-				}
-			}
-			dev->shared_info->active_display_count = currentActiveCount;
-
-			// If the disconnected display was the primary, choose a new primary.
-			if (arrayIndex == dev->shared_info->primary_pipe_index) {
-				dev->shared_info->primary_pipe_index = MAX_PIPES_I915; // Mark as invalid
-				for (uint32 i = 0; i < MAX_PIPES_I915; i++) {
-					if (dev->shared_info->pipe_display_configs[i].is_active) {
-						dev->shared_info->primary_pipe_index = i; // New primary (array index)
-						break;
-					}
-				}
-				if (dev->shared_info->primary_pipe_index == MAX_PIPES_I915) {
-					// No active displays left, default primary_pipe_index (e.g., for Pipe A's array index)
-					// This assumes PipeEnumToArrayIndex is available or direct 0 for A.
-					// For i915 accelerant.h, MAX_PIPES_I915 is used.
-					// Let's assume pipe_index 0 corresponds to INTEL_PIPE_A for shared_info arrays.
-					dev->shared_info->primary_pipe_index = 0; // Default to array index 0
-				}
-			}
-			dprintf(DEVICE_NAME_PRIV ": Display disconnected on HPD line %u. User-space notification needed.\n", hpdLine);
-		}
+		// If this port was driving an active pipe, that state in shared_info needs update.
+		// This is complex as it means the HPD handler is changing active display config,
+		// which should ideally be done by app_server after notification.
+		// For now, just mark for reprobe.
+		// dev->shared_info->pipe_needs_edid_reprobe[idx_for_shared_info] = true; // Signal change
 	}
+
 	mutex_unlock(&dev->shared_info->accelerant_lock);
+
+	// Notify any waiting user-space listeners
+	cpu_status lock_status = disable_interrupts();
+	acquire_spinlock(&sChangedHpdLinesMaskLock);
+	sChangedHpdLinesMask |= port_bit; // Mark this HPD line as having changed
+	release_spinlock(&sChangedHpdLinesMaskLock);
+	restore_interrupts(lock_status);
+
+	if (sDisplayChangeEventSem >= B_OK) {
+		// Release the semaphore to wake up any waiters.
+		// If multiple events occur rapidly, user-space will get at least one wakeup
+		// and can then process all accumulated changes from sChangedHpdLinesMask.
+		release_sem_etc(sDisplayChangeEventSem, 1, B_DO_NOT_RESCHEDULE);
+	}
 }
 
 
 void
 i915_hotplug_work_func(struct work_arg *work)
 {
-	// Assuming work_arg's 'data' member is used, or a container_of approach
-	// struct intel_i915_device_info* dev = (struct intel_i915_device_info*)work->data;
-	// For FreeBSD style work_arg embedded in struct:
 	struct intel_i915_device_info* dev = container_of(work, struct intel_i915_device_info, hotplug_work);
 
 

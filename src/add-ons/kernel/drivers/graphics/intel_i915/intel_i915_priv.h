@@ -644,7 +644,22 @@ typedef struct intel_i915_device_info {
 	} transcoders[PRIV_MAX_TRANSCODERS];
 	// --- End Resource Tracking ---
 
+	// For multi-monitor configuration validation and commit
+	struct mutex display_commit_lock;
+
 } intel_i915_device_info;
+
+
+// Structure used internally by i915_set_display_config_ioctl_handler
+// to hold planned state during the check phase.
+struct planned_pipe_config {
+	const struct i915_display_pipe_config* user_config; // Pointer to the user's config for this pipe from IOCTL args
+	struct intel_i915_gem_object* fb_gem_obj;         // Validated GEM object for the framebuffer
+	intel_clock_params_t clock_params;                // Calculated clock parameters for this pipe's mode
+	enum transcoder_id_priv assigned_transcoder;      // Transcoder assigned to this pipe
+	int assigned_dpll_id;                             // Hardware DPLL ID assigned (if any)
+	bool needs_modeset;                               // True if this pipe requires a full disable/re-enable sequence
+};
 
 
 // HPD Line Identifiers / Port Enums for Hotplug

@@ -467,54 +467,102 @@ intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv
 // --- Transcoder Management Stubs ---
 status_t
 i915_get_transcoder_for_pipe(struct intel_i915_device_info* dev,
-	enum pipe_id_priv pipe, enum transcoder_id_priv* selected_transcoder)
+	enum pipe_id_priv pipe, enum transcoder_id_priv* selected_transcoder,
+	intel_output_port_state* for_port) // Added port_state for eDP/DSI decision
 {
-	if (dev == NULL || selected_transcoder == NULL || pipe >= PRIV_MAX_PIPES || pipe == PRIV_PIPE_INVALID)
+	if (dev == NULL || selected_transcoder == NULL || pipe >= PRIV_MAX_PIPES || pipe == PRIV_PIPE_INVALID) {
+		ERROR("i915_get_transcoder_for_pipe: Invalid input parameters (dev %p, sel_trans %p, pipe %d).\n",
+			dev, selected_transcoder, pipe);
 		return B_BAD_VALUE;
+	}
+	if (for_port == NULL && (pipe == PRIV_PIPE_D || pipe == PRIV_PIPE_INVALID)) {
+		// For pipes that might map to eDP/DSI, we need port info to decide transcoder.
+		// If no port info, and it's not a standard A/B/C pipe, it's ambiguous.
+		ERROR("i915_get_transcoder_for_pipe: Port info required for pipe %d to determine transcoder type.\n", pipe);
+		// return B_BAD_VALUE; // Or try a default if appropriate for non-eDP/DSI on Pipe D
+	}
 
-	// TODO: This logic is highly GEN-specific and VBT-dependent for complex mappings
-	// (e.g., eDP pipe to TRANSCODER_EDP, or DSI pipes).
-	// For standard pipes A, B, C, a direct mapping is common on many GENs.
 	enum transcoder_id_priv candidate_transcoder = PRIV_TRANSCODER_INVALID;
+	uint8_t gen = INTEL_DISPLAY_GEN(dev);
 
-	switch (pipe) {
-		case PRIV_PIPE_A: candidate_transcoder = PRIV_TRANSCODER_A; break;
-		case PRIV_PIPE_B: candidate_transcoder = PRIV_TRANSCODER_B; break;
-		case PRIV_PIPE_C: candidate_transcoder = PRIV_TRANSCODER_C; break;
-		case PRIV_PIPE_D:
-			// Pipe D might map to TRANSCODER_EDP or a specific TRANSCODER_D if one exists
-			// and is defined. This needs PRM/VBT lookup.
-			TRACE("i915_get_transcoder_for_pipe: Pipe D to Transcoder mapping STUBBED/TODO.\n");
-			// For now, assume no dedicated TRANSCODER_D, maybe it uses EDP or is an error.
-			// If it's eDP, VBT should indicate which port uses TRANSCODER_EDP.
-			// This function should ideally take intel_output_port_state* to check port type.
-			candidate_transcoder = PRIV_TRANSCODER_EDP; // Highly speculative if Pipe D is eDP
-			break;
-		default:
-			ERROR("i915_get_transcoder_for_pipe: Invalid pipe_id %d.\n", pipe);
-			return B_BAD_VALUE;
+	// Determine candidate transcoder based on pipe and port type (especially for eDP/DSI)
+	if (for_port != NULL && (for_port->type == PRIV_OUTPUT_EDP || for_port->type == PRIV_OUTPUT_DSI)) {
+		if (for_port->type == PRIV_OUTPUT_EDP) {
+			// Most platforms map eDP to a dedicated TRANSCODER_EDP.
+			// VBT might specify which pipe drives the eDP transcoder.
+			// If 'pipe' is explicitly for eDP (e.g., a designated eDP pipe from VBT), map to TRANS_EDP.
+			// This logic needs to be robust based on VBT data and hardware generation.
+			candidate_transcoder = PRIV_TRANSCODER_EDP;
+			TRACE("i915_get_transcoder_for_pipe: Port %d is eDP, attempting to use TRANSCODER_EDP for pipe %d.\n",
+				for_port->logical_port_id, pipe);
+		} else if (for_port->type == PRIV_OUTPUT_DSI) {
+			// DSI typically has dedicated transcoders (DSI0, DSI1).
+			// Mapping from pipe to DSI transcoder depends on VBT and hardware.
+			// Example: if pipe C is for DSI0, pipe D for DSI1.
+			// This is highly GEN/VBT specific.
+			if (pipe == PRIV_PIPE_C) candidate_transcoder = PRIV_TRANSCODER_DSI0; // Example mapping
+			else if (pipe == PRIV_PIPE_D) candidate_transcoder = PRIV_TRANSCODER_DSI1; // Example mapping
+			else {
+				ERROR("i915_get_transcoder_for_pipe: DSI port %d on unhandled pipe %d.\n", for_port->logical_port_id, pipe);
+				return B_BAD_VALUE;
+			}
+			TRACE("i915_get_transcoder_for_pipe: Port %d is DSI, attempting to use Transcoder %d for pipe %d.\n",
+				for_port->logical_port_id, candidate_transcoder, pipe);
+		}
+	} else {
+		// Standard pipes A, B, C usually map to Transcoders A, B, C.
+		// Pipe D is more complex and its default transcoder mapping needs PRM/VBT check.
+		switch (pipe) {
+			case PRIV_PIPE_A: candidate_transcoder = PRIV_TRANSCODER_A; break;
+			case PRIV_PIPE_B: candidate_transcoder = PRIV_TRANSCODER_B; break;
+			case PRIV_PIPE_C: candidate_transcoder = PRIV_TRANSCODER_C; break;
+			case PRIV_PIPE_D:
+				// For Pipe D not driving eDP/DSI, it might map to a general purpose Transcoder D if available
+				// (e.g., on some 4-pipe desktop chips), or it might be an invalid configuration.
+				// Some platforms might not have a standard Transcoder D.
+				// For now, let's assume no default mapping for Pipe D if not eDP/DSI.
+				if (gen >= 9) { // Example: SKL+ might have a more flexible Transcoder D
+					// This is a placeholder; actual mapping depends on VBT/hardware.
+					// candidate_transcoder = PRIV_TRANSCODER_D (if defined);
+					TRACE("i915_get_transcoder_for_pipe: Pipe D (non-eDP/DSI) to Transcoder mapping for Gen %u is STUBBED. Defaulting to invalid.\n", gen);
+					candidate_transcoder = PRIV_TRANSCODER_INVALID; // Safer default
+				} else {
+					TRACE("i915_get_transcoder_for_pipe: Pipe D requested for non-eDP/DSI on Gen %u, unsupported.\n", gen);
+					candidate_transcoder = PRIV_TRANSCODER_INVALID;
+				}
+				break;
+			default: // Should be caught by initial check
+				ERROR("i915_get_transcoder_for_pipe: Unhandled pipe_id %d in switch.\n", pipe);
+				return B_BAD_VALUE;
+		}
+		TRACE("i915_get_transcoder_for_pipe: Standard pipe %d, candidate transcoder %d.\n", pipe, candidate_transcoder);
 	}
 
 	if (candidate_transcoder == PRIV_TRANSCODER_INVALID || candidate_transcoder >= PRIV_MAX_TRANSCODERS) {
-		ERROR("i915_get_transcoder_for_pipe: No valid candidate transcoder for pipe %d.\n", pipe);
-		return B_ERROR; // Or B_DEV_RESOURCE_UNAVAILABLE
+		ERROR("i915_get_transcoder_for_pipe: No valid candidate transcoder determined for pipe %d (port type %d).\n",
+			pipe, for_port ? for_port->type : -1);
+		return B_DEV_RESOURCE_UNAVAILABLE;
 	}
 
-	// Check if candidate transcoder is already in use by a *different* pipe.
-	// A transcoder can only be driven by one pipe at a time.
+	// Check if the candidate transcoder is already in use by a *different* pipe.
+	mutex_lock(&dev->gtt_allocator_lock); // Using gtt_allocator_lock to protect transcoder state for now.
+	                                     // TODO: Consider a dedicated display resource lock.
 	if (dev->transcoders[candidate_transcoder].is_in_use &&
 		dev->transcoders[candidate_transcoder].user_pipe != pipe) {
-		ERROR("i915_get_transcoder_for_pipe: Transcoder %d already in use by pipe %d (requested by pipe %d).\n",
-			candidate_transcoder, dev->transcoders[candidate_transcoder].user_pipe, pipe);
-		return B_BUSY;
+		mutex_unlock(&dev->gtt_allocator_lock);
+		ERROR("i915_get_transcoder_for_pipe: Transcoder %d already in use by pipe %d (requested by pipe %d for port %d).\n",
+			candidate_transcoder, dev->transcoders[candidate_transcoder].user_pipe, pipe, for_port ? for_port->logical_port_id : -1);
+		return B_BUSY; // Transcoder is busy with another pipe
 	}
 
+	// Reserve the transcoder for the current pipe
 	dev->transcoders[candidate_transcoder].is_in_use = true;
 	dev->transcoders[candidate_transcoder].user_pipe = pipe;
-	*selected_transcoder = candidate_transcoder;
+	mutex_unlock(&dev->gtt_allocator_lock);
 
-	TRACE("i915_get_transcoder_for_pipe: Assigned Transcoder %d to Pipe %d.\n",
-		*selected_transcoder, pipe);
+	*selected_transcoder = candidate_transcoder;
+	TRACE("i915_get_transcoder_for_pipe: Assigned Transcoder %d to Pipe %d (for port %d, type %d).\n",
+		*selected_transcoder, pipe, for_port ? for_port->logical_port_id : -1, for_port ? for_port->type : -1);
 	return B_OK;
 }
 
@@ -523,66 +571,125 @@ i915_release_transcoder(struct intel_i915_device_info* dev,
 	enum transcoder_id_priv transcoder_to_release)
 {
 	if (dev == NULL || transcoder_to_release >= PRIV_MAX_TRANSCODERS || transcoder_to_release == PRIV_TRANSCODER_INVALID) {
-		ERROR("i915_release_transcoder: Invalid parameters.\n");
+		ERROR("i915_release_transcoder: Invalid parameters (dev %p, transcoder %d).\n", dev, transcoder_to_release);
 		return;
 	}
 
+	mutex_lock(&dev->gtt_allocator_lock); // Protect transcoder state
 	if (!dev->transcoders[transcoder_to_release].is_in_use) {
-		TRACE("i915_release_transcoder: Transcoder %d was not in use.\n", transcoder_to_release);
-		// return; // Not necessarily an error, could be redundant call
+		TRACE("i915_release_transcoder: Warning - Transcoder %d was not marked as in use.\n", transcoder_to_release);
+		// It's generally safe to proceed and ensure state is cleared.
 	}
 
 	dev->transcoders[transcoder_to_release].is_in_use = false;
 	dev->transcoders[transcoder_to_release].user_pipe = PRIV_PIPE_INVALID;
-	TRACE("i915_release_transcoder: Released Transcoder %d.\n", transcoder_to_release);
+	mutex_unlock(&dev->gtt_allocator_lock);
+
+	TRACE("i915_release_transcoder: Released Transcoder %d (was used by pipe %d).\n",
+		transcoder_to_release, dev->transcoders[transcoder_to_release].user_pipe /* This will show old user before reset */);
 }
-// --- End Transcoder Management Stubs ---
+// --- End Transcoder Management ---
 
-
-// --- End Transcoder Management Stubs ---
 
 
 // --- Bandwidth Check Placeholder ---
 status_t
-i915_check_display_bandwidth(struct intel_i915_device_info* dev,
-	uint32 num_active_pipes,
-	const struct intel_i915_shared_info::per_pipe_display_info_accel pipe_configs[])
+i915_check_display_bandwidth(struct intel_i915_device_info* devInfo,
+	uint32 num_active_pipes, const struct planned_pipe_config planned_configs[])
 {
-	if (dev == NULL || pipe_configs == NULL)
+	if (devInfo == NULL || (num_active_pipes > 0 && planned_configs == NULL)) {
+		ERROR("check_display_bandwidth: Invalid arguments (devInfo %p, num_active %u, planned_configs %p)\n",
+			devInfo, num_active_pipes, planned_configs);
 		return B_BAD_VALUE;
+	}
 
-	if (num_active_pipes == 0)
+	if (num_active_pipes == 0) {
+		TRACE("check_display_bandwidth: No active pipes, check passes by default.\n");
 		return B_OK; // No displays, no bandwidth issue.
+	}
 
-	uint64 total_pixel_rate = 0;
-	uint32 total_bpp_sum = 0; // Less meaningful than weighted average or max
+	uint64 total_pixel_data_rate_bytes_sec = 0;
+	uint32 gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
+	uint32 actual_active_pipe_count_from_planned = 0;
 
-	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) { // Assuming PRIV_MAX_PIPES from i915_priv.h aligns with shared_info array size
-		if (pipe_configs[i].is_active) {
-			const display_mode* dm = &pipe_configs[i].current_mode;
-			uint64 refresh_rate = (dm->timing.pixel_clock > 0 && dm->timing.h_total > 0 && dm->timing.v_total > 0)
-				? (uint64)dm->timing.pixel_clock * 1000 / (dm->timing.h_total * dm->timing.v_total)
-				: 60; // Default to 60Hz if timing is weird
-			total_pixel_rate += (uint64)dm->timing.h_display * dm->timing.v_display * refresh_rate;
-			total_bpp_sum += pipe_configs[i].bits_per_pixel > 0 ? pipe_configs[i].bits_per_pixel : 32;
+	for (enum pipe_id_priv pipe = PRIV_PIPE_A; pipe < PRIV_MAX_PIPES; pipe++) {
+		// planned_configs is indexed by enum pipe_id_priv, so direct access is fine.
+		if (planned_configs[pipe].user_config != NULL && planned_configs[pipe].user_config->active) {
+			actual_active_pipe_count_from_planned++;
+			const display_mode* dm = &planned_configs[pipe].user_config->mode;
+			// Use _get_bpp_from_colorspace_ioctl which is now static in intel_i915.c
+			// For display.c, we'd need to either duplicate it or include a header that declares it.
+			// For now, let's assume a similar local helper or direct calculation.
+			uint32 bpp_val;
+			switch (dm->space) {
+				case B_RGB32_LITTLE: case B_RGBA32_LITTLE: case B_RGB32_BIG: case B_RGBA32_BIG: case B_RGB24_BIG: bpp_val = 32; break;
+				case B_RGB16_LITTLE: case B_RGB16_BIG: case B_RGB15_LITTLE: case B_RGBA15_LITTLE: case B_RGB15_BIG: case B_RGBA15_BIG: bpp_val = 16; break;
+				case B_CMAP8: bpp_val = 8; break;
+				default: bpp_val = 32; TRACE("BWCheck: Unknown colorspace %d for pipe %d, assuming 32bpp.\n", dm->space, pipe); break;
+			}
+			uint32 bpp_bytes = bpp_val / 8;
+
+			uint64 refresh_hz = 60; // Default refresh rate
+			if (dm->timing.h_total > 0 && dm->timing.v_total > 0 && dm->timing.pixel_clock > 0) {
+				refresh_hz = (uint64)dm->timing.pixel_clock * 1000 / (dm->timing.h_total * dm->timing.v_total);
+			}
+			if (refresh_hz == 0) refresh_hz = 60; // Sanity check if calculation results in zero
+
+			uint64 pipe_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz * bpp_bytes;
+			total_pixel_data_rate_bytes_sec += pipe_data_rate;
+			TRACE("BWCheck: Pipe %d active: mode %dx%d @ %" B_PRIu64 "Hz, %ubpp -> data rate %" B_PRIu64 " Bytes/sec.\n",
+				pipe, dm->timing.h_display, dm->timing.v_display, refresh_hz, bpp_bytes * 8, pipe_data_rate);
 		}
 	}
 
-	TRACE("i915_check_display_bandwidth: %u active displays. Approx total pixel rate: %" B_PRIu64 "/sec. Avg BPP: ~%u. (STUBBED CHECK)\n",
-		num_active_pipes, total_pixel_rate, num_active_pipes > 0 ? total_bpp_sum / num_active_pipes : 0);
+	if (actual_active_pipe_count_from_planned != num_active_pipes) {
+		TRACE("BWCheck: Warning - num_active_pipes (%u) from IOCTL args differs from count in planned_configs (%u).\n",
+			num_active_pipes, actual_active_pipe_count_from_planned);
+		// Use the count derived from planned_configs as it's what we're actually checking.
+		num_active_pipes = actual_active_pipe_count_from_planned;
+		if (num_active_pipes == 0) return B_OK; // Re-check if all pipes became inactive
+	}
 
-	// TODO: Implement actual bandwidth checks based on:
-	// - GPU generation (memory controller, display engine capabilities).
-	// - CDCLK frequency.
-	// - Number of active DDI links and their required bandwidth (e.g., HBR, HBR2, HBR3 for DP).
-	// - Memory type and frequency.
-	// - Watermark calculations and FIFO capacity.
-	// This is highly complex and requires detailed PRM data for each platform.
-	// For now, always return B_OK.
+	// These are very rough, conservative, placeholder thresholds (Bytes/second).
+	// Real limits depend on memory type (DDR3/4/LPDDR), channels, frequency, CDCLK, specific SKU,
+	// and specific display engine capabilities (e.g., max supported resolution per pipe, total planes).
+	uint64 platform_bw_limit_bytes_sec = 0;
+	// Example: Dual-channel DDR3-1600 offers peak ~25.6 GB/s, but effective for display might be much lower.
+	// These limits are illustrative and need to be derived from PRM data for specific memory configurations.
+	if (gen >= 9) { // Skylake+ (e.g., DDR4 dual channel)
+		platform_bw_limit_bytes_sec = 15ULL * 1024 * 1024 * 1024; // Approx ~15-20 GB/s effective for display
+	} else if (gen == 8) { // Broadwell
+		platform_bw_limit_bytes_sec = 12ULL * 1024 * 1024 * 1024; // Approx ~12-15 GB/s
+	} else if (gen == 7) { // Ivy/Haswell (e.g., DDR3 dual channel)
+		platform_bw_limit_bytes_sec = 10ULL * 1024 * 1024 * 1024; // Approx ~10-12 GB/s
+	} else if (gen == 6) { // Sandy Bridge
+		platform_bw_limit_bytes_sec = 8ULL * 1024 * 1024 * 1024;  // Approx ~8-10 GB/s
+	} else { // Older or unknown
+		platform_bw_limit_bytes_sec = 5ULL * 1024 * 1024 * 1024;  // Very conservative ~5 GB/s
+	}
 
+	TRACE("BWCheck: Total required display data rate: %" B_PRIu64 " Bytes/sec. Approx Platform Limit: %" B_PRIu64 " Bytes/sec (Gen %u).\n",
+		total_pixel_data_rate_bytes_sec, platform_bw_limit_bytes_sec, gen);
+
+	if (total_pixel_data_rate_bytes_sec > platform_bw_limit_bytes_sec) {
+		ERROR("BWCheck: Error - Required display bandwidth (%" B_PRIu64 " B/s) exceeds approximate platform limit (%" B_PRIu64 " B/s).\n",
+			total_pixel_data_rate_bytes_sec, platform_bw_limit_bytes_sec);
+		return B_NO_MEMORY; // Using B_NO_MEMORY as a proxy for "out of bandwidth resources"
+	}
+
+	// TODO: More advanced checks:
+	// 1. Per-DDI link bandwidth: Each DP/HDMI port has a max data rate. Sum of modes on a shared DDI or
+	//    a single high-res mode must not exceed this. (e.g., DP 1.2 HBR2 is 17.28 Gbit/s data rate).
+	// 2. CDCLK limitations: The Core Display Clock must be high enough to service all active pipes.
+	//    The required_cdclk_khz calculated elsewhere should be checked against platform max CDCLK.
+	// 3. Watermark/FIFO calculations: These are critical for avoiding underruns and are very detailed,
+	//    involving plane configurations, FIFO sizes, memory latency. This is a very advanced topic.
+	//    (Refer to Intel PRM "Display FIFO and Watermark Calculation").
+
+	TRACE("BWCheck: Basic bandwidth check passed.\n");
 	return B_OK;
 }
-// --- End Bandwidth Check Placeholder ---
+// --- End Bandwidth Check ---
 
 
 // This is the entry point called by the IOCTL(INTEL_I915_SET_DISPLAY_MODE)

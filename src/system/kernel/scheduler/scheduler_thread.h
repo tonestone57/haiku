@@ -48,6 +48,11 @@ public:
 
 			void		Dump() const;
 
+						// EEVDF parameter recalculation and update.
+						// Must be called with thread's scheduler_lock held.
+						void			UpdateEevdfParameters(CPUEntry* contextCpu,
+											bool isNewOrRelocated, bool isRequeue);
+
 	inline	int32		GetBasePriority() const	{ return fThread->priority; }
 	inline	Thread*		GetThread() const	{ return fThread; }
 	inline	CPUSet		GetCPUMask() const { return fThread->cpumask.And(gCPUEnabled); }

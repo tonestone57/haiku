@@ -179,6 +179,15 @@ CPUEntry::Start()
 }
 
 
+bool
+CPUEntry::IsActiveSMT() const
+{
+	// A CPU is considered active for SMT penalty purposes if it's running a real thread.
+	// The idle thread doesn't typically impose SMT contention.
+	return fRunningThread != NULL && fRunningThread != fIdleThread;
+}
+
+
 void
 CPUEntry::Stop()
 {
@@ -386,20 +395,45 @@ CPUEntry::SetIdleThread(ThreadData* idleThread)
 
 
 void
-CPUEntry::UpdatePriority(int32 priority)
+CPUEntry::UpdatePriority(int32 newSmtAwareKey) // Parameter renamed for clarity
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(!gCPU[fCPUNumber].disabled);
 
-	int32 oldPriority = CPUPriorityHeap::GetKey(this);
-	if (oldPriority == priority)
+	// This function is called by CoreEntry::CpuInstantaneousLoadChanged (with SMT-aware key)
+	// and potentially by CoreEntry::AddCPU (with B_IDLE_PRIORITY, though that usage might need review).
+	// The fCore->fCPULock is assumed to be held by the caller.
+
+	if (fCore == NULL || fCore->IsDefunct()) {
+		this->fHeapValue = newSmtAwareKey; // Update local value anyway.
 		return;
-	fCore->CPUHeap()->ModifyKey(this, priority);
+	}
 
-	if (oldPriority == B_IDLE_PRIORITY)
-		fCore->CPUWakesUp(this);
-	else if (priority == B_IDLE_PRIORITY)
-		fCore->CPUGoesIdle(this);
+	int32 oldKey = this->fHeapValue; // Directly use fHeapValue from HeapLinkImpl.
+
+	if (oldKey == newSmtAwareKey && fCore->CPUHeap()->Contains(this)) {
+		return; // Key is the same and it's in the heap.
+	}
+
+	this->fHeapValue = newSmtAwareKey; // Always update the internal key value.
+
+	if (gCPUEnabled.GetBit(fCPUNumber)) {
+		if (fCore->CPUHeap()->Contains(this)) {
+			fCore->CPUHeap()->ModifyKey(this, newSmtAwareKey);
+		} else {
+			// CPU is enabled but not in heap, insert it.
+			// Insert uses the fHeapValue which we just set.
+			fCore->CPUHeap()->Insert(this);
+		}
+	} else {
+		// CPU is disabled. If it's in the heap, remove it.
+		if (fCore->CPUHeap()->Contains(this)) {
+			fCore->CPUHeap()->Remove(this);
+		}
+	}
+
+	// The B_IDLE_PRIORITY related calls to CPUWakesUp/GoesIdle have been removed.
+	// Those should be triggered by actual CPU idle/active state transitions
+	// in the main scheduler logic (e.g., in reschedule_event or ChooseNextThread).
 }
 
 
@@ -749,10 +783,11 @@ CPUPriorityHeap::CPUPriorityHeap(int32 cpuCount)
 void
 CPUPriorityHeap::Dump()
 {
-	kprintf("  CPU   HeapKey  EffSMTLd InstLoad  MinVRun  RQTasks IdleTID\n");
+	kprintf("  CPU  SMTScore EffSMTLd InstLoad  MinVRun  RQTasks IdleTID\n");
 	kprintf("  ----------------------------------------------------------------\n");
 	// Note: This dump will show the key stored at the time of last UpdatePriority.
-	// This key IS SMT-aware due to changes in CPUEntry & CoreEntry.
+	// SMTScore (formerly HeapKey) IS SMT-aware due to changes in CPUEntry & CoreEntry.
+	// Higher SMTScore means more desirable CPU. EffSMTLd is the underlying load value (lower is better).
 	// We also calculate the current effective SMT load on the fly for comparison/verification.
 
 	CPUEntry* tempEntries[MAX_CPUS]; // Max possible CPUs on a core

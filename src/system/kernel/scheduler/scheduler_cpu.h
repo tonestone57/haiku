@@ -98,6 +98,7 @@ private:
 						// desirable (less loaded from an SMT perspective) CPU.
 						// outEffectiveSmtLoad returns the calculated effective load (0.0 to ~1.0+).
 						int32			_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const;
+						bool			IsActiveSMT() const;
 						void			_UpdateMinVirtualRuntime();
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);

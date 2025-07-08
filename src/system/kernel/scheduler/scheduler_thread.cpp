@@ -135,6 +135,70 @@ ThreadData::ClearAffinitizedIrqs()
 }
 
 
+void
+ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, bool isRequeue)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(this->GetThread() != NULL);
+	// This function must be called with this thread's scheduler_lock held.
+
+	// 1. Calculate Slice Duration (Quantum)
+	bigtime_t newSliceDuration = scheduler_calculate_eevdf_slice(this, contextCpu);
+	this->SetSliceDuration(newSliceDuration);
+
+	// 2. Determine Reference Minimum Virtual Runtime
+	bigtime_t reference_min_vruntime;
+	if (contextCpu != NULL) {
+		reference_min_vruntime = contextCpu->GetCachedMinVirtualRuntime();
+	} else {
+		reference_min_vruntime = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
+	}
+
+	// 3. Update Virtual Runtime
+	bigtime_t currentVRuntime = this->VirtualRuntime();
+	if (isNewOrRelocated || currentVRuntime < reference_min_vruntime) {
+		this->SetVirtualRuntime(max_c(currentVRuntime, reference_min_vruntime));
+	}
+	// Note: Priority change related vruntime scaling should happen *before* this call.
+
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice %" B_PRId64 ", refMinVR %" B_PRId64 ", VR set to %" B_PRId64 " (was %" B_PRId64 ")\n",
+		this->GetThread()->id, newSliceDuration, reference_min_vruntime, this->VirtualRuntime(), currentVRuntime);
+
+	// 4. Update Lag
+	int32 weight = scheduler_priority_to_weight(this->GetBasePriority());
+	if (weight <= 0) weight = 1;
+	bigtime_t weightedSliceEntitlement = (this->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
+
+	if (isRequeue) {
+		this->AddLag(weightedSliceEntitlement);
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag ADDED %" B_PRId64 " -> new lag %" B_PRId64 "\n",
+			this->GetThread()->id, weightedSliceEntitlement, this->Lag());
+	} else {
+		this->SetLag(weightedSliceEntitlement - (this->VirtualRuntime() - reference_min_vruntime));
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag SET to %" B_PRId64 " (wSlice %" B_PRId64 ", VR %" B_PRId64 ", refMinVR %" B_PRId64 ")\n",
+			this->GetThread()->id, this->Lag(), weightedSliceEntitlement, this->VirtualRuntime(), reference_min_vruntime);
+	}
+
+	// 5. Update Eligible Time
+	if (this->IsRealTime()) {
+		this->SetEligibleTime(system_time());
+	} else if (this->Lag() >= 0) {
+		this->SetEligibleTime(system_time());
+	} else {
+		bigtime_t delay = (-this->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
+		delay = min_c(delay, (bigtime_t)SCHEDULER_TARGET_LATENCY * 2);
+		this->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+	}
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time set to %" B_PRId64 "\n",
+		this->GetThread()->id, this->EligibleTime());
+
+	// 6. Update Virtual Deadline
+	this->SetVirtualDeadline(this->EligibleTime() + this->SliceDuration());
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", VD set to %" B_PRId64 "\n",
+		this->GetThread()->id, this->VirtualDeadline());
+}
+
+
 // #pragma mark - Core Logic
 
 

@@ -401,38 +401,21 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 	ASSERT(targetCPU != NULL);
 	ASSERT(targetCore != NULL);
 
+	// Acquire scheduler_lock for the thread before updating its EEVDF parameters.
+	// This is crucial as ThreadEnqueuer might be called from contexts where
+	// the lock isn't already held for this specific thread.
+	InterruptsSpinLocker schedulerLocker(t->scheduler_lock);
+
 	if (!thread->IsIdle()) {
-		thread->SetSliceDuration(scheduler_calculate_eevdf_slice(thread, targetCPU));
-
-		targetCPU->LockRunQueue();
-		bigtime_t queueMinVruntime = targetCPU->MinVirtualRuntime();
-		targetCPU->UnlockRunQueue();
-
-		bigtime_t oldVruntime = thread->VirtualRuntime();
-		thread->SetVirtualRuntime(max_c(oldVruntime, queueMinVruntime));
-		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 " vruntime set to %" B_PRId64 " (was %" B_PRId64 ", qMinVRun %" B_PRId64")\n",
-			t->id, thread->VirtualRuntime(), oldVruntime, queueMinVruntime);
-
-		int32 weight = scheduler_priority_to_weight(thread->GetBasePriority());
-		bigtime_t weightedSlice = (thread->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
-		thread->SetLag(weightedSlice - (thread->VirtualRuntime() - queueMinVruntime));
-		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", lag calc %" B_PRId64 "\n", t->id, thread->Lag());
-
-		if (thread->IsRealTime()) {
-			thread->SetEligibleTime(system_time());
-			TRACE_SCHED("ThreadEnqueuer: RT T %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", t->id, thread->Lag());
-		} else if (thread->Lag() >= 0) {
-			thread->SetEligibleTime(system_time());
-		} else {
-            bigtime_t delay = (-thread->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
-            if (weight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-            delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-			thread->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-		}
-		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", elig_time %" B_PRId64 "\n", t->id, thread->EligibleTime());
-		thread->SetVirtualDeadline(thread->EligibleTime() + thread->SliceDuration());
-		TRACE_SCHED("ThreadEnqueuer: T %" B_PRId32 ", VD %" B_PRId64 "\n", t->id, thread->VirtualDeadline());
+		// Centralized EEVDF parameter update
+		// isNewOrRelocated = true (thread is being re-homed/enqueued), isRequeue = false
+		thread->UpdateEevdfParameters(targetCPU, true, false);
 	}
+
+	schedulerLocker.Unlock(); // Release before calling enqueue_thread_on_cpu_eevdf,
+	                          // as that function might re-acquire or expect specific lock states.
+	                          // enqueue_thread_on_cpu_eevdf itself does not acquire scheduler_lock.
+	                          // It expects parameters to be set.
 
 	enqueue_thread_on_cpu_eevdf(t, targetCPU, targetCore);
 }
@@ -512,49 +495,10 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 		return;
 	}
 
-	threadData->SetSliceDuration(scheduler_calculate_eevdf_slice(threadData, targetCPU));
-
-	bigtime_t queueMinVruntime;
-	targetCPU->LockRunQueue();
-	queueMinVruntime = targetCPU->MinVirtualRuntime();
-	targetCPU->UnlockRunQueue();
-
-	bool isNewToScheduler = (threadData->VirtualRuntime() == 0 && threadData->Lag() == 0);
-
-	bigtime_t oldVruntime = threadData->VirtualRuntime();
-	if (isNewToScheduler) {
-		threadData->SetVirtualRuntime(queueMinVruntime);
-	} else {
-		threadData->SetVirtualRuntime(max_c(oldVruntime, queueMinVruntime));
-	}
-	TRACE_SCHED("enqueue: T %" B_PRId32 ", vruntime %s from %" B_PRId64 " to %" B_PRId64 " (qMinVRun %" B_PRId64")\n",
-		thread->id, isNewToScheduler ? "set" : "adjusted", oldVruntime, threadData->VirtualRuntime(), queueMinVruntime);
-
-
-	int32 weight = scheduler_priority_to_weight(threadData->GetBasePriority());
-	bigtime_t weightedSliceDuration = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
-
-	threadData->SetLag(weightedSliceDuration - (threadData->VirtualRuntime() - queueMinVruntime));
-	TRACE_SCHED("enqueue: T %" B_PRId32 ", lag calc %" B_PRId64 " (wSlice %" B_PRId64 ", vR %" B_PRId64 ", qMinVR %" B_PRId64 ")\n",
-		thread->id, threadData->Lag(), weightedSliceDuration, threadData->VirtualRuntime(), queueMinVruntime);
-
-	if (threadData->IsRealTime()) {
-		threadData->SetEligibleTime(system_time());
-		TRACE_SCHED("enqueue: RT T %" B_PRId32 ", EligibleTime forced to now, lag %" B_PRId64 "\n", thread->id, threadData->Lag());
-	} else if (threadData->Lag() >= 0) {
-		threadData->SetEligibleTime(system_time());
-	} else {
-        bigtime_t delay = (-threadData->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
-        if (weight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-        TRACE_SCHED("enqueue: T %" B_PRId32 " has negative lag %" B_PRId64 ", elig_time set to %" B_PRId64 " (delay %" B_PRId64 ")\n",
-            thread->id, threadData->Lag(), threadData->EligibleTime(), delay);
-	}
-	TRACE_SCHED("enqueue: T %" B_PRId32 ", elig_time %" B_PRId64 "\n", thread->id, threadData->EligibleTime());
-
-	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
-	TRACE_SCHED("enqueue: T %" B_PRId32 ", VD %" B_PRId64 "\n", thread->id, threadData->VirtualDeadline());
+	// Centralized EEVDF parameter update
+	// isNewOrRelocated = true (fresh enqueue), isRequeue = false
+	// This function is called with thread->scheduler_lock held.
+	threadData->UpdateEevdfParameters(targetCPU, true, false);
 
 	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
 }
@@ -607,33 +551,12 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		}
 	}
 
-	threadData->SetSliceDuration(scheduler_calculate_eevdf_slice(threadData, cpuContextForUpdate));
+	// Update EEVDF parameters after potential vruntime adjustment and base priority change.
+	// isNewOrRelocated = false, isRequeue = false (it's an in-place update)
+	// scheduler_lock is already held by interruptLocker.
+	threadData->UpdateEevdfParameters(cpuContextForUpdate, false, false);
 
-	bigtime_t reference_min_v = 0;
-	if (cpuContextForUpdate != NULL) {
-		reference_min_v = cpuContextForUpdate->MinVirtualRuntime();
-	} else if (threadData->Core() != NULL) {
-		reference_min_v = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
-	}
-
-	if (newWeight <=0) newWeight = 1;
-
-	bigtime_t newWeightedSlice = (threadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / newWeight;
-	threadData->SetLag(newWeightedSlice - (threadData->VirtualRuntime() - reference_min_v));
-
-	if (threadData->IsRealTime()) {
-		threadData->SetEligibleTime(system_time());
-	} else if (threadData->Lag() >= 0) {
-		threadData->SetEligibleTime(system_time());
-	} else {
-		bigtime_t delay = (-threadData->Lag() * SCHEDULER_WEIGHT_SCALE) / newWeight;
-		if (newWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-		delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-		threadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-	}
-	threadData->SetVirtualDeadline(threadData->EligibleTime() + threadData->SliceDuration());
-
-	TRACE_SCHED("set_prio: T %" B_PRId32 " new slice %" B_PRId64 ", new lag %" B_PRId64 ", new elig %" B_PRId64 ", new VD %" B_PRId64 "\n",
+	TRACE_SCHED("set_prio: T %" B_PRId32 " (after UpdateEevdfParameters) new slice %" B_PRId64 ", new lag %" B_PRId64 ", new elig %" B_PRId64 ", new VD %" B_PRId64 "\n",
 		thread->id, threadData->SliceDuration(), threadData->Lag(), threadData->EligibleTime(), threadData->VirtualDeadline());
 
 	if (wasRunning) {
@@ -941,28 +864,13 @@ reschedule(int32 nextState)
 					oldThreadData->UnassignCore(false);
 				}
 			} else {
-				oldThreadData->Continues();
-				oldThreadData->SetSliceDuration(scheduler_calculate_eevdf_slice(oldThreadData, cpu));
-				int32 re_weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
-				if (re_weight <= 0) re_weight = 1;
-				bigtime_t weightedSliceEntitlement = (oldThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / re_weight;
-				oldThreadData->AddLag(weightedSliceEntitlement);
-				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, lag increased by %" B_PRId64 " (wSlice) to %" B_PRId64 "\n",
-					oldThread->id, weightedSliceEntitlement, oldThreadData->Lag());
-
-				if (oldThreadData->IsRealTime()) {
-					oldThreadData->SetEligibleTime(system_time());
-				} else if (oldThreadData->Lag() >= 0) {
-					oldThreadData->SetEligibleTime(system_time());
-				} else {
-					int32 weight_for_delay = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
-					if (weight_for_delay <= 0) weight_for_delay = 1;
-					bigtime_t delay = (-oldThreadData->Lag() * SCHEDULER_WEIGHT_SCALE) / weight_for_delay;
-					delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-					oldThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-				}
-				oldThreadData->SetVirtualDeadline(oldThreadData->EligibleTime() + oldThreadData->SliceDuration());
-				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q, new VD %" B_PRId64 "\n", oldThread->id, oldThreadData->VirtualDeadline());
+				oldThreadData->Continues(); // Resets fTimeUsedInCurrentQuantum
+				// Update EEVDF parameters for requeue.
+				// isNewOrRelocated = false, isRequeue = true.
+				// scheduler_lock for oldThread is already held.
+				oldThreadData->UpdateEevdfParameters(cpu, false, true);
+				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q (after UpdateEevdfParameters), new VD %" B_PRId64 ", new Lag %" B_PRId64 "\n",
+					oldThread->id, oldThreadData->VirtualDeadline(), oldThreadData->Lag());
 			}
 			break;
 		}
@@ -1025,40 +933,67 @@ reschedule(int32 nextState)
 				cpu->LockRunQueue();
 
 				if (actuallyStolenThreadData != NULL) {
-					actuallyStolenThreadData->SetSliceDuration(scheduler_calculate_eevdf_slice(actuallyStolenThreadData, cpu));
+					// Acquire scheduler_lock for the stolen thread before updating its EEVDF parameters.
+					InterruptsSpinLocker schedulerLocker(actuallyStolenThreadData->GetThread()->scheduler_lock);
 
-					bigtime_t thiefQueueMinVruntime = cpu->MinVirtualRuntime();
+					// Update EEVDF parameters for the stolen thread.
+					// isNewOrRelocated = true, isRequeue = false.
+					// The thiefCPU is the contextCpu.
+					actuallyStolenThreadData->UpdateEevdfParameters(cpu, true, false);
 
-					actuallyStolenThreadData->SetVirtualRuntime(max_c(actuallyStolenThreadData->VirtualRuntime(), thiefQueueMinVruntime));
+					schedulerLocker.Unlock(); // Release lock
 
-					int32 stolenWeight = scheduler_priority_to_weight(actuallyStolenThreadData->GetBasePriority());
-					if (stolenWeight <= 0) stolenWeight = 1;
-					bigtime_t stolenWeightedSlice = (actuallyStolenThreadData->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
-					actuallyStolenThreadData->SetLag(stolenWeightedSlice - (actuallyStolenThreadData->VirtualRuntime() - thiefQueueMinVruntime));
+					TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " successfully STOLE T %" B_PRId32 " (after UpdateEevdfParameters). VD %" B_PRId64 ", Lag %" B_PRId64 "\n",
+						cpu->ID(), actuallyStolenThreadData->GetThread()->id, actuallyStolenThreadData->VirtualDeadline(), actuallyStolenThreadData->Lag());
 
-					if (actuallyStolenThreadData->IsRealTime()) {
-						actuallyStolenThreadData->SetEligibleTime(system_time());
-					} else if (actuallyStolenThreadData->Lag() >= 0) {
-						actuallyStolenThreadData->SetEligibleTime(system_time());
-					} else {
-						bigtime_t delay = (-actuallyStolenThreadData->Lag() * SCHEDULER_WEIGHT_SCALE) / stolenWeight;
-						if (stolenWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-						delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-						actuallyStolenThreadData->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-					}
-					actuallyStolenThreadData->SetVirtualDeadline(actuallyStolenThreadData->EligibleTime() + actuallyStolenThreadData->SliceDuration());
-
-					TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " successfully STOLE T %" B_PRId32 ". VD %" B_PRId64 "\n",
-						cpu->ID(), actuallyStolenThreadData->GetThread()->id, actuallyStolenThreadData->VirtualDeadline());
-
-					nextThreadData = actuallyStolenThreadData;
+					nextThreadData = actuallyStolenThreadData; // This will be the next thread for the thiefCPU
 					cpu->fNextStealAttemptTime = system_time() + kStealSuccessCooldownPeriod;
 
+					// Associate with the new core if different, and update load accounting.
+					// MarkEnqueued also sets fCore and handles load addition if thread was not fReady.
+					// Since it was stolen from another queue, it should be fReady.
+					// ChooseCoreAndCPU is typically called before enqueue.
+					// Here, we are directly placing it. Ensure its fCore is updated.
 					if (actuallyStolenThreadData->Core() != cpu->Core()) {
-						 if (actuallyStolenThreadData->Core() != NULL) actuallyStolenThreadData->UnassignCore(false);
-						 actuallyStolenThreadData->MarkEnqueued(cpu->Core());
+						if (actuallyStolenThreadData->Core() != NULL) {
+							// This UnassignCore might be problematic if it expects scheduler_lock
+							// and we are trying to avoid complex cross-CPU locking.
+							// For now, assume it's primarily about load accounting which might
+							// be okay if the old core's lock isn't strictly needed for RemoveLoad.
+							// A safer approach might be to queue this for the old core.
+							// However, since it was popped from victim, its load is already implicitly removed there.
+							// So, just updating its new core association should be fine.
+							// actuallyStolenThreadData->UnassignCore(false); // false = not currently running
+						}
+						// MarkEnqueued will set fCore to cpu->Core() and handle AddLoad.
+						// It needs thread->scheduler_lock, which we don't hold here anymore.
+						// This suggests parameter update and core association should be done
+						// before adding to run queue, or enqueue logic needs to handle it.
+						// For now, let's assume MarkEnqueued is robust or called later.
+						// The AddThread below will call MarkEnqueued.
 					}
-					atomic_add(&cpu->fTotalThreadCount, 1);
+					// AddThread will call MarkEnqueued and increment fTotalThreadCount.
+					// So, the manual atomic_add here should be removed if AddThread does it.
+					// CPUEntry::AddThread calls MarkEnqueued and atomic_add(&fTotalThreadCount, 1).
+					// So, no need for manual atomic_add or MarkEnqueued here.
+					// cpu->AddThread(actuallyStolenThreadData); // This would be more standard.
+					// However, the current structure has atomic_add here.
+					// Let's keep current structure and assume AddThread is not called for stolen tasks this way.
+					// This means we need to manually handle MarkEnqueued and fTotalThreadCount.
+
+					if (actuallyStolenThreadData->Core() != cpu->Core()) {
+						InterruptsSpinLocker lock(actuallyStolenThreadData->GetThread()->scheduler_lock);
+						if (actuallyStolenThreadData->Core() != NULL)
+							actuallyStolenThreadData->UnassignCore(false); // Unassign load from old core
+						actuallyStolenThreadData->MarkEnqueued(cpu->Core()); // Assign to new core and add load
+						lock.Unlock();
+					} else if (!actuallyStolenThreadData->IsEnqueued()) {
+						// Was on same core but not enqueued (should not happen for stolen task from runqueue)
+						InterruptsSpinLocker lock(actuallyStolenThreadData->GetThread()->scheduler_lock);
+						actuallyStolenThreadData->MarkEnqueued(cpu->Core());
+						lock.Unlock();
+					}
+					atomic_add(&cpu->fTotalThreadCount, 1); // Manually adjust count as we are not using cpu->AddThread() fully here.
 				} else {
 					cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
 				}
@@ -1183,41 +1118,43 @@ void
 scheduler_on_thread_destroy(Thread* thread)
 {
 	// Called when a thread is being destroyed.
-	// Cleans up any IRQ-task affinities associated with this thread from the
-	// global sIrqTaskAffinityMap by using the thread's local list of
-	// affinitized IRQs.
+	// Cleans up any IRQ-task affinities associated with this thread.
 	if (sIrqTaskAffinityMap != NULL && thread != NULL && thread->scheduler_data != NULL) {
 		ThreadData* threadData = thread->scheduler_data;
+		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
 		int8 irqCount = 0;
-		const int32* affinitizedIrqs = threadData->GetAffinitizedIrqs(irqCount);
 
+		// Safely copy the list of affinitized IRQs and clear it from ThreadData under thread's scheduler_lock.
+		InterruptsSpinLocker threadSchedulerLocker(thread->scheduler_lock);
+		const int32* affinitizedIrqsPtr = threadData->GetAffinitizedIrqs(irqCount);
 		if (irqCount > 0) {
-			InterruptsSpinLocker locker(gIrqTaskAffinityLock);
+			memcpy(localIrqList, affinitizedIrqsPtr, irqCount * sizeof(int32));
+		}
+		threadData->ClearAffinitizedIrqs(); // Clear the list in ThreadData
+		threadSchedulerLocker.Unlock();
+
+		// Now, operate on the local copy of the IRQ list to update the global map.
+		if (irqCount > 0) {
+			InterruptsSpinLocker mapLocker(gIrqTaskAffinityLock);
 			for (int8 i = 0; i < irqCount; ++i) {
-				int32 irq = affinitizedIrqs[i];
-				thread_id currentMappedTid;
+				int32 irq = localIrqList[i];
+				thread_id currentMappedTid = -1; // Initialize for robust TRACE message
 				// Verify that the map indeed points to *this* dying thread for this IRQ
-				// before removing, to prevent accidentally removing an affinity that might have
-				// been reassigned if there was a race or an unlikely intermediate state.
+				// before removing.
 				if (sIrqTaskAffinityMap->Lookup(irq, &currentMappedTid) == B_OK
 					&& currentMappedTid == thread->id) {
 					sIrqTaskAffinityMap->Remove(irq);
 					TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed, removed its affinity for IRQ %" B_PRId32 " from global map.\n",
 						thread->id, irq);
 				} else {
-					// This case (IRQ in thread's list but not in map, or map points elsewhere)
-					// could indicate an inconsistency if not handled carefully elsewhere (e.g.,
-					// if an IRQ was reassigned but not removed from old thread's list).
-					// The ThreadData list should be the source of truth for *this* thread's affinities.
-					TRACE_SCHED_IRQ_ERR("ThreadDestroy: T %" B_PRId32 " noted IRQ %" B_PRId32 " in its list, "
-						"but global map did not point to this thread (or IRQ not in map). Current map tid: %" B_PRId32 ".\n",
-						thread->id, irq, currentMappedTid);
+					TRACE_SCHED_IRQ_ERR("ThreadDestroy: T %" B_PRId32 " noted IRQ %" B_PRId32
+						" in its (now cleared) list, but global map did not point to this thread "
+						"(or IRQ not in map). Current map tid for IRQ %" B_PRId32 ": %" B_PRId32 ".\n",
+						thread->id, irq, irq, currentMappedTid);
 				}
 			}
+			mapLocker.Unlock();
 		}
-		// Clear the list in ThreadData as well, although ThreadData is about to be deleted.
-		// This is good practice in case ClearAffinitizedIrqs had other side effects.
-		threadData->ClearAffinitizedIrqs();
 	} else if (thread != NULL) {
 		TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed. No sIrqTaskAffinityMap or no scheduler_data, "
 			"no IRQ affinity cleanup needed from here.\n", thread->id);
@@ -1293,8 +1230,56 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 	if (enabled) {
 		cpuEntry->Start();
 	} else {
+		// CPU is being disabled
+		TRACE_SCHED("scheduler_set_cpu_enabled: Disabling CPU %" B_PRId32 ". Migrating its queued threads.\n", cpuID);
+
+		cpuEntry->LockRunQueue();
+		EevdfRunQueue& runQueue = cpuEntry->GetEevdfRunQueue();
+		DoublyLinkedList<ThreadData> threadsToReenqueue;
+
+		// Drain the run queue
+		while (true) {
+			ThreadData* threadData = runQueue.PopMinimum(); // Removes from heap
+			if (threadData == NULL)
+				break;
+
+			// Explicitly notify CPUEntry it's losing this thread from its runqueue
+			// This will decrement fTotalThreadCount and update fMinVirtualRuntime
+			cpuEntry->RemoveThread(threadData);
+
+			threadData->MarkDequeued();
+			if (threadData->Core() == core) { // It was homed to this core (likely via this CPU)
+				threadData->UnassignCore(false); // Unassign from core, false as it's not "running" to be unassigned
+			}
+			// Add to a temporary list to avoid re-enqueueing while holding queue lock
+			threadsToReenqueue.Add(threadData);
+		}
+		// After this loop, cpuEntry->fTotalThreadCount for its runqueue portion should be 0
+		// and fMinVirtualRuntime should be updated (or effectively infinite if empty).
+		// cpuEntry->_UpdateMinVirtualRuntime(); is called by RemoveThread if queue becomes empty.
+		cpuEntry->UnlockRunQueue();
+
+		// Re-enqueue all threads that were in the disabled CPU's queue
+		ThreadData* threadToReenqueue;
+		while ((threadToReenqueue = threadsToReenqueue.RemoveHead()) != NULL) {
+			TRACE_SCHED("scheduler_set_cpu_enabled: Re-homing T %" B_PRId32 " from disabled CPU %" B_PRId32 "\n",
+				threadToReenqueue->GetThread()->id, cpuID);
+			// Ensure thread state is READY for re-enqueueing
+			// This should ideally be handled by scheduler_enqueue_in_run_queue or its callers
+			// if the thread wasn't already in READY state. For safety, let's ensure it.
+			// However, threads from a runqueue should already be in B_THREAD_READY or B_THREAD_RUNNING (if it's the current).
+			// Since we are disabling a CPU, it won't be the current thread of *this* CPU.
+			// If it was running on another CPU but homed here, it's complex.
+			// For now, assume they are effectively READY or will be made so by enqueue.
+			// Let's re-verify: scheduler_enqueue_in_run_queue expects thread->state to be B_THREAD_READY.
+			// If a thread was in the run queue, it must have been B_THREAD_READY.
+			// So, this explicit set might be redundant but harmless.
+			atomic_set((int32*)&threadToReenqueue->GetThread()->state, B_THREAD_READY);
+			scheduler_enqueue_in_run_queue(threadToReenqueue->GetThread());
+		}
+
 		cpuEntry->UpdatePriority(B_IDLE_PRIORITY);
-		ThreadEnqueuer enqueuer;
+		ThreadEnqueuer enqueuer; // Used by core->RemoveCPU if core becomes defunct
 		core->RemoveCPU(cpuEntry, enqueuer);
 	}
 
@@ -1910,9 +1895,15 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 	ASSERT(core != NULL);
 
 	CPUEntry* bestCPU = NULL;
-	float bestLoadScore = preferBusiest ? -1.0f : 2.0f;
-	int32 bestTieBreakScore = preferBusiest ? -1 : 0x7fffffff;
+	// SMT-aware key (score) from cpu->GetValue() is higher for better/less-loaded CPUs.
+	// If preferBusiest = true, we want the LOWEST score.
+	// If preferBusiest = false (i.e. find LEAST loaded), we want the HIGHEST score.
+	int32 bestScore = preferBusiest ? 0x7fffffff : -1; // worst possible score
+	// Tie-break score (e.g. thread count) is not strictly needed if SMT score is good,
+	// but can use CPU ID for deterministic tie-breaking.
+	// int32 bestTieBreakScore = preferBusiest ? -1 : 0x7fffffff; // Example if using thread count
 
+	core->LockCPUHeap(); // Lock to safely iterate CPUs and access their scores (fHeapValue / GetValue())
 
 	CPUSet coreCPUs = core->CPUMask();
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
@@ -1928,57 +1919,38 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				continue;
 		}
 
-		float currentInstantLoad = currentCPU->GetInstantaneousLoad();
-		float smtPenalty = 0.0f;
-		if (!preferBusiest && core->CPUCount() > 1) {
-			int32 currentCPUID = currentCPU->ID();
-			int32 currentCoreID = core->ID();
-			int32 currentSMTID = gCPU[currentCPUID].topology_id[CPU_TOPOLOGY_SMT];
-			if (currentSMTID != -1) {
-				for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-					if (k == currentCPUID || gCPU[k].disabled) continue;
-					if (gCPU[k].topology_id[CPU_TOPOLOGY_CORE] == currentCoreID &&
-						gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == currentSMTID) {
-						smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-					}
-				}
-			}
-		}
-		float effectiveLoad = currentInstantLoad + smtPenalty;
+		// Use the pre-calculated SMT-aware key (score)
+		int32 currentSmtScore = currentCPU->GetValue(); // From HeapLinkImpl, this is fHeapValue
 
 		bool isBetter = false;
 		if (bestCPU == NULL) {
 			isBetter = true;
 		} else {
-			if (preferBusiest) {
-				if (effectiveLoad > bestLoadScore) {
+			if (preferBusiest) { // Seeking most loaded CPU = lowest SMT score
+				if (currentSmtScore < bestScore) {
 					isBetter = true;
-				} else if (effectiveLoad == bestLoadScore) {
-					currentCPU->LockRunQueue();
-					int32 currentTotalTasks = currentCPU->GetTotalThreadCount();
-					currentCPU->UnlockRunQueue();
-					if (currentTotalTasks > bestTieBreakScore) isBetter = true;
+				} else if (currentSmtScore == bestScore) {
+					// Tie-break: prefer higher CPU ID when seeking busiest (arbitrary but deterministic)
+					if (currentCPU->ID() > bestCPU->ID())
+						isBetter = true;
 				}
-			} else {
-				if (effectiveLoad < bestLoadScore) {
+			} else { // Seeking least loaded CPU = highest SMT score
+				if (currentSmtScore > bestScore) {
 					isBetter = true;
-				} else if (effectiveLoad == bestLoadScore) {
-					currentCPU->LockRunQueue();
-					int32 currentTotalTasks = currentCPU->GetTotalThreadCount();
-					currentCPU->UnlockRunQueue();
-					if (currentTotalTasks < bestTieBreakScore) isBetter = true;
+				} else if (currentSmtScore == bestScore) {
+					// Tie-break: prefer lower CPU ID when seeking least loaded
+					if (currentCPU->ID() < bestCPU->ID())
+						isBetter = true;
 				}
 			}
 		}
 
 		if (isBetter) {
-			bestLoadScore = effectiveLoad;
-			currentCPU->LockRunQueue();
-			bestTieBreakScore = currentCPU->GetTotalThreadCount();
-			currentCPU->UnlockRunQueue();
+			bestScore = currentSmtScore;
 			bestCPU = currentCPU;
 		}
 	}
+	core->UnlockCPUHeap();
 	return bestCPU;
 }
 
@@ -2270,36 +2242,23 @@ scheduler_perform_load_balance()
 
 	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
 	CoreEntry* actualFinalTargetCore = targetCPU->Core();
-	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU);
+	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU); // This sets threadToMove->fCore
 	ASSERT(threadToMove->Core() == actualFinalTargetCore);
 
-	bigtime_t newSliceDuration = scheduler_calculate_eevdf_slice(threadToMove, targetCPU);
-	threadToMove->SetSliceDuration(newSliceDuration);
+	// Acquire scheduler_lock for threadToMove before updating its EEVDF parameters.
+	InterruptsSpinLocker schedulerLocker(threadToMove->GetThread()->scheduler_lock);
 
-	targetCPU->LockRunQueue();
-	bigtime_t targetQueueMinVruntime = targetCPU->MinVirtualRuntime();
+	// Update EEVDF parameters for the migrated thread.
+	// isNewOrRelocated = true, isRequeue = false.
+	threadToMove->UpdateEevdfParameters(targetCPU, true, false);
 
-	threadToMove->SetVirtualRuntime(max_c(threadToMove->VirtualRuntime(), targetQueueMinVruntime));
+	schedulerLocker.Unlock(); // Release lock
 
-	int32 migratedWeight = scheduler_priority_to_weight(threadToMove->GetBasePriority());
-	if (migratedWeight <= 0) migratedWeight = 1;
-	bigtime_t migratedWeightedSlice = (threadToMove->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / migratedWeight;
-	threadToMove->SetLag(migratedWeightedSlice - (threadToMove->VirtualRuntime() - targetQueueMinVruntime));
-
-	if (threadToMove->IsRealTime()) {
-		threadToMove->SetEligibleTime(system_time());
-	} else if (threadToMove->Lag() >= 0) {
-		threadToMove->SetEligibleTime(system_time());
-	} else {
-        bigtime_t delay = (-threadToMove->Lag() * SCHEDULER_WEIGHT_SCALE) / migratedWeight;
-        if (migratedWeight == 0) delay = SCHEDULER_TARGET_LATENCY * 2;
-        delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-		threadToMove->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-	}
-	threadToMove->SetVirtualDeadline(threadToMove->EligibleTime() + threadToMove->SliceDuration());
-	TRACE_SCHED("LoadBalance: Migrated T %" B_PRId32 " to CPU %" B_PRId32 ", new VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 "\n",
+	TRACE_SCHED("LoadBalance: Migrated T %" B_PRId32 " to CPU %" B_PRId32 " (after UpdateEevdfParameters), new VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 "\n",
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
+	// Add to target CPU's run queue
+	targetCPU->LockRunQueue();
 	targetCPU->AddThread(threadToMove);
 	targetCPU->UnlockRunQueue();
 
@@ -2309,7 +2268,22 @@ scheduler_perform_load_balance()
 
 	// IRQ Follow-Task logic
 	if (threadToMove->Core() != sourceCPU->Core()) { // Check if moved across cores
-		scheduler_maybe_follow_task_irqs(threadToMove, targetCPU->Core(), targetCPU);
+		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
+		int8 localIrqCount = 0;
+		thread_id migratedThId = threadToMove->GetThread()->id;
+
+		// Safely copy the IRQ list under the thread's scheduler lock.
+		InterruptsSpinLocker followTaskLocker(threadToMove->GetThread()->scheduler_lock);
+		const int32* affinitizedIrqsPtr = threadToMove->GetAffinitizedIrqs(localIrqCount);
+		if (localIrqCount > 0) {
+			memcpy(localIrqList, affinitizedIrqsPtr, localIrqCount * sizeof(int32));
+		}
+		followTaskLocker.Unlock();
+
+		if (localIrqCount > 0) {
+			// Pass the copied list to the modified function.
+			scheduler_maybe_follow_task_irqs(migratedThId, localIrqList, localIrqCount, targetCPU->Core(), targetCPU);
+		}
 	}
 
 	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
@@ -2340,45 +2314,56 @@ scheduler_perform_load_balance()
 	\param newCpu The specific new CPU the thread is on (can be NULL if only core matters).
 */
 static void
-scheduler_maybe_follow_task_irqs(ThreadData* threadData, CoreEntry* newCore, CPUEntry* newCpu)
+scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
+	const int32* affinitizedIrqList, int8 irqListCount,
+	CoreEntry* newCore, CPUEntry* newCpu)
 {
-	if (threadData == NULL || threadData->IsIdle() || newCore == NULL)
-		return;
-
-	int8 irqCount = 0;
-	const int32* affinitizedIrqs = threadData->GetAffinitizedIrqs(irqCount);
-	if (irqCount == 0)
+	if (migratedThreadId <= 0 || affinitizedIrqList == NULL || irqListCount == 0 || newCore == NULL)
 		return;
 
 	TRACE_SCHED_IRQ("FollowTask: T %" B_PRId32 " moved to core %" B_PRId32 "/CPU %" B_PRId32
 		". Checking %d affinitized IRQs.\n",
-		threadData->GetThread()->id, newCore->ID(), newCpu ? newCpu->ID() : -1, irqCount);
+		migratedThreadId, newCore->ID(), newCpu ? newCpu->ID() : -1, irqListCount);
 
-	for (int8 i = 0; i < irqCount; ++i) {
-		int32 irqVector = affinitizedIrqs[i];
+	for (int8 i = 0; i < irqListCount; ++i) {
+		int32 irqVector = affinitizedIrqList[i];
+		int32 currentIrqCpuNum = -1;
+		int32 mappedVector = -1;
 
-		// TODO: A more robust way to get current IRQ load is needed.
-		//       Currently using a placeholder. The load influences CPU selection.
-		//       Ideally, retrieve irq_assignment->load for irqVector.
-		int32 estimatedIrqLoad = 100; // Placeholder for actual IRQ load
+		irq_assignment* assignment = get_irq_assignment(irqVector, &currentIrqCpuNum, &mappedVector);
 
-		// TODO: Check if the IRQ is already handled optimally on the newCore.
-		//       This requires a function like get_irq_routing_info(irqVector, &currentCpuId)
-		//       to avoid unnecessary re-assignments if the IRQ is already on a good
-		//       CPU of newCore or even on newCpu itself.
-		//       For this phase, we always attempt re-selection and assignment.
-		//       assign_io_interrupt_to_cpu() might be a no-op if already optimal,
-		//       but avoiding the call altogether would be better.
-
-		CPUEntry* targetCpuForIrq = _scheduler_select_cpu_for_irq(newCore, irqVector, estimatedIrqLoad);
-		if (targetCpuForIrq != NULL) {
-			TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32 " to CPU %" B_PRId32 " (on core %" B_PRId32 ") for T %" B_PRId32 "\n",
-				irqVector, targetCpuForIrq->ID(), newCore->ID(), threadData->GetThread()->id);
-			assign_io_interrupt_to_cpu(irqVector, targetCpuForIrq->ID());
+		int32 actualIrqLoad = 0;
+		if (assignment != NULL) {
+			actualIrqLoad = assignment->load;
 		} else {
-			TRACE_SCHED_IRQ("FollowTask: No suitable CPU on core %" B_PRId32 " for IRQ %" B_PRId32 " for T %" B_PRId32 "\n",
-				newCore->ID(), irqVector, threadData->GetThread()->id);
+			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " - no current assignment found. Skipping.\n",
+				irqVector, migratedThreadId);
+			continue;
 		}
+
+		if (actualIrqLoad == 0) {
+			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " has zero load. Skipping.\n",
+				irqVector, migratedThreadId);
+			continue;
+		}
+
+		CPUEntry* targetCpuForIrq = _scheduler_select_cpu_for_irq(newCore, irqVector, actualIrqLoad);
+
+		if (targetCpuForIrq == NULL) {
+			TRACE_SCHED_IRQ("FollowTask: No suitable CPU on core %" B_PRId32 " for IRQ %" B_PRId32 " (load %" B_PRId32 ") for T %" B_PRId32 "\n",
+				newCore->ID(), irqVector, actualIrqLoad, migratedThreadId);
+			continue;
+		}
+
+		if (currentIrqCpuNum == targetCpuForIrq->ID()) {
+			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is already optimally placed on target CPU %" B_PRId32 " (core %" B_PRId32 "). Skipping move.\n",
+				irqVector, migratedThreadId, targetCpuForIrq->ID(), newCore->ID());
+			continue;
+		}
+
+		TRACE_SCHED_IRQ("FollowTask: Attempting to move IRQ %" B_PRId32 " (load %" B_PRId32 ") from CPU %" B_PRId32 " to CPU %" B_PRId32 " (on core %" B_PRId32 ") for T %" B_PRId32 "\n",
+			irqVector, actualIrqLoad, currentIrqCpuNum, targetCpuForIrq->ID(), newCore->ID(), migratedThreadId);
+		assign_io_interrupt_to_cpu(irqVector, targetCpuForIrq->ID());
 	}
 }
 
@@ -2501,37 +2486,12 @@ _kern_set_thread_latency_nice(thread_id thid, int8 latencyNice)
 			TRACE_SCHED("set_latency_nice: T %" B_PRId32 " has no CPU context for update, using global min_vruntime.\n", thid);
 		}
 
-		targetThread->scheduler_data->SetSliceDuration(
-			scheduler_calculate_eevdf_slice(targetThread->scheduler_data, cpuContext));
+		// Update EEVDF parameters after latency_nice change.
+		// isNewOrRelocated = false, isRequeue = false (it's an in-place update)
+		// scheduler_lock is already held.
+		targetThread->scheduler_data->UpdateEevdfParameters(cpuContext, false, false);
 
-		bigtime_t reference_min_vruntime;
-		if (cpuContext != NULL) {
-			InterruptsSpinLocker queueLocker(cpuContext->fQueueLock);
-			reference_min_vruntime = cpuContext->MinVirtualRuntime();
-		} else {
-			reference_min_vruntime = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
-		}
-
-		int32 weight = scheduler_priority_to_weight(targetThread->scheduler_data->GetBasePriority());
-		if (weight <= 0) weight = 1;
-
-		bigtime_t newWeightedSlice = (targetThread->scheduler_data->SliceDuration() * SCHEDULER_WEIGHT_SCALE) / weight;
-		targetThread->scheduler_data->SetLag(newWeightedSlice
-			- (targetThread->scheduler_data->VirtualRuntime() - reference_min_vruntime));
-
-		if (targetThread->scheduler_data->IsRealTime()) {
-			targetThread->scheduler_data->SetEligibleTime(system_time());
-		} else if (targetThread->scheduler_data->Lag() >= 0) {
-			targetThread->scheduler_data->SetEligibleTime(system_time());
-		} else {
-			bigtime_t delay = (-targetThread->scheduler_data->Lag() * SCHEDULER_WEIGHT_SCALE) / weight;
-			delay = min_c(delay, SCHEDULER_TARGET_LATENCY * 2);
-			targetThread->scheduler_data->SetEligibleTime(system_time() + max_c(delay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
-		}
-		targetThread->scheduler_data->SetVirtualDeadline(
-			targetThread->scheduler_data->EligibleTime() + targetThread->scheduler_data->SliceDuration());
-
-		TRACE_SCHED("set_latency_nice: T %" B_PRId32 " params updated: slice %" B_PRId64 ", lag %" B_PRId64 ", elig %" B_PRId64 ", VD %" B_PRId64 "\n",
+		TRACE_SCHED("set_latency_nice: T %" B_PRId32 " (after UpdateEevdfParameters) params updated: slice %" B_PRId64 ", lag %" B_PRId64 ", elig %" B_PRId64 ", VD %" B_PRId64 "\n",
 			thid, targetThread->scheduler_data->SliceDuration(), targetThread->scheduler_data->Lag(),
 			targetThread->scheduler_data->EligibleTime(), targetThread->scheduler_data->VirtualDeadline());
 

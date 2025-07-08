@@ -686,37 +686,95 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 	EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
 
 	if (!victimQueue.IsEmpty()) {
-		// Phase 1 steal logic: check the top candidate.
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
-			bool canRunOnThief = true;
+			bool basicChecksPass = true;
 			struct thread* candThread = candidateTask->GetThread();
 
-			// 1. Check CPU pinning (pinned_to_cpu is 1-based for cpu_num)
+			// 1. Check CPU pinning
 			if (candThread->pinned_to_cpu != 0) {
 				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
-					canRunOnThief = false;
+					basicChecksPass = false;
 				}
 			}
 			// 2. Check CPU affinity mask
-			if (canRunOnThief && !candidateTask->GetCPUMask().IsEmpty()) {
+			if (basicChecksPass && !candidateTask->GetCPUMask().IsEmpty()) {
 				if (!candidateTask->GetCPUMask().GetBit(thiefCPU->ID())) {
-					canRunOnThief = false;
+					basicChecksPass = false;
 				}
 			}
 
 			// 3. Check if sufficiently starved (positive lag)
 			bool isStarved = candidateTask->Lag() > kMinimumLagToSteal;
 
-			if (canRunOnThief && isStarved) {
-				stolenTask = victimQueue.PopMinimum();
-				victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
-				atomic_add(&victimCPUEntry->fTotalThreadCount, -1);
-				ASSERT(victimCPUEntry->fTotalThreadCount >=0);
-				victimCPUEntry->_UpdateMinVirtualRuntime();
+			if (basicChecksPass && isStarved) {
+				// --- b.L-Specific Evaluation ---
+				bool allowStealByBLPolicy = false;
+				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
+				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
 
-				TRACE_SCHED("WorkSteal: CPU %" B_PRId32 " STOLE thread %" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "\n",
-					thiefCPU->ID(), stolenTask->GetThread()->id, stolenTask->Lag(), victimCpuID);
+				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidateTask->LatencyNice() < -5 || candidateTask->GetLoad() > kHighLoad);
+				bool isTaskEPref = (!isTaskPCritical && (candidateTask->GetBasePriority() < B_NORMAL_PRIORITY || candidateTask->LatencyNice() > 5 || candidateTask->GetLoad() < kLowLoad));
+
+				TRACE_SCHED_BL_STEAL("WorkSteal Eval: Thief C%d(T%d), Victim C%d(T%d), Task T% " B_PRId32 " (Pcrit %d, EPref %d, Load %" B_PRId32 ", Lag %" B_PRId64 ")\n",
+					thiefCPU->Core()->ID(), thiefCoreType, victimCPUEntry->Core()->ID(), victimCoreType,
+					candThread->id, isTaskPCritical, isTaskEPref, candidateTask->GetLoad(), candidateTask->Lag());
+
+				if (thiefCoreType == CORE_TYPE_BIG || thiefCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
+					if (isTaskPCritical) {
+						allowStealByBLPolicy = true;
+						TRACE_SCHED_BL_STEAL("  Decision: BIG thief, P-Critical task. ALLOW steal.\n");
+					} else { // EPref or Flexible task for BIG thief
+						// Only if victim is very overloaded.
+						uint32 victimCapacity = victimCPUEntry->Core()->PerformanceCapacity();
+						if (victimCapacity == 0) victimCapacity = SCHEDULER_NOMINAL_CAPACITY;
+						int32 victimEffectiveVeryHighLoad = (int32)((uint64)kVeryHighLoad * victimCapacity / SCHEDULER_NOMINAL_CAPACITY);
+						if (victimCPUEntry->GetLoad() > victimEffectiveVeryHighLoad) {
+							allowStealByBLPolicy = true;
+							TRACE_SCHED_BL_STEAL("  Decision: BIG thief, EPref/Flex task, victim C%d very overloaded. ALLOW steal.\n", victimCPUEntry->Core()->ID());
+						} else {
+							TRACE_SCHED_BL_STEAL("  Decision: BIG thief, EPref/Flex task, victim C%d not very overloaded. DENY steal.\n", victimCPUEntry->Core()->ID());
+						}
+					}
+				} else { // LITTLE Core Thief
+					if (isTaskPCritical) {
+						allowStealByBLPolicy = false; // Default: LITTLE thief avoids P-Critical
+						if (victimCoreType == CORE_TYPE_LITTLE && victimCPUEntry->GetLoad() > thiefCPU->Core()->GetLoad() + kLoadDifference) {
+							allowStealByBLPolicy = true; // Rescue P-Critical from another overloaded LITTLE
+							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Victim is overloaded LITTLE. ALLOW steal (rescue).\n");
+						} else if (victimCoreType != CORE_TYPE_LITTLE) {
+							// Check if task load is very small for the LITTLE thief
+							uint32 thiefCapacity = thiefCPU->Core()->PerformanceCapacity();
+							if (thiefCapacity == 0) thiefCapacity = SCHEDULER_NOMINAL_CAPACITY;
+							// Example: task needs < 20% of LITTLE core's nominal capacity
+							int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY);
+							if (candidateTask->GetLoad() < lightTaskLoadThreshold) {
+								allowStealByBLPolicy = true;
+								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Task load %" B_PRId32 " is very light for thief. ALLOW steal.\n", candidateTask->GetLoad());
+							} else {
+								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Task load %" B_PRId32 " too high for LITTLE. DENY steal.\n", candidateTask->GetLoad());
+							}
+						} else {
+							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Conditions not met. DENY steal.\n");
+						}
+					} else { // EPref or Flexible task for LITTLE thief
+						allowStealByBLPolicy = true;
+						TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, EPref/Flex task. ALLOW steal.\n");
+					}
+				}
+
+				if (allowStealByBLPolicy) {
+					stolenTask = victimQueue.PopMinimum();
+					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
+					atomic_add(&victimCPUEntry->fTotalThreadCount, -1);
+					ASSERT(victimCPUEntry->fTotalThreadCount >=0);
+					victimCPUEntry->_UpdateMinVirtualRuntime();
+
+					TRACE_SCHED_BL_STEAL("  SUCCESS: CPU %" B_PRId32 "(C%d,T%d) STOLE T%" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d)\n",
+						thiefCPU->ID(), thiefCPU->Core()->ID(), thiefCoreType,
+						stolenTask->GetThread()->id, stolenTask->Lag(),
+						victimCpuID, victimCPUEntry->Core()->ID(), victimCoreType);
+				}
 			}
 		}
 	}
@@ -725,8 +783,8 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 	if (stolenTask != NULL) {
 		stolenTask->MarkDequeued();
 		stolenTask->SetLastMigrationTime(system_time());
-		if (stolenTask->Core() != NULL)
-			stolenTask->UnassignCore(false);
+		if (stolenTask->Core() != NULL) // Should have been on victim's core
+			stolenTask->UnassignCore(false); // Unassign from old core
 	}
 	return stolenTask;
 }

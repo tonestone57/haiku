@@ -135,17 +135,33 @@ typedef struct {
 	uint32 connector_id; /**< Kernel's internal connector identifier (typically enum intel_port_id_priv). */
 
 	// Output
-	uint32 type;         /**< Type of the connector (user-space enum i915_port_id_user, maps to kernel's intel_output_type_priv). */
+	uint32 type;         /**< Logical type/port letter (user-space enum i915_port_id_user). */
+	enum intel_output_type_priv physical_type; /**< Physical type of the connector (DP, HDMI, etc.) from kernel's enum. */
 	bool   is_connected; /**< True if a display is physically connected to this port. */
 	bool   edid_valid;   /**< True if valid EDID data was retrieved from the connected display. */
 	uint8  edid_data[256];/**< Raw EDID data (first two blocks, 128 bytes each). Valid if edid_valid is true. */
 	uint32 num_edid_modes;/**< Number of display modes parsed from EDID, stored in edid_modes array. */
 	display_mode edid_modes[MAX_EDID_MODES_PER_PORT_ACCEL]; /**< Array of display modes derived from EDID. */
 	display_mode current_mode; /**< Current mode if this connector is active on a pipe. Zeroed if not active. */
-	uint32 current_pipe_id;    /**< Kernel's pipe ID (enum pipe_id_priv) this connector is currently driven by,
+	uint32 current_pipe_id;    /**< User-space pipe ID (enum i915_pipe_id_user) this connector is currently driven by,
 	                                 or I915_PIPE_USER_INVALID if not assigned or inactive. */
 	char   name[I915_CONNECTOR_NAME_LEN]; /**< Human-readable connector name (e.g., "DP-1", "HDMI-A"). */
-	uint32 reserved[4];  /**< Reserved for future use, initialize to zero. */
+
+	bool dpcd_data_valid; /**< True if dpcd_data field contains valid information. */
+	struct dpcd_info {    /**< DisplayPort Configuration Data (DPCD) - Valid if physical_type is DP/eDP. */
+		uint8_t revision;                       /**< DPCD_DPCD_REV (0x000) */
+		uint8_t max_link_rate;                  /**< DPCD_MAX_LINK_RATE (0x001) - Raw value, see DP spec for rates. */
+		uint8_t max_lane_count;                 /**< DPCD_MAX_LANE_COUNT (0x002) (lower 5 bits) */
+		bool    tps3_supported;                 /**< DPCD_MAX_LANE_COUNT (0x002) (bit 6: TRAINING_PATTERN_3 support) */
+		bool    tps4_supported;                 /**< DPCD_SINK_CAPABILITIES_1 (0x2281h) (bit 0: TRAINING_PATTERN_4 support for eDP) */
+		bool    enhanced_framing_capable;       /**< DPCD_MAX_LANE_COUNT (0x002) (bit 7) */
+		// Add other commonly useful fields like eDP panel features, PSR support, etc. as needed.
+		uint8_t edp_psr_support_version;        /**< eDP specific: DPCD_EDP_PSR_SUPPORT (0x070) - Version if PSR supported. 0 if not. */
+		uint8_t edp_backlight_control_type;     /**< eDP specific: DPCD_EDP_GENERAL_CAP_1 (0x00D) bit 1 (0=PWM, 1=AUX) */
+		uint8_t reserved_dpcd[14];              /**< Reserved for more DPCD fields. */
+	} dpcd_data;
+
+	uint32 reserved[2];  /**< Reserved for future use, initialize to zero. */
 } intel_i915_get_connector_info_args;
 
 

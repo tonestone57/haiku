@@ -403,28 +403,29 @@ hpd_monitoring_thread_entry(void* data)
 			if (event_data.changed_hpd_mask != 0) {
 				TRACE("HPD: Display change detected by kernel (mask 0x%lx). Refreshing config & notifying app_server.\n", event_data.changed_hpd_mask);
 
-				// 1. Refresh all connector information
-				intel_i915_get_connector_info_args connector_infos[I915_MAX_PORTS_USER];
-				uint32 num_connectors = I915_MAX_PORTS_USER;
-				// accel_get_all_connector_infos is static in hooks.c, direct call not possible here.
-				// This HPD thread should ideally just signal another part of accelerant or app_server
-				// to do the full refresh. For now, let's assume a simplified refresh or direct IOCTLs.
-				// For a more direct refresh here (less ideal due to potential complexity in this thread):
-				for (uint32 i = 0; i < I915_MAX_PORTS_USER; ++i) { // Assuming I915_MAX_PORTS_USER is sensible upper bound for kernel port IDs
-					if (gInfo->device_path_suffix[0] == '\0' && i >= 1) break; // Quick hack for single head testing for now
-					intel_i915_get_connector_info_args kargs;
-					kargs.connector_id = i; // This needs to be kernel's port ID enum values
-					if (ioctl(localGInfo->device_fd, INTEL_I915_GET_CONNECTOR_INFO, &kargs, sizeof(kargs)) == B_OK) {
-						// Store or process kargs if needed locally, though app_server will re-query.
-						TRACE("HPD: Refreshed connector %s (kernel_id %u), connected: %d\n", kargs.name, i, kargs.is_connected);
-					} else {
-						// Break if we are past the number of valid ports.
-						// B_BAD_INDEX or B_ENTRY_NOT_FOUND would indicate this.
-						break;
-					}
-				}
+				// 1. Refresh Connector Information for changed ports (and potentially all)
+				// The kernel's i915_handle_hotplug_event already updates port_state including EDID.
+				// Here, we primarily ensure our accelerant's view of shared_info (if it caches details)
+				// or pipe_framebuffers (if a pipe was implicitly disabled/enabled by kernel due to HPD) is synced.
+				// A full GET_DISPLAY_CONFIG is generally the most robust way to sync up.
+
+				// Optional: Iterate changed_hpd_mask and call GET_CONNECTOR_INFO for each.
+				// This is mostly for debug or if accelerant caches extensive connector details not in shared_info.
+				// For now, we rely on GET_DISPLAY_CONFIG to update pipe-related info.
+				// Example of iterating mask:
+				// for (uint32 hpd_line_idx = 0; hpd_line_idx < I915_HPD_MAX_LINES; ++hpd_line_idx) {
+				//    if (event_data.changed_hpd_mask & (1 << hpd_line_idx)) {
+				//        intel_i915_get_connector_info_args cargs;
+				//        cargs.connector_id = hpd_line_idx; // This mapping needs to be correct
+				//        ioctl(localGInfo->device_fd, INTEL_I915_GET_CONNECTOR_INFO, &cargs, sizeof(cargs));
+				//        TRACE("HPD: Refreshed connector for HPD line %lu, Name: %s, Connected: %d\n",
+				//             hpd_line_idx, cargs.name, cargs.is_connected);
+				//    }
+				// }
+
 
 				// 2. Refresh overall display configuration (active pipes, modes, FBs)
+				// This is crucial to update gInfo->pipe_framebuffers and shared_info view.
 				struct i915_get_display_config_args get_config_args;
 				struct i915_display_pipe_config kernel_pipe_configs[I915_MAX_PIPES_USER];
 				memset(&get_config_args, 0, sizeof(get_config_args));
@@ -435,29 +436,59 @@ hpd_monitoring_thread_entry(void* data)
 				if (ioctl(localGInfo->device_fd, INTEL_I915_GET_DISPLAY_CONFIG, &get_config_args, sizeof(get_config_args)) == B_OK) {
 					TRACE("HPD: Refreshed display config: %lu active pipes. Primary user pipe: %u\n",
 						get_config_args.num_pipe_configs, get_config_args.primary_pipe_id);
+
 					// Update gInfo->pipe_framebuffers based on kernel_pipe_configs
+					// First, mark all as inactive, then update active ones.
 					for(uint32 pipe_idx_user = 0; pipe_idx_user < I915_MAX_PIPES_USER; ++pipe_idx_user) {
-						gInfo->pipe_framebuffers[pipe_idx_user].is_active = false; // Default to inactive
-						// (GEM handle and other details will be updated if found below)
+						gInfo->pipe_framebuffers[pipe_idx_user].is_active = false;
+						// Don't clear gem_handle here, it might be reused if mode is same.
+						// accel_ensure_framebuffer_for_pipe handles GEM handle lifecycle.
 					}
+
 					for (uint32 k_idx = 0; k_idx < get_config_args.num_pipe_configs; k_idx++) {
 						struct i915_display_pipe_config* kcfg = &kernel_pipe_configs[k_idx];
 						if (kcfg->pipe_id < I915_MAX_PIPES_USER) {
 							enum accel_pipe_id pipe_user_enum = (enum accel_pipe_id)kcfg->pipe_id;
-							gInfo->pipe_framebuffers[pipe_user_enum].is_active = kcfg->active;
+							struct pipe_framebuffer_info* pfb = &gInfo->pipe_framebuffers[pipe_user_enum];
+
+							pfb->is_active = kcfg->active;
 							if (kcfg->active) {
-								gInfo->pipe_framebuffers[pipe_user_enum].gem_handle = kcfg->fb_gem_handle;
-								gInfo->pipe_framebuffers[pipe_user_enum].width = kcfg->mode.virtual_width;
-								gInfo->pipe_framebuffers[pipe_user_enum].height = kcfg->mode.virtual_height;
-								gInfo->pipe_framebuffers[pipe_user_enum].depth = _get_bpp_from_colorspace_accel(kcfg->mode.space);
+								// If the GEM handle changed, or dimensions/depth changed,
+								// the old mapping (if any) is invalid.
+								if (pfb->gem_handle != kcfg->fb_gem_handle ||
+									pfb->width != kcfg->mode.virtual_width ||
+									pfb->height != kcfg->mode.virtual_height ||
+									pfb->depth != _get_bpp_from_colorspace_accel(kcfg->mode.space))
+								{
+									if (pfb->mapping_area >= B_OK) {
+										delete_area(pfb->mapping_area);
+										pfb->mapping_area = -1;
+										pfb->base_address = NULL;
+									}
+								}
+								pfb->gem_handle = kcfg->fb_gem_handle;
+								pfb->width = kcfg->mode.virtual_width;
+								pfb->height = kcfg->mode.virtual_height;
+								pfb->depth = _get_bpp_from_colorspace_accel(kcfg->mode.space);
+
 								// Stride, GTT offset, tiling would require another IOCTL like GET_GEM_INFO per handle.
-								// For now, these might be missing from pipe_framebuffers after HPD.
-								TRACE("HPD: PipeUser %u now active: GEM %u, Mode %ux%u\n", pipe_user_enum, kcfg->fb_gem_handle, kcfg->mode.virtual_width, kcfg->mode.virtual_height);
+								// These are critical for 2D ops.
+								// For now, these might be missing or stale in pipe_framebuffers after HPD.
+								// A TODO for init_common and HPD to call GET_GEM_INFO.
+								// pfb->stride = ???; pfb->gtt_offset_pages = ???; pfb->tiling_mode = ???;
+
+								TRACE("HPD: PipeUser %u now active: GEM %u, Mode %ux%u\n",
+									pipe_user_enum, kcfg->fb_gem_handle, kcfg->mode.virtual_width, kcfg->mode.virtual_height);
 							}
 						}
 					}
+					// Update the cloned shared_info (gInfo->shared_info) to reflect the new state from kernel.
+					// The kernel directly updates its shared_info, so the clone becomes stale.
+					// Re-cloning is heavy. Best is if kernel's SET_DISPLAY_CONFIG and HPD handler
+					// ensure the shared_info is accurate.
+					// For now, assume app_server will use GET_DISPLAY_CONFIGURATION hook which uses IOCTL.
 				} else {
-					TRACE("HPD: Failed to refresh display config via IOCTL.\n");
+					TRACE("HPD: Failed to refresh display config via GET_DISPLAY_CONFIG IOCTL.\n");
 				}
 
 				// 3. Notify app_server

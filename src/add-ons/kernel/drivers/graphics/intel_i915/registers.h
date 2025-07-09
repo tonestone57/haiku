@@ -676,7 +676,32 @@
 #define DPCD_DOWNSPREAD_CTRL                0x107
 	#define DPCD_SPREAD_AMP_0_5_PERCENT     (1U << 4)
 	#define DPCD_MSA_TIMING_PAR_IGNORE_EN   (1U << 7)
-#define DPCD_MAIN_LINK_CHANNEL_CODING		0x008 // Added from ddi.c
+#define DPCD_MAIN_LINK_CHANNEL_CODING_SET_REG	0x008 // Standard DPCD Addresses (was DPCD_MAIN_LINK_CHANNEL_CODING)
+	#define DPCD_MAIN_LINK_8B_10B_SUPPORTED   (1U << 0) // Bit in MAIN_LINK_CHANNEL_CODING_SET
+
+// eDP Specific DPCD registers (from various eDP specs like 1.2, 1.3, 1.4)
+#define DPCD_EDP_CONFIGURATION_CAP_REG          0x00D // eDP Display Control, General Capability Register 1 (eDP v1.2+)
+	#define DPCD_EDP_BACKLIGHT_AUX_ENABLE_CAP_REG (1U << 1) // Renamed to match typical naming (was DPCD_EDP_BACKLIGHT_CONTROL_AUX_CAPABLE_REG)
+	// Other bits in 0x00D: TCON_ENABLE, PANEL_SELF_TEST_ERROR_COUNT_REQUEST etc.
+
+#define DPCD_EDP_PSR_SUPPORT_REG                0x070 // eDP Panel Self Refresh (PSR) Support (eDP v1.3+)
+	#define DPCD_PSR_IS_SUPPORTED               (1U << 0) // PSR version 1 (eDP 1.3)
+	#define DPCD_PSR2_IS_SUPPORTED              (1U << 1) // PSR version 2 (eDP 1.4, different from old PSR2 def)
+	#define DPCD_PSR_LINK_TRAINING_ON_EXIT_SUPPORT (1U << 2)
+	// Bits 3-7 are reserved.
+
+// eDP v1.4 specific registers for features like Panel Replay (PSR2 with Y-coordinate update)
+// and advanced link training patterns.
+#define DPCD_EDP_PSR_VERSION_REG                DPCD_EDP_PSR_SUPPORT_REG // Version is in this register
+#define DPCD_EDP_PSR_SETUP_TIME_REG             0x071 // PSR setup time
+
+#define DPCD_SINK_CAPABILITIES_1_REG            0x2281 // eDP specific, Sink Capabilities an eDP display supports (eDP v1.4+)
+	#define DPCD_TPS4_SUPPORTED_EDP_REG         (1U << 0)  // Training Pattern 4 support by eDP sink
+	// Other bits in 0x2281: VSC_SDP_COLORIMETRY_SUPPORTED, etc.
+
+#define DPCD_SINK_COUNT_REG						0x200 // Already defined, just for context
+	#define DPCD_SINK_COUNT_SINK_COUNT_MASK		0x3F  // Already defined
+	#define DPCD_SINK_COUNT_CP_READY			(1U << 6) // Already defined
 
 
 #define DPCD_LANE0_1_STATUS                 0x202

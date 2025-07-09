@@ -342,84 +342,47 @@ intel_i915_interrupt_handler(void* data)
 	// This logic needs to be GEN-specific as HPD registers and bits vary.
 	// This is a simplified example for PCH-based HPD (e.g., CPT/LPT).
 	// Newer gens (SKL+) have more complex HPD handling, often per-DDI.
-	if (active_de_irqs & DE_PCH_EVENT_IVB) { // PCH HPD summary bit for IVB+ (or similar for older)
-		intel_i915_write32(devInfo, DEIIR, DE_PCH_EVENT_IVB); // Ack PCH summary interrupt
-		handledStatus = B_HANDLED_INTERRUPT;
-		TRACE("IRQ: PCH Event detected (DEIIR: 0x%08lx)\n", de_iir);
+	uint32 de_iir_ack_hpd_related = 0;
 
-		if (HAS_PCH_SPLIT(devInfo)) {
-			uint32 pch_hpd_stat_reg = SDEISR; // Sideband Interrupt Status (CPT/LPT)
-			// For SKL+ PCH (SPT, KBP, CNP etc.), HPD might be via GMBUS_2 (for DDC) and specific HPD pins
-			// or directly via DDI HPD interrupts if not using PCH connectors.
-			// This example focuses on older PCH HPD registers.
-			// TODO: Adapt for SKL+ HPD mechanism (e.g. reading HPD_STATUS on DDI BUF CTLs)
-
-			uint32 pch_hpd_stat = intel_i915_read32(devInfo, pch_hpd_stat_reg);
-			uint32 pch_hpd_ack = 0;
-			bool hpd_event_processed_this_irq = false;
-
-			// Example for Port B (HDMI/DVI/DP on PCH)
-			if (pch_hpd_stat & SDE_PORTB_HOTPLUG_CPT) { // Check Port B specific bit
-				pch_hpd_ack |= SDE_PORTB_HOTPLUG_CPT;
-				// TODO: Determine actual connection state, possibly by reading PCH_PORT_HOTPLUG_STAT
-				// or DDC lines. For now, assume this means a change.
-				// The i915_queue_hpd_event is a placeholder for more complex HPD work.
-				// Directly update the pending mask and signal.
-				mutex_lock(&devInfo->hpd_wait_lock);
-				devInfo->hpd_pending_changes_mask |= (1 << I915_HPD_PORT_B);
-				mutex_unlock(&devInfo->hpd_wait_lock);
-				hpd_event_processed_this_irq = true;
-				TRACE("IRQ: PCH HPD Port B event (SDEISR: 0x%lx).\n", pch_hpd_stat);
-			}
-			// Example for Port C
-			if (pch_hpd_stat & SDE_PORTC_HOTPLUG_CPT) {
-				pch_hpd_ack |= SDE_PORTC_HOTPLUG_CPT;
-				mutex_lock(&devInfo->hpd_wait_lock);
-				devInfo->hpd_pending_changes_mask |= (1 << I915_HPD_PORT_C);
-				mutex_unlock(&devInfo->hpd_wait_lock);
-				hpd_event_processed_this_irq = true;
-				TRACE("IRQ: PCH HPD Port C event (SDEISR: 0x%lx).\n", pch_hpd_stat);
-			}
-			// Example for Port D
-			if (pch_hpd_stat & SDE_PORTD_HOTPLUG_CPT) {
-				pch_hpd_ack |= SDE_PORTD_HOTPLUG_CPT;
-				mutex_lock(&devInfo->hpd_wait_lock);
-				devInfo->hpd_pending_changes_mask |= (1 << I915_HPD_PORT_D);
-				mutex_unlock(&devInfo->hpd_wait_lock);
-				hpd_event_processed_this_irq = true;
-				TRACE("IRQ: PCH HPD Port D event (SDEISR: 0x%lx).\n", pch_hpd_stat);
-			}
-			// Add more ports if relevant for the PCH generation.
-
-			if (pch_hpd_ack != 0) {
-				intel_i915_write32(devInfo, pch_hpd_stat_reg, pch_hpd_ack); // Ack processed PCH HPDs
-			}
-
-			if (hpd_event_processed_this_irq) {
-				mutex_lock(&devInfo->hpd_wait_lock);
-				devInfo->hpd_event_generation_count++;
-				condition_variable_broadcast(&devInfo->hpd_wait_condition, B_DO_NOT_RESCHEDULE);
-				mutex_unlock(&devInfo->hpd_wait_lock);
-			}
+	if ((active_de_irqs & DE_PCH_EVENT_IVB) && (INTEL_DISPLAY_GEN(devInfo) >= 7 && INTEL_DISPLAY_GEN(devInfo) <= 8)) { // IVB, HSW, BDW PCH HPD
+		// PCH HPD events are complex, involving reading PCH HPD status registers.
+		// The work function will handle detailed PCH HPD status checks.
+		TRACE("IRQ: PCH Hotplug summary event detected. Scheduling work.\n");
+		if (devInfo->shared_info->workqueue != NULL) { // Check if workqueue is valid
+			workqueue_schedule_work(devInfo->shared_info->workqueue, &devInfo->hotplug_work, 0);
+		} else {
+			ERROR("IRQ: Workqueue not available for PCH HPD.\n");
 		}
+		de_iir_ack_hpd_related |= DE_PCH_EVENT_IVB;
+		handledStatus = B_HANDLED_INTERRUPT;
 	}
-	// Handle direct DDI HPD interrupts (e.g. DE_PORT_HOTPLUG_IVB for IVB/HSW/BDW DDI ports)
-	// This part needs to be GEN-specific.
-	// Example conceptual structure:
-	// if (active_de_irqs & DE_PORT_HOTPLUG_IVB) { // Or equivalent for newer gens
-	//     intel_i915_write32(devInfo, DEIIR, DE_PORT_HOTPLUG_IVB); // Ack summary
-	//     uint32 ddi_hpd_stat = intel_i915_read32(devInfo, DDI_HPD_STATUS_REG_OR_SIMILAR);
-	//     if (ddi_hpd_stat & HPD_FOR_DDI_A_BIT) {
-	//         mutex_lock(&devInfo->hpd_wait_lock);
-	//         devInfo->hpd_pending_changes_mask |= (1 << I915_HPD_PORT_A); // Assuming Port A is DDI-A
-	//         devInfo->hpd_event_generation_count++;
-	//         condition_variable_broadcast(&devInfo->hpd_wait_condition, B_DO_NOT_RESCHEDULE);
-	//         mutex_unlock(&devInfo->hpd_wait_lock);
-	//         intel_i915_write32(devInfo, DDI_HPD_STATUS_REG_OR_SIMILAR, HPD_FOR_DDI_A_BIT); // Ack specific
-	//     }
-	//     // Repeat for other DDI ports...
-	//     handledStatus = B_HANDLED_INTERRUPT;
-	// }
+	// Check for direct DDI HPD summary bit (DE_PORT_HOTPLUG_IVB on IVB/HSW/BDW, DE_SKL_HPD_IRQ on SKL+)
+	// These bits indicate *a* DDI port hotplug. The work function will determine which one(s).
+	else if ((active_de_irqs & DE_PORT_HOTPLUG_IVB) && (INTEL_DISPLAY_GEN(devInfo) >= 7 && INTEL_DISPLAY_GEN(devInfo) <= 8)) {
+		TRACE("IRQ: CPU/DDI Hotplug summary event detected (DE_PORT_HOTPLUG_IVB). Scheduling work.\n");
+		if (devInfo->shared_info->workqueue != NULL) {
+			workqueue_schedule_work(devInfo->shared_info->workqueue, &devInfo->hotplug_work, 0);
+		} else {
+			ERROR("IRQ: Workqueue not available for CPU/DDI HPD.\n");
+		}
+		de_iir_ack_hpd_related |= DE_PORT_HOTPLUG_IVB;
+		handledStatus = B_HANDLED_INTERRUPT;
+	} else if ((active_de_irqs & DE_SKL_HPD_IRQ) && (INTEL_DISPLAY_GEN(devInfo) >= 9)) { // SKL+ HPD summary
+		TRACE("IRQ: SKL+ Hotplug summary event detected (DE_SKL_HPD_IRQ). Scheduling work.\n");
+		if (devInfo->shared_info->workqueue != NULL) {
+			workqueue_schedule_work(devInfo->shared_info->workqueue, &devInfo->hotplug_work, 0);
+		} else {
+			ERROR("IRQ: Workqueue not available for SKL+ HPD.\n");
+		}
+		de_iir_ack_hpd_related |= DE_SKL_HPD_IRQ;
+		handledStatus = B_HANDLED_INTERRUPT;
+	}
+	// TODO: Add specific checks for other HPD sources if they have unique summary bits in DEIIR
+	// e.g., GMBUS HPD if used and has a DEIIR bit, TypeC HPD summary bits, etc.
+
+	if (de_iir_ack_hpd_related != 0) {
+		intel_i915_write32(devInfo, DEIIR, de_iir_ack_hpd_related); // Ack HPD summary interrupts
+	}
 
 
 	// Ack any other potentially enabled DE IRQs that are not explicitly handled above
@@ -427,15 +390,13 @@ intel_i915_interrupt_handler(void* data)
 	uint32 already_acked_de_irqs = DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB |
 									(PRIV_MAX_PIPES > 2 ? DE_PIPEC_VBLANK_IVB : 0) |
 									(PRIV_MAX_PIPES > 3 ? DE_PIPED_VBLANK_IVB : 0) |
-									DE_PCH_EVENT_IVB;
-	// Add DE_PORT_HOTPLUG_IVB or other summary HPD bits to already_acked if handled above
-	// already_acked_de_irqs |= DE_PORT_HOTPLUG_IVB;
+									de_iir_ack_hpd_related; // Add HPD bits we just acked
 
 	uint32 unhandled_de_irqs = active_de_irqs & ~already_acked_de_irqs;
 
 	if (unhandled_de_irqs) {
 		intel_i915_write32(devInfo, DEIIR, unhandled_de_irqs);
-		if (!handledStatus) handledStatus = B_HANDLED_INTERRUPT; // Mark as handled if not already
+		if (handledStatus != B_HANDLED_INTERRUPT) handledStatus = B_HANDLED_INTERRUPT;
 	}
 
 	// GT Interrupt Handling

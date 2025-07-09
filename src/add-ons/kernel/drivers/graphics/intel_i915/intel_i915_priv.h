@@ -464,6 +464,10 @@ typedef struct { /* ... intel_output_port_state fields ... */
 		uint8_t sink_count;                     // DPCD_SINK_COUNT (0x200) (lower 6 bits)
 		bool    cp_ready;                       // DPCD_SINK_COUNT (0x200) (bit 6: CP_READY / HDCP)
 		uint8_t training_aux_rd_interval;       // DPCD_TRAINING_AUX_RD_INTERVAL (0x00E)
+		// New fields for more detailed DPCD info
+		bool    tps4_supported;                 // eDP: DPCD_SINK_CAPABILITIES_1 (0x2281h) bit 0: TRAINING_PATTERN_4 support
+		uint8_t edp_psr_support_version;        // eDP: DPCD_EDP_PSR_SUPPORT (0x070) - Version if PSR supported. 0 if not.
+		uint8_t edp_backlight_control_type;     // eDP: DPCD_EDP_GENERAL_CAP_1 (0x00D) bit 1 (0=PWM, 1=AUX control)
 		// Add more fields as needed, e.g., for eDP specific features, downstream port info
 		uint8_t raw_receiver_cap[16];           // Store the first 16 bytes of DPCD for reference
 	} dpcd_data;

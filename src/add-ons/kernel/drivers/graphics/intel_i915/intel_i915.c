@@ -430,10 +430,40 @@ i915_get_connector_info_ioctl_handler(intel_i915_device_info* devInfo, intel_i91
 			result_args.current_pipe_id = _kernel_pipe_id_to_user_pipe_id(port_state->current_pipe);
 		}
 	}
+	// Populate physical type
+	result_args.physical_type = port_state->type;
+
+	// Populate DPCD data if applicable
+	result_args.dpcd_data_valid = false;
+	memset(&result_args.dpcd_data, 0, sizeof(result_args.dpcd_data));
+	if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
+		// Assuming port_state->dpcd_data is populated if edid_valid is true for DP,
+		// or if a separate flag like port_state->dpcd_read_successful exists.
+		// For now, let's use revision as an indicator of valid DPCD data.
+		if (port_state->dpcd_data.revision > 0) {
+			result_args.dpcd_data_valid = true;
+			result_args.dpcd_data.revision = port_state->dpcd_data.revision;
+			result_args.dpcd_data.max_link_rate = port_state->dpcd_data.max_link_rate;
+			result_args.dpcd_data.max_lane_count = port_state->dpcd_data.max_lane_count;
+			result_args.dpcd_data.tps3_supported = port_state->dpcd_data.tps3_supported;
+			result_args.dpcd_data.enhanced_framing_capable = port_state->dpcd_data.enhanced_framing_capable;
+			result_args.dpcd_data.tps4_supported = port_state->dpcd_data.tps4_supported;
+			result_args.dpcd_data.edp_psr_support_version = port_state->dpcd_data.edp_psr_support_version;
+			result_args.dpcd_data.edp_backlight_control_type = port_state->dpcd_data.edp_backlight_control_type;
+			TRACE("GET_CONNECTOR_INFO: DPCD data populated: rev %u, rate %u, lanes %u, tps3 %d, tps4 %d, psr %u, bl_ctrl %u\n",
+				result_args.dpcd_data.revision, result_args.dpcd_data.max_link_rate, result_args.dpcd_data.max_lane_count,
+				result_args.dpcd_data.tps3_supported, result_args.dpcd_data.tps4_supported,
+				result_args.dpcd_data.edp_psr_support_version, result_args.dpcd_data.edp_backlight_control_type);
+		} else {
+			TRACE("GET_CONNECTOR_INFO: DP/eDP port, but DPCD data in port_state seems invalid (revision 0).\n");
+		}
+	}
+
 	intel_display_get_connector_name(port_state->logical_port_id, port_state->type, result_args.name, sizeof(result_args.name));
-	TRACE("GET_CONNECTOR_INFO: Port %s (kernel_id %d, user_type %u), Connected: %d, EDID: %d, Modes: %lu, Current User Pipe: %lu\n",
-		result_args.name, kernel_port_id_to_query, result_args.type, result_args.is_connected, result_args.edid_valid,
-		result_args.num_edid_modes, result_args.current_pipe_id);
+	TRACE("GET_CONNECTOR_INFO: Port %s (kernel_id %d, user_type %u, physical_type %d), Connected: %d, EDID: %d, Modes: %lu, Current User Pipe: %lu, DPCD valid: %d\n",
+		result_args.name, kernel_port_id_to_query, result_args.type, result_args.physical_type,
+		result_args.is_connected, result_args.edid_valid, result_args.num_edid_modes,
+		result_args.current_pipe_id, result_args.dpcd_data_valid);
 
 	if (copy_to_user(user_args_ptr, &result_args, sizeof(intel_i915_get_connector_info_args)) != B_OK) {
 		TRACE("GET_CONNECTOR_INFO: copy_to_user for full struct failed.\n");

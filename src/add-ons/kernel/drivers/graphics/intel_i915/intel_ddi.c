@@ -37,9 +37,33 @@ intel_ddi_init_port(intel_i915_device_info* devInfo, intel_output_port_state* po
 		status_t status = intel_dp_read_dpcd(devInfo, port, DPCD_DPCD_REV, dpcd_caps, sizeof(dpcd_caps));
 		if (status == B_OK) {
 			intel_dp_parse_dpcd_data(devInfo, port, dpcd_caps, sizeof(dpcd_caps));
-			// intel_dp_read_extended_dpcd_caps(devInfo, port); // If needed for more caps
+			// After initial parse, if eDP, try to read extended DPCD fields
+			if (port->type == PRIV_OUTPUT_EDP) {
+				uint8_t val;
+				// Read PSR support
+				if (intel_dp_read_dpcd(devInfo, port, DPCD_EDP_PSR_SUPPORT_REG, &val, 1) == B_OK) {
+					port->dpcd_data.edp_psr_support_version = val; // Store raw value (bits indicate versions)
+					TRACE("DDI: init_port (eDP): PSR Support Reg (0x70): 0x%02x\n", val);
+				} else {
+					TRACE("DDI: init_port (eDP): Failed to read PSR support (0x70).\n");
+				}
+
+				// Read eDP TPS4 support (0x2281, bit 0)
+				// This register is eDP 1.4+. Reading it on older panels might fail.
+				if (port->dpcd_data.revision >= 0x14) { // Check if DPCD revision suggests eDP 1.4 features might exist
+					if (intel_dp_read_dpcd(devInfo, port, DPCD_SINK_CAPABILITIES_1_REG, &val, 1) == B_OK) {
+						port->dpcd_data.tps4_supported = (val & DPCD_TPS4_SUPPORTED_EDP_REG) != 0;
+						TRACE("DDI: init_port (eDP): Sink Caps 1 Reg (0x2281): 0x%02x, TPS4 supported: %d\n", val, port->dpcd_data.tps4_supported);
+					} else {
+						TRACE("DDI: init_port (eDP): Failed to read Sink Caps 1 (0x2281), assuming no TPS4.\n");
+						port->dpcd_data.tps4_supported = false;
+					}
+				} else {
+					port->dpcd_data.tps4_supported = false; // Assume not supported for pre-eDP 1.4
+				}
+			}
 		} else {
-			TRACE("DDI: init_port: Failed to read DPCD for port %d. Status: 0x%lx\n", port->logical_port_id, status);
+			TRACE("DDI: init_port: Failed to read initial DPCD for port %d. Status: 0x%lx\n", port->logical_port_id, status);
 			// Don't fail init for this, port will appear as not fully capable for DP.
 		}
 	}
@@ -194,47 +218,69 @@ static status_t
 intel_dp_parse_dpcd_data(intel_i915_device_info* devInfo,
 	intel_output_port_state* port, const uint8_t* raw_dpcd_buffer, size_t buffer_size)
 {
-	if (port == NULL || raw_dpcd_buffer == NULL || buffer_size < DPCD_RECEIVER_CAP_SIZE) {
-		TRACE("DDI: DPCD parse: Invalid arguments or buffer too small (size %lu, need min %u).\n",
-			buffer_size, DPCD_RECEIVER_CAP_SIZE);
+	if (port == NULL || raw_dpcd_buffer == NULL || buffer_size == 0) { // Changed min size check
+		TRACE("DDI: DPCD parse: Invalid arguments or buffer_size is 0.\n");
 		return B_BAD_VALUE;
 	}
 
-	memset(&port->dpcd_data, 0, sizeof(port->dpcd_data));
-	memcpy(port->dpcd_data.raw_receiver_cap, raw_dpcd_buffer,
-		min_c(buffer_size, sizeof(port->dpcd_data.raw_receiver_cap)));
+	// Initialize extended fields to default (false/0)
+	port->dpcd_data.tps4_supported = false;
+	port->dpcd_data.edp_psr_support_version = 0;
+	port->dpcd_data.edp_backlight_control_type = 0; // Default to PWM
 
-	port->dpcd_data.revision = raw_dpcd_buffer[DPCD_DPCD_REV];
-	port->dpcd_data.max_link_rate = raw_dpcd_buffer[DPCD_MAX_LINK_RATE];
-	// Use DPCD_MAX_LANE_COUNT_MASK from registers.h
-	port->dpcd_data.max_lane_count = raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_MAX_LANE_COUNT_MASK_REG;
-	port->dpcd_data.tps3_supported = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_TPS3_SUPPORTED_REG) != 0;
-	port->dpcd_data.enhanced_framing_capable = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_LANE_COUNT_ENHANCED_FRAME_EN_REG) != 0;
+	// Only copy/parse what's available in the provided buffer.
+	// The initial read is typically DPCD_RECEIVER_CAP_SIZE (16 bytes).
+	if (buffer_size >= sizeof(port->dpcd_data.raw_receiver_cap)) {
+		memcpy(port->dpcd_data.raw_receiver_cap, raw_dpcd_buffer, sizeof(port->dpcd_data.raw_receiver_cap));
+	} else {
+		memcpy(port->dpcd_data.raw_receiver_cap, raw_dpcd_buffer, buffer_size);
+	}
 
-	if (buffer_size > DPCD_MAX_DOWNSPREAD) // Ensure buffer is large enough for this field
+
+	if (buffer_size > DPCD_DPCD_REV) /* Also DPCD_MAX_LINK_RATE, DPCD_MAX_LANE_COUNT are <= 0x002 */ {
+		port->dpcd_data.revision = raw_dpcd_buffer[DPCD_DPCD_REV];
+		port->dpcd_data.max_link_rate = raw_dpcd_buffer[DPCD_MAX_LINK_RATE];
+		port->dpcd_data.max_lane_count = raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_MAX_LANE_COUNT_MASK;
+		port->dpcd_data.tps3_supported = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_TPS3_SUPPORTED) != 0;
+		port->dpcd_data.enhanced_framing_capable = (raw_dpcd_buffer[DPCD_MAX_LANE_COUNT] & DPCD_ENHANCED_FRAME_CAP) != 0;
+	}
+
+	if (buffer_size > DPCD_MAX_DOWNSPREAD) {
 		port->dpcd_data.max_downspread = (raw_dpcd_buffer[DPCD_MAX_DOWNSPREAD] & DPCD_MAX_DOWNSPREAD_0_5_PERCENT_SUPPORT) != 0;
+	}
 
-	if (buffer_size > DPCD_MAIN_LINK_CHANNEL_CODING_SET)
-		port->dpcd_data.main_link_channel_coding_set_capable = (raw_dpcd_buffer[DPCD_MAIN_LINK_CHANNEL_CODING_SET] & DPCD_MAIN_LINK_8B_10B_SUPPORTED) != 0;
+	if (buffer_size > DPCD_MAIN_LINK_CHANNEL_CODING_SET_REG) { // Use the _REG version
+		port->dpcd_data.main_link_channel_coding_set_capable = (raw_dpcd_buffer[DPCD_MAIN_LINK_CHANNEL_CODING_SET_REG] & DPCD_MAIN_LINK_8B_10B_SUPPORTED) != 0;
+	}
 
 	if (buffer_size > DPCD_TRAINING_AUX_RD_INTERVAL) {
 		uint8_t val = raw_dpcd_buffer[DPCD_TRAINING_AUX_RD_INTERVAL];
-		port->dpcd_data.training_aux_rd_interval = val & DPCD_TRAINING_AUX_RD_INTERVAL_MASK_REG; // Store raw value
+		// The DPCD_TRAINING_AUX_RD_INTERVAL_MASK was 0x7F, but spec says bits 6:0 are interval, bit 7 is unit.
+		// Let's assume the old mask was correct for the raw value.
+		port->dpcd_data.training_aux_rd_interval = val & DPCD_TRAINING_AUX_RD_INTERVAL_MASK;
 	}
 
-	// SINK_COUNT is at 0x200. This is typically read in a separate, larger DPCD read if needed.
-	// For now, assume it's not in the initial small buffer.
-	// if (buffer_size > DPCD_SINK_COUNT) { // This check would need buffer_size >= 0x201
-	//    port->dpcd_data.sink_count = raw_dpcd_buffer[DPCD_SINK_COUNT] & DPCD_SINK_COUNT_SINK_COUNT_MASK; // Use correct mask
-	//    port->dpcd_data.cp_ready = (raw_dpcd_buffer[DPCD_SINK_COUNT] & DPCD_SINK_COUNT_CP_READY) != 0; // Use correct mask
-	// }
+	// Parse eDP specific fields if available in this buffer
+	if (port->type == PRIV_OUTPUT_EDP) {
+		if (buffer_size > DPCD_EDP_CONFIGURATION_CAP_REG) {
+			uint8_t edp_cap_0d = raw_dpcd_buffer[DPCD_EDP_CONFIGURATION_CAP_REG];
+			if (edp_cap_0d & DPCD_EDP_BACKLIGHT_AUX_ENABLE_CAP_REG) {
+				port->dpcd_data.edp_backlight_control_type = 1; // 1 for AUX
+			} else {
+				port->dpcd_data.edp_backlight_control_type = 0; // 0 for PWM
+			}
+		}
+		// PSR version and TPS4 are read separately in intel_ddi_init_port
+		// as they are at higher DPCD offsets.
+	}
 
 
-	TRACE("DDI: Parsed DPCD: Rev 0x%02x, MaxLinkRate 0x%02x, MaxLanes %u (TPS3 %d, EnhFR %d), MaxSpread %d, 8b10b %d, AuxIntervalRaw 0x%02x\n",
-		port->dpcd_data.revision, port->dpcd_data.max_link_rate, port->dpcd_data.max_lane_count,
-		port->dpcd_data.tps3_supported, port->dpcd_data.enhanced_framing_capable,
-		port->dpcd_data.max_downspread, port->dpcd_data.main_link_channel_coding_set_capable,
-		port->dpcd_data.training_aux_rd_interval);
+	// SINK_COUNT (0x200) and CP_READY are not in the initial small DPCD read.
+	// They would be parsed if a larger/targeted read was supplied to this function.
+
+	TRACE("DDI: Parsed DPCD (from initial %lu byte read): Rev 0x%02x, MaxLinkRate 0x%02x, MaxLanes %u (TPS3 %d, EnhFR %d), BL_Ctrl %d\n",
+		buffer_size, port->dpcd_data.revision, port->dpcd_data.max_link_rate, port->dpcd_data.max_lane_count,
+		port->dpcd_data.tps3_supported, port->dpcd_data.enhanced_framing_capable, port->dpcd_data.edp_backlight_control_type);
 
 	return B_OK;
 }

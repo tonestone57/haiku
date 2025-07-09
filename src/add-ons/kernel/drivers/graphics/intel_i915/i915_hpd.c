@@ -16,13 +16,9 @@
 #include <string.h> // For memset
 
 
-// Global semaphore for user-space to wait on for display change events.
-// This assumes a single driver instance for simplicity. For multi-card, this might
-// need to be per-device or a more complex notification manager.
-static sem_id sDisplayChangeEventSem = -1;
-// Bitmask to track which HPD lines have changed since the last WAIT_FOR_DISPLAY_CHANGE call.
-static uint32 sChangedHpdLinesMask = 0;
-static spinlock sChangedHpdLinesMaskLock;
+// Global HPD structures are part of intel_i915_device_info.
+// The sDisplayChangeEventSem and related globals were incorrect for per-device notification.
+// The IOCTL uses devInfo->hpd_wait_condition, devInfo->hpd_pending_changes_mask, etc.
 
 
 // This function is called by the workqueue when dev->hotplug_work is scheduled.
@@ -85,83 +81,65 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 	// For pipe_needs_edid_reprobe, it should ideally be indexed by pipe if a pipe was associated.
 	// If not, perhaps a global "rescan displays" flag.
 	// For simplicity in this stub, let's assume hpdLine can map to a shared_info index.
-	uint32_t port_bit = (1 << hpdLine); // For ports_connected_status_mask
 
-	// Lock shared_info access
-	mutex_lock(&dev->shared_info->accelerant_lock); // Assuming this mutex exists and is initialized
+	// Update port_state (connection status, EDID, etc.)
+	mutex_lock(&dev->display_commit_lock); // Protects port_state and shared_info updates related to display config
 
 	port_state->connected = connected;
 
 	if (connected) {
 		TRACE("HPD Connect on port %d (HPD line %d)\n", port_state->logical_port_id, hpdLine);
-		dev->shared_info->ports_connected_status_mask |= port_bit;
-
 		// Attempt to read EDID
 		uint8 edid_buffer[PRIV_EDID_BLOCK_SIZE * 2]; // Allow for one extension block
 		memset(edid_buffer, 0, sizeof(edid_buffer));
 		status_t edid_status = B_ERROR;
 
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
-			// TODO: Use DP AUX read for DPCD and EDID (currently stubbed in intel_ddi.c)
-			// For now, try GMBus as a fallback if AUX channel is not specified or fails
+			// TODO: Use DP AUX read for DPCD and EDID. For now, GMBus fallback.
 			if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
-				TRACE("  DP/eDP: Attempting EDID read via GMBus (AUX is typically preferred but stubbed).\n");
 				edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
-			} else {
-				TRACE("  DP/eDP: No GMBus pin for EDID, and AUX is stubbed.\n");
 			}
 		} else if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
 			edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
 		}
 
 		if (edid_status == B_OK) {
-			memcpy(port_state->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE); // Store block 0
+			memcpy(port_state->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE);
 			port_state->edid_valid = true;
 			port_state->num_modes = intel_i915_parse_edid(port_state->edid_data, port_state->modes, PRIV_MAX_EDID_MODES_PER_PORT);
-			if (port_state->num_modes > 0) {
-				port_state->preferred_mode = port_state->modes[0];
-			}
+			if (port_state->num_modes > 0) port_state->preferred_mode = port_state->modes[0];
 			TRACE("  EDID read successful for port %d, %d modes found.\n", port_state->logical_port_id, port_state->num_modes);
-			// TODO: Handle EDID extensions if primary EDID indicates them.
+			// TODO: Parse EDID extensions.
 		} else {
 			TRACE("  EDID read failed for port %d (status: %s).\n", port_state->logical_port_id, strerror(edid_status));
 			port_state->edid_valid = false;
 			port_state->num_modes = 0;
 		}
-		// This part needs careful indexing if shared_info arrays are per-pipe vs per-connector
-		// Assuming a conceptual index `idx_for_shared_info` derived from port_state or hpdLine
-		// dev->shared_info->has_edid[idx_for_shared_info] = port_state->edid_valid;
-		// dev->shared_info->pipe_needs_edid_reprobe[idx_for_shared_info] = true;
-
+		// Update DPCD data if it's a DP/eDP port
+		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
+			intel_ddi_init_port(dev, port_state); // Re-init to read DPCD
+		}
 	} else { // Disconnected
 		TRACE("HPD Disconnect on port %d (HPD line %d)\n", port_state->logical_port_id, hpdLine);
-		dev->shared_info->ports_connected_status_mask &= ~port_bit;
 		port_state->edid_valid = false;
 		port_state->num_modes = 0;
 		memset(&port_state->preferred_mode, 0, sizeof(display_mode));
-
-		// If this port was driving an active pipe, that state in shared_info needs update.
-		// This is complex as it means the HPD handler is changing active display config,
-		// which should ideally be done by app_server after notification.
-		// For now, just mark for reprobe.
-		// dev->shared_info->pipe_needs_edid_reprobe[idx_for_shared_info] = true; // Signal change
+		// Note: If this port was driving an active pipe, app_server/user needs to reconfigure.
+		// The kernel driver itself usually doesn't automatically disable pipes on HPD disconnect
+		// without explicit instruction, to avoid disrupting a headless system or one where the
+		// monitor might be temporarily off.
 	}
+	mutex_unlock(&dev->display_commit_lock);
 
-	mutex_unlock(&dev->shared_info->accelerant_lock);
 
-	// Notify any waiting user-space listeners
-	cpu_status lock_status = disable_interrupts();
-	acquire_spinlock(&sChangedHpdLinesMaskLock);
-	sChangedHpdLinesMask |= port_bit; // Mark this HPD line as having changed
-	release_spinlock(&sChangedHpdLinesMaskLock);
-	restore_interrupts(lock_status);
-
-	if (sDisplayChangeEventSem >= B_OK) {
-		// Release the semaphore to wake up any waiters.
-		// If multiple events occur rapidly, user-space will get at least one wakeup
-		// and can then process all accumulated changes from sChangedHpdLinesMask.
-		release_sem_etc(sDisplayChangeEventSem, 1, B_DO_NOT_RESCHEDULE);
-	}
+	// Notify any waiting user-space listeners via the IOCTL mechanism
+	mutex_lock(&dev->hpd_wait_lock);
+	dev->hpd_pending_changes_mask |= (1 << hpdLine); // Mark this HPD line as having changed
+	dev->hpd_event_generation_count++;
+	condition_variable_broadcast(&dev->hpd_wait_condition, B_DO_NOT_RESCHEDULE);
+	mutex_unlock(&dev->hpd_wait_lock);
+	TRACE("HPD: Notified user-space about change on HPD line %d (gen_count %lu, mask 0x%lx).\n",
+		hpdLine, dev->hpd_event_generation_count, dev->hpd_pending_changes_mask);
 }
 
 
@@ -170,145 +148,118 @@ i915_hotplug_work_func(struct work_arg *work)
 {
 	struct intel_i915_device_info* dev = container_of(work, struct intel_i915_device_info, hotplug_work);
 
-
 	if (dev == NULL) {
 		ERROR("i915_hotplug_work_func: work_arg has no device context!\n");
 		return;
 	}
-	TRACE("i915_hotplug_work_func: Processing deferred HPD events for dev %p\n", dev);
+	TRACE("i915_hotplug_work_func: Processing HPD events for dev %p\n", dev);
 
-	while (true) {
-		hpd_event_data current_event;
-		bool event_found = false;
+	// This function now needs to determine *which* ports have changed state.
+	// The ISR only scheduled the work. This function must read HPD status registers.
+	// This is highly GEN-specific.
 
-		cpu_status cpu = disable_interrupts();
-		acquire_spinlock(&dev->hpd_events_lock);
-
-		if (dev->hpd_events_head != dev->hpd_events_tail) {
-			current_event = dev->hpd_events_queue[dev->hpd_events_tail];
-			dev->hpd_events_tail = (dev->hpd_events_tail + 1) % dev->hpd_queue_capacity;
-			event_found = true;
-			TRACE("i915_hotplug_work_func: Dequeued event for HPD line %d, connected: %d. Queue: %d/%d\n",
-				current_event.hpd_line, current_event.connected, dev->hpd_events_head, dev->hpd_events_tail);
-		}
-
-		release_spinlock(&dev->hpd_events_lock);
-		restore_interrupts(cpu);
-
-		if (!event_found) {
-			TRACE("i915_hotplug_work_func: No more HPD events in queue.\n");
-			break; // No more events in the queue
-		}
-
-		// --- Actual Hotplug Event Handling ---
-		// This is where the logic from Step 3 of the plan (intel_extreme_handle_hotplug) goes.
-		ERROR("i915_hotplug_work_func: Handling HPD for line %d, Connected: %s\n",
-			current_event.hpd_line, current_event.connected ? "yes" : "no");
-
-		// 1. Map hpd_line_identifier to a display connector/port context if necessary.
-		//    The hpd_line_identifier might directly correspond to an enum used for ports array,
-		//    or it might be an HPD_PIN that needs mapping.
-		//    Example: intel_output_port_state* port_state = find_port_by_hpd_line(dev, current_event.hpd_line);
-
-		// 2. Acquire lock for shared_info (e.g., dev->shared_info_lock or equivalent)
-		//    mutex_lock(&dev->shared_info->accelerant_lock); // If using intel_extreme style lock
-
-		// 3. Update shared_info based on connect/disconnect
-		//    - Get arrayIndex for the affected pipe/port.
-		//    - If connected:
-		//        - Mark for reprobe: dev->shared_info->pipe_needs_reprobe[arrayIndex] = true; (needs this field)
-		//        - Clear has_edid: dev->shared_info->has_edid[arrayIndex] = false;
-		//        - TODO: Notify app_server (e.g., send BMessage, or signal a user-waitable object).
-		//    - If disconnected:
-		//        - If dev->shared_info->pipe_display_configs[arrayIndex].is_active:
-		//            - dev->shared_info->pipe_display_configs[arrayIndex].is_active = false;
-		//            - (The accelerant's intel_set_display_mode will free the FB on next call)
-		//            - dev->shared_info->active_display_count--; (ensure atomicity or careful update)
-		//            - Update primary_pipe_index if needed.
-		//        - dev->shared_info->has_edid[arrayIndex] = false;
-		//        - TODO: Notify app_server.
-
-		// mutex_unlock(&dev->shared_info->accelerant_lock);
-
-		dprintf(DEVICE_NAME_PRIV ": Hotplug event processed for HPD line %d (connected: %s). User-space notification would occur here.\n",
-		hpdLine, connected ? "true" : "false");
-
-	// Notify any waiting user-space listeners
-	cpu_status lock_status = disable_interrupts();
-	acquire_spinlock(&sChangedHpdLinesMaskLock);
-	sChangedHpdLinesMask |= (1 << hpdLine); // Mark this HPD line as having changed
-	release_spinlock(&sChangedHpdLinesMaskLock);
-	restore_interrupts(lock_status);
-
-	if (sDisplayChangeEventSem >= B_OK) {
-		// Release the semaphore. If multiple events happen quickly, this might release it
-		// multiple times before user-space acquires it. User-space should loop on acquire
-		// if it wants to catch all individual signals, or the semaphore count can be used.
-		// Releasing once is usually sufficient to wake up a single listener.
-		int32 semCount;
-		if (get_sem_count(sDisplayChangeEventSem, &semCount) == B_OK && semCount <= 0) {
-			// Release only if there are waiters or count is zero.
-			// This avoids incrementing the semaphore count indefinitely if no one is waiting.
-			release_sem_etc(sDisplayChangeEventSem, 1, B_DO_NOT_RESCHEDULE);
-		} else if (semCount > 0) {
-			// If already signaled, perhaps don't signal again, or ensure it doesn't overflow.
-			// For now, simple release.
-			release_sem_etc(sDisplayChangeEventSem, 1, B_DO_NOT_RESCHEDULE);
-		}
+	// Example for Gen7/HSW/BDW (PCH Split or CPU DDI HPD)
+	if (INTEL_DISPLAY_GEN(dev) >= 7 && INTEL_DISPLAY_GEN(dev) <= 8) {
+		// TODO: Read PCH HPD Status (e.g., SDEISR, PCH_PORT_HOTPLUG_STAT)
+		// TODO: Read CPU DDI HPD Status (e.g., DDI_BUF_CTL HPD sense bits or specific HPD status regs)
+		// For each port that shows a change:
+		//   bool current_connection_status = ... (read from HPD pin status)
+		//   i915_hpd_line_identifier line_id = map_physical_port_to_hpd_line(...);
+		//   i915_handle_hotplug_event(dev, line_id, current_connection_status);
+		TRACE("HPD Work (Gen7-8): Detailed port status check STUBBED. Assuming event on PORT_B for test.\n");
+		// Simulate an event on Port B for demonstration if nothing else is implemented
+		// This is a placeholder and needs actual hardware register reads.
+		// bool port_b_connected = (intel_i915_read32(dev, SDEISR) & SDE_PORTB_HOTPLUG_CPT) ? true : false; // Example
+		// i915_handle_hotplug_event(dev, I915_HPD_PORT_B, port_b_connected);
 	}
-}
-
-
-void
-i915_hotplug_work_func(struct work_arg *work)
-{
-	// Assuming work_arg's 'data' member is used, or a container_of approach
-	// struct intel_i915_device_info* dev = (struct intel_i915_device_info*)work->data;
-	// For FreeBSD style work_arg embedded in struct:
-	struct intel_i915_device_info* dev = container_of(work, struct intel_i915_device_info, hotplug_work);
-
-
-	if (dev == NULL) {
-		ERROR("i915_hotplug_work_func: work_arg has no device context!\n");
-		return;
-	}
-	TRACE("i915_hotplug_work_func: Processing deferred HPD events for dev %p\n", dev);
-
-	while (true) {
-		hpd_event_data current_event;
-		bool event_found = false;
-
-		cpu_status cpu = disable_interrupts();
-		acquire_spinlock(&dev->hpd_events_lock);
-
-		if (dev->hpd_events_head != dev->hpd_events_tail) {
-			current_event = dev->hpd_events_queue[dev->hpd_events_tail];
-			dev->hpd_events_tail = (dev->hpd_events_tail + 1) % dev->hpd_queue_capacity;
-			event_found = true;
-			TRACE("i915_hotplug_work_func: Dequeued event for HPD line %d, connected: %d. Queue: %d/%d\n",
-				current_event.hpd_line, current_event.connected, dev->hpd_events_head, dev->hpd_events_tail);
-		}
-
-		release_spinlock(&dev->hpd_events_lock);
-		restore_interrupts(cpu);
-
-		if (!event_found) {
-			TRACE("i915_hotplug_work_func: No more HPD events in queue.\n");
-			break; // No more events in the queue
-		}
-
-		i915_handle_hotplug_event(dev, current_event.hpd_line, current_event.connected);
+	// Example for Gen9+ (SKL and newer)
+	else if (INTEL_DISPLAY_GEN(dev) >= 9) {
+		// TODO: Read SKL+ specific HPD status registers (e.g., SDE_PORT_HOTPLUG_STAT_SKL per port)
+		// For each DDI port (A-F, TC1-6):
+		//   Read its HPD status bit.
+		//   Determine if it's an interrupt (latched) or current state.
+		//   bool current_connection_status = ...
+		//   i915_hpd_line_identifier line_id = map_skl_ddi_to_hpd_line(...);
+		//   i915_handle_hotplug_event(dev, line_id, current_connection_status);
+		TRACE("HPD Work (Gen9+): Detailed port status check STUBBED.\n");
+	} else {
+		TRACE("HPD Work: HPD logic not implemented for this GEN (%d).\n", INTEL_DISPLAY_GEN(dev));
 	}
 
-	// TODO: Consider re-scheduling hotplug_retry_timer if complex debouncing is needed
-	// and not all events could be processed or if new events came in during processing.
-	// The existing hotplug_retry_timer might be for this purpose.
+	// The old hpd_events_queue mechanism is being replaced by direct status checking here.
+	// If the ISR only schedules work, this function needs to find out what changed.
+	// The i915_queue_hpd_event function might not be needed if this work function
+	// directly calls i915_handle_hotplug_event after determining port states.
+	// For now, let's assume the ISR has queued specific events.
+	// This means the ISR needs to be smarter about identifying HPD source.
+	// The current IRQ handler just schedules work on summary bits, so this work function
+	// MUST do the detailed HPD status register reads.
+
+	// The loop below is from the previous version that assumed ISR queued specific events.
+	// This needs to be reconciled with the ISR just scheduling work.
+	// For now, let's keep the loop structure, but the population of the queue
+	// (or direct handling) needs to be driven by actual HPD register reads in this function.
+
+	bool processed_event = false;
+	do {
+		processed_event = false;
+		// Re-check HPD status registers for ALL relevant ports here.
+		// This is a simplified loop, assuming a function `check_and_handle_port_hpd`
+		// which reads HW status for a given port, compares to software state,
+		// and calls i915_handle_hotplug_event if a change is detected.
+		for (int i = 0; i < dev->num_ports_detected; i++) {
+			intel_output_port_state* port = &dev->ports[i];
+			// This requires a function like:
+			// bool new_status = intel_i915_read_port_hpd_status(dev, port);
+			// if (new_status != port->hpd_last_status) {
+			//    port->hpd_last_status = new_status;
+			//    i915_hpd_line_identifier line = map_port_to_hpd_line(port->logical_port_id);
+			//    if(line != I915_HPD_INVALID) {
+			//        i915_handle_hotplug_event(dev, line, new_status);
+			//        processed_event = true;
+			//    }
+			// }
+		}
+		// This loop should continue if an event was processed, as processing one
+		// might have generated another (e.g. for DP MST).
+		// For now, a single pass is placeholder.
+		if(!processed_event && dev->hpd_events_head != dev->hpd_events_tail) {
+			// This path is if ISR queued specific events, which it no longer does directly.
+			// This part of the loop should be removed if work func does direct HPD status reads.
+			hpd_event_data current_event;
+			cpu_status cpu = disable_interrupts();
+			acquire_spinlock(&dev->hpd_events_lock);
+			if (dev->hpd_events_head != dev->hpd_events_tail) {
+				current_event = dev->hpd_events_queue[dev->hpd_events_tail];
+				dev->hpd_events_tail = (dev->hpd_events_tail + 1) % dev->hpd_queue_capacity;
+				release_spinlock(&dev->hpd_events_lock);
+				restore_interrupts(cpu);
+				i915_handle_hotplug_event(dev, current_event.hpd_line, current_event.connected);
+				processed_event = true; // Mark that we processed an event from the queue
+			} else {
+				release_spinlock(&dev->hpd_events_lock);
+				restore_interrupts(cpu);
+				break; // No more events in queue
+			}
+		} else if (!processed_event) {
+			break; // No direct HPD status change found on this pass, and queue is empty
+		}
+	} while(processed_event); // Loop if events were processed, to catch cascading events.
+
+	// TODO: Re-enable HPD interrupts if they were temporarily disabled during processing.
+	// This depends on the specific HPD interrupt architecture of the generation.
+	// For example, some HPD status bits need to be written to clear, re-arming the interrupt.
 }
 
 
 void
 i915_queue_hpd_event(struct intel_i915_device_info* dev, i915_hpd_line_identifier hpd_line, bool connected)
 {
+	// This function is now less critical if i915_hotplug_work_func directly reads HPD status
+	// and calls i915_handle_hotplug_event. However, it can be kept if specific ISR paths
+	// can determine the exact HPD line and want to queue it.
+	// The current ISR design only schedules the work function on summary bits.
+
 	if (dev == NULL) {
 		ERROR("i915_queue_hpd_event: Called with NULL device!\n");
 		return;
@@ -336,18 +287,11 @@ i915_queue_hpd_event(struct intel_i915_device_info* dev, i915_hpd_line_identifie
 	release_spinlock(&dev->hpd_events_lock);
 	restore_interrupts(cpu);
 
-	// Schedule the existing hotplug_work to process the queue.
-	// This assumes dev->hotplug_work is already initialized with i915_hotplug_work_func.
-	// The workqueue API might differ slightly in Haiku.
-	// This is a common pattern from FreeBSD drivers.
-	if (gKernelWorkQueue != NULL) { // Assuming gKernelWorkQueue is Haiku's system work queue
-		workqueue_enqueue(gKernelWorkQueue, &dev->hotplug_work, NULL);
-	} else {
-		ERROR("i915_queue_hpd_event: Kernel work queue not available!\n");
-		// Fallback or alternative: Haiku might use specific taskqueues per driver or type.
-		// If dev->hotplug_work is a `struct task` for FreeBSD's taskqueue:
-		// taskqueue_enqueue(taskqueue_fast, &dev->hotplug_work.work_task); // Example
-	}
+	// The work function is scheduled by the ISR. This function just queues data if called.
+	// If this function is to be the primary way to trigger processing, it should schedule work.
+	// if (gKernelWorkQueue != NULL) {
+	//    workqueue_enqueue(gKernelWorkQueue, &dev->hotplug_work, NULL);
+	// }
 }
 
 

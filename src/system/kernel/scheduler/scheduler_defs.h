@@ -68,6 +68,13 @@ const bigtime_t kStealSuccessCooldownPeriod = 5000; // 5ms
 const bigtime_t kStealFailureBackoffInterval = 1000;  // 1ms
 
 
+// --- Slice Adaptation for High Contention ---
+// If more than this many threads are in a CPU's runqueue, apply dynamic floor.
+const int HIGH_CONTENTION_THRESHOLD = 4;
+// Factor to multiply kMinSliceGranularity by for the dynamic floor.
+const float HIGH_CONTENTION_MIN_SLICE_FACTOR = 1.5f;
+
+
 // --- Dynamic Load Balancer Interval Constants ---
 const bigtime_t kInitialLoadBalanceInterval = 100000; // Initial and default
 const bigtime_t kMinLoadBalanceInterval = 20000;     // e.g., 20ms

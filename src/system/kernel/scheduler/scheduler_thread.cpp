@@ -694,6 +694,22 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		}
 	}
 
+	// Apply dynamic floor if CPU contention is high
+	if (cpu != NULL) {
+		int32 num_contenders = cpu->GetEevdfRunQueue().Count();
+		if (num_contenders == 0) // Should include current thread if it's to be run
+			num_contenders = 1;
+
+		if (num_contenders > HIGH_CONTENTION_THRESHOLD) {
+			bigtime_t dynamic_floor_slice = (bigtime_t)(kMinSliceGranularity * HIGH_CONTENTION_MIN_SLICE_FACTOR);
+			if (modulatedSlice < dynamic_floor_slice) {
+				TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 " CPU %" B_PRId32 " high contention (%ld contenders). Slice %" B_PRId64 "us floored to %" B_PRId64 "us.\n",
+					fThread->id, cpu->ID(), num_contenders, modulatedSlice, dynamic_floor_slice);
+				modulatedSlice = dynamic_floor_slice;
+			}
+		}
+	}
+
 	// Clamp to system min/max (final clamping)
 	if (modulatedSlice < kMinSliceGranularity)
 		modulatedSlice = kMinSliceGranularity;
@@ -701,7 +717,7 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		modulatedSlice = kMaxSliceDuration;
 
 	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", latency_nice %d, "
-		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt)\n",
+		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt/contention floor)\n",
 		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()), (int)fLatencyNice,
 		baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
 

@@ -2571,9 +2571,31 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (currentSmtScore > bestScore) {
 					isBetter = true;
 				} else if (currentSmtScore == bestScore) {
-					// Tie-break: prefer lower CPU ID when seeking least loaded
-					if (currentCPU->ID() < bestCPU->ID())
+					// Multi-level tie-breaking for (preferBusiest == false):
+					// 1. Prefer CPU with shorter EEVDF run queue.
+					// 2. If queues are equal, prefer CPU with lower MinVirtualRuntime.
+					// 3. If still tied, prefer lower CPU ID for determinism.
+					int32 currentQueueDepth = currentCPU->GetEevdfRunQueue().Count();
+					int32 bestQueueDepth = bestCPU->GetEevdfRunQueue().Count();
+					if (currentQueueDepth < bestQueueDepth) {
 						isBetter = true;
+						TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 ". CPU %" B_PRId32 " selected due to shallower run queue (%d vs %d).\n",
+							currentCPU->ID(), currentSmtScore, bestCPU->ID(), currentCPU->ID(), currentQueueDepth, bestQueueDepth);
+					} else if (currentQueueDepth == bestQueueDepth) {
+						bigtime_t currentMinVR = currentCPU->GetCachedMinVirtualRuntime();
+						bigtime_t bestMinVR = bestCPU->GetCachedMinVirtualRuntime();
+						if (currentMinVR < bestMinVR) {
+							isBetter = true;
+							TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 " (queue depth %d). CPU %" B_PRId32 " selected due to lower MinVirtualRuntime (%" B_PRId64 " vs %" B_PRId64 ").\n",
+								currentCPU->ID(), currentSmtScore, bestCPU->ID(), currentQueueDepth, currentCPU->ID(), currentMinVR, bestMinVR);
+						} else if (currentMinVR == bestMinVR) {
+							if (currentCPU->ID() < bestCPU->ID()) {
+								isBetter = true;
+								TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 " (queue %d, MinVR %" B_PRId64 "). CPU %" B_PRId32 " selected due to lower CPU ID (%d vs %d).\n",
+									currentCPU->ID(), currentSmtScore, bestCPU->ID(), currentQueueDepth, currentMinVR, currentCPU->ID(), currentCPU->ID(), bestCPU->ID());
+							}
+						}
+					}
 				}
 			}
 		}

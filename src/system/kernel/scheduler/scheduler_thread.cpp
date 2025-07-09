@@ -677,14 +677,31 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	// (baseSlice * factor) >> SHIFT is good for powers of 2 SCALE
 	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
 
-	// Clamp to system min/max
+	// Adaptive adjustment for I/O-bound or frequently yielding threads
+	if (fVoluntarySleepTransitions >= IO_BOUND_MIN_TRANSITIONS && fAverageRunBurstTimeEWMA > 0) {
+		if (fAverageRunBurstTimeEWMA < modulatedSlice) {
+			// Add a small buffer (e.g., 25% of avg burst or half min granularity)
+			// to prevent slice from being too tight to the average.
+			bigtime_t adaptiveBuffer = max_c(fAverageRunBurstTimeEWMA / 4, kMinSliceGranularity / 2);
+			bigtime_t potentiallyAdaptiveSlice = fAverageRunBurstTimeEWMA + adaptiveBuffer;
+
+			// Only adapt if it's meaningfully shorter and still respects min granularity
+			if (potentiallyAdaptiveSlice < modulatedSlice) {
+				TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 " adapting slice. Original: %" B_PRId64 "us, AvgBurst: %" B_PRId64 "us, Buffer: %" B_PRId64 "us, PotentialAdaptive: %" B_PRId64 "us\n",
+					fThread->id, modulatedSlice, fAverageRunBurstTimeEWMA, adaptiveBuffer, potentiallyAdaptiveSlice);
+				modulatedSlice = potentiallyAdaptiveSlice;
+			}
+		}
+	}
+
+	// Clamp to system min/max (final clamping)
 	if (modulatedSlice < kMinSliceGranularity)
 		modulatedSlice = kMinSliceGranularity;
 	if (modulatedSlice > kMaxSliceDuration)
 		modulatedSlice = kMaxSliceDuration;
 
 	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", latency_nice %d, "
-		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
+		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt)\n",
 		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()), (int)fLatencyNice,
 		baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
 

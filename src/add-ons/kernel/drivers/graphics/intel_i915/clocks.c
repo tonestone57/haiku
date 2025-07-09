@@ -226,15 +226,13 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	clocks->adjusted_pixel_clock_khz = mode->timing.pixel_clock;
 	clocks->needs_fdi = false;
 	clocks->selected_dpll_id = -1; // Default to no DPLL needed/assigned
+	clocks->dp_lane_count = 0; // Default to 0, set if DP/eDP
 
 	intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, targetPortId);
 	if (port_state == NULL) { TRACE("calculate_clocks: No port_state for targetPortId %d\n", targetPortId); return B_BAD_VALUE;}
 
 	if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id) || IS_SANDYBRIDGE(devInfo->runtime_caps.device_id)) { /* ... FDI setup ... */ }
 
-	// Set initial cdclk_freq_khz for this calculation context.
-	// The IOCTL handler might later decide on a different *overall target* CDCLK
-	// and call i915_hsw_recalculate_cdclk_params if necessary.
 	clocks->cdclk_freq_khz = devInfo->current_cdclk_freq_khz;
 	if (clocks->cdclk_freq_khz == 0) {
 		clocks->cdclk_freq_khz = IS_HASWELL(devInfo->runtime_caps.device_id) ? 450000 :
@@ -243,33 +241,67 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 	}
 
 	if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
-		// Calculate HSW CDCLK params based on the initial clocks->cdclk_freq_khz (usually current actual CDCLK).
-		// If the IOCTL handler decides on a *different* final target CDCLK, it will call
-		// i915_hsw_recalculate_cdclk_params again on the relevant planned_config's clock_params.
 		status_t hsw_cdclk_status = i915_hsw_recalculate_cdclk_params(devInfo, clocks);
 		if (hsw_cdclk_status != B_OK) {
 			TRACE("calculate_clocks: Initial HSW CDCLK param calculation failed for %u kHz.\n", clocks->cdclk_freq_khz);
-			// This might be an issue if current_cdclk_freq_khz itself is somehow not representable by the calculation,
-			// though read_current_cdclk_khz should give a value derived from HW register states.
-			// If it fails, it might mean the current CDCLK is odd or the recalc logic is too strict.
-			// For now, we proceed, but hsw_cdclk_ctl_field_val might be 0.
 		}
 	}
 
 	bool is_dp = (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP);
 	clocks->is_dp_or_edp = is_dp;
 	clocks->is_lvds = (port_state->type == PRIV_OUTPUT_LVDS);
+
 	if (clocks->is_lvds && port_state->panel_is_dual_channel) { /* ... adjust PCLK ... */ }
 	uint32_t ref_clk_khz = 0;
 	uint32_t dpll_tgt_freq = clocks->adjusted_pixel_clock_khz;
 
-	if(IS_HASWELL(devInfo->runtime_caps.device_id)){ /* ... (DPLL logic as before, using updated dpll_tgt_freq for DP) ... */ }
-	else if(IS_IVYBRIDGE(devInfo->runtime_caps.device_id)){ /* ... (DPLL logic as before, using updated dpll_tgt_freq for DP) ... */ }
+	if (is_dp) {
+		clocks->dp_link_rate_khz = intel_dp_get_link_clock_for_mode(devInfo, mode, port_state);
+		dpll_tgt_freq = clocks->dp_link_rate_khz;
+		if (port_state->dpcd_data.max_lane_count > 0 && port_state->dpcd_data.max_lane_count <= 4) {
+			clocks->dp_lane_count = port_state->dpcd_data.max_lane_count;
+		} else {
+			clocks->dp_lane_count = 1;
+			TRACE("calculate_clocks: DP port %d, invalid max_lane_count %u from DPCD, defaulting to 1 lane.\n",
+				targetPortId, port_state->dpcd_data.max_lane_count);
+		}
+		TRACE("calculate_clocks: DP port %d, link_rate %u kHz, training for %u lanes.\n",
+			targetPortId, clocks->dp_link_rate_khz, clocks->dp_lane_count);
+	}
+
+
+	if(IS_HASWELL(devInfo->runtime_caps.device_id)){
+		if (is_dp) {
+			ref_clk_khz = get_hsw_lcpll_link_rate_khz(devInfo);
+			if (!find_gen7_wrpll_dividers(dpll_tgt_freq, ref_clk_khz, clocks, true)) {
+				TRACE("calculate_clocks (HSW DP): Failed to find WRPLL dividers.\n"); return B_ERROR;
+			}
+			clocks->is_wrpll = true;
+			clocks->selected_dpll_id = 0; // Placeholder
+		} else {
+			ref_clk_khz = get_hsw_lcpll_link_rate_khz(devInfo);
+			if (find_hsw_spll_dividers(dpll_tgt_freq, ref_clk_khz, clocks)) {
+				clocks->is_wrpll = false;
+				clocks->selected_dpll_id = 2; // Placeholder for SPLL
+			} else if (find_gen7_wrpll_dividers(dpll_tgt_freq, ref_clk_khz, clocks, false)) {
+				clocks->is_wrpll = true;
+				clocks->selected_dpll_id = 1; // Placeholder
+			} else {
+				TRACE("calculate_clocks (HSW HDMI): Failed to find SPLL/WRPLL dividers.\n"); return B_ERROR;
+			}
+		}
+	}
+	else if(IS_IVYBRIDGE(devInfo->runtime_caps.device_id)){
+		ref_clk_khz = REF_CLOCK_SSC_120000_KHZ;
+		if (!find_ivb_dpll_dividers(dpll_tgt_freq, ref_clk_khz, is_dp, clocks)) {
+			TRACE("calculate_clocks (IVB): Failed to find DPLL dividers.\n"); return B_ERROR;
+		}
+	}
 	else if (IS_SANDYBRIDGE(devInfo->runtime_caps.device_id)) { /* ... SNB STUB ... */ return B_UNSUPPORTED; }
 	else { TRACE("Clocks: calc_display_clocks: Unsupp Gen %d\n",INTEL_DISPLAY_GEN(devInfo)); return B_UNSUPPORTED; }
 
 	if(clocks->needs_fdi){
-		uint8_t target_fdi_bpc_total = get_fdi_target_bpc_total(mode->space); // Use helper
+		uint8_t target_fdi_bpc_total = get_fdi_target_bpc_total(mode->space);
 		clocks->fdi_params.pipe_bpc_total = target_fdi_bpc_total;
 		calculate_fdi_m_n_params(devInfo, clocks, target_fdi_bpc_total);
 	}
@@ -277,9 +309,6 @@ intel_i915_calculate_display_clocks(intel_i915_device_info* devInfo,
 }
 
 // ... (Rest of the file: SKL DPLL stubs, program_cdclk, program_dpll, enable_dpll, FDI funcs) ...
-// ... (Make sure get_fdi_target_bpc_total is defined if it's not already, or included)
-// For this step, it's assumed to be defined elsewhere or will be added.
-// For now, I'll add a simple static version here.
 
 static uint8_t get_fdi_target_bpc_total(color_space cs) {
     switch (cs) {
@@ -293,12 +322,11 @@ static uint8_t get_fdi_target_bpc_total(color_space cs) {
             return 24;
     }
 }
-// Stubs for other functions if they were elided in the paste
 status_t intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_clock_params_t* clocks) {
 	if (!devInfo || !clocks || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
 	TRACE("intel_i915_program_cdclk: Target CDCLK: %u kHz\n", clocks->cdclk_freq_khz);
 
-	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Or FW_DOMAIN_ALL
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
 	if (fw_status != B_OK) {
 		TRACE("Program CDCLK: Failed to get forcewake: %s\n", strerror(fw_status));
 		return fw_status;
@@ -306,38 +334,26 @@ status_t intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_c
 
 	if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
 		if (clocks->hsw_cdclk_ctl_field_val == 0 && clocks->cdclk_freq_khz != 0) {
-			// This means i915_hsw_recalculate_cdclk_params failed or wasn't called with this target.
 			TRACE("Program CDCLK (HSW): hsw_cdclk_ctl_field_val is 0 for target %u kHz. Aborting CDCLK change.\n", clocks->cdclk_freq_khz);
 			intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
 			return B_BAD_VALUE;
 		}
 		uint32_t current_cdclk_ctl = intel_i915_read32(devInfo, CDCLK_CTL);
-		if ((current_cdclk_ctl & ~HSW_CDCLK_FREQ_DECIMAL_ENABLE) == clocks->hsw_cdclk_ctl_field_val) { // Ignore decimal enable for comparison if not set in target
+		if ((current_cdclk_ctl & ~HSW_CDCLK_FREQ_DECIMAL_ENABLE) == clocks->hsw_cdclk_ctl_field_val) {
 			TRACE("Program CDCLK (HSW): Target CDCLK %u kHz (CTL 0x%lx) already set or equivalent. Skipping.\n",
 				clocks->cdclk_freq_khz, clocks->hsw_cdclk_ctl_field_val);
 		} else {
 			intel_i915_write32(devInfo, CDCLK_CTL, clocks->hsw_cdclk_ctl_field_val);
-			spin(30); // Wait for CDCLK to stabilize (PRM: >20us for HSW)
+			spin(30);
 			TRACE("Program CDCLK (HSW): Programmed CDCLK_CTL to 0x%lx for %u kHz.\n",
 				clocks->hsw_cdclk_ctl_field_val, clocks->cdclk_freq_khz);
 		}
 	} else if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) {
-		// IVB CDCLK is usually not directly programmed like this post-init; it's derived.
-		// This function might be more about ensuring it's at a sufficient level if that's possible.
-		// For IVB, LCP_FREQ_STATUS reflects current state, and changes are complex.
-		// This might be a NO-OP for IVB in this context, or require deeper VBT/fuse knowledge.
 		TRACE("Program CDCLK (IVB): Programming not directly supported/needed via this path. Current is %u kHz.\n",
 			devInfo->current_cdclk_freq_khz);
 	} else if (INTEL_DISPLAY_GEN(devInfo) >= 9) {
-		// SKL+ CDCLK programming is also complex, often involving CDCLK_CTL and voltage changes.
-		// This is a placeholder.
 		TRACE("Program CDCLK (SKL+): Programming for Gen %d is complex and not fully implemented. Target %u kHz.\n",
 			INTEL_DISPLAY_GEN(devInfo), clocks->cdclk_freq_khz);
-		// Example: Read CDCLK_CTL, mask out freq bits, OR in new freq bits, write back.
-		// uint32_t ctl = intel_i915_read32(devInfo, CDCLK_CTL);
-		// Calculate new_ctl_val based on clocks->cdclk_freq_khz...
-		// intel_i915_write32(devInfo, CDCLK_CTL, new_ctl_val);
-		// spin for stabilization.
 	} else {
 		TRACE("Program CDCLK: Unsupported GEN %d\n", INTEL_DISPLAY_GEN(devInfo));
 		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
@@ -345,7 +361,7 @@ status_t intel_i915_program_cdclk(intel_i915_device_info* devInfo, const intel_c
 	}
 
 	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-	devInfo->current_cdclk_freq_khz = clocks->cdclk_freq_khz; // Update cached value
+	devInfo->current_cdclk_freq_khz = clocks->cdclk_freq_khz;
 	devInfo->shared_info->current_cdclk_freq_khz = clocks->cdclk_freq_khz;
 	return B_OK;
 }
@@ -359,5 +375,3 @@ status_t i915_program_skl_dpll(struct intel_i915_device_info* dev, int dpll_id, 
 status_t i915_enable_skl_dpll(struct intel_i915_device_info* dev, int dpll_id, enum intel_port_id_priv port_id, bool enable) { return B_UNSUPPORTED;}
 
 [end of src/add-ons/kernel/drivers/graphics/intel_i915/clocks.c]
-
-[end of src/add-ons/kernel/drivers/graphics/intel_i915/intel_i915.c]

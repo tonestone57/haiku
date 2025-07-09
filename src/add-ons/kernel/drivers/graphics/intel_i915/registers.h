@@ -703,6 +703,37 @@
 	#define DPCD_SINK_COUNT_SINK_COUNT_MASK		0x3F  // Already defined
 	#define DPCD_SINK_COUNT_CP_READY			(1U << 6) // Already defined
 
+// Renamed existing DPCD defines to avoid conflicts with struct field names if any.
+// These were already mostly fine, but ensuring clarity.
+#define DPCD_DPCD_REV_ADDR                       0x000 // Renamed from DPCD_DPCD_REV
+#define DPCD_MAX_LINK_RATE_ADDR                  0x001 // Renamed from DPCD_MAX_LINK_RATE
+#define DPCD_MAX_LANE_COUNT_ADDR                 0x002 // Renamed from DPCD_MAX_LANE_COUNT
+	// DPCD_MAX_LANE_COUNT_MASK        0x1F  // This is a bitmask, not an address. Stays.
+	// DPCD_TPS3_SUPPORTED             (1U << 6) // This is a bitmask. Stays.
+	// DPCD_ENHANCED_FRAME_CAP         (1U << 7) // This is a bitmask. Stays.
+#define DPCD_TRAINING_AUX_RD_INTERVAL_ADDR       0x00E // Renamed from DPCD_TRAINING_AUX_RD_INTERVAL
+	// DPCD_TRAINING_AUX_RD_INTERVAL_MASK 0x7F // Bitmask. Stays.
+	// DPCD_TRAINING_AUX_RD_UNIT_100US    (1U << 7) // Bitmask. Stays.
+
+#define DPCD_LINK_BW_SET_ADDR                    0x100 // Renamed from DPCD_LINK_BW_SET
+#define DPCD_LANE_COUNT_SET_ADDR                 0x101 // Renamed from DPCD_LANE_COUNT_SET
+#define DPCD_TRAINING_PATTERN_SET_ADDR           0x102 // Renamed from DPCD_TRAINING_PATTERN_SET
+#define DPCD_TRAINING_LANE0_SET_ADDR             0x103 // Renamed from DPCD_TRAINING_LANE0_SET
+#define DPCD_TRAINING_LANE1_SET_ADDR             0x104 // Renamed from DPCD_TRAINING_LANE1_SET
+#define DPCD_TRAINING_LANE2_SET_ADDR             0x105 // Renamed from DPCD_TRAINING_LANE2_SET
+#define DPCD_TRAINING_LANE3_SET_ADDR             0x106 // Renamed from DPCD_TRAINING_LANE3_SET
+#define DPCD_DOWNSPREAD_CTRL_ADDR                0x107 // Renamed from DPCD_DOWNSPREAD_CTRL
+#define DPCD_LANE0_1_STATUS_ADDR                 0x202 // Renamed from DPCD_LANE0_1_STATUS
+#define DPCD_LANE2_3_STATUS_ADDR                 0x203 // Renamed from DPCD_LANE2_3_STATUS
+#define DPCD_LANE_ALIGN_STATUS_UPDATED_ADDR      0x204 // Renamed from DPCD_LANE_ALIGN_STATUS_UPDATED
+#define DPCD_SINK_STATUS_ADDR                    0x205 // Added _ADDR
+#define DPCD_ADJUST_REQUEST_LANE0_1_ADDR         0x206 // Renamed from DPCD_ADJUST_REQUEST_LANE0_1
+#define DPCD_ADJUST_REQUEST_LANE2_3_ADDR         0x207 // Renamed from DPCD_ADJUST_REQUEST_LANE2_3
+#define DPCD_SET_POWER_ADDR                      0x600 // Renamed from DPCD_SET_POWER
+#define DPCD_EDP_DISPLAY_CONTROL_REGISTER_ADDR   0x700 // Renamed
+#define DPCD_EDP_BACKLIGHT_BRIGHTNESS_MSB_ADDR   0x721 // Renamed
+#define DPCD_EDP_BACKLIGHT_BRIGHTNESS_LSB_ADDR   0x722 // Renamed
+
 
 #define DPCD_LANE0_1_STATUS                 0x202
 #define DPCD_LANE2_3_STATUS                 0x203

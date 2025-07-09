@@ -21,6 +21,27 @@
 // The IOCTL uses devInfo->hpd_wait_condition, devInfo->hpd_pending_changes_mask, etc.
 
 
+// Maps a kernel physical/logical port identifier to the HPD line identifier
+// used for user-space notification masks.
+static i915_hpd_line_identifier
+map_intel_port_id_to_hpd_line(enum intel_port_id_priv port_id)
+{
+	switch (port_id) {
+		case PRIV_PORT_A: return I915_HPD_PORT_A;
+		case PRIV_PORT_B: return I915_HPD_PORT_B;
+		case PRIV_PORT_C: return I915_HPD_PORT_C;
+		case PRIV_PORT_D: return I915_HPD_PORT_D;
+		case PRIV_PORT_E: return I915_HPD_PORT_E;
+		case PRIV_PORT_F: return I915_HPD_PORT_F;
+		// TODO: Add mappings for Type-C ports (TC1-TC6) if PRIV_PORT_IDs exist for them
+		// Example: case PRIV_PORT_TC1: return I915_HPD_PORT_TC1;
+		default:
+			TRACE("map_intel_port_id_to_hpd_line: Unhandled port_id %d\n", port_id);
+			return I915_HPD_INVALID;
+	}
+}
+
+
 // This function is called by the workqueue when dev->hotplug_work is scheduled.
 // It processes all pending HPD events from the queue.
 
@@ -154,78 +175,91 @@ i915_hotplug_work_func(struct work_arg *work)
 	}
 	TRACE("i915_hotplug_work_func: Processing HPD events for dev %p\n", dev);
 
-	// This function now needs to determine *which* ports have changed state.
-	// The ISR only scheduled the work. This function must read HPD status registers.
-	// This is highly GEN-specific.
+	// The ISR only schedules this work function. This function must now:
+	// 1. Read the appropriate HPD status registers for the platform.
+	// 2. Determine which port(s) have had an event.
+	// 3. Determine the new connection state for those port(s).
+	// 4. Call i915_handle_hotplug_event() for each changed port.
+	// 5. Acknowledge the specific HPD interrupts at the source register.
 
-	// Example for Gen7/HSW/BDW (PCH Split or CPU DDI HPD)
-	if (INTEL_DISPLAY_GEN(dev) >= 7 && INTEL_DISPLAY_GEN(dev) <= 8) {
-		// TODO: Read PCH HPD Status (e.g., SDEISR, PCH_PORT_HOTPLUG_STAT)
-		// TODO: Read CPU DDI HPD Status (e.g., DDI_BUF_CTL HPD sense bits or specific HPD status regs)
-		// For each port that shows a change:
-		//   bool current_connection_status = ... (read from HPD pin status)
-		//   i915_hpd_line_identifier line_id = map_physical_port_to_hpd_line(...);
-		//   i915_handle_hotplug_event(dev, line_id, current_connection_status);
-		TRACE("HPD Work (Gen7-8): Detailed port status check STUBBED. Assuming event on PORT_B for test.\n");
-		// Simulate an event on Port B for demonstration if nothing else is implemented
-		// This is a placeholder and needs actual hardware register reads.
-		// bool port_b_connected = (intel_i915_read32(dev, SDEISR) & SDE_PORTB_HOTPLUG_CPT) ? true : false; // Example
-		// i915_handle_hotplug_event(dev, I915_HPD_PORT_B, port_b_connected);
-	}
-	// Example for Gen9+ (SKL and newer)
-	else if (INTEL_DISPLAY_GEN(dev) >= 9) {
-		// TODO: Read SKL+ specific HPD status registers (e.g., SDE_PORT_HOTPLUG_STAT_SKL per port)
-		// For each DDI port (A-F, TC1-6):
-		//   Read its HPD status bit.
-		//   Determine if it's an interrupt (latched) or current state.
-		//   bool current_connection_status = ...
-		//   i915_hpd_line_identifier line_id = map_skl_ddi_to_hpd_line(...);
-		//   i915_handle_hotplug_event(dev, line_id, current_connection_status);
-		TRACE("HPD Work (Gen9+): Detailed port status check STUBBED.\n");
-	} else {
-		TRACE("HPD Work: HPD logic not implemented for this GEN (%d).\n", INTEL_DISPLAY_GEN(dev));
+	status_t fw_status = intel_i915_forcewake_get(dev, FW_DOMAIN_RENDER); // Or other relevant domain
+	if (fw_status != B_OK) {
+		ERROR("i915_hotplug_work_func: Failed to get forcewake: %s\n", strerror(fw_status));
+		// Proceeding without forcewake might be okay for some HPD regs, but risky.
 	}
 
-	// The old hpd_events_queue mechanism is being replaced by direct status checking here.
-	// If the ISR only schedules work, this function needs to find out what changed.
-	// The i915_queue_hpd_event function might not be needed if this work function
-	// directly calls i915_handle_hotplug_event after determining port states.
-	// For now, let's assume the ISR has queued specific events.
-	// This means the ISR needs to be smarter about identifying HPD source.
-	// The current IRQ handler just schedules work on summary bits, so this work function
-	// MUST do the detailed HPD status register reads.
+	uint32 gen = INTEL_DISPLAY_GEN(dev);
+	bool event_handled_this_pass = false;
 
-	// The loop below is from the previous version that assumed ISR queued specific events.
-	// This needs to be reconciled with the ISR just scheduling work.
-	// For now, let's keep the loop structure, but the population of the queue
-	// (or direct handling) needs to be driven by actual HPD register reads in this function.
-
-	bool processed_event = false;
+	// Loop to handle potentially multiple HPD events that might have occurred
+	// or become visible after acknowledging earlier ones.
 	do {
-		processed_event = false;
-		// Re-check HPD status registers for ALL relevant ports here.
-		// This is a simplified loop, assuming a function `check_and_handle_port_hpd`
-		// which reads HW status for a given port, compares to software state,
-		// and calls i915_handle_hotplug_event if a change is detected.
-		for (int i = 0; i < dev->num_ports_detected; i++) {
-			intel_output_port_state* port = &dev->ports[i];
-			// This requires a function like:
-			// bool new_status = intel_i915_read_port_hpd_status(dev, port);
-			// if (new_status != port->hpd_last_status) {
-			//    port->hpd_last_status = new_status;
-			//    i915_hpd_line_identifier line = map_port_to_hpd_line(port->logical_port_id);
-			//    if(line != I915_HPD_INVALID) {
-			//        i915_handle_hotplug_event(dev, line, new_status);
-			//        processed_event = true;
-			//    }
-			// }
+		event_handled_this_pass = false;
+
+		if (gen >= 9) { // SKL+
+			// Example: Iterate through known DDI ports for SKL+
+			// HPD status often in SDE_PORT_HOTPLUG_STAT_SKL (0x44404 for port A, +0x10 per port)
+			// Or more unified registers on newer gens (e.g., ICL HPD_INT_STATUS_REG 0x16F0B0)
+			// This requires accurate port_state to hw_port_index/ddi_id mapping from VBT.
+			for (int i = 0; i < dev->num_ports_detected; i++) {
+				intel_output_port_state* port = &dev->ports[i];
+				if (port->type != PRIV_OUTPUT_DP && port->type != PRIV_OUTPUT_EDP && port->type != PRIV_OUTPUT_HDMI) continue; // Assuming HPD mainly for these
+
+				// TODO: Read actual HPD status register for this port (e.g., SKL_DP_HPD_STATUS(port->hw_port_index))
+				// uint32_t hpd_status_val = intel_i915_read32(dev, SKL_PORT_HOTPLUG_STAT(port->hw_port_index));
+				// bool current_connected = (hpd_status_val & PORT_HOTPLUG_STATUS_CONNECTED) != 0;
+				// bool event_pending = (hpd_status_val & PORT_HOTPLUG_INT_STATUS_EVENT_PENDING) != 0;
+				// For now, this is a STUB. We need actual register reads.
+				// if (event_pending) {
+				//    i915_hpd_line_identifier line = map_port_to_hpd_line(port->logical_port_id); // Needs implementation
+				//    if (line != I915_HPD_INVALID) {
+				//        i915_handle_hotplug_event(dev, line, current_connected);
+				//        intel_i915_write32(dev, SKL_PORT_HOTPLUG_STAT(port->hw_port_index), PORT_HOTPLUG_INT_STATUS_EVENT_PENDING); // W1C
+				//        event_handled_this_pass = true;
+				//    }
+				// }
+			}
+			if (!event_handled_this_pass) { // If no specific events found, TRACE once.
+				static bool skl_stub_traced = false;
+				if (!skl_stub_traced) {
+					TRACE("HPD Work (Gen9+): Detailed HPD status check and event handling STUBBED.\n");
+					skl_stub_traced = true;
+				}
+			}
+		} else if (gen >= 7) { // IVB, HSW, BDW
+			// PCH Based HPD (e.g. for HDMI/DVI on CPT/LPT PCH)
+			if (HAS_PCH_SPLIT(dev)) { // Assuming this macro correctly identifies PCH presence
+				uint32_t pch_hpd_stat_reg = SDEISR; // South Display Engine Interrupt Status (e.g. 0xC4004)
+				uint32_t pch_hpd_en_reg = SDEIMR;   // Corresponding mask register (e.g. 0xC400C for SDEIMR)
+				                                     // Or PCH_PORT_HOTPLUG_STAT (0xC4030) & PCH_PORT_HOTPLUG_EN (0xC4034) for LPT/CPT
+
+				// This is a simplified example. Real code needs to check specific bits for specific ports.
+				// Example: SDE_PORTB_HOTPLUG_CPT, SDE_PORTC_HOTPLUG_CPT, SDE_PORTD_HOTPLUG_CPT
+				// And then map these to i915_hpd_line_identifier.
+				// Also need to read current connection state from PCH_PORT_HOTPLUG_STAT (long pulse vs short pulse / pin level).
+				// For now, this remains a STUB.
+				static bool pch_hpd_stub_traced = false;
+				if (!pch_hpd_stub_traced) {
+					TRACE("HPD Work (Gen7/8 PCH): Detailed PCH HPD status check STUBBED (SDEISR/PCH_PORT_HOTPLUG_STAT).\n");
+					pch_hpd_stub_traced = true;
+				}
+			}
+			// CPU DDI Based HPD (e.g. for eDP or CPU-connected DP/HDMI)
+			// Example: DDI_BUF_CTL[port_idx] has HPD sense bits on some GENs.
+			// Or specific registers like PORT_HOTPLUG_STAT for CPU ports.
+			// This also needs GEN-specific register knowledge.
+			static bool cpu_hpd_stub_traced = false;
+			if(!cpu_hpd_stub_traced){
+				TRACE("HPD Work (Gen7/8 CPU DDI): Detailed CPU DDI HPD status check STUBBED.\n");
+				cpu_hpd_stub_traced = true;
+			}
+		} else {
+			TRACE("HPD Work: HPD logic not implemented for this GEN (%d).\n", gen);
 		}
-		// This loop should continue if an event was processed, as processing one
-		// might have generated another (e.g. for DP MST).
-		// For now, a single pass is placeholder.
-		if(!processed_event && dev->hpd_events_head != dev->hpd_events_tail) {
-			// This path is if ISR queued specific events, which it no longer does directly.
-			// This part of the loop should be removed if work func does direct HPD status reads.
+
+		// If the old event queue is still being used by some path (it shouldn't be now)
+		// This part should be removed once HPD status register polling is fully implemented above.
+		if (!event_handled_this_pass && dev->hpd_events_head != dev->hpd_events_tail) {
 			hpd_event_data current_event;
 			cpu_status cpu = disable_interrupts();
 			acquire_spinlock(&dev->hpd_events_lock);
@@ -235,20 +269,25 @@ i915_hotplug_work_func(struct work_arg *work)
 				release_spinlock(&dev->hpd_events_lock);
 				restore_interrupts(cpu);
 				i915_handle_hotplug_event(dev, current_event.hpd_line, current_event.connected);
-				processed_event = true; // Mark that we processed an event from the queue
+				event_handled_this_pass = true;
 			} else {
 				release_spinlock(&dev->hpd_events_lock);
 				restore_interrupts(cpu);
-				break; // No more events in queue
 			}
-		} else if (!processed_event) {
-			break; // No direct HPD status change found on this pass, and queue is empty
 		}
-	} while(processed_event); // Loop if events were processed, to catch cascading events.
+	} while (event_handled_this_pass); // Loop if an event was processed, as it might unmask others
 
-	// TODO: Re-enable HPD interrupts if they were temporarily disabled during processing.
-	// This depends on the specific HPD interrupt architecture of the generation.
-	// For example, some HPD status bits need to be written to clear, re-arming the interrupt.
+	if (fw_status == B_OK) {
+		intel_i915_forcewake_put(dev, FW_DOMAIN_RENDER);
+	}
+
+	// Re-enable HPD interrupts at the source if they are level-triggered and were masked,
+	// or if specific event bits need clearing to re-arm. This is GEN-specific.
+	// Example: For PCH HPD, might need to re-enable bits in SDEIMR or PCH_PORT_HOTPLUG_EN
+	// if they were temporarily disabled.
+	// For SKL+ DDI HPD, writing to clear status bits in SDE_PORT_HOTPLUG_STAT_SKL re-arms.
+	// This is also STUBBED for now.
+	TRACE("HPD Work: Re-arming HPD interrupts (STUBBED).\n");
 }
 
 

@@ -211,6 +211,25 @@ init_common(int fd, bool is_clone)
 	return B_OK;
 }
 
+// Implementation for the new hook
+status_t
+intel_i915_set_cursor_target_pipe(uint32 user_pipe_id)
+{
+	TRACE_HOOKS("intel_i915_set_cursor_target_pipe: user_pipe_id %lu\n", user_pipe_id);
+	if (!gInfo) {
+		TRACE_HOOKS("  Error: Accelerant not initialized.\n");
+		return B_NO_INIT;
+	}
+	if (user_pipe_id >= I915_MAX_PIPES_USER && user_pipe_id != I915_PIPE_USER_INVALID) {
+		TRACE_HOOKS("  Error: Invalid user_pipe_id %lu.\n", user_pipe_id);
+		return B_BAD_INDEX;
+	}
+
+	gInfo->current_cursor_target_pipe = (enum accel_pipe_id)user_pipe_id;
+	TRACE_HOOKS("  Set current_cursor_target_pipe to %d.\n", gInfo->current_cursor_target_pipe);
+	return B_OK;
+}
+
 // --- New Internal Helper Functions ---
 
 /**

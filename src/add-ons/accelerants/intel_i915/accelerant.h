@@ -110,6 +110,14 @@ typedef struct {
 #define INTEL_ACCELERANT_GET_DISPLAY_CONFIGURATION (B_ACCELERANT_PRIVATE_OFFSET + 101)
 
 /**
+ * @brief Accelerant hook feature code for setting the target pipe for subsequent cursor operations.
+ * The 'data' parameter for get_accelerant_hook should be NULL.
+ * The returned function pointer will have the signature:
+ *  status_t (*set_cursor_target_pipe_hook)(uint32 user_pipe_id); // user_pipe_id is enum i915_pipe_id_user
+ */
+#define INTEL_I915_ACCELERANT_SET_CURSOR_TARGET_PIPE (B_ACCELERANT_PRIVATE_OFFSET + 102)
+
+/**
  * @brief Argument structure for the INTEL_ACCELERANT_GET_DISPLAY_CONFIGURATION hook.
  * Used by clients (e.g., app_server) to query the current display setup.
  */

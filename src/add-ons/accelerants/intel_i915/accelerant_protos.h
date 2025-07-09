@@ -77,6 +77,9 @@ status_t accel_get_pipe_display_mode(enum accel_pipe_id pipe, display_mode *mode
 status_t accel_set_pipe_dpms_mode(enum accel_pipe_id pipe, uint32 dpms_state);
 uint32_t _get_bpp_from_colorspace_accel(color_space cs); // Already in hooks.c, but good to have proto
 
+// New hook for setting cursor target pipe
+status_t intel_i915_set_cursor_target_pipe(uint32 user_pipe_id);
+
 
 #ifdef __cplusplus
 }

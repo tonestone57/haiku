@@ -466,21 +466,22 @@ static status_t
 intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX, uint16 hotY,
 	color_space colorSpace, uint16 bytesPerRow, const uint8 *bitmapData)
 {
-	TRACE_HOOKS("intel_i915_set_cursor_bitmap: w%u h%u hx%u hy%u cs%d bpr%u\n",
-		width, height, hotX, hotY, colorSpace, bytesPerRow);
+	TRACE_HOOKS("intel_i915_set_cursor_bitmap: w%u h%u hX%u hY%u cs%d bpr%u pipe%d\n",
+		width, height, hotX, hotY, colorSpace, bytesPerRow, gInfo->current_cursor_target_pipe);
 
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
 	if (width == 0 || height == 0 || width > MAX_CURSOR_DIM || height > MAX_CURSOR_DIM) return B_BAD_VALUE;
 	if (bitmapData == NULL) return B_BAD_ADDRESS;
-	// Kernel expects ARGB32 for cursor. We might need conversion if app_server sends other formats.
-	// For now, assume data is ARGB32 and bytesPerRow matches width * 4.
-	if (colorSpace != B_RGBA32 && colorSpace != B_RGB32) { // B_RGB32 might be acceptable if alpha is assumed opaque
+
+	if (colorSpace != B_RGBA32 && colorSpace != B_RGB32) {
 		TRACE_HOOKS("  Error: Unsupported cursor color space %d. Kernel expects ARGB32.\n", colorSpace);
-		// TODO: Software conversion if other formats like B_CMAP8 (mono cursor) are common.
 		return B_BAD_VALUE;
 	}
-	if (bytesPerRow < width * 4) return B_BAD_VALUE;
-
+	// Kernel expects ARGB32, so 4 bytes per pixel.
+	if (bytesPerRow < width * 4) {
+		TRACE_HOOKS("  Error: bytesPerRow %u is too small for %u width ARGB32 cursor.\n", bytesPerRow, width);
+		return B_BAD_VALUE;
+	}
 
 	intel_i915_set_cursor_bitmap_args kargs;
 	kargs.width = width;
@@ -488,12 +489,12 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX, uint16 ho
 	kargs.hot_x = hotX;
 	kargs.hot_y = hotY;
 	kargs.user_bitmap_ptr = (uint64_t)(uintptr_t)bitmapData;
-	kargs.bitmap_size = height * bytesPerRow; // Total size of data provided
-	kargs.pipe = (uint32_t)gInfo->current_cursor_target_pipe; // Use current target
+	kargs.bitmap_size = (size_t)height * bytesPerRow;
+	kargs.pipe = (uint32_t)gInfo->current_cursor_target_pipe;
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_BITMAP, &kargs, sizeof(kargs));
 	if (status == B_OK) {
-		gInfo->cursor_hot_x = hotX; // Cache hotspot globally for now
+		gInfo->cursor_hot_x = hotX;
 		gInfo->cursor_hot_y = hotY;
 	} else {
 		TRACE_HOOKS("  Error: IOCTL_SET_CURSOR_BITMAP failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
@@ -504,30 +505,57 @@ intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX, uint16 ho
 static void
 intel_i915_move_cursor(uint16 x, uint16 y)
 {
-	if (!gInfo || gInfo->device_fd < 0) return;
+	if (!gInfo || gInfo->device_fd < 0 || !gInfo->shared_info) return;
 
-	// Update global/cached position
 	gInfo->cursor_current_x_global = x;
 	gInfo->cursor_current_y_global = y;
 
-	// Determine which pipe the cursor is on based on global coordinates.
-	// This requires knowing the layout of screens from app_server.
-	// For now, we assume app_server calls SET_ACTIVE_CURSOR_HEAD, or we use current_cursor_target_pipe.
-	enum accel_pipe_id targetPipe = gInfo->current_cursor_target_pipe;
+	enum accel_pipe_id old_target_pipe = gInfo->current_cursor_target_pipe;
+	enum accel_pipe_id new_target_pipe = ACCEL_PIPE_INVALID;
+	int32 local_x = x;
+	int32 local_y = y;
 
-	// TODO: If app_server provides global coordinates, we need to translate
-	// (x, y) to be relative to the origin of targetPipe's display area.
-	// For now, assume x, y are already relative or this is handled by app_server logic
-	// that sets current_cursor_target_pipe.
+	// Determine which pipe the cursor is on
+	for (uint32 i = 0; i < I915_MAX_PIPES_USER; i++) {
+		if (gInfo->shared_info->pipe_display_configs[i].is_active) {
+			const display_mode* dm = &gInfo->shared_info->pipe_display_configs[i].current_mode;
+			if (x >= dm->timing.h_display_start && x < (dm->timing.h_display_start + dm->virtual_width) &&
+				y >= dm->timing.v_display_start && y < (dm->timing.v_display_start + dm->virtual_height)) {
+				new_target_pipe = (enum accel_pipe_id)i;
+				local_x = x - dm->timing.h_display_start;
+				local_y = y - dm->timing.v_display_start;
+				break;
+			}
+		}
+	}
 
 	intel_i915_set_cursor_state_args kargs;
-	kargs.x = x; // These are screen-relative for the target pipe
-	kargs.y = y;
-	kargs.is_visible = gInfo->cursor_is_visible_general; // Use general visibility
-	kargs.pipe = (uint32_t)targetPipe;
 
-	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
-		TRACE_HOOKS("MoveCursor: IOCTL_SET_CURSOR_STATE failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+	if (new_target_pipe != old_target_pipe && old_target_pipe != ACCEL_PIPE_INVALID) {
+		// Hide cursor on the old pipe
+		kargs.x = 0; // Position doesn't matter much when hiding
+		kargs.y = 0;
+		kargs.is_visible = false;
+		kargs.pipe = (uint32_t)old_target_pipe;
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs));
+		TRACE_HOOKS("MoveCursor: Hid cursor on old pipe %u\n", old_target_pipe);
+	}
+
+	gInfo->current_cursor_target_pipe = new_target_pipe;
+
+	if (new_target_pipe != ACCEL_PIPE_INVALID) {
+		kargs.x = (uint16_t)local_x;
+		kargs.y = (uint16_t)local_y;
+		kargs.is_visible = gInfo->cursor_is_visible_general;
+		kargs.pipe = (uint32_t)new_target_pipe;
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
+			TRACE_HOOKS("MoveCursor: IOCTL_SET_CURSOR_STATE failed for new pipe %u: %s\n", kargs.pipe, strerror(errno));
+		} else {
+			TRACE_HOOKS("MoveCursor: Moved cursor to pipe %u at local (%d,%d) (global %u,%u)\n", new_target_pipe, local_x, local_y, x, y);
+		}
+	} else {
+		// Cursor is off all active screens, it was hidden on the old pipe if applicable.
+		TRACE_HOOKS("MoveCursor: Cursor moved off-screen (global %u,%u).\n", x,y);
 	}
 }
 
@@ -539,14 +567,41 @@ intel_i915_show_cursor(bool is_visible)
 	gInfo->cursor_is_visible_general = is_visible;
 	enum accel_pipe_id targetPipe = gInfo->current_cursor_target_pipe;
 
-	intel_i915_set_cursor_state_args kargs;
-	kargs.x = gInfo->cursor_current_x_global; // Use last known global position
-	kargs.y = gInfo->cursor_current_y_global; // (Needs translation if targetPipe changes)
-	kargs.is_visible = is_visible;
-	kargs.pipe = (uint32_t)targetPipe;
+	if (targetPipe == ACCEL_PIPE_INVALID && is_visible) {
+		// If cursor is to be shown but it's off-screen, try to show it on the primary/default pipe at last global pos.
+		// This case might need more sophisticated logic (e.g. find closest screen to last global pos).
+		// For now, if it's off-screen, showing it might target the default pipe.
+		// Or, ensure move_cursor is called first to place it on a screen.
+		targetPipe = gInfo->target_pipe; // Default to instance's target_pipe
+		gInfo->current_cursor_target_pipe = targetPipe; // Update the target
+		TRACE_HOOKS("ShowCursor(true): current_cursor_target_pipe was invalid, defaulting to %u\n", targetPipe);
+	}
 
-	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
-		TRACE_HOOKS("ShowCursor: IOCTL_SET_CURSOR_STATE failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+	if (targetPipe != ACCEL_PIPE_INVALID) {
+		intel_i915_set_cursor_state_args kargs;
+		// Need to translate gInfo->cursor_current_x_global, y_global to local for targetPipe
+		int32 local_x = gInfo->cursor_current_x_global;
+		int32 local_y = gInfo->cursor_current_y_global;
+
+		if (gInfo->shared_info && gInfo->shared_info->pipe_display_configs[targetPipe].is_active) {
+			const display_mode* dm = &gInfo->shared_info->pipe_display_configs[targetPipe].current_mode;
+			local_x -= dm->timing.h_display_start;
+			local_y -= dm->timing.v_display_start;
+		}
+		// Clamp to ensure non-negative, as kernel might not like negative relative positions for cursor.
+		kargs.x = (local_x < 0) ? 0 : (uint16_t)local_x;
+		kargs.y = (local_y < 0) ? 0 : (uint16_t)local_y;
+		kargs.is_visible = is_visible;
+		kargs.pipe = (uint32_t)targetPipe;
+
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
+			TRACE_HOOKS("ShowCursor: IOCTL_SET_CURSOR_STATE failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+		} else {
+			TRACE_HOOKS("ShowCursor: %s cursor on pipe %u at local (%u,%u)\n", is_visible ? "Showing" : "Hiding", targetPipe, kargs.x, kargs.y);
+		}
+	} else if (!is_visible) {
+		// If hiding and target is invalid, nothing specific to do as it should be hidden already.
+		TRACE_HOOKS("ShowCursor(false): current_cursor_target_pipe is invalid, cursor should be hidden.\n");
 	}
 }
 
@@ -951,6 +1006,7 @@ get_accelerant_hook(uint32 feature, void *data)
 		case B_FILL_TRIANGLE: return (void*)accel_fill_triangle;
 		case INTEL_I915_ACCELERANT_SET_DISPLAY_CONFIGURATION: return (void*)intel_i915_set_display_configuration;
 		case INTEL_ACCELERANT_GET_DISPLAY_CONFIGURATION: return (void*)intel_i915_get_display_configuration_hook;
+		case INTEL_I915_ACCELERANT_SET_CURSOR_TARGET_PIPE: return (void*)intel_i915_set_cursor_target_pipe;
 		default: TRACE("get_accelerant_hook: Unknown feature 0x%lx requested.\n", feature); return NULL;
 	}
 }

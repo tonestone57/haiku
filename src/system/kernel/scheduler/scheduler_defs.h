@@ -75,6 +75,12 @@ const int HIGH_CONTENTION_THRESHOLD = 4;
 const float HIGH_CONTENTION_MIN_SLICE_FACTOR = 1.5f;
 
 
+// --- Low Intensity Task Heuristic ---
+// Load threshold (0-kMaxLoad) below which a task might be considered low intensity.
+// kMaxLoad is typically 1000. 100 would be 10% of nominal core capacity.
+const int32 LOW_INTENSITY_LOAD_THRESHOLD = 100;
+
+
 // --- Real-Time Thread Slice Configuration ---
 // Minimum guaranteed slice duration for real-time threads, in microseconds.
 // This ensures RT threads get a slightly longer minimum run time than kMinSliceGranularity

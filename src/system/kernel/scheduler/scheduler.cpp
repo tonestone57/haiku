@@ -2548,6 +2548,9 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 // Define constants for b.L type compatibility bonus/penalties
 // These values are added to the benefit score. Their magnitude should be
 // relative to typical benefit scores (which are influenced by lag and eligibility).
+
+// New constant for capacity-aware load difference trigger
+static const int32 kWorkDifferenceThresholdAbsolute = 200; // Approx. 20% of nominal core capacity in work units
 // Lag can be ~slice_duration (e.g. 2000-10000), eligibility improvement similar.
 // So bonuses should be in a comparable range to make a difference.
 #define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL (SCHEDULER_TARGET_LATENCY * 4) // Strong incentive

@@ -473,6 +473,7 @@ typedef struct { /* ... intel_output_port_state fields ... */
 	} dpcd_data;
 	bool     is_pch_port; // True if this port is connected via PCH (requires FDI on IVB)
 	enum pipe_id_priv current_pipe_assignment; // Which pipe is this port currently configured for
+	i915_hpd_line_identifier hpd_line; // Which HPD line corresponds to this port
 } intel_output_port_state;
 
 // Define backlight control source enum (conceptual)

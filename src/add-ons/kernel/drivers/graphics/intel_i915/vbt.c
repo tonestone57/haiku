@@ -84,6 +84,31 @@ get_port_from_dvo_port(uint8_t dvo_port, uint16_t device_type)
 	return PRIV_PORT_ID_NONE;
 }
 
+// Helper to map an intel_port_id_priv to an i915_hpd_line_identifier.
+// This mapping is based on the typical DDI to HPD pin assignments.
+// VBT parsing should ensure the port->logical_port_id is correctly set first.
+static i915_hpd_line_identifier
+map_intel_port_id_to_hpd_line_from_vbt(enum intel_port_id_priv port_id)
+{
+	switch (port_id) {
+		case PRIV_PORT_A: return I915_HPD_PORT_A; // Typically eDP or DP on DDI-A
+		case PRIV_PORT_B: return I915_HPD_PORT_B; // DP/HDMI on DDI-B
+		case PRIV_PORT_C: return I915_HPD_PORT_C; // DP/HDMI on DDI-C
+		case PRIV_PORT_D: return I915_HPD_PORT_D; // DP/HDMI on DDI-D
+		case PRIV_PORT_E: return I915_HPD_PORT_E; // DP/HDMI on DDI-E (SKL+)
+		case PRIV_PORT_F: return I915_HPD_PORT_F; // DP/HDMI on DDI-F (ICL+)
+		// TODO: Add mappings for PRIV_PORT_G and Type-C ports (PRIV_PORT_TC1 etc.)
+		// if those enums are added to intel_port_id_priv and i915_hpd_line_identifier.
+		// For example:
+		// case PRIV_PORT_TC1: return I915_HPD_PORT_TC1;
+		default:
+			// For ports like LVDS, Analog (CRT), or unhandled/unknown logical ports,
+			// they might not have a standard HPD line or it's handled differently.
+			return I915_HPD_INVALID;
+	}
+}
+
+
 static const char VBT_SIGNATURE_PREFIX[] = "$VBT";
 static const char BDB_SIGNATURE[] = "BIOS_DATA_BLOCK";
 #define DEFAULT_T1_VDD_PANEL_MS 50
@@ -173,6 +198,8 @@ static void parse_bdb_child_devices(intel_i915_device_info* devInfo, const uint8
 		if ((port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP) && devInfo->vbt->bdb_header->version >= 158) pin_val = child->aux_channel;
 		port->gmbus_pin_pair = vbt_ddc_pin_to_gmbus_pin(pin_val, port->type);
 		port->dp_aux_ch = child->aux_channel;
+		// Assign HPD line based on the determined logical_port_id
+		port->hpd_line = map_intel_port_id_to_hpd_line_from_vbt(port->logical_port_id);
 		if (port->type == PRIV_OUTPUT_ANALOG || port->type == PRIV_OUTPUT_LVDS) port->is_pch_port = true;
 		if (devInfo->vbt->bdb_header->version >= 158) {
 			if (child->hdmi_support && (port->type == PRIV_OUTPUT_TMDS_DVI || port->type == PRIV_OUTPUT_DP)) port->type = PRIV_OUTPUT_TMDS_HDMI;

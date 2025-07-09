@@ -74,11 +74,14 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 
 	TRACE("i915_handle_hotplug_event: HPD line %d, Connected: %s\n", hpdLine, connected ? "yes" : "no");
 
-	intel_output_port_state* port_state = find_port_for_hpd_line(dev, hpdLine);
+	intel_output_port_state* port_state = find_port_by_hpd_line(dev, hpdLine);
 	if (port_state == NULL) {
 		ERROR("i915_handle_hotplug_event: Could not find port for HPD line %d.\n", hpdLine);
 		return;
 	}
+
+	// Store current connection state before potentially changing it
+	bool was_connected = port_state->connected;
 
 	mutex_lock(&dev->display_commit_lock);
 
@@ -87,43 +90,235 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 	if (connected) {
 		TRACE("HPD Connect on port %s (logical_id %d, HPD line %d)\n",
 			port_state->name, port_state->logical_port_id, hpdLine);
-		uint8 edid_buffer[PRIV_EDID_BLOCK_SIZE * 2];
-		memset(edid_buffer, 0, sizeof(edid_buffer));
+		// Temporarily store EDID data as it's read block by block
+		uint8_t raw_edid_data[PRIV_EDID_BLOCK_SIZE * 2]; // Max 2 blocks for now
+		memset(raw_edid_data, 0, sizeof(raw_edid_data));
 		status_t edid_status = B_ERROR;
+		int parsed_modes = 0;
 
+		// Determine GMBUS pin or AUX channel for EDID read
+		uint8_t i2c_pin = GMBUS_PIN_DISABLED;
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
-			if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) { // Fallback if proper AUX not used
-				edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
-			}
-			// TODO: Proper DP AUX EDID read should be preferred.
-		} else if (port_state->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
-			edid_status = intel_i915_gmbus_read_edid_block(dev, port_state->gmbus_pin_pair, edid_buffer, 0);
+			// Prefer AUX channel if defined and distinct from GMBUS pins,
+			// otherwise use gmbus_pin_pair (which might be an AUX-capable GMBUS pin).
+			// This needs a clear way to distinguish dedicated AUX vs AUX-over-GMBUS.
+			// Assuming dp_aux_ch stores the GMBUS pin if AUX is via GMBUS for this platform.
+			i2c_pin = (port_state->dp_aux_ch != 0 && port_state->dp_aux_ch != GMBUS_PIN_DISABLED) ?
+			          port_state->dp_aux_ch : port_state->gmbus_pin_pair;
+		} else {
+			i2c_pin = port_state->gmbus_pin_pair;
+		}
+
+		if (i2c_pin != GMBUS_PIN_DISABLED) {
+			edid_status = intel_i915_gmbus_read_edid_block(dev, i2c_pin, raw_edid_data, 0);
 		}
 
 		if (edid_status == B_OK) {
-			memcpy(port_state->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE);
-			port_state->edid_valid = true;
-			port_state->num_modes = intel_i915_parse_edid(port_state->edid_data, port_state->modes, PRIV_MAX_EDID_MODES_PER_PORT);
-			if (port_state->num_modes > 0) port_state->preferred_mode = port_state->modes[0];
-			TRACE("  EDID read successful for port %s, %d modes found.\n", port_state->name, port_state->num_modes);
+			// Copy first block to port_state
+			memcpy(port_state->edid_data, raw_edid_data, PRIV_EDID_BLOCK_SIZE);
+			port_state->edid_valid = true; // Mark valid after first block successfully read
+			parsed_modes = intel_i915_parse_edid(port_state->edid_data, port_state->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+
+			const struct edid_v1_info* base_edid = (const struct edid_v1_info*)port_state->edid_data;
+			uint8_t num_extensions = base_edid->extension_flag;
+			TRACE("  EDID Block 0 read for port %s, %d modes initially. Extensions: %u\n", port_state->name, parsed_modes, num_extensions);
+
+			for (uint8_t ext_idx = 0; ext_idx < num_extensions && (ext_idx + 1) < (sizeof(port_state->edid_data)/PRIV_EDID_BLOCK_SIZE); ext_idx++) {
+				if (parsed_modes >= PRIV_MAX_EDID_MODES_PER_PORT) break;
+				uint8_t extension_block_buffer[PRIV_EDID_BLOCK_SIZE];
+				status_t ext_edid_status = B_ERROR;
+				if (i2c_pin != GMBUS_PIN_DISABLED) {
+					ext_edid_status = intel_i915_gmbus_read_edid_block(dev, i2c_pin, extension_block_buffer, ext_idx + 1);
+				}
+
+				if (ext_edid_status == B_OK) {
+					memcpy(port_state->edid_data + (ext_idx + 1) * PRIV_EDID_BLOCK_SIZE, extension_block_buffer, PRIV_EDID_BLOCK_SIZE);
+					// Pass current count of modes to append new ones
+					intel_i915_parse_edid_extension_block(extension_block_buffer, port_state->modes, &parsed_modes, PRIV_MAX_EDID_MODES_PER_PORT);
+					TRACE("  EDID Extension %u read, total modes now %d\n", ext_idx + 1, parsed_modes);
+				} else {
+					TRACE("  Failed to read EDID extension block %u for port %s (status: %s).\n", ext_idx + 1, port_state->name, strerror(ext_edid_status));
+					// Do not invalidate entire EDID if one extension fails, base block might still be useful.
+					break;
+				}
+			}
+			port_state->num_modes = parsed_modes;
+			if (port_state->num_modes > 0) {
+				port_state->preferred_mode = port_state->modes[0];
+			} else {
+				memset(&port_state->preferred_mode, 0, sizeof(display_mode));
+				port_state->edid_valid = false; // No modes found, so effectively invalid EDID for mode setting
+				TRACE("  No modes found after parsing all EDID blocks for port %s.\n", port_state->name);
+			}
 		} else {
-			TRACE("  EDID read failed for port %s (status: %s).\n", port_state->name, strerror(edid_status));
+			TRACE("  EDID Block 0 read failed for port %s (status: %s).\n", port_state->name, strerror(edid_status));
 			port_state->edid_valid = false;
 			port_state->num_modes = 0;
+			memset(&port_state->preferred_mode, 0, sizeof(display_mode));
 		}
+
+		// Re-initialize DDI port specifics (like DPCD) on connect, after EDID attempt
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
-			intel_ddi_init_port(dev, port_state);
+			intel_ddi_init_port(dev, port_state); // This reads DPCD
 		}
-	} else {
+	} else { // Disconnected
 		TRACE("HPD Disconnect on port %s (logical_id %d, HPD line %d)\n",
 			port_state->name, port_state->logical_port_id, hpdLine);
 		port_state->edid_valid = false;
 		port_state->num_modes = 0;
 		memset(&port_state->preferred_mode, 0, sizeof(display_mode));
+		memset(port_state->edid_data, 0, sizeof(port_state->edid_data)); // Clear old EDID data
+		// Clear DPCD data as well for DP/eDP
+		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
+			memset(&port_state->dpcd_data, 0, sizeof(port_state->dpcd_data));
+		}
 	}
 	mutex_unlock(&dev->display_commit_lock);
 
-	mutex_lock(&dev->hpd_wait_lock);
+	// Notify user-space if connection state actually changed or if it's a connect event (to force re-check by app_server)
+	if (was_connected != connected || connected) {
+		mutex_lock(&dev->hpd_wait_lock);
+		dev->hpd_pending_changes_mask |= (1 << hpdLine);
+		dev->hpd_event_generation_count++;
+		condition_variable_broadcast(&dev->hpd_wait_condition, B_DO_NOT_RESCHEDULE);
+		mutex_unlock(&dev->hpd_wait_lock);
+		TRACE("HPD: Notified user-space about change on HPD line %d (gen_count %lu, mask 0x%lx).\n",
+			hpdLine, dev->hpd_event_generation_count, dev->hpd_pending_changes_mask);
+	} else {
+		TRACE("HPD: Event on HPD line %d, but reported connection state (%d) same as cached. No notification sent.\n",
+			hpdLine, connected);
+	}
+}
+
+
+void
+i915_hotplug_work_func(struct work_arg *work)
+{
+	struct intel_i915_device_info* dev = container_of(work, struct intel_i915_device_info, hotplug_work);
+
+	if (dev == NULL) {
+		ERROR("i915_hotplug_work_func: work_arg has no device context!\n");
+		return;
+	}
+	TRACE("i915_hotplug_work_func: Processing HPD events for dev %p\n", dev);
+
+	status_t fw_status = intel_i915_forcewake_get(dev, FW_DOMAIN_RENDER); // Or FW_DOMAIN_DISPLAY
+	if (fw_status != B_OK) {
+		ERROR("i915_hotplug_work_func: Failed to get forcewake: %s. HPD check might be unreliable.\n", strerror(fw_status));
+		// Proceed anyway, HPD reads might still work or might be PCH based.
+	}
+
+	uint32 gen = INTEL_DISPLAY_GEN(dev);
+	bool event_handled_this_pass;
+
+	do {
+		event_handled_this_pass = false;
+
+		// Iterate through all detected ports to check their HPD status
+		for (int i = 0; i < dev->num_ports_detected; i++) {
+			intel_output_port_state* port = &dev->ports[i];
+			i915_hpd_line_identifier current_port_hpd_line = port->hpd_line;
+
+			if (current_port_hpd_line == I915_HPD_INVALID) {
+				// Fallback for VBTs that might not populate port->hpd_line correctly.
+				// The function `map_logical_port_id_to_hpd_line` was removed, use direct mapping from `intel_i915_priv.h` enum logic
+				if (port->logical_port_id >= PRIV_PORT_A && port->logical_port_id <= PRIV_PORT_F) {
+					current_port_hpd_line = (i915_hpd_line_identifier)(I915_HPD_PORT_A + (port->logical_port_id - PRIV_PORT_A));
+				}
+				// TODO: Add similar fallback for Type-C ports if/when those enums are aligned.
+
+				if (current_port_hpd_line == I915_HPD_INVALID) {
+					continue; // Skip ports without a valid HPD line mapping
+				}
+			}
+
+			// Read the actual hardware HPD status for this port's HPD line.
+			// This is highly GEN and port-specific.
+			bool new_connected_state = port->connected; // Assume no change initially
+			bool hpd_event_occurred = false;      // Did the hardware indicate an event for this line?
+			uint32_t hpd_ack_mask = 0;          // Mask to ack the interrupt for this port/line
+			uint32_t hpd_source_reg = 0;        // Register to ack
+
+			// --- PCH-based HPD (Gen7/8 LPT/WPT PCH) ---
+			if (HAS_PCH_SPLIT(dev) && port->is_pch_port) {
+				uint32_t pch_hotplug_stat_val = intel_i915_read32(dev, PCH_PORT_HOTPLUG_STAT);
+				uint32_t sdeiir = intel_i915_read32(dev, SDEISR); // South Display Engine Interrupt Status
+				uint32_t sde_bit_for_port = 0;
+				uint32_t stat_pin_bit_for_port = 0;
+
+				if (port->logical_port_id == PRIV_PORT_B) { sde_bit_for_port = SDE_PORTB_HOTPLUG_CPT; stat_pin_bit_for_port = PORTB_PIN_STATUS_LPT; }
+				else if (port->logical_port_id == PRIV_PORT_C) { sde_bit_for_port = SDE_PORTC_HOTPLUG_CPT; stat_pin_bit_for_port = PORTC_PIN_STATUS_LPT; }
+				else if (port->logical_port_id == PRIV_PORT_D) { sde_bit_for_port = SDE_PORTD_HOTPLUG_CPT; stat_pin_bit_for_port = PORTD_PIN_STATUS_LPT; }
+
+				if (sde_bit_for_port != 0 && (sdeiir & sde_bit_for_port)) {
+					hpd_event_occurred = true;
+					new_connected_state = (pch_hotplug_stat_val & stat_pin_bit_for_port) != 0;
+					hpd_source_reg = SDEISR; hpd_ack_mask = sde_bit_for_port;
+				} else if (stat_pin_bit_for_port != 0) { // Poll if no interrupt for this specific bit
+					bool current_hw_pin_state = (pch_hotplug_stat_val & stat_pin_bit_for_port) != 0;
+					if (current_hw_pin_state != port->connected) {
+						hpd_event_occurred = true; new_connected_state = current_hw_pin_state;
+					}
+				}
+			}
+			// --- CPU DDI HPD (Gen7/8 IVB/HSW/BDW CPU ports, Gen9+ SKL/KBL/CFL etc.) ---
+			else if (!port->is_pch_port && (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP || port->type == PRIV_OUTPUT_HDMI)) {
+				// Placeholder: Actual register reads for CPU DDI HPD are complex and GEN-specific.
+				// This section needs to be filled based on PRM for each generation.
+				// Example conceptual flow:
+				// 1. Check a summary HPD interrupt status register (e.g., DEISR for IVB/HSW, or a SKL+ equivalent).
+				// 2. If summary indicates an event for this port's DDI type/group:
+				//    a. Read the specific HPD status register for this port's DDI (e.g., from port->hw_port_index).
+				//    b. Determine `new_connected_state` from pin status bit.
+				//    c. Determine `hpd_event_occurred` if an interrupt/event bit is set for this port.
+				//    d. Set `hpd_source_reg` and `hpd_ack_mask` for acknowledging this specific port's HPD event.
+				// 3. If no summary interrupt, may need to poll the specific port's HPD pin status if reliable.
+				//
+				// For now, we'll log a stub and not generate events for CPU HPD to avoid issues.
+				static bool cpu_hpd_stub_logged_once = false;
+				if (!cpu_hpd_stub_logged_once) {
+					TRACE("HPD Work: CPU DDI HPD checking for port %d (Gen %d, type %d) is STUBBED.\n", port->logical_port_id, gen, port->type);
+					cpu_hpd_stub_logged_once = true;
+				}
+			}
+
+			if (hpd_event_occurred) {
+				if (hpd_source_reg != 0 && hpd_ack_mask != 0) {
+					intel_i915_write32(dev, hpd_source_reg, hpd_ack_mask); // Ack the specific HPD source
+				}
+				// Only call handle_event if the state actually changed OR if it's a connect event
+				// and EDID wasn't valid (to force re-probe of EDID and DPCD).
+				if (port->connected != new_connected_state || (new_connected_state && !port->edid_valid)) {
+					i915_handle_hotplug_event(dev, current_port_hpd_line, new_connected_state);
+					event_handled_this_pass = true;
+				} else {
+					TRACE("HPD Work: Event for port %d (HPD line %d), but state (%d) and EDID validity (%d) unchanged. Ignoring.\n",
+						port->logical_port_id, current_port_hpd_line, new_connected_state, port->edid_valid);
+				}
+			}
+		} // End for each port
+	} while (event_handled_this_pass); // Loop if an event was handled, as it might trigger another
+
+	if (fw_status == B_OK) {
+		intel_i915_forcewake_put(dev, FW_DOMAIN_RENDER);
+	}
+
+	// After processing, re-enable HPD interrupts at the main controller level (e.g., in DEIMR).
+	// This should be done by calling a function in irq.c.
+	// Example: intel_i915_irq_hpd_work_complete_reenable_irqs(dev);
+	// For now, a TRACE message:
+	if (dev->irq_cookie != NULL) { // Check if IRQ handling is initialized
+		// This is a conceptual call, actual function name might differ.
+		// It would typically be called from irq.c after this work function completes,
+		// or the work function itself signals completion to the IRQ handler.
+		// For simplicity, we'll assume the main IRQ handler re-enables summary HPD bits.
+		// The specific port HPD bits (like SDEISR) were acked above.
+		TRACE("HPD Work: Main HPD interrupt sources expected to be re-enabled by IRQ handler logic.\n");
+	}
+}
+
+/*
+// This function is now OBSOLETE as the ISR only schedules the work function,
 	dev->hpd_pending_changes_mask |= (1 << hpdLine);
 	dev->hpd_event_generation_count++;
 	condition_variable_broadcast(&dev->hpd_wait_condition, B_DO_NOT_RESCHEDULE);

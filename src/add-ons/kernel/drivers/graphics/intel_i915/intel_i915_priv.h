@@ -656,6 +656,8 @@ typedef struct intel_i915_device_info {
 	uint32_t hpd_pending_changes_mask; // Bitmask of i915_hpd_line_identifier for changes not yet reported by IOCTL
 	mutex hpd_wait_lock; // Protects hpd_event_generation_count, hpd_pending_changes_mask, and condition variable
 
+	uint32_t framebuffer_user_handle[PRIV_MAX_PIPES]; // User-space handle for current scanout BO
+
 } intel_i915_device_info;
 
 
@@ -994,6 +996,9 @@ extern "C" status_t init_driver(void) {
 				condition_variable_init(&gDeviceInfo[gDeviceCount]->hpd_wait_condition, "i915 hpd_wait_cond");
 				gDeviceInfo[gDeviceCount]->hpd_event_generation_count = 0;
 				gDeviceInfo[gDeviceCount]->hpd_pending_changes_mask = 0;
+				for (int k = 0; k < PRIV_MAX_PIPES; k++) {
+					gDeviceInfo[gDeviceCount]->framebuffer_user_handle[k] = 0;
+				}
 
 
 				char nameBuffer[128];

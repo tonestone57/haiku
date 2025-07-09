@@ -54,63 +54,74 @@ static int32
 calculate_continuous_haiku_weight_prototype(int32 priority)
 {
 	if (priority == B_IDLE_PRIORITY) // 0
-		return 1; // Smallest distinct weight
-	if (priority > B_IDLE_PRIORITY && priority < B_LOWEST_ACTIVE_PRIORITY) // 1-4
-		return 1 + priority; // Small, distinct weights: 2, 3, 4, 5
+		return 1; // Smallest distinct weight for idle
+	if (priority > B_IDLE_PRIORITY && priority < B_LOWEST_ACTIVE_PRIORITY) // Priorities 1-4
+		return 2 + (priority - 1) * 2; // Small, distinct weights: 2, 4, 6, 8
 
-	// Clamp priority for the main calculation range
-	// B_LOWEST_ACTIVE_PRIORITY = 5
-	// B_MAX_PRIORITY = 121 (max usable Haiku prio is 120)
+	// Clamp priority for the main calculation range to avoid extreme values with pow()
+	// B_MAX_PRIORITY is 121, so valid Haiku priorities are 0-120.
 	int32 calcPrio = priority;
 	if (calcPrio < B_LOWEST_ACTIVE_PRIORITY) calcPrio = B_LOWEST_ACTIVE_PRIORITY;
-	if (calcPrio >= B_MAX_PRIORITY) calcPrio = B_MAX_PRIORITY - 1;
+	if (calcPrio >= B_MAX_PRIORITY) calcPrio = B_MAX_PRIORITY - 1; // Max Haiku prio is 120
+
+	// Base scaling factor per Haiku priority point.
+	// (1.25)^(1/2.5) approx 1.0915. This means for every 2.5 priority points
+	// away from B_NORMAL_PRIORITY, the weight changes by a factor of 1.25.
+	const double haiku_priority_step_factor = 1.091507805494422;
 
 	double weight_fp;
-	const double factor_per_haiku_prio = 1.091507805494422; // (1.25)^(1/2.5)
 
-	if (calcPrio < B_REAL_TIME_DISPLAY_PRIORITY) {
-		// Normal Range (B_LOWEST_ACTIVE_PRIORITY to B_REAL_TIME_DISPLAY_PRIORITY - 1)
-		// Anchored at B_NORMAL_PRIORITY (10) = SCHEDULER_WEIGHT_SCALE (1024)
-		weight_fp = SCHEDULER_WEIGHT_SCALE;
-		int delta_priority = B_NORMAL_PRIORITY - calcPrio;
+	// Calculate relative to B_NORMAL_PRIORITY (10)
+	int priority_delta_from_normal = B_NORMAL_PRIORITY - calcPrio;
 
-		if (delta_priority > 0) { // Higher actual priority (prio < 10)
-			for (int i = 0; i < delta_priority; ++i) weight_fp *= factor_per_haiku_prio;
-		} else if (delta_priority < 0) { // Lower actual priority (prio > 10)
-			for (int i = 0; i < -delta_priority; ++i) weight_fp /= factor_per_haiku_prio;
-		}
-		// if delta_priority == 0, weight_fp is SCHEDULER_WEIGHT_SCALE
+	weight_fp = (double)SCHEDULER_WEIGHT_SCALE * pow(haiku_priority_step_factor, priority_delta_from_normal);
 
-		int32 calculated_weight = static_cast<int32>(round(weight_fp));
-		return max_c(kNewMinActiveWeight, calculated_weight);
-
-	} else {
-		// Real-Time Range (priority >= B_REAL_TIME_DISPLAY_PRIORITY)
-		// Base RT weight for B_REAL_TIME_DISPLAY_PRIORITY (20) is gNiceToWeight[0]
-		double rt_weight_base = (double)gNiceToWeight[0]; // 88761.0
-
-		// Calculate how many steps above B_REAL_TIME_DISPLAY_PRIORITY this priority is
-		int rt_steps = calcPrio - B_REAL_TIME_DISPLAY_PRIORITY;
-
-		weight_fp = rt_weight_base;
-		for (int i = 0; i < rt_steps; ++i) {
-			weight_fp *= factor_per_haiku_prio; // Increase weight for higher RT priorities
-		}
-
-		int32 calculated_weight = static_cast<int32>(round(weight_fp));
-		return min_c(kNewMaxWeightCap, calculated_weight); // Apply cap
+	// Apply additional multipliers for kernel/urgent real-time priorities
+	// This creates a steeper increase for priorities >= B_URGENT_DISPLAY_PRIORITY
+	// while keeping the curve smoother for user-level priorities.
+	if (calcPrio >= B_MAX_REAL_TIME_PRIORITY) { // Timer threads, etc. (>= 120)
+		weight_fp *= 4.0; // Strongest boost for highest kernel RT
+	} else if (calcPrio >= B_URGENT_PRIORITY) { // Kernel daemons, etc. (>= 100)
+		weight_fp *= 2.5; // Significant boost
+	} else if (calcPrio >= B_REAL_TIME_PRIORITY) { // User RT, important system (>= 30)
+		weight_fp *= 1.5; // Moderate boost
+	} else if (calcPrio >= B_REAL_TIME_DISPLAY_PRIORITY) { // Display server, etc. (>= 20)
+		weight_fp *= 1.2; // Slight boost over normal user priorities
 	}
+	// Priorities from B_LOWEST_ACTIVE_PRIORITY (5) up to B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
+	// will use the direct exponential scaling from B_NORMAL_PRIORITY without additional multipliers.
+
+	int32 calculated_weight = static_cast<int32>(round(weight_fp));
+
+	// Apply overall caps and ensure minimum for active priorities
+	if (calculated_weight < kNewMinActiveWeight && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
+		calculated_weight = kNewMinActiveWeight;
+	if (calculated_weight > kNewMaxWeightCap)
+		calculated_weight = kNewMaxWeightCap;
+
+	// Final check: if an active priority somehow calculated to 1 (idle weight), bump it.
+	if (calculated_weight <= 1 && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
+		calculated_weight = kNewMinActiveWeight;
+
+	return calculated_weight;
 }
 
 static void
 _init_continuous_weights()
 {
+	dprintf("Scheduler: Initializing continuous weights table...\n");
 	for (int32 i = 0; i < B_MAX_PRIORITY; i++) {
 		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
-		// dprintf("Weight for prio %d = %d\n", i, gHaikuContinuousWeights[i]); // For debugging
+		// For extensive debugging of the generated table:
+		// dprintf("Weight for prio %3d = %6d\n", i, gHaikuContinuousWeights[i]);
 	}
 	// Ensure idle is absolutely minimal if prototype didn't set it to 1.
 	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1;
+	dprintf("Scheduler: Continuous weights table initialized.\n");
+	// Example output for key priorities:
+	// dprintf("Key Weights: Idle(0)=%d, LowActive(5)=%d, Normal(10)=%d, RTDisp(20)=%d, RTUser(30)=%d, Urgent(100)=%d, MaxRT(120)=%d\n",
+	//	gHaikuContinuousWeights[0], gHaikuContinuousWeights[5], gHaikuContinuousWeights[10],
+	//	gHaikuContinuousWeights[20], gHaikuContinuousWeights[30], gHaikuContinuousWeights[100], gHaikuContinuousWeights[120]);
 }
 
 // Toggle to switch between old and new weight calculation for testing.
@@ -146,9 +157,8 @@ static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
 
 static inline int32 scheduler_priority_to_weight(int32 priority) {
     // Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
-    // If it's false, this function would need to fall back to the old logic or panic.
-    // Given kUseContinuousWeights is already true by default in the file,
-    // gHaikuContinuousWeights should be populated.
+    // _init_continuous_weights() is called from scheduler_init().
+    // Given kUseContinuousWeights is true, gHaikuContinuousWeights should be populated.
 
     // Clamp priority to be a valid index for gHaikuContinuousWeights.
     // B_MAX_PRIORITY is 121, so valid indices are 0 to 120.
@@ -619,6 +629,38 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			threadData->SetVirtualRuntime(newAdjustedVRuntime);
 			TRACE_SCHED("set_prio: T %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 "->%" B_PRId32 ") rel_to_min_v %" B_PRId64 "\n",
 				thread->id, currentVRuntime, newAdjustedVRuntime, oldWeight, newWeight, min_v);
+		}
+	}
+
+	// --- Lag Adjustment for Fairness ---
+	// If the thread was running, adjust its current lag to reflect the service it
+	// received in its current (now interrupted/ending) slice, as if it had
+	// been running with the new weight all along for that slice.
+	if (wasRunning && oldWeight != newWeight && oldWeight > 0 && newWeight > 0) {
+		bigtime_t actualRuntimeInSlice = threadData->fTimeUsedInCurrentQuantum;
+		if (actualRuntimeInSlice > 0) {
+			// Service received under old weight: (actualRuntime * SCALE) / oldWeight
+			// Service that *should* have been accounted under new weight: (actualRuntime * SCALE) / newWeight
+			// Difference to add back to lag: OldService - NewService
+			bigtime_t lagAdjustment = 0;
+			// To avoid potential overflow with large actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE,
+			// calculate terms separately or use 128-bit intermediate if available.
+			// For now, direct calculation, assuming typical values won't overflow bigtime_t.
+			// lagAdjustment = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE / oldWeight)
+			//               - (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE / newWeight);
+			// Simplified: actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE * (1/oldW - 1/newW)
+			//           = actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE * (newW - oldW) / (oldW * newW)
+
+			// Let's use a structure that might be less prone to intermediate overflow
+			// if SCHEDULER_WEIGHT_SCALE is large and weights are small.
+			// Calculate weighted runtimes separately.
+			bigtime_t weightedRuntimeOld = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / oldWeight;
+			bigtime_t weightedRuntimeNew = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / newWeight;
+			lagAdjustment = weightedRuntimeOld - weightedRuntimeNew;
+
+			threadData->AddLag(lagAdjustment);
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ran %" B_PRId64 "us in slice. Lag adjusted by %" B_PRId64 " due to weight change (%d->%d). New Lag before recalc: %" B_PRId64 "\n",
+				thread->id, actualRuntimeInSlice, lagAdjustment, oldWeight, newWeight, threadData->Lag());
 		}
 	}
 

@@ -67,6 +67,137 @@ static void accel_invert_rect_clipped(engine_token* et, uint32 num_rects, void* 
 static void accel_fill_span_unclipped(engine_token* et, uint32 color, uint32 num_spans, void* list);
 static void accel_s2s_transparent_blit_unclipped(engine_token* et, uint32 tc, uint32 nr, void* l);
 static void accel_s2s_scaled_filtered_blit_unclipped(engine_token* et, void* s, void* d, uint32 nr, void* l);
+
+// Helper function to get info for all connectors
+static status_t
+accel_get_all_connector_infos(intel_i915_get_connector_info_args* infos_array, uint32* count)
+{
+	TRACE_HOOKS("accel_get_all_connector_infos called. Max count: %lu\n", *count);
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE_HOOKS("  Error: Accelerant not initialized.\n");
+		*count = 0;
+		return B_NO_INIT;
+	}
+	if (!infos_array || !count || *count == 0) {
+		TRACE_HOOKS("  Error: Invalid arguments (infos_array NULL, count NULL, or *count is 0).\n");
+		if (count) *count = 0;
+		return B_BAD_VALUE;
+	}
+
+	uint32 max_fetch = *count;
+	uint32 found_count = 0;
+
+	// Iterate through possible kernel port IDs. The kernel IOCTL expects kernel's enum intel_port_id_priv.
+	// We assume i915_port_id_user maps reasonably to these for iteration, stopping when kernel returns error.
+	for (uint32 kernel_port_idx = 1; kernel_port_idx < PRIV_MAX_PORTS; kernel_port_idx++) {
+		// PRIV_PORT_ID_NONE is 0, actual ports start from 1 (PRIV_PORT_A)
+		if (found_count >= max_fetch) {
+			TRACE_HOOKS("  Reached max_fetch limit (%lu).\n", max_fetch);
+			break;
+		}
+
+		intel_i915_get_connector_info_args kargs;
+		memset(&kargs, 0, sizeof(kargs));
+		kargs.connector_id = kernel_port_idx; // Send kernel's enum intel_port_id_priv
+
+		TRACE_HOOKS("  Querying kernel for connector_id (kernel enum): %lu\n", kargs.connector_id);
+		status_t status = ioctl(gInfo->device_fd, INTEL_I915_GET_CONNECTOR_INFO, &kargs, sizeof(kargs));
+
+		if (status == B_OK) {
+			infos_array[found_count++] = kargs;
+			TRACE_HOOKS("    Success: Found connector %s (user_type %u, kernel_id %u), connected: %d\n",
+				kargs.name, kargs.type, kernel_port_idx, kargs.is_connected);
+		} else if (status == B_ENTRY_NOT_FOUND || status == B_BAD_INDEX) {
+			TRACE_HOOKS("    Kernel indicated no more connectors (or bad index %lu): %s.\n", kernel_port_idx, strerror(status));
+			break; // No more connectors or invalid index
+		} else {
+			TRACE_HOOKS("    Error querying connector_id %lu: %s (0x%lx)\n", kernel_port_idx, strerror(status), status);
+			// Optionally, could decide to stop on other errors too, or just skip this one.
+			// For now, let's stop.
+			*count = found_count;
+			return status;
+		}
+	}
+
+	*count = found_count;
+	TRACE_HOOKS("  Finished querying. Found %lu connectors.\n", found_count);
+	return B_OK;
+}
+
+// Helper function to ensure a framebuffer GEM object exists for a pipe and mode
+static status_t
+accel_ensure_framebuffer_for_pipe(enum i915_pipe_id_user pipe_id_user, const display_mode* mode, uint32* fb_gem_handle_out)
+{
+	TRACE_HOOKS("accel_ensure_framebuffer_for_pipe: pipe_user %u, mode %dx%d@%dHz, space %d\n",
+		pipe_id_user, mode->virtual_width, mode->virtual_height,
+		(mode->timing.h_total * mode->timing.v_total > 0) ? (mode->timing.pixel_clock / (mode->timing.h_total * mode->timing.v_total / 1000)) : 0,
+		mode->space);
+
+	if (pipe_id_user >= I915_MAX_PIPES_USER || !mode || !fb_gem_handle_out || !gInfo || gInfo->device_fd < 0) {
+		TRACE_HOOKS("  Error: Invalid args (pipe_id_user %u, mode %p, fb_gem_handle_out %p, gInfo %p, fd %d)\n",
+			pipe_id_user, mode, fb_gem_handle_out, gInfo, gInfo ? gInfo->device_fd : -1);
+		return B_BAD_VALUE;
+	}
+
+	uint32 bpp = _get_bpp_from_colorspace_accel(mode->space);
+	if (bpp == 0) {
+		TRACE_HOOKS("  Error: Invalid bpp (0) for color space %d.\n", mode->space);
+		return B_BAD_VALUE;
+	}
+	if (mode->virtual_width == 0 || mode->virtual_height == 0) {
+		TRACE_HOOKS("  Error: Invalid mode dimensions (%dx%d).\n", mode->virtual_width, mode->virtual_height);
+		return B_BAD_VALUE;
+	}
+
+	struct pipe_framebuffer_info* pfb = &gInfo->pipe_framebuffers[pipe_id_user];
+
+	if (pfb->gem_handle != 0 &&
+		(pfb->width != mode->virtual_width || pfb->height != mode->virtual_height || pfb->format_bpp != bpp)) {
+		TRACE_HOOKS("  Info: Existing FB for pipe %u (%ux%u %ubpp) doesn't match new mode (%ux%u %ubpp). Closing old handle %u.\n",
+			pipe_id_user, pfb->width, pfb->height, pfb->format_bpp,
+			mode->virtual_width, mode->virtual_height, bpp, pfb->gem_handle);
+		intel_i915_gem_close_args close_args = { pfb->gem_handle };
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args)) != B_OK) {
+			TRACE_HOOKS("    Warning: Failed to close old GEM handle %u: %s\n", pfb->gem_handle, strerror(errno));
+		}
+		pfb->gem_handle = 0;
+		pfb->width = 0;
+		pfb->height = 0;
+		pfb->format_bpp = 0;
+	}
+
+	if (pfb->gem_handle == 0) {
+		intel_i915_gem_create_args create_args = {0};
+		create_args.width_px = mode->virtual_width;
+		create_args.height_px = mode->virtual_height;
+		create_args.bits_per_pixel = bpp;
+		create_args.creation_flags = I915_BO_ALLOC_TILED_X | I915_BO_ALLOC_PINNED | I915_BO_ALLOC_CPU_CLEAR;
+
+		TRACE_HOOKS("  Info: Creating new FB GEM object for pipe %u: %ux%u %ubpp, flags 0x%x.\n",
+			pipe_id_user, create_args.width_px, create_args.height_px, create_args.bits_per_pixel, create_args.creation_flags);
+
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CREATE, &create_args, sizeof(create_args)) != B_OK) {
+			TRACE_HOOKS("  Error: GEM_CREATE failed for pipe %u: %s\n", pipe_id_user, strerror(errno));
+			*fb_gem_handle_out = 0;
+			return B_NO_MEMORY;
+		}
+
+		pfb->gem_handle = create_args.handle;
+		pfb->width = create_args.width_px;
+		pfb->height = create_args.height_px;
+		pfb->format_bpp = create_args.bits_per_pixel;
+
+		TRACE_HOOKS("  Success: Created new FB GEM handle %u for pipe %u (%ux%u %ubpp). Actual size: %llu bytes.\n",
+			pfb->gem_handle, pipe_id_user, pfb->width, pfb->height, pfb->format_bpp, create_args.actual_allocated_size);
+	} else {
+		TRACE_HOOKS("  Info: Reusing existing FB GEM handle %u for pipe %u (%ux%u %ubpp).\n",
+			pfb->gem_handle, pipe_id_user, pfb->width, pfb->height, pfb->format_bpp);
+	}
+
+	*fb_gem_handle_out = pfb->gem_handle;
+	return B_OK;
+}
+
 static void accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void* list, void* clip_info_ptr);
 static void accel_draw_line_array(engine_token* et, uint32 count, uint8 *raw_list, uint32 color);
 static void accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern);
@@ -211,134 +342,253 @@ static status_t accel_ensure_framebuffer_for_pipe(enum i915_pipe_id_user pipe_id
 static status_t
 intel_i915_set_display_mode(display_mode *app_server_mode_list, uint32 app_server_mode_count)
 {
-    // ... (Implementation from previous steps, including Part 1 and Part 2 logic) ...
-    // This function is now quite long and contains the logic to:
-    // 1. Get all connector infos.
-    // 2. Iterate app_server_mode_list to find active displays.
-    // 3. Match active displays to connected connectors.
-    // 4. Assign pipes.
-    // 5. Ensure framebuffers for active pipes.
-    // 6. Build final_configs_for_kernel including inactive pipes.
-    // 7. Call intel_i915_set_display_configuration.
-    // For brevity, not repeating the full code here, assuming it's as developed.
-	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
-    TRACE("intel_i915_set_display_mode: app_server_mode_count %lu (multi-monitor path)\n", app_server_mode_count);
+	TRACE_HOOKS("intel_i915_set_display_mode: app_server wants %lu mode(s).\n", app_server_mode_count);
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE_HOOKS("  Error: Accelerant not initialized.\n");
+		return B_NO_INIT;
+	}
+	if (app_server_mode_count > I915_MAX_PIPES_USER) {
+		TRACE_HOOKS("  Error: app_server_mode_count (%lu) exceeds I915_MAX_PIPES_USER (%d).\n",
+			app_server_mode_count, I915_MAX_PIPES_USER);
+		return B_BAD_VALUE;
+	}
+	if (app_server_mode_count > 0 && app_server_mode_list == NULL) {
+		TRACE_HOOKS("  Error: app_server_mode_list is NULL but count is %lu.\n", app_server_mode_count);
+		return B_BAD_ADDRESS;
+	}
 
-    intel_i915_get_connector_info_args connector_infos[I915_MAX_PORTS_USER];
-    uint32 num_kernel_connectors = I915_MAX_PORTS_USER;
-    if (accel_get_all_connector_infos(connector_infos, &num_kernel_connectors) != B_OK) {
-        TRACE("SET_DISPLAY_MODE: Failed to get connector info from kernel.\n"); return B_ERROR;
-    }
+	// 1. Get all connector infos
+	intel_i915_get_connector_info_args connector_infos[I915_MAX_PORTS_USER]; // Max possible ports
+	uint32 num_detected_connectors = I915_MAX_PORTS_USER;
+	status_t status = accel_get_all_connector_infos(connector_infos, &num_detected_connectors);
+	if (status != B_OK) {
+		TRACE_HOOKS("  Error: Failed to get connector info from kernel: %s\n", strerror(status));
+		return status;
+	}
+	TRACE_HOOKS("  Detected %lu connectors from kernel.\n", num_detected_connectors);
 
-    accelerant_display_config active_configs_temp[I915_MAX_PIPES_USER];
-    uint32 active_config_count = 0;
-    uint32 primary_pipe_user_id = I915_PIPE_USER_INVALID;
-    uint32 assigned_connector_kernel_ids_mask = 0;
-    uint32 assigned_pipe_user_ids_mask = 0;
-    uint32 current_connector_info_idx = 0;
+	accelerant_display_config assigned_configs[I915_MAX_PIPES_USER];
+	uint32 assigned_config_count = 0;
+	uint32 primary_pipe_user_id = I915_PIPE_USER_INVALID;
+	uint64 assigned_connector_kernel_ids_mask = 0; // Using kernel IDs for this mask
+	uint32 assigned_pipe_user_ids_mask = 0;      // Using user pipe IDs for this mask
 
-    for (uint32 i = 0; i < app_server_mode_count && active_config_count < I915_MAX_PIPES_USER; i++) {
-        display_mode* current_app_mode = &app_server_mode_list[i];
-        intel_i915_get_connector_info_args* chosen_connector_info = NULL;
+	// 2. Iterate app_server_mode_list to find active displays
+	// 3. Match active displays to connected connectors
+	// 4. Assign pipes
+	// 5. Ensure framebuffers for active pipes
+	uint32 current_connector_search_idx = 0;
+	for (uint32 i = 0; i < app_server_mode_count; i++) {
+		if (assigned_config_count >= I915_MAX_PIPES_USER) {
+			TRACE_HOOKS("  Warning: More app_server modes (%u) than available pipes (%d). Ignoring extra modes.\n",
+				app_server_mode_count, I915_MAX_PIPES_USER);
+			break;
+		}
+		display_mode* current_app_mode = &app_server_mode_list[i];
+		intel_i915_get_connector_info_args* chosen_connector_info = NULL;
 
-        for (; current_connector_info_idx < num_kernel_connectors; current_connector_info_idx++) {
-            if (connector_infos[current_connector_info_idx].is_connected &&
-                !(assigned_connector_kernel_ids_mask & (1 << connector_infos[current_connector_info_idx].connector_id))) {
-                chosen_connector_info = &connector_infos[current_connector_info_idx];
-                break;
-            }
-        }
-        if (!chosen_connector_info) { TRACE("SET_DISPLAY_MODE: No more connected/available connectors for app_mode %u.\n", i); break; }
+		// Find an available *connected* connector
+		for (uint32 conn_idx_loop = 0; conn_idx_loop < num_detected_connectors; conn_idx_loop++) {
+			// Cycle through connector_infos to ensure we don't always pick the first ones
+			uint32 actual_conn_idx = (current_connector_search_idx + conn_idx_loop) % num_detected_connectors;
+			intel_i915_get_connector_info_args* candidate_connector = &connector_infos[actual_conn_idx];
 
-        enum i915_pipe_id_user pipe_to_assign = I915_PIPE_USER_INVALID;
-        for (uint32 p_idx = 0; p_idx < I915_MAX_PIPES_USER; ++p_idx) {
-            if (!(assigned_pipe_user_ids_mask & (1 << p_idx))) { pipe_to_assign = (enum i915_pipe_id_user)p_idx; break; }
-        }
-        if (pipe_to_assign == I915_PIPE_USER_INVALID) { TRACE("SET_DISPLAY_MODE: No available pipes to assign.\n"); break; }
+			if (candidate_connector->is_connected &&
+				!(assigned_connector_kernel_ids_mask & (1ULL << candidate_connector->connector_id))) {
+				chosen_connector_info = candidate_connector;
+				current_connector_search_idx = (actual_conn_idx + 1) % num_detected_connectors; // Start next search from here
+				TRACE_HOOKS("  Mode %u: Matched to connector %s (kernel_id %u, user_type %u).\n",
+					i, chosen_connector_info->name, chosen_connector_info->connector_id, chosen_connector_info->type);
+				break;
+			}
+		}
 
-        uint32 fb_handle;
-        status_t fb_status = accel_ensure_framebuffer_for_pipe(pipe_to_assign, current_app_mode, &fb_handle);
-        if (fb_status != B_OK) {
-            TRACE("SET_DISPLAY_MODE: Failed to ensure FB for app_mode %u, pipe %u: %s. Aborting.\n", i, pipe_to_assign, strerror(fb_status));
-            for (uint32 cleanup_idx = 0; cleanup_idx < active_config_count; cleanup_idx++) {
-                if (active_configs_temp[cleanup_idx].fb_gem_handle != 0) {
-                    intel_i915_gem_close_args close_args = { active_configs_temp[cleanup_idx].fb_gem_handle };
-                    ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
-                    gInfo->pipe_framebuffers[active_configs_temp[cleanup_idx].pipe_id].gem_handle = 0;
-                }
-            }
-            return fb_status;
-        }
-        assigned_pipe_user_ids_mask |= (1 << pipe_to_assign);
-        assigned_connector_kernel_ids_mask |= (1 << chosen_connector_info->connector_id);
-        current_connector_info_idx++;
+		if (!chosen_connector_info) {
+			TRACE_HOOKS("  Warning: No more connected/available connectors for app_server_mode %u. Stopping assignment.\n", i);
+			break;
+		}
 
-        accelerant_display_config* current_accel_cfg = &active_configs_temp[active_config_count];
-        current_accel_cfg->pipe_id = pipe_to_assign; current_accel_cfg->active = true;
-        current_accel_cfg->mode = *current_app_mode; current_accel_cfg->connector_id = chosen_connector_info->connector_id;
-        current_accel_cfg->fb_gem_handle = fb_handle;
-        current_accel_cfg->pos_x = current_app_mode->h_display_start; current_accel_cfg->pos_y = current_app_mode->v_display_start;
-        if (primary_pipe_user_id == I915_PIPE_USER_INVALID) primary_pipe_user_id = pipe_to_assign;
-        active_config_count++;
-    }
+		// Assign an available pipe
+		enum i915_pipe_id_user pipe_to_assign = I915_PIPE_USER_INVALID;
+		for (uint32 p_user_idx = 0; p_user_idx < I915_MAX_PIPES_USER; ++p_user_idx) {
+			if (!(assigned_pipe_user_ids_mask & (1 << p_user_idx))) {
+				pipe_to_assign = (enum i915_pipe_id_user)p_user_idx;
+				TRACE_HOOKS("  Mode %u: Assigning to user pipe %u.\n", i, pipe_to_assign);
+				break;
+			}
+		}
 
-    accelerant_display_config final_kernel_configs[I915_MAX_PIPES_USER];
-    memset(final_kernel_configs, 0, sizeof(final_kernel_configs));
-    uint32 final_config_idx = 0;
-    for (uint32 k = 0; k < active_config_count; k++) { final_kernel_configs[final_config_idx++] = active_configs_temp[k]; }
+		if (pipe_to_assign == I915_PIPE_USER_INVALID) {
+			TRACE_HOOKS("  Warning: No available pipes to assign for app_server_mode %u. Stopping assignment.\n", i);
+			break; // Should not happen if app_server_mode_count <= I915_MAX_PIPES_USER
+		}
 
-    for (enum i915_pipe_id_user p_id = I915_PIPE_USER_A; p_id < I915_MAX_PIPES_USER; ++p_id) {
-        if (!(assigned_pipe_user_ids_mask & (1 << p_id))) {
-            final_kernel_configs[final_config_idx].pipe_id = p_id;
-            final_kernel_configs[final_config_idx].active = false;
-            for(uint32 k_conn=0; k_conn < num_kernel_connectors; ++k_conn) {
-                if (connector_infos[k_conn].current_pipe_id == p_id) {
-                    final_kernel_configs[final_config_idx].connector_id = connector_infos[k_conn].connector_id; break;
-                }
-            }
-            final_config_idx++;
-        }
-    }
-    if (app_server_mode_count > 0 && active_config_count == 0) { TRACE("SET_DISPLAY_MODE: Requested modes but none mapped.\n"); return B_ERROR; }
+		// Ensure framebuffer for this pipe and mode
+		uint32 fb_handle;
+		status = accel_ensure_framebuffer_for_pipe(pipe_to_assign, current_app_mode, &fb_handle);
+		if (status != B_OK) {
+			TRACE_HOOKS("  Error: Failed to ensure framebuffer for app_mode %u, user pipe %u: %s. Aborting.\n",
+				i, pipe_to_assign, strerror(status));
+			// Cleanup already assigned framebuffers for this transaction attempt
+			for (uint32 cleanup_idx = 0; cleanup_idx < assigned_config_count; cleanup_idx++) {
+				if (assigned_configs[cleanup_idx].fb_gem_handle != 0) {
+					intel_i915_gem_close_args close_args = { assigned_configs[cleanup_idx].fb_gem_handle };
+					ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+					// Also clear from gInfo->pipe_framebuffers to force realloc next time
+					gInfo->pipe_framebuffers[assigned_configs[cleanup_idx].pipe_id].gem_handle = 0;
+				}
+			}
+			return status;
+		}
 
-    status_t status = intel_i915_set_display_configuration(final_config_idx, final_kernel_configs, primary_pipe_user_id, 0);
-    if (status != B_OK) { TRACE("SET_DISPLAY_MODE: intel_i915_set_display_configuration failed: %s\n", strerror(status));}
-    else { TRACE("SET_DISPLAY_MODE: intel_i915_set_display_configuration successful.\n"); }
-    return status;
+		// Mark resources as used for this transaction
+		assigned_pipe_user_ids_mask |= (1 << pipe_to_assign);
+		assigned_connector_kernel_ids_mask |= (1ULL << chosen_connector_info->connector_id);
+
+		// Populate this entry in our temporary list of active configs
+		accelerant_display_config* current_accel_cfg = &assigned_configs[assigned_config_count];
+		current_accel_cfg->pipe_id = pipe_to_assign; // User pipe ID
+		current_accel_cfg->active = true;
+		current_accel_cfg->mode = *current_app_mode;
+		current_accel_cfg->connector_id = chosen_connector_info->connector_id; // Kernel connector ID
+		current_accel_cfg->fb_gem_handle = fb_handle;
+		current_accel_cfg->pos_x = current_app_mode->h_display_start; // App_server provides these
+		current_accel_cfg->pos_y = current_app_mode->v_display_start;
+
+		if (primary_pipe_user_id == I915_PIPE_USER_INVALID) {
+			primary_pipe_user_id = pipe_to_assign;
+			TRACE_HOOKS("  Mode %u: Setting primary user pipe to %u.\n", i, primary_pipe_user_id);
+		}
+		assigned_config_count++;
+	}
+
+	// 6. Build final_configs_for_kernel including inactive pipes
+	accelerant_display_config final_configs_for_kernel[I915_MAX_PIPES_USER];
+	memset(final_configs_for_kernel, 0, sizeof(final_configs_for_kernel));
+	uint32 final_idx = 0;
+
+	// Add active configurations first
+	for (uint32 k = 0; k < assigned_config_count; k++) {
+		final_configs_for_kernel[final_idx++] = assigned_configs[k];
+	}
+
+	// Add entries for pipes that should be inactive
+	for (enum i915_pipe_id_user p_id_user = I915_PIPE_USER_A; p_id_user < I915_MAX_PIPES_USER; ++p_id_user) {
+		if (!(assigned_pipe_user_ids_mask & (1 << p_id_user))) {
+			if (final_idx >= I915_MAX_PIPES_USER) break; // Should not happen
+			final_configs_for_kernel[final_idx].pipe_id = p_id_user;
+			final_configs_for_kernel[final_idx].active = false;
+			// Try to find which connector this pipe might have been using previously
+			// This helps kernel to know which port to disable if it was tied to this pipe.
+			final_configs_for_kernel[final_idx].connector_id = I915_PORT_ID_USER_NONE; // Default
+			for(uint32 k_conn=0; k_conn < num_detected_connectors; ++k_conn) {
+				if (connector_infos[k_conn].current_pipe_id == p_id_user) { // current_pipe_id is user enum
+					final_configs_for_kernel[final_idx].connector_id = connector_infos[k_conn].connector_id; // kernel ID
+					break;
+				}
+			}
+			final_configs_for_kernel[final_idx].fb_gem_handle = 0; // No FB for inactive
+			// mode and pos are zeroed by memset
+			TRACE_HOOKS("  Adding inactive config for user pipe %u, final_idx %lu, connector_id %u \n",
+				p_id_user, final_idx, final_configs_for_kernel[final_idx].connector_id);
+			final_idx++;
+		}
+	}
+	uint32 total_configs_for_kernel = final_idx;
+
+
+	// If app_server requested modes but we couldn't map any, it's an error.
+	if (app_server_mode_count > 0 && assigned_config_count == 0) {
+		TRACE_HOOKS("  Error: App_server requested %lu modes, but none could be mapped to connectors/pipes.\n", app_server_mode_count);
+		return B_ERROR; // Or a more specific error
+	}
+	// If no modes requested, and none active, it's a valid "disable all" scenario.
+	if (app_server_mode_count == 0 && assigned_config_count == 0) {
+		TRACE_HOOKS("  Info: No modes requested by app_server, and no active configs assigned. Will disable all displays.\n");
+		// Ensure primary_pipe_user_id is invalid if all are off
+		if (total_configs_for_kernel > 0) primary_pipe_user_id = I915_PIPE_USER_INVALID;
+	}
+
+
+	// 7. Call intel_i915_set_display_configuration hook
+	TRACE_HOOKS("  Calling intel_i915_set_display_configuration with %lu total configs. Primary user pipe: %u\n",
+		total_configs_for_kernel, primary_pipe_user_id);
+	for(uint32 dbg_i=0; dbg_i < total_configs_for_kernel; ++dbg_i) {
+		TRACE_HOOKS("    Kernel Cfg %u: PipeUser %u, Active %d, ConnKernel %u, FBHandle %u, Mode %ux%u, Pos %ld,%ld\n",
+			dbg_i, final_configs_for_kernel[dbg_i].pipe_id, final_configs_for_kernel[dbg_i].active,
+			final_configs_for_kernel[dbg_i].connector_id, final_configs_for_kernel[dbg_i].fb_gem_handle,
+			final_configs_for_kernel[dbg_i].mode.virtual_width, final_configs_for_kernel[dbg_i].mode.virtual_height,
+			final_configs_for_kernel[dbg_i].pos_x, final_configs_for_kernel[dbg_i].pos_y);
+	}
+
+	status = intel_i915_set_display_configuration(total_configs_for_kernel, final_configs_for_kernel, primary_pipe_user_id, 0);
+
+	if (status != B_OK) {
+		TRACE_HOOKS("  Error: intel_i915_set_display_configuration hook failed: %s\n", strerror(status));
+		// If the set_config failed, the FBs we allocated might still be around.
+		// The kernel is responsible for not leaking them if its internal state commit fails.
+		// Our accel_ensure_framebuffer_for_pipe will clean up its own gInfo->pipe_framebuffers
+		// on the *next* call if modes change.
+	} else {
+		TRACE_HOOKS("  intel_i915_set_display_configuration hook successful.\n");
+		// Update shared_info to reflect this new state (kernel IOCTL should do this, but this is good for consistency)
+		// This part might be redundant if kernel's SET_DISPLAY_CONFIG IOCTL robustly updates shared_info.
+		// However, accelerant's view in gInfo->shared_info also needs to be up-to-date.
+		// A GET_DISPLAY_CONFIG call here could refresh it, or manually update based on what was sent.
+		// For now, assume kernel updates shared_info correctly.
+	}
+	return status;
 }
 
 static status_t
 intel_i915_get_display_configuration_hook(accelerant_get_display_configuration_args* args)
 {
-	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
-	if (!args) return B_BAD_VALUE;
-	if (args->max_configs_to_get > 0 && args->configs_out_ptr == NULL) return B_BAD_ADDRESS;
+	TRACE_HOOKS("intel_i915_get_display_configuration_hook called.\n");
+	if (!gInfo || gInfo->device_fd < 0) {
+		TRACE_HOOKS("  Error: Accelerant not initialized (gInfo: %p, fd: %d).\n", gInfo, gInfo ? gInfo->device_fd : -1);
+		return B_NO_INIT;
+	}
+	if (!args) {
+		TRACE_HOOKS("  Error: Input args pointer is NULL.\n");
+		return B_BAD_VALUE;
+	}
+	if (args->max_configs_to_get > 0 && args->configs_out_ptr == NULL) {
+		TRACE_HOOKS("  Error: max_configs_to_get (%lu) > 0 but configs_out_ptr is NULL.\n", args->max_configs_to_get);
+		return B_BAD_ADDRESS;
+	}
 
 	struct i915_get_display_config_args kernel_ioctl_args;
 	memset(&kernel_ioctl_args, 0, sizeof(kernel_ioctl_args));
-	struct i915_display_pipe_config* temp_kernel_pipe_configs = NULL;
-	size_t temp_buffer_alloc_count = min_c(args->max_configs_to_get, (uint32)I915_MAX_PIPES_USER);
 
-	if (temp_buffer_alloc_count > 0) {
-		temp_kernel_pipe_configs = (struct i915_display_pipe_config*)malloc(temp_buffer_alloc_count * sizeof(struct i915_display_pipe_config));
-		if (temp_kernel_pipe_configs == NULL) return B_NO_MEMORY;
-		kernel_ioctl_args.pipe_configs_ptr = (uint64)(uintptr_t)temp_kernel_pipe_configs;
-	} else { kernel_ioctl_args.pipe_configs_ptr = 0; }
-	kernel_ioctl_args.max_pipe_configs_to_get = temp_buffer_alloc_count;
+	// We will directly use the user-provided buffer if it's valid and large enough.
+	// The kernel IOCTL expects a user-space pointer.
+	kernel_ioctl_args.pipe_configs_ptr = (uint64)(uintptr_t)args->configs_out_ptr;
+	kernel_ioctl_args.max_pipe_configs_to_get = args->max_configs_to_get;
+
+	TRACE_HOOKS("  Calling INTEL_I915_GET_DISPLAY_CONFIG IOCTL. max_configs_to_get: %lu, user_buffer: %p\n",
+		kernel_ioctl_args.max_pipe_configs_to_get, (void*)kernel_ioctl_args.pipe_configs_ptr);
 
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_GET_DISPLAY_CONFIG, &kernel_ioctl_args, sizeof(kernel_ioctl_args));
 
 	if (status == B_OK) {
-		args->num_configs_returned = kernel_ioctl_args.num_pipe_configs;
-		args->primary_pipe_id_returned_user = kernel_ioctl_args.primary_pipe_id;
-		if (temp_kernel_pipe_configs != NULL && args->configs_out_ptr != NULL) {
-			uint32 num_to_copy = min_c(kernel_ioctl_args.num_pipe_configs, args->max_configs_to_get);
-			for (uint32 i = 0; i < num_to_copy; i++) { // Direct struct copy as they are identical
-				memcpy(&args->configs_out_ptr[i], &temp_kernel_pipe_configs[i], sizeof(accelerant_display_config));
-			}
-		}
-	} else { args->num_configs_returned = 0; args->primary_pipe_id_returned_user = I915_PIPE_USER_INVALID; }
-	if (temp_kernel_pipe_configs != NULL) free(temp_kernel_pipe_configs);
+		// The kernel IOCTL handler directly fills num_pipe_configs and primary_pipe_id
+		// into the user_args_ptr structure passed to it (which is kernel_ioctl_args here).
+		// It also fills the array pointed to by pipe_configs_ptr.
+		// So, we just need to copy these scalar output values back to the caller's struct.
+		args->num_configs_returned = kernel_ioctl_args.num_pipe_configs; // This was filled by kernel
+		args->primary_pipe_id_returned_user = kernel_ioctl_args.primary_pipe_id; // This was filled by kernel
+
+		TRACE_HOOKS("  IOCTL successful. Num configs returned: %lu, Primary pipe ID: %lu\n",
+			args->num_configs_returned, args->primary_pipe_id_returned_user);
+
+		// The `args->configs_out_ptr` array should have been filled directly by the kernel.
+		// No extra memcpy is needed here because we passed args->configs_out_ptr to the kernel.
+	} else {
+		TRACE_HOOKS("  IOCTL failed with status: %s (0x%lx)\n", strerror(status), status);
+		args->num_configs_returned = 0;
+		args->primary_pipe_id_returned_user = I915_PIPE_USER_INVALID;
+	}
+
 	return status;
 }
 

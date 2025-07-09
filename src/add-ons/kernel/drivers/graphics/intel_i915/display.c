@@ -363,6 +363,44 @@ status_t intel_display_set_plane_offset(intel_i915_device_info* devInfo, enum pi
 status_t intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint32_t dpms_mode) { /* ... as before ... */ return B_OK; }
 status_t intel_i915_set_cursor_bitmap_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length) { /* ... as before ... */ return B_OK; }
 status_t intel_i915_set_cursor_state_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length) { /* ... as before ... */ return B_OK; }
+
+void
+intel_display_get_connector_name(enum intel_port_id_priv port_id, enum intel_output_type_priv output_type, char* buffer, size_t buffer_size)
+{
+	if (buffer == NULL || buffer_size == 0)
+		return;
+
+	const char* type_str = "Unknown";
+	switch (output_type) {
+		case PRIV_OUTPUT_ANALOG:    type_str = "VGA"; break;
+		case PRIV_OUTPUT_LVDS:      type_str = "LVDS"; break;
+		case PRIV_OUTPUT_TMDS_DVI:  type_str = "DVI"; break;
+		case PRIV_OUTPUT_TMDS_HDMI: type_str = "HDMI"; break;
+		case PRIV_OUTPUT_DP:        type_str = "DP"; break;
+		case PRIV_OUTPUT_EDP:       type_str = "eDP"; break;
+		case PRIV_OUTPUT_DSI:       type_str = "DSI"; break;
+		default: break;
+	}
+
+	// Kernel port IDs are 1-based for A-F etc.
+	char port_char = '?';
+	if (port_id >= PRIV_PORT_A && port_id <= PRIV_PORT_F) { // Assuming F is the max for simple char mapping
+		port_char = 'A' + (port_id - PRIV_PORT_A);
+	} else if (port_id > PRIV_PORT_F && port_id < PRIV_MAX_PORTS) {
+		// For ports beyond F, could use numbers or specific names if known (e.g. TC1 for Type-C)
+		// For now, just use a generic number based on its enum value.
+		snprintf(buffer, buffer_size, "%s-%d", type_str, (int)port_id);
+		return;
+	}
+
+
+	if (port_char != '?') {
+		snprintf(buffer, buffer_size, "%s-%c", type_str, port_char);
+	} else {
+		snprintf(buffer, buffer_size, "%s-Unknown", type_str);
+	}
+}
+
 intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id) { /* ... as before ... */ return NULL; }
 
 // Remove old planned_pipe_config struct definition from display.c if it was there.

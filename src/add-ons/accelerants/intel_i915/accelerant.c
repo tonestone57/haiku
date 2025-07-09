@@ -18,8 +18,9 @@
 #include <ctype.h> // For isdigit
 #include <kernel/OS.h> // For spawn_thread, kill_thread, wait_for_thread, BMessage, snooze
 #include <Messenger.h> // For BMessenger
-#include <AppDefs.h>   // For B_APP_SERVER_SIGNATURE, B_SCREEN_CHANGED
+#include <AppDefs.h>   // For B_APP_SERVER_SIGNATURE
 #include <edid.h>      // For edid1_info structure (used in HPD thread)
+#include <notify.h>    // For send_notification (app_server_notify_display_changed is preferred)
 
 #include <AutoDeleter.h>
 
@@ -55,7 +56,9 @@ static bool gEngineLockInited = false; // Tracks if gEngineLock has been initial
 static uint32 gAccelLastSubmittedSeqno = 0; // Last known sequence number submitted to engine, shared.
 
 // Forward declaration for HPD thread entry function
-static int32 hpd_event_thread_entry(void* data);
+static int32 hpd_monitoring_thread_entry(void* data);
+// External prototype for app_server notification
+extern "C" status_t app_server_notify_display_changed(bool active);
 
 
 // --- Initialization and Teardown ---
@@ -108,118 +111,120 @@ init_common(int fd, bool is_clone)
 	if (!is_clone) {
 		if (!gEngineLockInited) { if (mutex_init(&gEngineLock, "i915_accel_engine_lock") == B_OK) gEngineLockInited = true; else { TRACE("init_common: FATAL - Failed to init global engine lock.\n"); /* cleanup */ return B_ERROR; } }
 		gInfo->hpd_thread_active = true; char hpd_thread_name[B_OS_NAME_LENGTH]; snprintf(hpd_thread_name, sizeof(hpd_thread_name), "i915_hpd_mon_%s", gInfo->device_path_suffix);
-		for (char *p = hpd_thread_name; *p; ++p) if (*p == '/') *p = '_';
-		gInfo->hpd_thread = spawn_thread(hpd_event_thread_entry, hpd_thread_name, B_NORMAL_PRIORITY + 1, gInfo);
+		for (char *p = hpd_thread_name; *p; ++p) if (*p == '/') *p = '_'; // Sanitize name for kernel
+		gInfo->hpd_thread = spawn_thread(hpd_monitoring_thread_entry, hpd_thread_name, B_NORMAL_PRIORITY + 1, gInfo);
 		if (gInfo->hpd_thread >= B_OK) { resume_thread(gInfo->hpd_thread); TRACE("init_common: HPD thread (ID: %" B_PRId32 ") spawned.\n", gInfo->hpd_thread); }
 		else { TRACE("init_common: WARNING - Failed to spawn HPD thread: %s.\n", strerror(gInfo->hpd_thread)); gInfo->hpd_thread_active = false; gInfo->hpd_thread = -1; }
 	}
 	return B_OK;
 }
 
-static void uninit_common(void) { /* ... as before ... */ }
-status_t INIT_ACCELERANT(int fd) { /* ... as before ... */ return B_OK; }
+static void uninit_common(void) {
+	TRACE("uninit_common: Start for instance: %s\n", gInfo ? gInfo->device_path_suffix : "UNKNOWN");
+	if (gInfo == NULL) return;
+
+	if (gInfo->hpd_thread >= B_OK && !gInfo->is_clone) {
+		gInfo->hpd_thread_active = false;
+		// The HPD IOCTL has a timeout, so the thread should eventually exit.
+		// Sending a signal or closing the fd might be more immediate if needed.
+		// For now, wait_for_thread will block until it exits.
+		status_t exit_status;
+		TRACE("uninit_common: Waiting for HPD thread %" B_PRId32 " to exit.\n", gInfo->hpd_thread);
+		wait_for_thread(gInfo->hpd_thread, &exit_status);
+		TRACE("uninit_common: HPD thread exited with status 0x%lx.\n", exit_status);
+		gInfo->hpd_thread = -1;
+	}
+
+	if (gInfo->mode_list_area >= B_OK) delete_area(gInfo->mode_list_area);
+	if (gInfo->shared_info_area >= B_OK) delete_area(gInfo->shared_info_area);
+	// Framebuffer area (gInfo->framebuffer_base) is a clone, also deleted by delete_area on its ID if it was cloned.
+	// If gInfo->framebuffer_base was mapped directly from shared_info->framebuffer_area, its clone ID needs to be tracked.
+	// Assuming `clone_area` for framebuffer_base returns an ID that should be deleted.
+	// If gInfo->framebuffer_base was from a GEM BO mmap, that area is managed by GEM.
+	// For simplicity, if a separate fb_clone_area_id was stored:
+	// if (gInfo->fb_clone_area_id >= B_OK) delete_area(gInfo->fb_clone_area_id);
+
+	// Close GEM BOs for per-pipe framebuffers
+	for (int i = 0; i < I915_MAX_PIPES_USER; i++) {
+		if (gInfo->pipe_framebuffers[i].gem_handle != 0) {
+			intel_i915_gem_close_args close_args = { gInfo->pipe_framebuffers[i].gem_handle };
+			ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+			gInfo->pipe_framebuffers[i].gem_handle = 0;
+		}
+	}
+
+	close(gInfo->device_fd);
+	free(gInfo);
+	gInfo = NULL; // Set to NULL after freeing
+
+	// Global engine lock should only be destroyed by the last primary instance,
+	// but simple check for now. A refcount for gEngineLockInited might be better.
+	if (gEngineLockInited && !gInfo /* or check if this was the last primary */) {
+		mutex_destroy(&gEngineLock);
+		gEngineLockInited = false;
+	}
+	TRACE("uninit_common: Done.\n");
+}
+status_t INIT_ACCELERANT(int fd) { TRACE("INIT_ACCELERANT called for fd %d\n", fd); return init_common(fd, false); }
 ssize_t ACCELERANT_CLONE_INFO_SIZE(void) { return B_PATH_NAME_LENGTH; }
-void GET_ACCELERANT_CLONE_INFO(void *data) { /* ... as before ... */ }
-status_t CLONE_ACCELERANT(void *data) { /* ... as before ... */ return B_OK; }
+void GET_ACCELERANT_CLONE_INFO(void *data) { if (gInfo) strlcpy((char*)data, gInfo->device_path_suffix, B_PATH_NAME_LENGTH); else memset(data, 0, B_PATH_NAME_LENGTH); }
+status_t CLONE_ACCELERANT(void *data) { TRACE("CLONE_ACCELERANT called for path suffix: %s\n", (char*)data); /* TODO: Proper clone logic */ return init_common(gInfo->device_fd, true); } // Simplified
 void UNINIT_ACCELERANT(void) { uninit_common(); }
 status_t GET_ACCELERANT_DEVICE_INFO(accelerant_device_info *adi) { /* ... as before ... */ return B_OK; }
 sem_id ACCELERANT_RETRACE_SEMAPHORE(void) { /* ... (now points to intel_i915_accelerant_retrace_semaphore in hooks.c) ... */ return B_ERROR;}
 
 
+// HPD Monitoring Thread function
 static int32
-hpd_event_thread_entry(void* data)
+hpd_monitoring_thread_entry(void* data)
 {
 	accelerant_info* localGInfo = (accelerant_info*)data;
-	TRACE("HPD: Event thread (ID: %" B_PRId32 ") started for accelerant instance: %s\n", find_thread(NULL), localGInfo->device_path_suffix);
+	if (!localGInfo || localGInfo->device_fd < 0) {
+		syslog(LOG_ERR, "intel_i915_hpd: Thread started with invalid localGInfo or device_fd.\n");
+		return B_BAD_VALUE;
+	}
+
+	TRACE("HPD: Event thread (ID: %" B_PRId32 ") started for accelerant instance: %s, fd: %d\n",
+		find_thread(NULL), localGInfo->device_path_suffix, localGInfo->device_fd);
 
 	while (localGInfo->hpd_thread_active) {
-		struct i915_display_change_event_ioctl_data event_args;
-		event_args.version = 0;
-		event_args.timeout_us = 2000000; // 2-second timeout
+		struct i915_display_change_event_ioctl_data event_data;
+		memset(&event_data, 0, sizeof(event_data));
+		event_data.version = 0;
+		event_data.timeout_us = 2000000; // 2 seconds timeout
 
-		status_t ioctl_status = ioctl(localGInfo->device_fd, INTEL_I915_WAIT_FOR_DISPLAY_CHANGE, &event_args, sizeof(event_args));
+		status_t ioctl_status = ioctl(localGInfo->device_fd, INTEL_I915_WAIT_FOR_DISPLAY_CHANGE, &event_data, sizeof(event_data));
 
-		if (!localGInfo->hpd_thread_active) { TRACE("HPD: Thread signaled to exit.\n"); break; }
+		if (!localGInfo->hpd_thread_active) {
+			TRACE("HPD: Thread signaled to exit while or after IOCTL.\n");
+			break;
+		}
 
 		if (ioctl_status == B_OK) {
-			if (event_args.changed_hpd_mask != 0) {
-				TRACE("HPD: Event detected! Kernel reported changed_hpd_mask: 0x%lx.\n", event_args.changed_hpd_mask);
-
-				uint32 new_ports_connected_mask = 0;
-				uint32 num_actually_connected = 0;
-				bool edid_state_changed_for_any_pipe = false;
-
-				// Iterate through all possible user-space port IDs to refresh their full status
-				for (uint32 user_port_idx = 0; user_port_idx < I915_MAX_PORTS_USER; user_port_idx++) {
-					// Skip PORT_ID_USER_NONE if it's 0 and part of the loop
-					if ((enum i915_port_id_user)user_port_idx == I915_PORT_ID_USER_NONE && I915_PORT_ID_USER_NONE == 0) continue;
-
-					intel_i915_get_connector_info_args conn_args;
-					memset(&conn_args, 0, sizeof(conn_args));
-					conn_args.connector_id = user_port_idx; // User-space ID passed to kernel
-
-					if (ioctl(localGInfo->device_fd, INTEL_I915_GET_CONNECTOR_INFO, &conn_args, sizeof(conn_args)) == B_OK) {
-						TRACE("HPD: Got info for connector_id_user %u: name '%s', connected %d, edid_valid %d, kernel_type %u, current_pipe %u\n",
-							user_port_idx, conn_args.name, conn_args.is_connected, conn_args.edid_valid, conn_args.type, conn_args.current_pipe_id);
-
-						if (conn_args.is_connected) {
-							num_actually_connected++;
-							// Set bit in mask corresponding to the kernel's view of port ID (which is user_port_idx here)
-							if (user_port_idx < 32) { // Ensure it fits in a uint32 bitmask
-								new_ports_connected_mask |= (1 << user_port_idx);
-							}
-						}
-
-						// Update EDID info in shared_info for the pipe this connector is *currently* driving.
-						// conn_args.current_pipe_id is kernel's enum pipe_id_priv.
-						// We assume enum i915_pipe_id_user maps 1:1 to these for array indexing.
-						uint32 pipe_array_idx = conn_args.current_pipe_id;
-
-						if (pipe_array_idx < MAX_PIPES_I915 && pipe_array_idx != I915_PIPE_USER_INVALID) {
-							bool previous_edid_valid = localGInfo->shared_info->has_edid[pipe_array_idx];
-							localGInfo->shared_info->has_edid[pipe_array_idx] = conn_args.edid_valid;
-
-							if (conn_args.edid_valid) {
-								if (memcmp(&localGInfo->shared_info->edid_infos[pipe_array_idx], conn_args.edid_data, sizeof(edid1_info)) != 0) {
-									memcpy(&localGInfo->shared_info->edid_infos[pipe_array_idx], conn_args.edid_data, sizeof(edid1_info));
-									edid_state_changed_for_any_pipe = true;
-								}
-							} else if (previous_edid_valid) { // EDID was valid, now it's not
-								memset(&localGInfo->shared_info->edid_infos[pipe_array_idx], 0, sizeof(edid1_info));
-								edid_state_changed_for_any_pipe = true;
-							}
-							// Always mark for reprobe if this pipe was involved or connection state changed
-							if (conn_args.is_connected || previous_edid_valid != conn_args.edid_valid) {
-								localGInfo->shared_info->pipe_needs_edid_reprobe[pipe_array_idx] = true;
-								if(previous_edid_valid != conn_args.edid_valid) edid_state_changed_for_any_pipe = true;
-							}
-						}
-					} else {
-						TRACE("HPD: GET_CONNECTOR_INFO failed for user_port_idx %u\n", user_port_idx);
-					}
-				}
-				// Update global shared_info fields
-				localGInfo->shared_info->ports_connected_status_mask = new_ports_connected_mask;
-				localGInfo->shared_info->num_connected_ports = num_actually_connected;
-				TRACE("HPD: Updated shared_info: num_connected_ports %lu, ports_connected_status_mask 0x%lx\n",
-					localGInfo->shared_info->num_connected_ports, localGInfo->shared_info->ports_connected_status_mask);
-
-				// Notify app_server
-				if (event_args.changed_hpd_mask != 0 || edid_state_changed_for_any_pipe) { // Send if HPD fired or EDID content changed
-					BMessenger appServerMessenger(B_APP_SERVER_SIGNATURE);
-					if (appServerMessenger.IsValid()) {
-						BMessage hpd_notification(B_SCREEN_CHANGED);
-						hpd_notification.AddInt32("i915_hpd_changed_mask", event_args.changed_hpd_mask);
-						appServerMessenger.SendMessage(&hpd_notification);
-						TRACE("HPD: Sent B_SCREEN_CHANGED to app_server.\n");
-					} else { TRACE("HPD: Could not get BMessenger for app_server.\n"); }
-				}
+			if (event_data.changed_hpd_mask != 0) {
+				TRACE("HPD: Display change detected by kernel (mask 0x%lx). Notifying app_server.\n", event_data.changed_hpd_mask);
+				// The kernel IOCTL now provides a generic "something changed" via non-zero mask
+				// if the generation count changed. The accelerant should re-evaluate.
+				// A simple notification is enough to trigger app_server to re-query.
+				app_server_notify_display_changed(true);
+			} else {
+				// IOCTL B_OK but mask 0 can happen if timeout occurred but generation count was same,
+				// or if kernel's changed_hpd_mask logic is still basic.
+				// No action needed if mask is 0.
 			}
-		} else if (ioctl_status == B_TIMED_OUT) { /* Normal timeout */ }
-		else if (ioctl_status == B_INTERRUPTED || ioctl_status == B_BAD_SEM_ID) { TRACE("HPD: Wait IOCTL interrupted/sem error; thread exiting.\n"); break; }
-		else { TRACE("HPD: WAIT_FOR_DISPLAY_CHANGE failed: %s. Retrying after delay.\n", strerror(ioctl_status)); snooze(1000000); }
+		} else if (ioctl_status == B_TIMED_OUT) {
+			// Normal timeout, no display event from kernel's perspective.
+		} else if (ioctl_status == B_INTERRUPTED || ioctl_status == B_BAD_SEM_ID || ioctl_status == B_FILE_ERROR) {
+			// B_FILE_ERROR can happen if the device fd is closed while thread is waiting.
+			TRACE("HPD: Wait IOCTL interrupted or fd error (%s); thread exiting.\n", strerror(ioctl_status));
+			break;
+		} else {
+			syslog(LOG_ERR, "intel_i915_hpd: Error from INTEL_I915_WAIT_FOR_DISPLAY_CHANGE IOCTL: %s (0x%lx)\n", strerror(ioctl_status), ioctl_status);
+			snooze(1000000); // 1 second before retrying on other errors
+		}
 	}
-	TRACE("HPD: Event thread (ID: %" B_PRId32 ") exiting.\n", find_thread(NULL));
+
+	TRACE("HPD: Event thread (ID: %" B_PRId32 ") for %s exiting.\n", find_thread(NULL), localGInfo->device_path_suffix);
 	return B_OK;
 }
 
@@ -230,5 +235,3 @@ status_t intel_i915_release_engine(engine_token *et, sync_token *st) { /* ... */
 void intel_i915_wait_engine_idle(void) { /* ... */ }
 status_t intel_i915_get_sync_token(engine_token *et, sync_token *st) { /* ... */ return B_OK; }
 status_t intel_i915_sync_to_token(sync_token *st) { /* ... */ return B_OK; }
-
-[end of src/add-ons/accelerants/intel_i915/accelerant.c]

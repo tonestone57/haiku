@@ -860,20 +860,40 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 						if (victimCoreType == CORE_TYPE_LITTLE && victimCPUEntry->GetLoad() > thiefCPU->Core()->GetLoad() + kLoadDifference) {
 							allowStealByBLPolicy = true; // Rescue P-Critical from another overloaded LITTLE
 							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Victim is overloaded LITTLE. ALLOW steal (rescue).\n");
-						} else if (victimCoreType != CORE_TYPE_LITTLE) {
-							// Check if task load is very small for the LITTLE thief
-							uint32 thiefCapacity = thiefCPU->Core()->PerformanceCapacity();
-							if (thiefCapacity == 0) thiefCapacity = SCHEDULER_NOMINAL_CAPACITY;
-							// Example: task needs < 20% of LITTLE core's nominal capacity
-							int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY);
-							if (candidateTask->GetLoad() < lightTaskLoadThreshold) {
-								allowStealByBLPolicy = true;
-								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Task load %" B_PRId32 " is very light for thief. ALLOW steal.\n", candidateTask->GetLoad());
-							} else {
-								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Task load %" B_PRId32 " too high for LITTLE. DENY steal.\n", candidateTask->GetLoad());
+						} else if (victimCoreType == CORE_TYPE_BIG || victimCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
+							// E-core thief considering stealing P-critical task from a P-core.
+							// This should only happen if all P-cores are saturated AND the task is light enough for the E-core.
+							bool allBigCoresSaturated = true;
+							for (int32 coreIdx = 0; coreIdx < gCoreCount; coreIdx++) {
+								CoreEntry* core = &gCoreEntries[coreIdx];
+								if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE))
+									continue;
+								// Use capacity-adjusted kHighLoad for saturation check
+								uint32 pCoreCapacity = core->PerformanceCapacity() > 0 ? core->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
+								int32 pCoreHighLoadThreshold = kHighLoad * pCoreCapacity / SCHEDULER_NOMINAL_CAPACITY;
+								if (core->GetLoad() < pCoreHighLoadThreshold) {
+									allBigCoresSaturated = false;
+									TRACE_SCHED_BL_STEAL("  Eval P-crit steal by E-core: P-Core %" B_PRId32 " (load %" B_PRId32 ") not saturated (threshold %" B_PRId32 ").\n",
+										core->ID(), core->GetLoad(), pCoreHighLoadThreshold);
+									break;
+								}
 							}
-						} else {
-							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Conditions not met. DENY steal.\n");
+
+							if (allBigCoresSaturated) {
+								uint32 thiefCapacity = thiefCPU->Core()->PerformanceCapacity();
+								if (thiefCapacity == 0) thiefCapacity = SCHEDULER_NOMINAL_CAPACITY;
+								int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY); // Task uses < 20% of E-core's capacity
+								if (candidateTask->GetLoad() < lightTaskLoadThreshold) {
+									allowStealByBLPolicy = true;
+									TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. All P-cores saturated AND task load %" B_PRId32 " is light for thief. ALLOW steal.\n", candidateTask->GetLoad());
+								} else {
+									TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. All P-cores saturated BUT task load %" B_PRId32 " too high for LITTLE. DENY steal.\n", candidateTask->GetLoad());
+								}
+							} else {
+								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. Not all P-cores saturated. DENY steal.\n");
+							}
+						} else { // Victim is also LITTLE core (already handled by rescue logic if victim overloaded)
+							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from LITTLE victim. Conditions for rescue not met. DENY steal.\n");
 						}
 					} else { // EPref or Flexible task for LITTLE thief
 						allowStealByBLPolicy = true;
@@ -2587,6 +2607,44 @@ static const int32 kWorkDifferenceThresholdAbsolute = 200; // Approx. 20% of nom
 const bigtime_t MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION = 1000; // 1ms of nominal work
 
 
+// Helper function to determine b.L-aware load difference threshold
+static int32
+scheduler_get_bl_aware_load_difference_threshold(CoreEntry* sourceCore, CoreEntry* targetCore)
+{
+	// Base threshold (e.g., 20% of kMaxLoad)
+	const int32 baseThreshold = kLoadDifference; // kLoadDifference is kMaxLoad / 5
+	int32 adjustedThreshold = baseThreshold;
+
+	if (sourceCore == NULL || targetCore == NULL)
+		return baseThreshold;
+
+	scheduler_core_type sourceType = sourceCore->Type();
+	scheduler_core_type targetType = targetCore->Type();
+
+	// Tune these multipliers as needed.
+	// Migrating from E-core to P-core: more lenient (smaller threshold)
+	if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+		adjustedThreshold = baseThreshold * 3 / 4; // e.g., 150 if base is 200
+	}
+	// Migrating from P-core to E-core: stricter (larger threshold)
+	else if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+		adjustedThreshold = baseThreshold * 5 / 4; // e.g., 250 if base is 200
+	}
+	// Migrating P-to-P or E-to-E, or involving UNKNOWN: use baseThreshold
+
+	// Ensure threshold is not excessively small or large
+	adjustedThreshold = max_c(baseThreshold / 2, adjustedThreshold);      // e.g., min 100
+	adjustedThreshold = min_c(baseThreshold * 3 / 2, adjustedThreshold);  // e.g., max 300
+
+	TRACE_SCHED_BL("BLDiffThreshold: Source (T%d, C%u) Target (T%d, C%u) -> Base: %d, Adjusted: %d\n",
+		sourceType, sourceCore->PerformanceCapacity(),
+		targetType, targetCore->PerformanceCapacity(),
+		baseThreshold, adjustedThreshold);
+
+	return adjustedThreshold;
+}
+
+
 static bool // Changed return type
 scheduler_perform_load_balance()
 {
@@ -2674,12 +2732,16 @@ scheduler_perform_load_balance()
 		targetCoreCandidate->ID(), targetCoreCandidate->Type(), targetCoreCandidate->GetLoad());
 
 
-	// --- Imbalance Check (using kLoadDifference) ---
-	// TODO: kLoadDifference might need to be type-aware later.
-	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + kLoadDifference)
+	// --- Imbalance Check (using b.L-aware load difference threshold) ---
+	int32 blAwareLoadDifference = scheduler_get_bl_aware_load_difference_threshold(sourceCoreCandidate, targetCoreCandidate);
+	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + blAwareLoadDifference) {
+		TRACE_SCHED_BL("LoadBalance: No imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") vs TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
+			sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
+			targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
 		return migrationPerformed;
+	}
 
-	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 ")\n",
+	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
 		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
 		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad());
 
@@ -2880,27 +2942,68 @@ scheduler_perform_load_balance()
 
 		bigtime_t eligibilityImprovementWallClock = candidate->EligibleTime() - estimatedEligibleTimeOnTarget;
 
-		bool isPCriticalScore = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidate->LatencyNice() < -5 || candidate->GetLoad() > kHighLoad);
-		bool isEPrefScore = (!isPCriticalScore && (candidate->GetBasePriority() < B_NORMAL_PRIORITY || candidate->LatencyNice() > 5 || candidate->GetLoad() < kLowLoad));
-		scheduler_core_type sourceTypeScore = sourceCPU->Core()->Type();
-		scheduler_core_type targetTypeScore = finalTargetCore->Type();
-		bigtime_t typeBonusWallClock = 0;
+		// Task type classification for b.L scheduling decisions
+		// P-Critical: High priority, low latency nice, or high load. Prefers P-cores.
+		bool taskIsPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
+			|| candidate->LatencyNice() < -10 // More aggressive latency sensitivity for P-core preference
+			|| candidate->GetLoad() > (kMaxLoad * 7 / 10)); // Example: >70% load
+		// E-Preferring: Not P-Critical and low priority, high latency nice, or low load. Suitable for E-cores.
+		bool taskIsEPreferring = (!taskIsPCritical
+			&& (candidate->GetBasePriority() < B_NORMAL_PRIORITY
+				|| candidate->LatencyNice() > 8 // More tolerant of latency for E-core preference
+				|| candidate->GetLoad() < (kMaxLoad / 5))); // Example: <20% load
 
-		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD) { // Low Latency
-			if (isPCriticalScore && sourceTypeScore == CORE_TYPE_LITTLE && (targetTypeScore == CORE_TYPE_BIG || targetTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-				typeBonusWallClock = BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL;
-			} else if (isPCriticalScore && (sourceTypeScore == CORE_TYPE_BIG || sourceTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE) && targetTypeScore == CORE_TYPE_LITTLE) {
-				typeBonusWallClock = -BL_TYPE_PENALTY_PPREF_BIG_TO_LITTLE_LL;
+		scheduler_core_type sourceType = sourceCPU->Core()->Type();
+		scheduler_core_type targetType = finalTargetCore->Type();
+		bigtime_t typeCompatibilityBonus = 0;
+
+		// Define bonuses/penalties for migrating between P and E cores.
+		// These values are added to the benefit score.
+		// Positive values encourage migration, negative values discourage.
+		const bigtime_t P_TO_E_PENALTY_HIGH_LOAD_SOURCE = SCHEDULER_TARGET_LATENCY * 12; // Strong penalty if P-core is not even that busy
+		const bigtime_t P_TO_E_PENALTY_DEFAULT = SCHEDULER_TARGET_LATENCY * 6;
+		const bigtime_t E_TO_P_BONUS_PCRITICAL = SCHEDULER_TARGET_LATENCY * 8; // Strong bonus for P-critical to P-core
+		const bigtime_t E_TO_P_BONUS_DEFAULT = SCHEDULER_TARGET_LATENCY * 2;
+		const bigtime_t P_TO_E_BONUS_EPREF_PS = SCHEDULER_TARGET_LATENCY * 4; // Bonus for E-pref to E-core in PS mode
+
+		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD) { // Low Latency Mode
+			if (taskIsPCritical) {
+				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+					typeCompatibilityBonus += E_TO_P_BONUS_PCRITICAL; // Task wants P-core, moving from E to P
+				} else if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+					// Penalize moving P-critical from P to E, unless source P is very overloaded
+					if (sourceCPU->Core()->GetLoad() < kVeryHighLoad * sourceCPU->Core()->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)
+						typeCompatibilityBonus -= P_TO_E_PENALTY_HIGH_LOAD_SOURCE;
+					else
+						typeCompatibilityBonus -= P_TO_E_PENALTY_DEFAULT;
+				}
+			} else { // Flexible or E-Preferring task in Low Latency
+				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+					// Mild bonus if moving from E to P, might be beneficial if P has lots of capacity
+					typeCompatibilityBonus += E_TO_P_BONUS_DEFAULT / 2;
+				}
+				// No strong penalty for moving E-pref from P to E in LL if P has work.
 			}
-		} else { // Power Saving (Consolidate)
-			if (isEPrefScore && (sourceTypeScore == CORE_TYPE_BIG || sourceTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE) && targetTypeScore == CORE_TYPE_LITTLE) {
-				typeBonusWallClock = BL_TYPE_BONUS_EPREF_BIG_TO_LITTLE_PS;
-			} else if (isPCriticalScore && sourceTypeScore == CORE_TYPE_LITTLE && (targetTypeScore == CORE_TYPE_BIG || targetTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-				typeBonusWallClock = BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_PS;
-			} else if (isEPrefScore && sourceTypeScore == CORE_TYPE_LITTLE && (targetTypeScore == CORE_TYPE_BIG || targetTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-				typeBonusWallClock = -BL_TYPE_PENALTY_EPREF_LITTLE_TO_BIG_PS;
+		} else { // Power Saving Mode (SCHED_LOAD_BALANCE_CONSOLIDATE)
+			if (taskIsEPreferring) {
+				if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+					typeCompatibilityBonus += P_TO_E_BONUS_EPREF_PS; // Task is E-pref, moving from P to E
+				} else if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+					// Mildly discourage moving E-pref from E to P if P isn't idle
+					if (finalTargetCore->GetLoad() > kLowLoad / 2)
+						typeCompatibilityBonus -= SCHEDULER_TARGET_LATENCY;
+				}
+			} else if (taskIsPCritical) {
+				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+					typeCompatibilityBonus += E_TO_P_BONUS_DEFAULT; // Still good to move P-critical to P-core
+				} else if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
+					typeCompatibilityBonus -= P_TO_E_PENALTY_DEFAULT; // Discourage P-critical to E-core
+				}
 			}
+			// Flexible tasks in PS mode: less aggressive about type matching, focus on consolidation target.
 		}
+		TRACE_SCHED_BL("LoadBalance: Task T%" B_PRId32 " (Pcrit:%d, EPref:%d) from CoreType %d to %d. TypeBonus: %" B_PRId64 "\n",
+			candidate->GetThread()->id, taskIsPCritical, taskIsEPreferring, sourceType, targetType, typeCompatibilityBonus);
 
 		bigtime_t affinityBonusWallClock = 0;
 		if (idleTargetCPUOnTargetCore != NULL

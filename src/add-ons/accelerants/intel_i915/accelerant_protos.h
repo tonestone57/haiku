@@ -52,7 +52,7 @@ typedef struct {
 // New function for arbitrary lines
 extern void intel_i915_draw_line_arbitrary(engine_token *et,
     const line_params *line, uint32 color,
-    const general_rect* clip_rects, uint32 num_clip_rects); // Using general_rect for clip_rects for consistency with other hooks
+    const general_rect* clip_rects, uint32 num_clip_rects);
 
 // Structures and functions for polygon/triangle filling
 typedef struct {
@@ -69,6 +69,13 @@ extern void intel_i915_fill_triangle_list(engine_token *et,
 extern void intel_i915_fill_convex_polygon(engine_token *et,
     const int16 coords[], uint32 num_vertices, // coords is [x0,y0, x1,y1, ...]
     uint32 color, const general_rect* clip_rects, uint32 num_clip_rects);
+
+// New internal helper functions for multi-monitor
+status_t accel_set_pipe_config_single(enum accel_pipe_id pipe, const display_mode *mode,
+    uint32 fb_gem_handle, int32 x, int32 y, uint32 connector_kernel_id);
+status_t accel_get_pipe_display_mode(enum accel_pipe_id pipe, display_mode *mode);
+status_t accel_set_pipe_dpms_mode(enum accel_pipe_id pipe, uint32 dpms_state);
+uint32_t _get_bpp_from_colorspace_accel(color_space cs); // Already in hooks.c, but good to have proto
 
 
 #ifdef __cplusplus

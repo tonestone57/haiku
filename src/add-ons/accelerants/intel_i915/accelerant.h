@@ -576,26 +576,44 @@ typedef struct {
 	char						device_path_suffix[B_PATH_NAME_LENGTH]; /**< Device path suffix (e.g., "graphics/intel_i915/0"). */
 	enum accel_pipe_id			target_pipe;        /**< For cloned instances, which display pipe this instance primarily controls. Maps to kernel pipe IDs. */
 
-	// Cursor state (per accelerant instance, applies to its target_pipe)
-	bool						cursor_is_visible;
-	uint16_t					cursor_current_x;
-	uint16_t					cursor_current_y;
-	uint16_t					cursor_hot_x;
-	uint16_t					cursor_hot_y;
+	// Cursor state
+	// These might remain global if cursor operations are always directed to a specific
+	// 'current_cursor_target_pipe' or if app_server manages global-to-local coordinate mapping.
+	// If fine-grained per-head cursor caching is needed in accel, these would become arrays.
+	bool		cursor_is_visible_general; // General state if cursor is shown on *any* screen
+	uint16_t	cursor_current_x_global; // Last known X (global screen coordinates)
+	uint16_t	cursor_current_y_global; // Last known Y (global screen coordinates)
+	uint16_t	cursor_hot_x;            // Current cursor hotspot X (applies to current shape)
+	uint16_t	cursor_hot_y;            // Current cursor hotspot Y (applies to current shape)
 
-	uint32_t					cached_dpms_mode;   /**< Cached DPMS mode for the target_pipe. */
+	// Per-pipe cached DPMS state
+	uint32		cached_dpms_mode[I915_MAX_PIPES_USER];
 
 	// HPD Event Handling (only used by the primary accelerant instance)
-	thread_id					hpd_thread;         /**< ID of the HPD monitoring thread. Initialized to -1. */
-	volatile bool				hpd_thread_active;  /**< Flag to signal the HPD thread to terminate. */
+	thread_id	hpd_thread;
+	volatile bool hpd_thread_active;
 
-	/** @brief Information about framebuffers managed by the accelerant for each pipe. */
+	/**
+	 * @brief Information about framebuffers managed by the accelerant for each pipe.
+	 * This will be populated from INTEL_I915_GET_DISPLAY_CONFIG.
+	 */
 	struct pipe_framebuffer_info {
-		uint32 gem_handle;   /**< GEM handle for the framebuffer BO. 0 if not allocated. */
-		uint32 width;        /**< Width of the allocated framebuffer in pixels. */
-		uint32 height;       /**< Height of the allocated framebuffer in pixels. */
-		uint32 format_bpp;   /**< Bits per pixel of the allocated framebuffer. */
+		uint32_t	gem_handle;       /**< Kernel GEM handle for the framebuffer BO. */
+		area_id		mapping_area;     /**< Area ID if mapped in accelerant (optional, for direct CPU access). */
+		uint8_t*	base_address;     /**< Mapped virtual address (optional). */
+		uint32_t	gtt_offset_pages; /**< GTT page offset (for GPU commands). */
+		uint32_t    width;            /**< Width of the framebuffer in pixels. */
+		uint32_t    height;           /**< Height of the framebuffer in pixels. */
+		uint32_t    stride;           /**< Bytes per row of the framebuffer. */
+		uint32_t    depth;            /**< Bits per pixel of the framebuffer. */
+		bool        is_active;        /**< Whether this pipe config is currently active. */
+		enum i915_tiling_mode tiling_mode; /**< Tiling mode of this framebuffer. */
 	} pipe_framebuffers[I915_MAX_PIPES_USER]; /**< Indexed by enum i915_pipe_id_user */
+
+	// Target pipes for operations if not explicitly passed to functions,
+	// allowing some stateful behavior for simpler hook signatures.
+	enum accel_pipe_id current_drawing_target_pipe;
+	enum accel_pipe_id current_cursor_target_pipe;
 
 } accelerant_info;
 

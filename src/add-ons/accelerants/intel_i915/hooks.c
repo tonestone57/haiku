@@ -48,10 +48,14 @@ static status_t intel_i915_set_dpms_mode(uint32 dpms_flags);
 static status_t intel_i915_get_preferred_display_mode(display_mode* m);
 static status_t intel_i915_get_monitor_info(monitor_info* mi);
 static status_t intel_i915_get_edid_info(void* i, size_t s, uint32* v);
+
+// Cursor Hooks - These will operate on gInfo->current_cursor_target_pipe
 static status_t intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 hot_x, uint16 hot_y, uint8 *andMask, uint8 *xorMask);
 static void     intel_i915_move_cursor(uint16 x, uint16 y);
 static void     intel_i915_show_cursor(bool is_visible);
 static status_t intel_i915_set_cursor_bitmap(uint16 w, uint16 h, uint16 hx, uint16 hy, color_space cs, uint16 bpr, const uint8 *data);
+
+// Engine Hooks
 static uint32   intel_i915_accelerant_engine_count(void);
 static status_t intel_i915_acquire_engine(uint32 capabilities, uint32 max_wait, sync_token *st, engine_token **et);
 static status_t intel_i915_release_engine(engine_token *et, sync_token *st);
@@ -225,59 +229,362 @@ static sem_id   intel_i915_accelerant_retrace_semaphore(void) {
 static uint32 intel_i915_accelerant_mode_count(void) { return (gInfo && gInfo->shared_info) ? gInfo->shared_info->mode_count : 0; }
 static status_t intel_i915_get_mode_list(display_mode *dm) {
 	if (!gInfo || !gInfo->mode_list || !gInfo->shared_info || !dm) return B_BAD_VALUE;
-	if (gInfo->shared_info->mode_count == 0) return B_OK;
+	if (gInfo->shared_info->mode_count == 0) return B_OK; // No modes to copy
 	memcpy(dm, gInfo->mode_list, gInfo->shared_info->mode_count * sizeof(display_mode));
 	return B_OK;
 }
-static status_t intel_i915_propose_display_mode(display_mode *t, const display_mode *l, const display_mode *h) {
-	if (!gInfo || gInfo->device_fd < 0 || !t || !l || !h) return B_BAD_VALUE;
-	intel_i915_propose_specific_mode_args args = {*t, *l, *h, {0}, (uint8_t)gInfo->target_pipe};
+
+static status_t intel_i915_propose_display_mode(display_mode *target, const display_mode *low, const display_mode *high) {
+	TRACE_HOOKS("intel_i915_propose_display_mode target: %dx%d@%dHz, space %d\n",
+		target->virtual_width, target->virtual_height,
+		(target->timing.h_total * target->timing.v_total > 0) ? (target->timing.pixel_clock*1000 / (target->timing.h_total * target->timing.v_total)) : 0,
+		target->space);
+
+	if (!gInfo || gInfo->device_fd < 0 || !target || !low || !h) return B_BAD_VALUE;
+
+	// This hook traditionally operates on the "primary" or default screen.
+	// For multi-monitor, app_server might iterate through connectors, get EDID,
+	// and then use this to validate/adjust modes for a specific connector.
+	// The kernel IOCTL INTEL_I915_PROPOSE_SPECIFIC_MODE takes a pipe_id.
+	// We'll use gInfo->target_pipe for this legacy hook.
+	intel_i915_propose_specific_mode_args args;
+	args.target_mode = *target;
+	args.low_bound = *low;
+	args.high_bound = *high;
+	args.pipe_id = (uint8_t)gInfo->target_pipe; // Kernel expects its pipe enum
+
 	status_t status = ioctl(gInfo->device_fd, INTEL_I915_PROPOSE_SPECIFIC_MODE, &args, sizeof(args));
-	if (status == B_OK) *t = args.result_mode;
+	if (status == B_OK) {
+		*target = args.result_mode;
+		TRACE_HOOKS("  Result: %dx%d@%dHz, space %d, pclk %ukHz\n",
+			target->virtual_width, target->virtual_height,
+			(target->timing.h_total * target->timing.v_total > 0) ? (target->timing.pixel_clock*1000 / (target->timing.h_total * target->timing.v_total)) : 0,
+			target->space, target->timing.pixel_clock);
+	} else {
+		TRACE_HOOKS("  Propose failed: %s\n", strerror(status));
+	}
 	return status;
 }
+
+static status_t intel_i915_set_display_mode(display_mode *mode_to_set)
+{
+	TRACE_HOOKS("intel_i915_set_display_mode (legacy hook) for target_pipe %d: %dx%d@%dHz, space %d\n",
+		gInfo->target_pipe, mode_to_set->virtual_width, mode_to_set->virtual_height,
+		(mode_to_set->timing.h_total * mode_to_set->timing.v_total > 0) ? (mode_to_set->timing.pixel_clock*1000 / (mode_to_set->timing.h_total * mode_to_set->timing.v_total)) : 0,
+		mode_to_set->space);
+
+	if (!gInfo || gInfo->device_fd < 0 || !mode_to_set) return B_BAD_VALUE;
+
+	// This hook now needs to use the INTEL_I915_SET_DISPLAY_CONFIG IOCTL.
+	// It will configure only gInfo->target_pipe.
+	// We need to find a connector for this pipe.
+	// This is a simplified approach for the legacy hook. App_server should use the new hook.
+
+	uint32 connector_kernel_id_to_use = I915_PORT_ID_USER_NONE; // Kernel's enum
+	// Try to find the connector currently associated with target_pipe or a free one.
+	if (gInfo->shared_info && gInfo->shared_info->pipe_display_configs[gInfo->target_pipe].is_active) {
+		connector_kernel_id_to_use = gInfo->shared_info->pipe_display_configs[gInfo->target_pipe].connector_id;
+	} else { // Find first connected, unassigned connector for this pipe
+		intel_i915_get_connector_info_args c_infos[I915_MAX_PORTS_USER];
+		uint32 num_conns = I915_MAX_PORTS_USER;
+		if (accel_get_all_connector_infos(c_infos, &num_conns) == B_OK) {
+			for (uint32 i = 0; i < num_conns; i++) {
+				if (c_infos[i].is_connected && c_infos[i].current_pipe_id == I915_PIPE_USER_INVALID) {
+					connector_kernel_id_to_use = c_infos[i].connector_id; // This is already kernel_port_id
+					break;
+				}
+			}
+		}
+	}
+	if (connector_kernel_id_to_use == I915_PORT_ID_USER_NONE && num_detected_connectors > 0) { // Fallback if desperate
+		for (uint32 i = 0; i < num_detected_connectors; i++) {
+			if (connector_infos[i].is_connected) {connector_kernel_id_to_use = connector_infos[i].connector_id; break;}
+		}
+	}
+
+
+	if (connector_kernel_id_to_use == I915_PORT_ID_USER_NONE) {
+		TRACE_HOOKS("  SetDisplayMode: No suitable connector found for target_pipe %d.\n", gInfo->target_pipe);
+		return B_ERROR;
+	}
+
+	uint32 fb_handle;
+	status_t status = accel_ensure_framebuffer_for_pipe((enum i915_pipe_id_user)gInfo->target_pipe, mode_to_set, &fb_handle);
+	if (status != B_OK) {
+		TRACE_HOOKS("  SetDisplayMode: Failed to ensure framebuffer for pipe %d: %s\n", gInfo->target_pipe, strerror(status));
+		return status;
+	}
+
+	struct i915_display_pipe_config kernel_pipe_cfg;
+	memset(&kernel_pipe_cfg, 0, sizeof(kernel_pipe_cfg));
+	kernel_pipe_cfg.pipe_id = (uint32)gInfo->target_pipe; // Kernel expects its enum value
+	kernel_pipe_cfg.active = true;
+	kernel_pipe_cfg.mode = *mode_to_set;
+	kernel_pipe_cfg.connector_id = connector_kernel_id_to_use;
+	kernel_pipe_cfg.fb_gem_handle = fb_handle;
+	kernel_pipe_cfg.pos_x = 0; // Legacy hook assumes single screen at (0,0)
+	kernel_pipe_cfg.pos_y = 0;
+
+	struct i915_set_display_config_args ioctl_args;
+	memset(&ioctl_args, 0, sizeof(ioctl_args));
+	ioctl_args.num_pipe_configs = 1;
+	ioctl_args.pipe_configs_ptr = (uint64)(uintptr_t)&kernel_pipe_cfg;
+	ioctl_args.primary_pipe_id = (uint32)gInfo->target_pipe; // This pipe becomes primary
+
+	status = ioctl(gInfo->device_fd, INTEL_I915_SET_DISPLAY_CONFIG, &ioctl_args, sizeof(ioctl_args));
+	if (status == B_OK) {
+		// Update shared_info to reflect this (kernel should do this, but good to sync accel's view)
+		if (gInfo->shared_info) {
+			uint32 pidx = PipeEnumToArrayIndex(gInfo->target_pipe);
+			if (pidx < MAX_PIPES_I915) {
+				gInfo->shared_info->pipe_display_configs[pidx].is_active = true;
+				gInfo->shared_info->pipe_display_configs[pidx].current_mode = *mode_to_set;
+				gInfo->shared_info->pipe_display_configs[pidx].connector_id = connector_kernel_id_to_use;
+				gInfo->shared_info->pipe_display_configs[pidx].bytes_per_row =
+					gInfo->pipe_framebuffers[gInfo->target_pipe].stride; // Assuming accel_ensure_framebuffer updated stride
+				gInfo->shared_info->pipe_display_configs[pidx].bits_per_pixel =
+					gInfo->pipe_framebuffers[gInfo->target_pipe].format_bpp;
+				gInfo->shared_info->primary_pipe_index = gInfo->target_pipe;
+				gInfo->shared_info->active_display_count = 1; // Simplified for legacy hook
+			}
+			gInfo->shared_info->current_mode = *mode_to_set; // Update legacy field too
+			gInfo->shared_info->bytes_per_row = gInfo->pipe_framebuffers[gInfo->target_pipe].stride;
+			gInfo->shared_info->bits_per_pixel = mode_to_set->space; // This should be bpp
+		}
+	} else {
+		TRACE_HOOKS("  SetDisplayMode: INTEL_I915_SET_DISPLAY_CONFIG IOCTL failed: %s\n", strerror(status));
+	}
+	return status;
+}
+
 static status_t intel_i915_get_display_mode(display_mode *m) {
-	if (!gInfo || gInfo->device_fd < 0 || !m) return B_BAD_VALUE;
-	intel_i915_get_pipe_display_mode_args args = {(uint8_t)gInfo->target_pipe, {0}};
-	status_t status = ioctl(gInfo->device_fd, INTEL_I915_GET_PIPE_DISPLAY_MODE, &args, sizeof(args));
-	if (status == B_OK) { *m = args.pipe_mode; }
-	else if (gInfo->shared_info) {
-		uint32 aidx = gInfo->target_pipe;
-		if (aidx < MAX_PIPES_I915 && gInfo->shared_info->pipe_display_configs[aidx].is_active) {
-			*m = gInfo->shared_info->pipe_display_configs[aidx].current_mode; status = B_OK;
-		} else if (gInfo->target_pipe == ACCEL_PIPE_A && gInfo->shared_info->active_display_count > 0) {
-			uint32 pidx = PipeEnumToArrayIndex(gInfo->shared_info->primary_pipe_index);
-			if (pidx < MAX_PIPES_I915 && gInfo->shared_info->pipe_display_configs[pidx].is_active) {
-				*m = gInfo->shared_info->pipe_display_configs[pidx].current_mode; status = B_OK;
-			} else { memset(m, 0, sizeof(display_mode)); status = (status == B_OK) ? B_ERROR : status; }
-		} else { memset(m, 0, sizeof(display_mode)); status = (status == B_OK) ? B_ERROR : status; }
-	} else { return B_ERROR; }
-	return status;
+	if (!gInfo || !m) return B_BAD_VALUE;
+	return accel_get_pipe_display_mode(gInfo->target_pipe, m);
 }
-static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fbc) { return GET_FRAME_BUFFER_CONFIG(fbc); }
-static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *l, uint32 *h) { return GET_PIXEL_CLOCK_LIMITS(dm, l, h); }
+
+static status_t intel_i915_get_frame_buffer_config(frame_buffer_config *fbc) {
+	if (!gInfo || !fbc || !gInfo->shared_info) return B_NO_INIT;
+	enum accel_pipe_id target = gInfo->target_pipe;
+	if (target >= I915_MAX_PIPES_USER) target = ACCEL_PIPE_A; // Fallback
+
+	struct pipe_framebuffer_info* pfb = &gInfo->pipe_framebuffers[target];
+
+	if (pfb->is_active && pfb->base_address != NULL) { // Prefer mapped FB info if available
+		fbc->frame_buffer = pfb->base_address;
+		fbc->frame_buffer_dma = (void*)(uintptr_t)(pfb->gtt_offset_pages * B_PAGE_SIZE); // GTT offset as "DMA" address
+		fbc->bytes_per_row = pfb->stride;
+	} else { // Fallback to shared_info from kernel (might be less up-to-date or for primary only)
+		uint32 pidx = PipeEnumToArrayIndex(target);
+		if (pidx < MAX_PIPES_I915 && gInfo->shared_info->pipe_display_configs[pidx].is_active) {
+			fbc->frame_buffer = (void*)(uintptr_t)gInfo->shared_info->pipe_display_configs[pidx].frame_buffer_base; // This is likely kernel VAddr
+			fbc->frame_buffer_dma = (void*)(uintptr_t)(gInfo->shared_info->pipe_display_configs[pidx].frame_buffer_offset * B_PAGE_SIZE);
+			fbc->bytes_per_row = gInfo->shared_info->pipe_display_configs[pidx].bytes_per_row;
+		} else { // Final fallback to legacy global shared_info
+			fbc->frame_buffer = gInfo->framebuffer_base; // May be NULL if not mapped by accel
+			fbc->frame_buffer_dma = (void*)gInfo->shared_info->framebuffer_physical; // Physical address
+			fbc->bytes_per_row = gInfo->shared_info->bytes_per_row;
+		}
+	}
+	TRACE_HOOKS("GetFrameBufferConfig for pipe %d: base %p, dma_offset 0x%lx, bpr %lu\n",
+		target, fbc->frame_buffer, (uintptr_t)fbc->frame_buffer_dma, fbc->bytes_per_row);
+	return B_OK;
+}
+
+static status_t intel_i915_get_pixel_clock_limits(display_mode *dm, uint32 *l, uint32 *h) {
+	if (!gInfo || !gInfo->shared_info || !l || !h) return B_BAD_VALUE;
+	*l = gInfo->shared_info->min_pixel_clock;
+	*h = gInfo->shared_info->max_pixel_clock;
+	return B_OK;
+}
+
 static status_t intel_i915_move_display(uint16 x, uint16 y) {
 	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	// This hook is for the primary framebuffer offset. For multi-monitor, app_server
+	// would use SET_DISPLAY_CONFIG with pos_x, pos_y.
+	// We apply this to gInfo->target_pipe.
 	intel_i915_move_display_args args = {(uint32)gInfo->target_pipe, x, y};
 	return ioctl(gInfo->device_fd, INTEL_I915_MOVE_DISPLAY_OFFSET, &args, sizeof(args));
 }
+
 static void intel_i915_set_indexed_colors(uint count, uint8 first, uint8 *color_data, uint32 flags) {
 	if (!gInfo || gInfo->device_fd < 0 || count == 0 || color_data == NULL) return;
+	// Apply to gInfo->target_pipe
 	intel_i915_set_indexed_colors_args args = {(uint32)gInfo->target_pipe, first, count, (uint64_t)(uintptr_t)color_data};
 	ioctl(gInfo->device_fd, INTEL_I915_SET_INDEXED_COLORS, &args, sizeof(args));
 }
-static uint32 intel_i915_dpms_capabilities(void) { return DPMS_CAPABILITIES(); }
-static uint32 intel_i915_dpms_mode(void) { /* ... as before ... */ return B_DPMS_ON; }
-static status_t intel_i915_set_dpms_mode(uint32 flags) { /* ... as before ... */ return B_ERROR; }
-static status_t intel_i915_get_preferred_display_mode(display_mode* m) { return GET_PREFERRED_DISPLAY_MODE(m); }
-static status_t intel_i915_get_monitor_info(monitor_info* mi) { return GET_MONITOR_INFO(mi); }
+
+static uint32 intel_i915_dpms_capabilities(void) {
+	return B_DPMS_ON | B_DPMS_STANDBY | B_DPMS_SUSPEND | B_DPMS_OFF;
+}
+
+static uint32 intel_i915_dpms_mode(void) {
+	if (!gInfo || gInfo->device_fd < 0) return B_DPMS_ON; // Default if error
+	// Return cached for target_pipe
+	if (gInfo->target_pipe < I915_MAX_PIPES_USER) {
+		return gInfo->cached_dpms_mode[gInfo->target_pipe];
+	}
+	return B_DPMS_ON;
+}
+
+static status_t intel_i915_set_dpms_mode(uint32 dpms_flags) {
+	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	// Set for target_pipe
+	return accel_set_pipe_dpms_mode(gInfo->target_pipe, dpms_flags);
+}
+
+static status_t intel_i915_get_preferred_display_mode(display_mode* m) {
+	if (!gInfo || !gInfo->shared_info || !m) return B_BAD_VALUE;
+	if (gInfo->shared_info->preferred_mode_suggestion.timing.pixel_clock > 0) {
+		*m = gInfo->shared_info->preferred_mode_suggestion;
+		return B_OK;
+	}
+	return B_ERROR; // No preferred mode suggested by kernel
+}
+
+static status_t intel_i915_get_monitor_info(monitor_info* mi) {
+	if (!gInfo || !gInfo->shared_info || !mi) return B_BAD_VALUE;
+	// This hook is typically for the primary monitor.
+	// For multi-monitor, app_server would query EDID per connector.
+	if (gInfo->shared_info->primary_edid_valid) {
+		// The shared_info primary_edid_block is only 128 bytes.
+		// edid_decode requires the full edid1_info structure, which might be larger.
+		// This might be better served by getting connector info for the primary display's connector.
+		// For now, a simple attempt if edid.h's edid1_info matches the 128 byte block for basic fields.
+		edid_decode(mi, (struct edid1_info*)gInfo->shared_info->primary_edid_block);
+		return B_OK;
+	}
+	return B_ERROR;
+}
+
 static status_t intel_i915_get_edid_info(void* i, size_t s, uint32* v) { return GET_EDID_INFO(i,s,v); }
 
 // --- Cursor Hooks ---
-static status_t intel_i915_set_cursor_shape(uint16 w, uint16 h, uint16 hx, uint16 hy, uint8 *a, uint8 *x) {return B_ERROR;}
-static void intel_i915_move_cursor(uint16 x, uint16 y) {}
-static void intel_i915_show_cursor(bool v) {}
-static status_t intel_i915_set_cursor_bitmap(uint16 w,uint16 h,uint16 hx,uint16 hy,color_space cs,uint16 bpr,const uint8 *d){return B_ERROR;}
+// These will now use gInfo->current_cursor_target_pipe (defaulting to gInfo->target_pipe)
+// to direct IOCTL calls to the correct kernel pipe.
+
+static status_t
+intel_i915_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX, uint16 hotY,
+	color_space colorSpace, uint16 bytesPerRow, const uint8 *bitmapData)
+{
+	TRACE_HOOKS("intel_i915_set_cursor_bitmap: w%u h%u hx%u hy%u cs%d bpr%u\n",
+		width, height, hotX, hotY, colorSpace, bytesPerRow);
+
+	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	if (width == 0 || height == 0 || width > MAX_CURSOR_DIM || height > MAX_CURSOR_DIM) return B_BAD_VALUE;
+	if (bitmapData == NULL) return B_BAD_ADDRESS;
+	// Kernel expects ARGB32 for cursor. We might need conversion if app_server sends other formats.
+	// For now, assume data is ARGB32 and bytesPerRow matches width * 4.
+	if (colorSpace != B_RGBA32 && colorSpace != B_RGB32) { // B_RGB32 might be acceptable if alpha is assumed opaque
+		TRACE_HOOKS("  Error: Unsupported cursor color space %d. Kernel expects ARGB32.\n", colorSpace);
+		// TODO: Software conversion if other formats like B_CMAP8 (mono cursor) are common.
+		return B_BAD_VALUE;
+	}
+	if (bytesPerRow < width * 4) return B_BAD_VALUE;
+
+
+	intel_i915_set_cursor_bitmap_args kargs;
+	kargs.width = width;
+	kargs.height = height;
+	kargs.hot_x = hotX;
+	kargs.hot_y = hotY;
+	kargs.user_bitmap_ptr = (uint64_t)(uintptr_t)bitmapData;
+	kargs.bitmap_size = height * bytesPerRow; // Total size of data provided
+	kargs.pipe = (uint32_t)gInfo->current_cursor_target_pipe; // Use current target
+
+	status_t status = ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_BITMAP, &kargs, sizeof(kargs));
+	if (status == B_OK) {
+		gInfo->cursor_hot_x = hotX; // Cache hotspot globally for now
+		gInfo->cursor_hot_y = hotY;
+	} else {
+		TRACE_HOOKS("  Error: IOCTL_SET_CURSOR_BITMAP failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+	}
+	return status;
+}
+
+static void
+intel_i915_move_cursor(uint16 x, uint16 y)
+{
+	if (!gInfo || gInfo->device_fd < 0) return;
+
+	// Update global/cached position
+	gInfo->cursor_current_x_global = x;
+	gInfo->cursor_current_y_global = y;
+
+	// Determine which pipe the cursor is on based on global coordinates.
+	// This requires knowing the layout of screens from app_server.
+	// For now, we assume app_server calls SET_ACTIVE_CURSOR_HEAD, or we use current_cursor_target_pipe.
+	enum accel_pipe_id targetPipe = gInfo->current_cursor_target_pipe;
+
+	// TODO: If app_server provides global coordinates, we need to translate
+	// (x, y) to be relative to the origin of targetPipe's display area.
+	// For now, assume x, y are already relative or this is handled by app_server logic
+	// that sets current_cursor_target_pipe.
+
+	intel_i915_set_cursor_state_args kargs;
+	kargs.x = x; // These are screen-relative for the target pipe
+	kargs.y = y;
+	kargs.is_visible = gInfo->cursor_is_visible_general; // Use general visibility
+	kargs.pipe = (uint32_t)targetPipe;
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
+		TRACE_HOOKS("MoveCursor: IOCTL_SET_CURSOR_STATE failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+	}
+}
+
+static void
+intel_i915_show_cursor(bool is_visible)
+{
+	if (!gInfo || gInfo->device_fd < 0) return;
+
+	gInfo->cursor_is_visible_general = is_visible;
+	enum accel_pipe_id targetPipe = gInfo->current_cursor_target_pipe;
+
+	intel_i915_set_cursor_state_args kargs;
+	kargs.x = gInfo->cursor_current_x_global; // Use last known global position
+	kargs.y = gInfo->cursor_current_y_global; // (Needs translation if targetPipe changes)
+	kargs.is_visible = is_visible;
+	kargs.pipe = (uint32_t)targetPipe;
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_CURSOR_STATE, &kargs, sizeof(kargs)) != B_OK) {
+		TRACE_HOOKS("ShowCursor: IOCTL_SET_CURSOR_STATE failed for pipe %u: %s\n", kargs.pipe, strerror(errno));
+	}
+}
+
+// Legacy B_SET_CURSOR_SHAPE - this is for monochrome cursors.
+// Kernel driver expects ARGB. This hook might need to convert or be deprecated.
+static status_t
+intel_i915_set_cursor_shape(uint16 width, uint16 height, uint16 hotX, uint16 hotY,
+	uint8 *andMask, uint8 *xorMask)
+{
+	TRACE_HOOKS("intel_i915_set_cursor_shape (monochrome) called. w%u h%u. This is likely not fully supported by current kernel path.\n", width, height);
+	if (!gInfo || gInfo->device_fd < 0) return B_NO_INIT;
+	if (width > 64 || height > 64) return B_BAD_VALUE; // Typical old limit
+
+	// This hook is for old-style monochrome cursors. The kernel path (via INTEL_I915_IOCTL_SET_CURSOR_BITMAP)
+	// expects an ARGB bitmap. A software conversion would be needed here to create an ARGB bitmap
+	// from the AND/XOR masks.
+	// For now, this will likely fail or do nothing useful if called, unless the kernel has a fallback for it.
+	// A proper implementation would allocate a temporary buffer, render the mono cursor into ARGB32 format,
+	// then call intel_i915_set_cursor_bitmap.
+
+	// Example: Create a simple black square ARGB cursor for testing this path
+	const int cur_w = 16, cur_h = 16;
+	uint32_t argb_bitmap[cur_h][cur_w];
+	for(int r=0; r < cur_h; ++r) {
+		for(int c=0; c < cur_w; ++c) {
+			argb_bitmap[r][c] = 0xFF000000; // Opaque black
+		}
+	}
+	if (width == 0 && height == 0) { // Often means "hide cursor" or use default arrow
+		return intel_i915_set_cursor_bitmap(cur_w, cur_h, hotX, hotY, B_RGBA32, cur_w * 4, (const uint8*)argb_bitmap);
+	}
+
+	// If actual masks are provided, they need conversion.
+	// This is a complex task involving iterating bits and setting ARGB pixels.
+	TRACE_HOOKS("  Monochrome cursor shape to ARGB conversion is not implemented.\n");
+	return B_UNSUPPORTED;
+}
+
 
 // --- Sync Hooks ---
 static uint32 intel_i915_accelerant_engine_count(void) { return ACCELERANT_ENGINE_COUNT(); }

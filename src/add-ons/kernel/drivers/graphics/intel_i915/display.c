@@ -398,6 +398,9 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 	uint64 total_pixel_data_rate_bytes_sec = 0;
 	uint32 gen = INTEL_DISPLAY_GEN(devInfo);
 
+	TRACE("BWCheck: Start. num_active_pipes: %lu, target_cdclk: %u kHz, max_pclk_in_conf: %u kHz, Gen: %u\n",
+		num_active_pipes, target_overall_cdclk_khz, max_pixel_clk_in_config_khz, gen);
+
 	for (enum pipe_id_priv pipe_idx = PRIV_PIPE_A; pipe_idx < PRIV_MAX_PIPES; pipe_idx++) {
 		if (planned_configs[pipe_idx].user_config == NULL || !planned_configs[pipe_idx].user_config->active)
 			continue;
@@ -407,7 +410,11 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)user_cfg->connector_id);
 		const intel_clock_params_t* clks = &planned_configs[pipe_idx].clock_params;
 
-		if (!port_state) { TRACE("BWCheck: No port_state for pipe %d, port %u\n", pipe_idx, user_cfg->connector_id); return B_ERROR; }
+		if (!port_state) { TRACE("BWCheck: Pipe %d: No port_state for connector_id %u\n", pipe_idx, user_cfg->connector_id); return B_ERROR; }
+
+		TRACE("BWCheck: Pipe %d (Port %s, Type %d): Mode %dx%d@%ukHz, Space %d. AdjPCLK: %ukHz, DPLinkRate: %ukHz, DPLanes: %u\n",
+			pipe_idx, port_state->name, port_state->type, dm->timing.h_display, dm->timing.v_display, dm->timing.pixel_clock, dm->space,
+			clks->adjusted_pixel_clock_khz, clks->dp_link_rate_khz, clks->dp_lane_count);
 
 		uint32 bpp_val = get_bpp_from_colorspace(dm->space);
 		uint32 bpp_bytes = bpp_val / 8;
@@ -424,24 +431,43 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 
 		// Per-DDI Link Bandwidth Check
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
-			if (clks->dp_link_rate_khz == 0 || port_state->dpcd_data.max_lane_count == 0) {
-				TRACE("BWCheck: Pipe %d (DP) has invalid link_rate (%u) or lane_count (%u)\n", pipe_idx, clks->dp_link_rate_khz, port_state->dpcd_data.max_lane_count);
-				return B_BAD_VALUE; // Cannot check bandwidth
+			uint8_t current_lane_count = clks->dp_lane_count; // Use the lane count from clock_params
+			if (clks->dp_link_rate_khz == 0 || current_lane_count == 0) {
+				TRACE("BWCheck: Pipe %d (DP): Invalid link_rate (%u kHz) or lane_count (%u) from clock_params.\n",
+					pipe_idx, clks->dp_link_rate_khz, current_lane_count);
+				// This might happen if DPCD read failed and calculate_clocks used a default.
+				// Depending on strictness, could return B_BAD_VALUE or try to proceed with caution.
+				// For now, if essential params are zero, it's safer to fail.
+				return B_BAD_VALUE;
 			}
 			// Effective data rate per lane (kHz), assuming 8b/10b encoding (multiply by 0.8)
 			uint64 link_data_rate_per_lane_khz = (uint64)clks->dp_link_rate_khz * 8 / 10;
-			uint64 total_link_data_rate_khz = link_data_rate_per_lane_khz * port_state->dpcd_data.max_lane_count;
+			uint64 total_link_data_rate_khz = link_data_rate_per_lane_khz * current_lane_count;
 			uint64 mode_required_data_rate_khz = (uint64)clks->pixel_clock_khz * bpp_val / 8; // bpp_val is bits per pixel
+
+			TRACE("BWCheck: Pipe %d (DP): Mode req: %" B_PRIu64 " kBytes/s. Link cap: %" B_PRIu64 " kBytes/s (Rate: %u kHz, Lanes: %u).\n",
+				pipe_idx, mode_required_data_rate_khz / 1000, total_link_data_rate_khz / 1000, /* Approximation for logging */
+				clks->dp_link_rate_khz, current_lane_count);
 
 			if (mode_required_data_rate_khz > total_link_data_rate_khz) {
 				TRACE("BWCheck: Pipe %d (DP) mode data rate %" B_PRIu64 " kHz exceeds link capacity %" B_PRIu64 " kHz (Link: %u kHz x %u lanes).\n",
-					pipe_idx, mode_required_data_rate_khz, total_link_data_rate_khz, clks->dp_link_rate_khz, port_state->dpcd_data.max_lane_count);
-				return B_NO_MEMORY; // Using B_NO_MEMORY for out of link bandwidth
+					pipe_idx, mode_required_data_rate_khz, total_link_data_rate_khz, clks->dp_link_rate_khz, current_lane_count);
+				return B_NO_MEMORY;
 			}
 		} else if (port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
 			uint32 max_tmds_clk_for_port_khz = 340000; // Default HDMI 1.4-ish limit
-			if (gen >= 9) max_tmds_clk_for_port_khz = 600000; // HDMI 2.0-ish for newer gens (very rough)
-			// TODO: Get this from VBT or more precise platform data.
+			if (gen >= 9 && INTEL_GRAPHICS_VER(devInfo) >= 9) { // Check graphics version for HDMI 2.0 capabilities
+				max_tmds_clk_for_port_khz = 600000; // HDMI 2.0-ish for newer gens (e.g. SKL+)
+			} else if (IS_HASWELL(devInfo->runtime_caps.device_id) || IS_BROADWELL(devInfo->runtime_caps.device_id)) {
+				// HSW/BDW might support up to 300-340MHz typically
+				max_tmds_clk_for_port_khz = 340000;
+			} else { // Older gens like IVB
+				max_tmds_clk_for_port_khz = 225000; // More conservative for IVB HDMI
+			}
+			// TODO: This should ideally be derived from VBT DDI buffer type or specific device info.
+
+			TRACE("BWCheck: Pipe %d (HDMI/DVI): Adj. PCLK: %u kHz. Max TMDS clock for port: %u kHz (Gen %u).\n",
+				pipe_idx, clks->adjusted_pixel_clock_khz, max_tmds_clk_for_port_khz, gen);
 
 			if (clks->adjusted_pixel_clock_khz > max_tmds_clk_for_port_khz) {
 				TRACE("BWCheck: Pipe %d (HDMI/DVI) adj. pixel clock %u kHz exceeds port TMDS limit %u kHz.\n",
@@ -451,7 +477,7 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		}
 	}
 
-	// Total Memory Bandwidth Check (refined thresholds)
+	// Total Memory Bandwidth Check
 	uint64 platform_bw_limit_bytes_sec = 0;
 	if (gen >= 9) platform_bw_limit_bytes_sec = 18ULL * 1024 * 1024 * 1024; // ~18 GB/s for SKL+
 	else if (gen == 8) platform_bw_limit_bytes_sec = 15ULL * 1024 * 1024 * 1024; // ~15 GB/s for BDW

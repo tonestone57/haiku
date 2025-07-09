@@ -683,13 +683,124 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	if (modulatedSlice > kMaxSliceDuration)
 		modulatedSlice = kMaxSliceDuration;
 
-	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, latency_nice %d, "
-		"baseSlice %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
-		fThread->id, GetBasePriority(), (int)fLatencyNice, baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE,
-		modulatedSlice);
+	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", latency_nice %d, "
+		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, modulatedSlice %" B_PRId64 "us\n",
+		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()), (int)fLatencyNice,
+		baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
 
 	return modulatedSlice;
 }
+
+
+void
+ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, bool isRequeue)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(this->GetThread() != NULL);
+	// This function must be called with this thread's scheduler_lock held.
+
+	// 1. Calculate Slice Duration (Quantum) - This now uses the refined CalculateDynamicQuantum
+	bigtime_t newSliceDuration = this->CalculateDynamicQuantum(contextCpu); // Changed from scheduler_calculate_eevdf_slice
+	this->SetSliceDuration(newSliceDuration);
+
+	// 2. Determine Reference Minimum Virtual Runtime
+	bigtime_t reference_min_vruntime;
+	if (contextCpu != NULL) {
+		reference_min_vruntime = contextCpu->GetCachedMinVirtualRuntime();
+	} else {
+		reference_min_vruntime = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
+	}
+
+	// 3. Update Virtual Runtime
+	bigtime_t currentVRuntime = this->VirtualRuntime();
+	if (isNewOrRelocated || currentVRuntime < reference_min_vruntime) {
+		this->SetVirtualRuntime(max_c(currentVRuntime, reference_min_vruntime));
+	}
+	// Note: Priority change related vruntime scaling should happen *before* this call.
+
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice_wall_clock %" B_PRId64 ", refMinVR_norm %" B_PRId64 ", VR_norm set to %" B_PRId64 " (was %" B_PRId64 ")\n",
+		this->GetThread()->id, newSliceDuration, reference_min_vruntime, this->VirtualRuntime(), currentVRuntime);
+
+	// 4. Update Lag (fLag now represents normalized weighted work deficit/surplus)
+	int32 weight = scheduler_priority_to_weight(this->GetBasePriority());
+	if (weight <= 0) weight = 1;
+
+	uint32 contextCoreCapacity = SCHEDULER_NOMINAL_CAPACITY;
+	if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity > 0) {
+		contextCoreCapacity = contextCpu->Core()->fPerformanceCapacity;
+	} else if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity == 0) {
+		TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 ", contextCpu Core %" B_PRId32 " has 0 capacity! Using nominal %u for entitlement calc.\n",
+			this->GetThread()->id, contextCpu->Core()->ID(), SCHEDULER_NOMINAL_CAPACITY);
+	} else if (contextCpu == NULL) {
+		// This implies we are using gGlobalMinVirtualRuntime, which is normalized.
+		// The slice entitlement should also be normalized against nominal capacity.
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", contextCpu is NULL, using nominal capacity %u for entitlement calc.\n",
+			this->GetThread()->id, SCHEDULER_NOMINAL_CAPACITY);
+	}
+
+
+	// Convert wall-clock SliceDuration to normalized work equivalent on contextCpu (or nominal)
+	// normalizedSliceWork = SliceDuration_wall_clock * contextCoreCapacity / SCHEDULER_NOMINAL_CAPACITY
+	uint64 normalizedSliceWork_num = (uint64)this->SliceDuration() * contextCoreCapacity;
+	uint64 normalizedSliceWork_den = SCHEDULER_NOMINAL_CAPACITY;
+	bigtime_t normalizedSliceWork = (normalizedSliceWork_den == 0) ? 0 : normalizedSliceWork_num / normalizedSliceWork_den;
+
+	bigtime_t weightedNormalizedSliceEntitlement = (normalizedSliceWork * SCHEDULER_WEIGHT_SCALE) / weight;
+
+	if (isRequeue) {
+		this->AddLag(weightedNormalizedSliceEntitlement);
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag_norm ADDED %" B_PRId64 " (from normSliceWork %" B_PRId64 ") -> new lag_norm %" B_PRId64 "\n",
+			this->GetThread()->id, weightedNormalizedSliceEntitlement, normalizedSliceWork, this->Lag());
+	} else {
+		this->SetLag(weightedNormalizedSliceEntitlement - (this->VirtualRuntime() - reference_min_vruntime));
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag_norm SET to %" B_PRId64 " (wNormSliceEnt %" B_PRId64 ", VR_norm %" B_PRId64 ", refMinVR_norm %" B_PRId64 ")\n",
+			this->GetThread()->id, this->Lag(), weightedNormalizedSliceEntitlement, this->VirtualRuntime(), reference_min_vruntime);
+	}
+
+	// 5. Update Eligible Time (fEligibleTime is wall-clock)
+	if (this->IsRealTime()) {
+		this->SetEligibleTime(system_time());
+	} else if (this->Lag() >= 0) { // Lag is normalized weighted work
+		this->SetEligibleTime(system_time());
+	} else {
+		// Convert normalized weighted work deficit back to wall-clock delay
+		// Deficit_norm_weighted = -this->Lag()
+		// Deficit_norm_unweighted = (Deficit_norm_weighted * weight) / SCHEDULER_WEIGHT_SCALE
+		// WallClockDelay_on_target = (Deficit_norm_unweighted * SCHEDULER_NOMINAL_CAPACITY) / targetCoreCapacity
+		// Combined: (-this->Lag() * weight * SCHEDULER_NOMINAL_CAPACITY) / (SCHEDULER_WEIGHT_SCALE * targetCoreCapacity)
+
+		uint32 targetCoreCapacity = contextCoreCapacity; // Use the same capacity as for entitlement.
+		                                                 // If contextCpu was NULL, nominal is used.
+
+		uint64 delayNumerator = (uint64)(-this->Lag()) * weight * SCHEDULER_NOMINAL_CAPACITY;
+		uint64 delayDenominator = (uint64)SCHEDULER_WEIGHT_SCALE * targetCoreCapacity;
+		bigtime_t wallClockDelay;
+
+		if (delayDenominator == 0) { // Should be impossible
+			wallClockDelay = SCHEDULER_TARGET_LATENCY * 2;
+			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 " - Denominator zero in eligibility delay calc! lag_norm %" B_PRId64 ", weight %" B_PRId32 ", targetCap %" B_PRIu32 "\n",
+				this->GetThread()->id, this->Lag(), weight, targetCoreCapacity);
+		} else {
+			wallClockDelay = delayNumerator / delayDenominator;
+		}
+
+		wallClockDelay = min_c(wallClockDelay, (bigtime_t)SCHEDULER_TARGET_LATENCY * 2);
+		this->SetEligibleTime(system_time() + max_c(wallClockDelay, (bigtime_t)SCHEDULER_MIN_GRANULARITY));
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", neg_lag_norm %" B_PRId64 ", targetCap %" B_PRIu32 ", calculated wallClockDelay %" B_PRId64 "\n",
+			this->GetThread()->id, this->Lag(), targetCoreCapacity, wallClockDelay);
+	}
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time_wall_clock set to %" B_PRId64 "\n",
+		this->GetThread()->id, this->EligibleTime());
+
+	// 6. Update Virtual Deadline (fVirtualDeadline is wall-clock)
+	// It's the wall-clock time by which the wall-clock SliceDuration should complete.
+	this->SetVirtualDeadline(this->EligibleTime() + this->SliceDuration()); // SliceDuration is still wall-clock
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", VD set to %" B_PRId64 "\n",
+		this->GetThread()->id, this->VirtualDeadline());
+}
+
+
+// #pragma mark - Core Logic
 
 
 void
@@ -737,13 +848,18 @@ ThreadData::_ComputeNeededLoad()
 	fMeasureAvailableActiveTime = 0; // Reset normalized active time accumulator
 
 	// EEVDF parameters are not re-initialized here. This function focuses on load.
-	// Minor cleanup: fSliceDuration was an EEVDF param; its re-init here was a relic.
-	// Corrected to match constructor default for slice duration.
-	// However, fSliceDuration is primarily managed by UpdateEevdfParameters.
+	// fSliceDuration is now dynamically calculated by CalculateDynamicQuantum,
+	// which is called by UpdateEevdfParameters.
+	// These re-initializations to zero/default are generally okay as placeholders
+	// if this function is called outside a full EEVDF update cycle, but
+	// UpdateEevdfParameters is the authoritative source for these values
+	// when a thread is being actively managed by the EEVDF scheduler.
 	fVirtualDeadline = 0;
 	fLag = 0;
 	fEligibleTime = 0;
-	fSliceDuration = kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)];
+	// fSliceDuration = kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)]; // Old way, kBaseQuanta will be removed.
+	// Set to a generic default; will be properly set by UpdateEevdfParameters.
+	fSliceDuration = SCHEDULER_TARGET_LATENCY; // A generic default if needed before proper calculation
 	fVirtualRuntime = 0;
 	// fEevdfLink is implicitly default-constructed.
 }

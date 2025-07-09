@@ -121,6 +121,8 @@ static const bool kUseContinuousWeights = true;
 // --- Original Haiku priority to nice index mapping ---
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
 // B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
+// This function becomes unused if scheduler_priority_to_weight directly uses gHaikuContinuousWeights.
+#if 0 // No longer used if kUseContinuousWeights is true and scheduler_priority_to_weight is updated
 static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
     float effNiceFloat;
     // B_NORMAL_PRIORITY is 10
@@ -140,46 +142,23 @@ static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
     // Convert nice value to index for gNiceToWeight (nice -20=idx 0, nice 0=idx 20)
     return effNice + 20;
 }
+#endif
 
 static inline int32 scheduler_priority_to_weight(int32 priority) {
-    // Idle threads get the absolute lowest weight
-    if (priority < B_LOWEST_ACTIVE_PRIORITY) { // Typically priority 0-4
-        return gNiceToWeight[39]; // nice +19, weight 15
+    // Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
+    // If it's false, this function would need to fall back to the old logic or panic.
+    // Given kUseContinuousWeights is already true by default in the file,
+    // gHaikuContinuousWeights should be populated.
+
+    // Clamp priority to be a valid index for gHaikuContinuousWeights.
+    // B_MAX_PRIORITY is 121, so valid indices are 0 to 120.
+    if (priority < 0) {
+        priority = 0;
+    } else if (priority >= B_MAX_PRIORITY) {
+        priority = B_MAX_PRIORITY - 1;
     }
 
-    // Kernel Real-Time (highest importance, e.g., timer threads)
-    if (priority >= B_MAX_REAL_TIME_PRIORITY) { // >= 120
-        return gNiceToWeight[0] * 16; // Nice -20 base, heavily boosted
-    }
-
-    // Kernel Urgent/Worker Threads (very high importance)
-    if (priority >= B_URGENT_PRIORITY) { // >= 100 (e.g., some kernel daemons)
-        return gNiceToWeight[0] * 8;  // Nice -20 base, significantly boosted
-    }
-
-    // High Priority User/System Threads (e.g. media kit internals, high-priority user RT apps)
-    // Range: 60 to B_URGENT_PRIORITY - 1 (99)
-    if (priority >= 60) {
-        return gNiceToWeight[0] * 4; // Nice -20 base, moderately boosted
-    }
-
-    // Medium-High Priority User/System Threads (e.g. typical user RT apps, some media)
-    // Range: B_REAL_TIME_PRIORITY (30) to 59
-    if (priority >= B_REAL_TIME_PRIORITY) { // >= 30
-        return gNiceToWeight[0] * 2; // Nice -20 base, boosted
-    }
-
-    // System Services (app_server, input_server, lower-priority media threads)
-    // Range: B_REAL_TIME_DISPLAY_PRIORITY (20) to B_REAL_TIME_PRIORITY - 1 (29)
-    if (priority >= B_REAL_TIME_DISPLAY_PRIORITY) { // >= 20
-        return gNiceToWeight[0]; // Nice -20 base (weight 88761)
-    }
-
-    // Normal Application Priorities
-    // Range: B_LOWEST_ACTIVE_PRIORITY (5) to B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
-    // Uses the refined scheduler_haiku_priority_to_nice_index()
-    int niceIndex = scheduler_haiku_priority_to_nice_index(priority);
-    return gNiceToWeight[niceIndex];
+    return gHaikuContinuousWeights[priority];
 }
 
 

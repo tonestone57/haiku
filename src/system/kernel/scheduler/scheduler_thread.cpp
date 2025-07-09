@@ -142,7 +142,7 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 	// This function must be called with this thread's scheduler_lock held.
 
 	// 1. Calculate Slice Duration (Quantum)
-	bigtime_t newSliceDuration = scheduler_calculate_eevdf_slice(this, contextCpu);
+	bigtime_t newSliceDuration = this->CalculateDynamicQuantum(contextCpu);
 	this->SetSliceDuration(newSliceDuration);
 
 	// 2. Determine Reference Minimum Virtual Runtime
@@ -418,7 +418,7 @@ ThreadData::ThreadData(Thread* thread)
 	fVirtualDeadline(0),
 	fLag(0),
 	fEligibleTime(0),
-	fSliceDuration(kBaseQuanta[MapPriorityToEffectiveLevel(B_NORMAL_PRIORITY)]), // Default slice duration
+	fSliceDuration(SCHEDULER_TARGET_LATENCY), // Updated Default slice duration
 	fVirtualRuntime(0),
 	fLatencyNice(LATENCY_NICE_DEFAULT),
 	// I/O-bound heuristic
@@ -661,23 +661,46 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		return B_INFINITE_TIMEOUT;
 	}
 
-	// Base slice duration from priority using definitions from scheduler_defs.h
-	int effectivePriority = GetBasePriority();
-	// Clamp priority to valid range for safety, though ThreadData should maintain valid priority.
-	if (effectivePriority < 0) effectivePriority = 0; // Should map to B_IDLE_PRIORITY level via MapPriorityToEffectiveLevel
-	if (effectivePriority >= B_MAX_PRIORITY) effectivePriority = B_MAX_PRIORITY - 1;
+	// Get the thread's continuous weight.
+	int32 priority = GetBasePriority();
+	// Clamp priority for safety, though it should be valid.
+	if (priority < 0) priority = 0;
+	if (priority >= B_MAX_PRIORITY) priority = B_MAX_PRIORITY - 1;
+	int32 weight = scheduler_priority_to_weight(priority); // This now uses gHaikuContinuousWeights
 
-	int level = MapPriorityToEffectiveLevel(effectivePriority);
-	bigtime_t baseSlice = kBaseQuanta[level]; // Direct use of kBaseQuanta
+	if (weight <= 0) {
+		// This should not happen as idle (weight 1) is the minimum from gHaikuContinuousWeights.
+		// Fallback to a sane default if it does due to some unexpected issue.
+		TRACE_SCHED_WARNING("CalculateDynamicQuantum: T %" B_PRId32 " (prio %" B_PRId32 ") has unexpected weight %" B_PRId32 "! Using weight 1.\n",
+			fThread->id, priority, weight);
+		weight = 1;
+	}
 
-	int latencyNiceIdx = latency_nice_to_index(fLatencyNice);
+	// Calculate baseSlice inversely proportional to weight.
+	// baseSlice = (TargetLatency * IdealWeight) / ActualWeight
+	// SCHEDULER_TARGET_LATENCY is our target period (e.g., 20ms = 20000us)
+	// SCHEDULER_WEIGHT_SCALE is the weight of a nice 0 thread (typically 1024)
+	// This makes baseSlice shorter for higher priority (higher weight) threads.
+	bigtime_t baseSlice;
+	// 'weight' is guaranteed to be > 0 here due to the check above.
+	baseSlice = (SCHEDULER_TARGET_LATENCY * SCHEDULER_WEIGHT_SCALE) / weight;
+
+	// For Real-Time threads, ensure baseSlice is at least RT_MIN_GUARANTEED_SLICE
+	if (IsRealTime()) {
+		baseSlice = max_c(baseSlice, RT_MIN_GUARANTEED_SLICE);
+	}
+
+	// Modulate by latency_nice.
+	int latencyNiceIdx = latency_nice_to_index(fLatencyNice); // fLatencyNice is int8
 	int32 factor = gLatencyNiceFactors[latencyNiceIdx];
 
 	// Apply factor: (baseSlice * factor) / SCALE
-	// (baseSlice * factor) >> SHIFT is good for powers of 2 SCALE
+	// (baseSlice * factor) >> SHIFT is good for powers of 2 SCALE (LATENCY_NICE_FACTOR_SCALE is 1024)
 	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
 
 	// Adaptive adjustment for I/O-bound or frequently yielding threads
+	// This should generally not apply to RT threads if RT_MIN_GUARANTEED_SLICE is effective,
+	// but the logic is general.
 	if (fVoluntarySleepTransitions >= IO_BOUND_MIN_TRANSITIONS && fAverageRunBurstTimeEWMA > 0) {
 		if (fAverageRunBurstTimeEWMA < modulatedSlice) {
 			// Add a small buffer (e.g., 25% of avg burst or half min granularity)
@@ -711,15 +734,19 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	}
 
 	// Clamp to system min/max (final clamping)
-	if (modulatedSlice < kMinSliceGranularity)
-		modulatedSlice = kMinSliceGranularity;
-	if (modulatedSlice > kMaxSliceDuration)
-		modulatedSlice = kMaxSliceDuration;
+	// For Real-Time threads, the floor is RT_MIN_GUARANTEED_SLICE.
+	// For others, it's kMinSliceGranularity.
+	if (IsRealTime()) {
+		modulatedSlice = max_c(RT_MIN_GUARANTEED_SLICE, min_c(modulatedSlice, kMaxSliceDuration));
+	} else {
+		modulatedSlice = max_c(kMinSliceGranularity, min_c(modulatedSlice, kMaxSliceDuration));
+	}
 
 	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", latency_nice %d, "
-		"baseSlice (inv. weight) %" B_PRId64 "us, factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt/contention floor)\n",
+		"baseSlice %" B_PRId64 "us (RT floor %" B_PRId64 "us), factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt/contention/RT floor)\n",
 		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()), (int)fLatencyNice,
-		baseSlice, factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
+		baseSlice, IsRealTime() ? RT_MIN_GUARANTEED_SLICE : kMinSliceGranularity,
+		factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
 
 	return modulatedSlice;
 }
@@ -1094,3 +1121,5 @@ ThreadData::_ComputeNeededLoad()
 	// fEevdfLink is implicitly default-constructed.
 }
 // --- End of new _ComputeNeededLoad ---
+
+[end of src/system/kernel/scheduler/scheduler_thread.cpp]

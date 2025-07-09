@@ -75,6 +75,13 @@ const int HIGH_CONTENTION_THRESHOLD = 4;
 const float HIGH_CONTENTION_MIN_SLICE_FACTOR = 1.5f;
 
 
+// --- Real-Time Thread Slice Configuration ---
+// Minimum guaranteed slice duration for real-time threads, in microseconds.
+// This ensures RT threads get a slightly longer minimum run time than kMinSliceGranularity
+// if their weight-derived slice would be too small, before latency_nice modulation.
+const bigtime_t RT_MIN_GUARANTEED_SLICE = 2000; // 2ms
+
+
 // --- Dynamic Load Balancer Interval Constants ---
 const bigtime_t kInitialLoadBalanceInterval = 100000; // Initial and default
 const bigtime_t kMinLoadBalanceInterval = 20000;     // e.g., 20ms

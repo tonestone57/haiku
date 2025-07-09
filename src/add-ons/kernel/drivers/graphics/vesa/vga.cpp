@@ -10,9 +10,30 @@
 #include "vga.h"
 #include "driver.h"
 
-#include <vga.h>
+#include <vga.h> // This should provide VGA_SEQUENCER_INDEX, etc.
 
 #include <KernelExport.h>
+
+// Standard VGA Register Indices - defined locally as a fallback
+// if not consistently found via <vga.h> macros across build environments.
+// Assumes VGA_SEQUENCER_INDEX, VGA_GRAPHICS_INDEX, etc. ARE defined by <vga.h>
+#ifndef VGA_SEQ_MAP_MASK // Use Haiku's names if available
+	#define VGA_SEQ_MAP_MASK          0x02
+#endif
+#ifndef VGA_GC_DATA_ROTATE // Use Haiku's names if available
+	#define VGA_GC_DATA_ROTATE        0x03
+#endif
+#ifndef VGA_GC_BIT_MASK // Use Haiku's names if available
+	#define VGA_GC_BIT_MASK           0x08
+#endif
+
+// Standard VGA DAC Register Ports - from Haiku's headers/os/drivers/vga.h
+#ifndef VGA_DAC_WRITE_INDEX
+	#define VGA_DAC_WRITE_INDEX       0x3C8
+#endif
+#ifndef VGA_DAC_DATA
+	#define VGA_DAC_DATA              0x3C9
+#endif
 
 
 status_t

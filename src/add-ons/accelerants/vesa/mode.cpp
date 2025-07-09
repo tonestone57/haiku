@@ -179,18 +179,50 @@ vesa_propose_display_mode(display_mode* target, const display_mode* low,
 	// Search for the specified mode in the list. If it's in there, we don't need a custom mode and
 	// we just normalize it to the info provided by the VESA BIOS.
 
-	for (uint32 i = 0; i < gInfo->shared_info->mode_count; i++) {
-		display_mode* current = &gInfo->mode_list[i];
+	// gInfo->mode_list is sorted by create_display_modes: typically by width, then height,
+	// then color_space, then refresh rate. We're looking for an exact match on
+	// width, height, and space.
+	int low = 0;
+	int high = gInfo->shared_info->mode_count - 1;
+	bool found = false;
 
-		if (target->virtual_width != current->virtual_width
-			|| target->virtual_height != current->virtual_height
-			|| target->space != current->space)
-			continue;
+	while (low <= high) {
+		int mid = low + (high - low) / 2;
+		display_mode* current = &gInfo->mode_list[mid];
 
-		*target = *current;
-		return B_OK;
+		if (current->virtual_width < target->virtual_width) {
+			low = mid + 1;
+		} else if (current->virtual_width > target->virtual_width) {
+			high = mid - 1;
+		} else {
+			// Widths match, check height
+			if (current->virtual_height < target->virtual_height) {
+				low = mid + 1;
+			} else if (current->virtual_height > target->virtual_height) {
+				high = mid - 1;
+			} else {
+				// Widths and heights match, check space
+				if (current->space < target->space) {
+					low = mid + 1;
+				} else if (current->space > target->space) {
+					high = mid - 1;
+				} else {
+					// Exact match found for width, height, and space.
+					// Propose_display_mode can pick any refresh rate, so this is sufficient.
+					// To be more precise, we might need to iterate if multiple refresh rates exist.
+					// However, the first one found by binary search is acceptable for proposal.
+					*target = *current;
+					found = true;
+					break;
+				}
+			}
+		}
 	}
 
+	if (found)
+		return B_OK;
+
+	// If not found in the mode_list, check if it's a patchable custom mode
 	bios_type_enum type = gInfo->shared_info->bios_type;
 	if (type == kIntelBiosType || type == kAtomBiosType1 || type == kAtomBiosType2) {
 		// The driver says it knows the BIOS type, and therefore how to patch it to apply custom

@@ -87,12 +87,17 @@ find_graphics_card(addr_t frameBuffer, addr_t& base, size_t& size, uint16_t& ven
 				vendorId = info.vendor_id;
 				productId = info.device_id;
 
+				dprintf(DEVICE_NAME ": Found matching PCI device for framebuffer 0x%lx: "
+					"Vendor 0x%04x, Product 0x%04x, BAR%u 0x%lx, Size 0x%lx\n",
+					frameBuffer, vendorId, productId, i, base, size);
 				put_module(B_PCI_MODULE_NAME);
 				return B_OK;
 			}
 		}
 	}
 
+	dprintf(DEVICE_NAME ": Could not find a PCI device matching framebuffer 0x%lx. "
+		"Full VRAM size may not be available.\n", frameBuffer);
 	put_module(B_PCI_MODULE_NAME);
 	return B_ENTRY_NOT_FOUND;
 }

@@ -92,6 +92,15 @@ CPUEntry::CPUEntry()
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
+	// fEevdfRunQueueTaskCount is initialized using atomic_init in C++11 style if possible,
+	// or direct initialization if the type supports it.
+	// For Haiku's C-style atomics, it's typically done in Init or by ensuring zero-init.
+	// Let's ensure it's zeroed. If atomic_int32 is a struct, it might need explicit {0}.
+	// Assuming it's a typedef for a type that zero-initializes or atomic_init in constructor.
+	// For safety, we will explicitly initialize in the member initializer list if possible,
+	// otherwise rely on Init() for atomic_store.
+	// atomic_init(&fEevdfRunQueueTaskCount, 0); // This is C11 style, might not be direct C++ init list
+	fEevdfRunQueueTaskCount(0), // Assuming atomic_int32 can be value-initialized like this
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false)
@@ -157,6 +166,7 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
+	atomic_store(&fEevdfRunQueueTaskCount, 0);
 
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
@@ -257,6 +267,7 @@ CPUEntry::AddThread(ThreadData* thread)
 	fEevdfRunQueue.Add(thread);
 	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
+	atomic_add(&fEevdfRunQueueTaskCount, 1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
 	// fMlfqHighestNonEmptyLevel logic removed.
 }
@@ -273,7 +284,9 @@ CPUEntry::RemoveThread(ThreadData* thread)
 		fEevdfRunQueue.Remove(thread);
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
-		ASSERT(fTotalThreadCount >= 0);
+		ASSERT(atomic_load(&fTotalThreadCount) >= 0);
+		atomic_add(&fEevdfRunQueueTaskCount, -1);
+		ASSERT(atomic_load(&fEevdfRunQueueTaskCount) >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
 	}
 	// fMlfqHighestNonEmptyLevel logic removed.
@@ -312,12 +325,14 @@ CPUEntry::PeekEligibleNextThread()
 	// We are looking for the first eligible thread based on VirtualDeadline order.
 	while (!fEevdfRunQueue.IsEmpty()) {
 		ThreadData* candidate = fEevdfRunQueue.PopMinimum(); // Pop from actual queue
+		atomic_add(&fEevdfRunQueueTaskCount, -1);
+		ASSERT(atomic_load(&fEevdfRunQueueTaskCount) >= 0);
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
 		if (now >= candidate->EligibleTime()) {
 			eligibleCandidate = candidate; // Found an eligible one
-			// It's already popped, so we keep it out and will return it.
+			// It's already popped (and count decremented), so we keep it out and will return it.
 			// The caller (ChooseNextThread) will call MarkDequeued() on it.
 			break;
 		} else {
@@ -337,6 +352,7 @@ CPUEntry::PeekEligibleNextThread()
 	// correctly by deadline.
 	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
 		fEevdfRunQueue.Add(toReAdd);
+		atomic_add(&fEevdfRunQueueTaskCount, 1);
 		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
 		// becomes the head or if the queue was empty.
 	}

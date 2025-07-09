@@ -2572,11 +2572,11 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 					isBetter = true;
 				} else if (currentSmtScore == bestScore) {
 					// Multi-level tie-breaking for (preferBusiest == false):
-					// 1. Prefer CPU with shorter EEVDF run queue.
+					// 1. Prefer CPU with shorter EEVDF run queue (using cached/atomic count).
 					// 2. If queues are equal, prefer CPU with lower MinVirtualRuntime.
 					// 3. If still tied, prefer lower CPU ID for determinism.
-					int32 currentQueueDepth = currentCPU->GetEevdfRunQueue().Count();
-					int32 bestQueueDepth = bestCPU->GetEevdfRunQueue().Count();
+					int32 currentQueueDepth = currentCPU->GetEevdfRunQueueTaskCount();
+					int32 bestQueueDepth = bestCPU->GetEevdfRunQueueTaskCount();
 					if (currentQueueDepth < bestQueueDepth) {
 						isBetter = true;
 						TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 ". CPU %" B_PRId32 " selected due to shallower run queue (%d vs %d).\n",

@@ -5,6 +5,9 @@
 
 
 #include "vga.h"
+#include <string.h> // For memset
+
+#include "vga.h"
 #include "driver.h"
 
 #include <vga.h>
@@ -22,7 +25,7 @@ vga_set_indexed_colors(uint8 first, uint8 *colors, uint16 count)
 	if (first + count > 256)
 		count = 256 - first;
 
-	gISA->write_io_8(VGA_COLOR_WRITE_MODE, first);
+	gISA->write_io_8(VGA_DAC_WRITE_INDEX, first);
 
 	// write VGA palette
 	for (int32 i = first; i < count; i++) {
@@ -31,9 +34,9 @@ vga_set_indexed_colors(uint8 first, uint8 *colors, uint16 count)
 			return B_BAD_ADDRESS;
 
 		// VGA (usually) has only 6 bits per gun
-		gISA->write_io_8(VGA_COLOR_DATA, color[0] >> 2);
-		gISA->write_io_8(VGA_COLOR_DATA, color[1] >> 2);
-		gISA->write_io_8(VGA_COLOR_DATA, color[2] >> 2);
+		gISA->write_io_8(VGA_DAC_DATA, color[0] >> 2);
+		gISA->write_io_8(VGA_DAC_DATA, color[1] >> 2);
+		gISA->write_io_8(VGA_DAC_DATA, color[2] >> 2);
 	}
 	return B_OK;
 }
@@ -52,7 +55,7 @@ vga_planar_blit(vesa_shared_info *info, uint8 *src, int32 srcBPR,
 		return B_BAD_ADDRESS;
 
 	int32 dstBPR = info->bytes_per_row;
-	uint8 *dst = info->frame_buffer + top * dstBPR + left / 8;
+	// Original line, now unused: uint8 *dst = info->frame_buffer + top * dstBPR + left / 8;
 
 	// TODO: assumes BGR order
 
@@ -109,13 +112,13 @@ vga_planar_blit(vesa_shared_info *info, uint8 *src, int32 srcBPR,
 			}
 
 			// Set VGA registers for writing to the current plane
-			gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SR_MAP_MASK);
+			gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SEQ_MAP_MASK);
 			gISA->write_io_8(VGA_SEQUENCER_DATA, 1 << plane);
 
-			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_DATA_ROTATE);
+			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GC_DATA_ROTATE);
 			gISA->write_io_8(VGA_GRAPHICS_DATA, 0x00); // Write mode 0 (replace), no rotation
 
-			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_BIT_MASK);
+			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GC_BIT_MASK);
 			gISA->write_io_8(VGA_GRAPHICS_DATA, 0xFF); // Affect all bits
 
 			// Write the prepared plane data for the row segment to VGA memory
@@ -129,9 +132,9 @@ vga_planar_blit(vesa_shared_info *info, uint8 *src, int32 srcBPR,
 	}
 
 	// Restore VGA registers to a default state (all planes writeable for safety)
-	gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SR_MAP_MASK);
+	gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SEQ_MAP_MASK);
 	gISA->write_io_8(VGA_SEQUENCER_DATA, 0x0F); // Enable all planes
-	gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_BIT_MASK);
+	gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GC_BIT_MASK);
 	gISA->write_io_8(VGA_GRAPHICS_DATA, 0xFF); // Affect all bits
 
 	return B_OK;

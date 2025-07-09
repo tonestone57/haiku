@@ -115,7 +115,8 @@ _init_continuous_weights()
 
 // Toggle to switch between old and new weight calculation for testing.
 // Default to false (old system) until new system is validated.
-static const bool kUseContinuousWeights = false;
+// Enabling the new continuous weight mapping by default.
+static const bool kUseContinuousWeights = true;
 
 // --- Original Haiku priority to nice index mapping ---
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.

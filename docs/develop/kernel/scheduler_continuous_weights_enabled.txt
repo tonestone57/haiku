@@ -1,0 +1,42 @@
+**Subject: Activation of Continuous Priority-to-Weight Mapping in EEVDF Scheduler**
+
+**Date:** YYYY-MM-DD
+
+**1. Decision**
+
+The experimental continuous/hybrid priority-to-weight mapping for the EEVDF scheduler, prototyped in `src/system/kernel/scheduler/scheduler.cpp` (via `calculate_continuous_haiku_weight_prototype` and the `gHaikuContinuousWeights` table), has been **enabled by default**.
+
+This was achieved by changing the compile-time toggle:
+`static const bool kUseContinuousWeights = true;`
+in `src/system/kernel/scheduler/scheduler.cpp`.
+
+**2. Rationale for Enabling**
+
+The previous priority-to-weight mapping relied on a tiered system with significant, discrete jumps in EEVDF weights at the boundaries of these tiers (especially between normal and real-time priorities). Additionally, it offered no weight differentiation for threads within the same broad real-time (RT) tier, despite them potentially having different Haiku RT priority numbers.
+
+The new continuous/hybrid mapping aims to address these points by:
+*   Providing a smoother, geometric scaling of weights for normal Haiku priorities, anchored at `B_NORMAL_PRIORITY` (10) mapping to `SCHEDULER_WEIGHT_SCALE` (1024).
+*   Establishing a high base weight for the entry into real-time priorities (at `B_REAL_TIME_DISPLAY_PRIORITY` = 20, using the previous nice -20 weight of 88761) to maintain strong RT preference.
+*   Applying continuous geometric scaling *from this RT base* for higher Haiku RT priorities, allowing for finer-grained differentiation among them.
+*   Implementing appropriate minimum and maximum caps for weights.
+
+**3. Expected Impact and Behavioral Changes**
+
+With `kUseContinuousWeights = true`, the following behavioral changes are anticipated:
+
+*   **Smoother CPU Share Progression (Normal Priorities)**: For threads in the normal priority range (Haiku priority 5-19), CPU time allocation should now more closely reflect a geometric progression. Small changes in Haiku priority will result in proportionally small changes in EEVDF weight and thus CPU share, rather than potentially large shifts if a "nice level" boundary was crossed in the old system.
+*   **Granularity within Real-Time Tiers**: Threads with different Haiku real-time priorities (e.g., priority 30 vs. 35 vs. 40) will now have distinct EEVDF weights. This allows the EEVDF scheduler to differentiate their importance and allocate CPU time more granularly among them, which was not possible when they all mapped to the same large weight.
+*   **Normal-to-RT Transition**: The transition from the highest normal priority (19) to the lowest "system service" RT priority (20) will still involve a significant step-up in weight (prio 19 weight ~476, prio 20 weight 88761). This maintains the strong preference for RT tasks but eliminates some of the more extreme multiplicative jumps of the old system for the very first RT tier. Subsequent RT priorities then scale smoothly from this new RT base.
+*   **Overall System Feel**: Subjectively, these changes *may* lead to a more predictable and consistently responsive system, as relative thread importances are more finely represented. However, this requires empirical validation.
+*   **No Change in Fundamental EEVDF Mechanics**: The core EEVDF logic (virtual runtime, lag, deadlines) remains unchanged. The new mapping only alters one input (thread weight) to these calculations.
+
+**4. Next Steps / Verification**
+
+While conceptual verification and code review indicate the new mapping aligns with design goals, **empirical testing on a live Haiku system is crucial** to:
+*   Validate the actual impact on application performance and system responsiveness.
+*   Confirm fairness and starvation characteristics across diverse workloads.
+*   Identify any unintended consequences or areas where the scaling factors, RT base weight, or caps might need further tuning.
+
+The test scenarios previously outlined for comparing the old and new mappings should be executed.
+Monitoring key system metrics and application benchmarks will be essential.
+This change sets the stage for more nuanced scheduler behavior, but its real-world benefits will be determined through testing.

@@ -167,78 +167,188 @@ status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, con
 
 
 // --- CDCLK Helper Functions ---
-static const uint32 hsw_ult_cdclk_freqs[] = {450000, 540000, 337500, 675000};
-static const uint32 hsw_desktop_cdclk_freqs[] = {450000, 540000, 650000};
-static const uint32 ivb_mobile_cdclk_freqs[] = {337500, 450000, 540000, 675000};
-static const uint32 ivb_desktop_cdclk_freqs[] = {320000, 400000};
 
-static bool
-is_cdclk_sufficient(intel_i915_device_info* devInfo, uint32_t current_cdclk_khz, uint32_t max_pclk_khz)
-{
-	if (max_pclk_khz == 0) return true;
-	float factor = 2.0f;
-	if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) factor = 1.5f;
-	return current_cdclk_khz >= (uint32_t)(max_pclk_khz * factor);
+// Define known CDCLK frequencies (kHz) for various platforms.
+// Values should be ordered from lowest to highest if preference is for lowest sufficient.
+// Or highest to lowest if preference is for highest possible.
+// For now, using a mix and letting selection logic pick smallest sufficient.
+// These are examples and need PRM validation and expansion.
+static const uint32_t IVB_D_CDCLK_FREQ_KHZ[] = {320000, 400000, 480000, 560000, 640000}; // Desktop IVB
+static const uint32_t IVB_M_CDCLK_FREQ_KHZ[] = {337500, 450000, 540000, 675000};       // Mobile IVB
+
+static const uint32_t HSW_ULT_CDCLK_FREQ_KHZ[] = {337500, 450000, 540000, 675000};      // Haswell ULT
+static const uint32_t HSW_GT1_2_CDCLK_FREQ_KHZ[] = {450000, 540000, 650000};            // Haswell Desktop/Mobile GT1/GT2
+// HSW GT3 might have different/higher options.
+
+static const uint32_t BDW_CDCLK_FREQ_KHZ[] = {450000, 540000, 675000}; // Broadwell (example)
+
+// SKL+ CDCLK can be more flexibly synthesized.
+// Common values often seen (derived from 24MHz refclk and dividers):
+static const uint32_t SKL_CDCLK_FREQ_KHZ[] = {307200, 336000, 432000, 450000, 540000, 648000, 675000};
+// Max CDCLK for SKL is often around 675 MHz. Max for KBL can be higher.
+
+// Helper to get the list of available CDCLK frequencies for the platform.
+static void get_platform_cdclk_freqs(intel_i915_device_info* devInfo, const uint32_t** freqs, size_t* count) {
+	*freqs = NULL;
+	*count = 0;
+	uint16_t devid = devInfo->runtime_caps.device_id;
+
+	if (IS_IVYBRIDGE(devid)) {
+		if (IS_IVYBRIDGE_MOBILE(devid)) {
+			*freqs = IVB_M_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(IVB_M_CDCLK_FREQ_KHZ);
+		} else { // Desktop/Server
+			*freqs = IVB_D_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(IVB_D_CDCLK_FREQ_KHZ);
+		}
+	} else if (IS_HASWELL(devid)) {
+		if (IS_HASWELL_ULT(devid)) {
+			*freqs = HSW_ULT_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(HSW_ULT_CDCLK_FREQ_KHZ);
+		} else { // Desktop/Mobile GT1/GT2/GT3
+			// TODO: Differentiate HSW GT3 if it has different CDCLK options.
+			*freqs = HSW_GT1_2_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(HSW_GT1_2_CDCLK_FREQ_KHZ);
+		}
+	} else if (IS_BROADWELL(devid)) {
+		*freqs = BDW_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(BDW_CDCLK_FREQ_KHZ);
+	} else if (INTEL_DISPLAY_GEN(devInfo) >= 9) { // SKL, KBL, CFL, etc.
+		// TODO: Refine for KBL/CFL if they have higher max CDCLKs than SKL.
+		*freqs = SKL_CDCLK_FREQ_KHZ; *count = B_COUNT_OF(SKL_CDCLK_FREQ_KHZ);
+	} else {
+		TRACE("get_platform_cdclk_freqs: No CDCLK table for platform %d (devid 0x%04x)\n",
+			devInfo->platform, devid);
+	}
 }
 
+
+// Calculates minimum required CDCLK based on PRM guidelines (simplified).
+// This needs to be GEN-specific and account for total pixel rate, number of pipes, etc.
 static uint32_t
-get_target_cdclk_for_pclk(intel_i915_device_info* devInfo, uint32 max_pclk_khz)
+calculate_required_min_cdclk(intel_i915_device_info* devInfo,
+	uint32 total_pixel_rate_mhz, /* Sum of (PixelClock kHz / 1000) for all active displays */
+	uint32 num_active_pipes,
+	uint32 max_single_pipe_pclk_khz)
 {
-	if (max_pclk_khz == 0) return devInfo->current_cdclk_freq_khz;
+	uint32 gen = INTEL_DISPLAY_GEN(devInfo);
+	uint32 required_cdclk_khz = 0;
 
-	const uint32_t* freqs = NULL;
-	size_t num_freqs = 0;
-	float min_ratio = 2.0f;
+	// Basic requirement: CDCLK must be >= max single pipe pixel clock.
+	// Often, it needs to be significantly higher, e.g., 1.5x to 2.5x,
+	// depending on internal bus widths, buffering, and features.
+	float base_ratio = 1.5f; // Default starting ratio
 
-	if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
-		if (IS_HASWELL_ULT(devInfo->runtime_caps.device_id)) {
-			freqs = hsw_ult_cdclk_freqs; num_freqs = B_COUNT_OF(hsw_ult_cdclk_freqs);
-		} else {
-			freqs = hsw_desktop_cdclk_freqs; num_freqs = B_COUNT_OF(hsw_desktop_cdclk_freqs);
-		}
+	if (gen >= 9) { // SKL+
+		base_ratio = 1.8f; // SKL+ might need more headroom for features
+		if (num_active_pipes > 1) base_ratio += 0.2f * (num_active_pipes - 1);
+		// Example: 1 pipe = 1.8x, 2 pipes = 2.0x, 3 pipes = 2.2x
+		// This is a heuristic. PRMs might have formulas like:
+		// CDCLK >= Max(PCLK_pipe0, PCLK_pipe1, ...) * Factor_num_pipes
+		// Or CDCLK >= Sum(PCLK_pipe_n * per_pipe_factor)
+		required_cdclk_khz = (uint32_t)(max_single_pipe_pclk_khz * base_ratio);
+
+		// SKL PRM (Vol 12, Display) often mentions specific requirements for multi-display.
+		// E.g., for two 4K@60Hz displays, CDCLK might need to be ~648MHz or higher.
+		// A more robust calculation would sum weighted pixel rates.
+		// For now, using max_single_pipe_pclk_khz * ratio.
+	} else if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
+		base_ratio = 1.6f;
+		if (num_active_pipes > 1) base_ratio += 0.3f * (num_active_pipes - 1);
+		required_cdclk_khz = (uint32_t)(max_single_pipe_pclk_khz * base_ratio);
 	} else if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) {
-		min_ratio = 1.5f;
-		if (IS_IVYBRIDGE_MOBILE(devInfo->runtime_caps.device_id)) {
-			freqs = ivb_mobile_cdclk_freqs; num_freqs = B_COUNT_OF(ivb_mobile_cdclk_freqs);
-		} else {
-			freqs = ivb_desktop_cdclk_freqs; num_freqs = B_COUNT_OF(ivb_desktop_cdclk_freqs);
-		}
-	} else if (INTEL_DISPLAY_GEN(devInfo) >= 9) {
-		static const uint32 skl_cdclk_freqs[] = {675000, 540000, 450000, 432000, 337500, 308570 };
-		freqs = skl_cdclk_freqs; num_freqs = B_COUNT_OF(skl_cdclk_freqs);
-		min_ratio = 1.8f;
+		base_ratio = 1.2f; // IVB might be more relaxed, but this is a guess.
+		if (num_active_pipes > 1) base_ratio += 0.2f * (num_active_pipes - 1);
+		required_cdclk_khz = (uint32_t)(max_single_pipe_pclk_khz * base_ratio);
+	} else { // Older or unknown
+		required_cdclk_khz = (uint32_t)(max_single_pipe_pclk_khz * 1.5f);
 	}
-	else {
-		TRACE("get_target_cdclk_for_pclk: No specific CDCLK table for Gen %d, using current.\n", INTEL_DISPLAY_GEN(devInfo));
+
+	// Ensure a minimum, e.g., if max_pclk is very low.
+	if (required_cdclk_khz < 300000 && max_single_pipe_pclk_khz > 0) { // Arbitrary floor
+		required_cdclk_khz = 300000;
+	}
+
+	TRACE("calculate_required_min_cdclk: Gen %u, %lu active pipes, max_pclk %u kHz -> required_min_cdclk ~%u kHz (using ratio %.2f)\n",
+		gen, num_active_pipes, max_single_pipe_pclk_khz, required_cdclk_khz, base_ratio);
+
+	return required_cdclk_khz;
+}
+
+
+static uint32_t
+get_target_cdclk_for_config(intel_i915_device_info* devInfo,
+	uint32 num_active_pipes_in_new_config,
+	uint32 max_pclk_in_new_config_khz,
+	uint32 total_pixel_rate_mhz_in_new_config) /* Sum of (PCLK kHz / 1000) */
+{
+	if (num_active_pipes_in_new_config == 0 || max_pclk_in_new_config_khz == 0) {
+		// No active displays, attempt to return a safe low/default CDCLK for the platform,
+		// or current if already low.
+		// For HSW/IVB, this might be the lowest in their respective tables.
+		// For SKL+, could be lowest common (e.g., 307.2 MHz or 432 MHz).
+		// For now, just return current if nothing is active.
+		TRACE("get_target_cdclk_for_config: No active pipes in new config, maintaining current CDCLK %u kHz.\n",
+			devInfo->current_cdclk_freq_khz);
 		return devInfo->current_cdclk_freq_khz;
 	}
 
-	uint32_t required_min_cdclk = (uint32_t)(max_pclk_khz * min_ratio);
-	uint32_t best_fit_cdclk = 0;
-	uint32_t max_available_cdclk = 0;
+	const uint32_t* platform_freqs = NULL;
+	size_t num_platform_freqs = 0;
+	get_platform_cdclk_freqs(devInfo, &platform_freqs, &num_platform_freqs);
 
-	for (size_t i = 0; i < num_freqs; i++) {
-		if (freqs[i] > max_available_cdclk) max_available_cdclk = freqs[i];
-		if (freqs[i] >= required_min_cdclk) {
-			if (best_fit_cdclk == 0 || freqs[i] < best_fit_cdclk) {
-				best_fit_cdclk = freqs[i];
-			}
+	if (platform_freqs == NULL || num_platform_freqs == 0) {
+		TRACE("get_target_cdclk_for_config: No CDCLK frequency table for platform %d. Using current CDCLK %u kHz.\n",
+			devInfo->platform, devInfo->current_cdclk_freq_khz);
+		return devInfo->current_cdclk_freq_khz;
+	}
+
+	uint32_t required_min_cdclk = calculate_required_min_cdclk(devInfo,
+		total_pixel_rate_mhz_in_new_config,
+		num_active_pipes_in_new_config,
+		max_pclk_in_new_config_khz);
+
+	uint32_t best_fit_cdclk = 0;
+	uint32_t highest_available_cdclk = platform_freqs[num_platform_freqs - 1]; // Assuming sorted low to high
+
+	// Find the smallest available CDCLK frequency that meets the requirement.
+	for (size_t i = 0; i < num_platform_freqs; i++) {
+		if (platform_freqs[i] >= required_min_cdclk) {
+			best_fit_cdclk = platform_freqs[i];
+			break;
 		}
 	}
 
-	if (best_fit_cdclk == 0) {
-		best_fit_cdclk = max_available_cdclk;
-		TRACE("get_target_cdclk_for_pclk: Required CDCLK %u kHz for PCLK %u kHz. No ideal fit, choosing max available %u kHz.\n",
-			required_min_cdclk, max_pclk_khz, best_fit_cdclk);
+	if (best_fit_cdclk == 0) { // No frequency in the table meets the minimum requirement
+		best_fit_cdclk = highest_available_cdclk; // Use the highest available from table
+		TRACE("get_target_cdclk_for_config: Required min CDCLK %u kHz for PCLK %u kHz (num_pipes %lu). No ideal fit, choosing max available %u kHz.\n",
+			required_min_cdclk, max_pclk_in_new_config_khz, num_active_pipes_in_new_config, best_fit_cdclk);
 	}
 
-	if (is_cdclk_sufficient(devInfo, devInfo->current_cdclk_freq_khz, max_pclk_khz) &&
-	    devInfo->current_cdclk_freq_khz > best_fit_cdclk) {
-	    best_fit_cdclk = devInfo->current_cdclk_freq_khz;
+	// Policy: Don't lower CDCLK if current is already sufficient and higher than the new best_fit_cdclk,
+	// unless current is significantly higher (e.g., >1 step above best_fit in the table),
+	// to avoid unnecessary frequency changes if current is already good enough.
+	// For simplicity now: if current CDCLK meets the new 'required_min_cdclk' and is >= new 'best_fit_cdclk',
+	// consider keeping current to minimize changes unless optimizing for power.
+	if (devInfo->current_cdclk_freq_khz >= required_min_cdclk &&
+	    devInfo->current_cdclk_freq_khz >= best_fit_cdclk) {
+		// If current is already fine, and not excessively high compared to best_fit, keep it.
+		// This avoids lowering CDCLK if it's already in a good state for the new config or even better.
+		// Example: current=540, required_min=400, best_fit_from_table_for_400=450. Keep 540.
+		// If we want to optimize down:
+		// bool current_is_much_higher = false;
+		// for (size_t i = 0; i < num_platform_freqs; i++) {
+		//    if (platform_freqs[i] == best_fit_cdclk && i + 1 < num_platform_freqs && devInfo->current_cdclk_freq_khz > platform_freqs[i+1]) {
+		//        current_is_much_higher = true; break;
+		//    }
+		// }
+		// if (!current_is_much_higher) best_fit_cdclk = devInfo->current_cdclk_freq_khz;
+
+		// Simpler: if current meets the new minimum, and is at least as good as the calculated best_fit, prefer current.
+		// This reduces unnecessary changes if current is already suitable.
+		best_fit_cdclk = devInfo->current_cdclk_freq_khz;
+		TRACE("get_target_cdclk_for_config: Current CDCLK %u kHz is sufficient for new requirement ~%u kHz. Maintaining current.\n",
+			devInfo->current_cdclk_freq_khz, required_min_cdclk);
 	}
 
-	TRACE("get_target_cdclk_for_pclk: Max PCLK %u kHz, required min CDCLK ~%u kHz. Selected target CDCLK: %u kHz.\n",
-		max_pclk_khz, required_min_cdclk, best_fit_cdclk);
+
+	TRACE("get_target_cdclk_for_config: Max PCLK %u kHz, num_pipes %lu, req_min_cdclk ~%u kHz. Selected target CDCLK: %u kHz.\n",
+		max_pclk_in_new_config_khz, num_active_pipes_in_new_config, required_min_cdclk, best_fit_cdclk);
 	return best_fit_cdclk;
 }
 // --- End CDCLK Helper Functions ---
@@ -500,112 +610,161 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 	struct planned_pipe_config planned_configs[PRIV_MAX_PIPES];
 	uint32 active_pipe_count_in_new_config = 0;
 	uint32 max_req_pclk_for_new_config_khz = 0;
+	uint32 total_pixel_rate_mhz_in_new_config = 0; // Sum of (PCLK kHz / 1000)
 	uint32 final_target_cdclk_khz = devInfo->current_cdclk_freq_khz;
-	struct temp_dpll_check_state {
-		bool is_reserved_for_new_config;
-		enum pipe_id_priv user_pipe;
-		enum intel_port_id_priv user_port_for_check;
-		intel_clock_params_t programmed_params;
-	};
-	temp_dpll_check_state temp_dpll_info[MAX_HW_DPLLS];
 
-	for (uint32 i = 0; i < MAX_HW_DPLLS; i++) {
-		temp_dpll_info[i].is_reserved_for_new_config = false;
-		memset(&temp_dpll_info[i].programmed_params, 0, sizeof(intel_clock_params_t));
-		temp_dpll_info[i].user_pipe = PRIV_PIPE_INVALID;
-		temp_dpll_info[i].user_port_for_check = PRIV_PORT_ID_NONE;
-	}
+	// Temporary tracking for resources allocated in this transaction's check phase
+	struct temp_dpll_check_state {
+		bool is_reserved_for_txn; // Reserved in this transaction
+		enum pipe_id_priv user_pipe;
+		enum intel_port_id_priv user_port;
+		intel_clock_params_t clock_params; // Store clock params for sharing check
+	} temp_dpll_txn_info[MAX_HW_DPLLS];
+	memset(temp_dpll_txn_info, 0, sizeof(temp_dpll_txn_info));
+
+	struct temp_transcoder_check_state {
+		bool is_reserved_for_txn;
+		enum pipe_id_priv user_pipe;
+	} temp_transcoder_txn_info[PRIV_MAX_TRANSCODERS];
+	memset(temp_transcoder_txn_info, 0, sizeof(temp_transcoder_txn_info));
+
+
 	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
 		planned_configs[i].user_config = NULL;
 		planned_configs[i].fb_gem_obj = NULL;
 		planned_configs[i].assigned_transcoder = PRIV_TRANSCODER_INVALID;
 		planned_configs[i].assigned_dpll_id = -1;
-		planned_configs[i].needs_modeset = true;
+		planned_configs[i].needs_modeset = true; // Default, can be cleared if no change
 		planned_configs[i].user_fb_handle = 0;
 	}
 
 	// Pass 1: Validate individual pipes, calculate clocks, reserve resources for this transaction
 	for (uint32 i = 0; i < args->num_pipe_configs; i++) {
 		const struct i915_display_pipe_config* user_cfg = &pipe_configs_kernel_copy[i];
-		enum pipe_id_priv pipe = (enum pipe_id_priv)user_cfg->pipe_id;
-		if (pipe >= PRIV_MAX_PIPES) { status = B_BAD_VALUE; goto check_done_release_gem; }
+		enum pipe_id_priv pipe = (enum pipe_id_priv)user_cfg->pipe_id; // User pipe ID is kernel pipe ID
+
+		if (pipe >= PRIV_MAX_PIPES) {
+			TRACE("    Error: Invalid pipe_id %d in user_cfg.\n", pipe);
+			status = B_BAD_VALUE; goto check_done_release_gem_objects;
+		}
 		planned_configs[pipe].user_config = user_cfg;
-		if (!user_cfg->active) { if (devInfo->pipes[pipe].enabled) planned_configs[pipe].needs_modeset = true; else planned_configs[pipe].needs_modeset = false; continue; }
+
+		if (!user_cfg->active) {
+			if (devInfo->pipes[pipe].enabled) planned_configs[pipe].needs_modeset = true; // Mark for disable
+			else planned_configs[pipe].needs_modeset = false; // Already disabled, no change
+			continue;
+		}
+
+		// This pipe is intended to be active in the new configuration
 		active_pipe_count_in_new_config++;
-		if (user_cfg->mode.timing.pixel_clock > max_req_pclk_for_new_config_khz) max_req_pclk_for_new_config_khz = user_cfg->mode.timing.pixel_clock;
+		if (user_cfg->mode.timing.pixel_clock > max_req_pclk_for_new_config_khz) {
+			max_req_pclk_for_new_config_khz = user_cfg->mode.timing.pixel_clock;
+		}
+		total_pixel_rate_mhz_in_new_config += user_cfg->mode.timing.pixel_clock / 1000;
 
 		intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)user_cfg->connector_id);
-		if (!port_state || !port_state->connected) { TRACE("    Error: Pipe %d target port %u not found/connected.\n", pipe, user_cfg->connector_id); status = B_DEV_NOT_READY; goto check_done_release_gem; }
-		if (user_cfg->fb_gem_handle == 0) { status = B_BAD_VALUE; goto check_done_release_gem; }
-		planned_configs[pipe].fb_gem_obj = (struct intel_i915_gem_object*)_generic_handle_lookup(user_cfg->fb_gem_handle, HANDLE_TYPE_GEM_OBJECT);
-		if (planned_configs[pipe].fb_gem_obj == NULL) { status = B_BAD_VALUE; goto check_done_release_gem; }
-		status = i915_get_transcoder_for_pipe(devInfo, pipe, &planned_configs[pipe].assigned_transcoder, port_state); if (status != B_OK) goto check_done_release_gem;
-
-		intel_clock_params_t* current_pipe_clocks = &planned_configs[pipe].clock_params;
-		current_pipe_clocks->cdclk_freq_khz = devInfo->current_cdclk_freq_khz;
-		status = intel_i915_calculate_display_clocks(devInfo, &user_cfg->mode, pipe, (enum intel_port_id_priv)user_cfg->connector_id, current_pipe_clocks);
-		if (status != B_OK) { TRACE("    Error: Clock calculation failed for pipe %d: %s\n", pipe, strerror(status)); goto check_done_release_transcoders_and_gem; }
-
-		// DPLL conflict check and reservation for this transaction
-		int hw_dpll_id = current_pipe_clocks->selected_dpll_id;
-		if (hw_dpll_id >= 0 && hw_dpll_id < MAX_HW_DPLLS) {
-			if (temp_dpll_info[hw_dpll_id].is_reserved_for_new_config) {
-				if (temp_dpll_info[hw_dpll_id].programmed_params.dpll_vco_khz != current_pipe_clocks->dpll_vco_khz ||
-					(temp_dpll_info[hw_dpll_id].programmed_params.pixel_clock_khz != current_pipe_clocks->pixel_clock_khz && !current_pipe_clocks->is_dp_or_edp )) {
-					TRACE("    Error: DPLL %d conflict in transaction. Pipe %d (port %d) wants VCO %u PCLK %u, Pipe %d (port %d) wants VCO %u PCLK %u.\n",
-						hw_dpll_id,
-						temp_dpll_info[hw_dpll_id].user_pipe, temp_dpll_info[hw_dpll_id].user_port_for_check,
-						temp_dpll_info[hw_dpll_id].programmed_params.dpll_vco_khz, temp_dpll_info[hw_dpll_id].programmed_params.pixel_clock_khz,
-						pipe, (enum intel_port_id_priv)user_cfg->connector_id,
-						current_pipe_clocks->dpll_vco_khz, current_pipe_clocks->pixel_clock_khz);
-					status = B_BUSY; goto check_done_release_transcoders_and_gem;
-				}
-				TRACE("    Info: DPLL %d will be shared in transaction by pipe %d (port %d) and pipe %d (port %d).\n",
-					hw_dpll_id, temp_dpll_info[hw_dpll_id].user_pipe, temp_dpll_info[hw_dpll_id].user_port_for_check, pipe, (enum intel_port_id_priv)user_cfg->connector_id);
-			} else if (devInfo->dplls[hw_dpll_id].is_in_use) {
-				bool used_by_pipe_being_disabled = false;
-				for (uint32 dis_idx = 0; dis_idx < args->num_pipe_configs; dis_idx++) {
-					if (!pipe_configs_kernel_copy[dis_idx].active &&
-						(enum pipe_id_priv)pipe_configs_kernel_copy[dis_idx].pipe_id == devInfo->dplls[hw_dpll_id].user_pipe) {
-						used_by_pipe_being_disabled = true;
-						break;
-					}
-				}
-				if (!used_by_pipe_being_disabled &&
-					(devInfo->dplls[hw_dpll_id].programmed_params.dpll_vco_khz != current_pipe_clocks->dpll_vco_khz ||
-					(devInfo->dplls[hw_dpll_id].programmed_params.pixel_clock_khz != current_pipe_clocks->pixel_clock_khz && !current_pipe_clocks->is_dp_or_edp))) {
-					TRACE("    Error: DPLL %d already in use by active pipe %d (port %d) with incompatible params (VCO %u PCLK %u vs VCO %u PCLK %u).\n",
-						hw_dpll_id, devInfo->dplls[hw_dpll_id].user_pipe, devInfo->dplls[hw_dpll_id].user_port,
-						devInfo->dplls[hw_dpll_id].programmed_params.dpll_vco_khz, devInfo->dplls[hw_dpll_id].programmed_params.pixel_clock_khz,
-						current_pipe_clocks->dpll_vco_khz, current_pipe_clocks->pixel_clock_khz);
-					status = B_BUSY; goto check_done_release_transcoders_and_gem;
-				}
-				temp_dpll_info[hw_dpll_id].is_reserved_for_new_config = true;
-				temp_dpll_info[hw_dpll_id].user_pipe = pipe;
-				temp_dpll_info[hw_dpll_id].user_port_for_check = (enum intel_port_id_priv)user_cfg->connector_id;
-				temp_dpll_info[hw_dpll_id].programmed_params = *current_pipe_clocks;
-			} else {
-				temp_dpll_info[hw_dpll_id].is_reserved_for_new_config = true;
-				temp_dpll_info[hw_dpll_id].user_pipe = pipe;
-				temp_dpll_info[hw_dpll_id].user_port_for_check = (enum intel_port_id_priv)user_cfg->connector_id;
-				temp_dpll_info[hw_dpll_id].programmed_params = *current_pipe_clocks;
-			}
-			planned_configs[pipe].assigned_dpll_id = hw_dpll_id;
-			TRACE("    Info: DPLL %d (re)assigned/reserved for pipe %d, port %u in this transaction.\n", hw_dpll_id, pipe, user_cfg->connector_id);
-		} else if (current_pipe_clocks->selected_dpll_id != -1) {
-			TRACE("    Error: Invalid selected_dpll_id %d for pipe %d.\n", current_pipe_clocks->selected_dpll_id, pipe);
-			status = B_ERROR; goto check_done_release_transcoders_and_gem;
+		if (!port_state || !port_state->connected) { // Also check VBT presence?
+			TRACE("    Error: Pipe %d target port %u not found/connected/valid.\n", pipe, user_cfg->connector_id);
+			status = B_DEV_NOT_READY; goto check_done_release_gem_objects;
 		}
-		planned_configs[pipe].user_fb_handle = user_cfg->fb_gem_handle;
-	}
-	if (status != B_OK && status != B_BAD_VALUE ) {
-		goto check_done_release_all_resources;
-	}
 
+		if (user_cfg->fb_gem_handle == 0) {
+			TRACE("    Error: Pipe %d has zero fb_gem_handle.\n", pipe);
+			status = B_BAD_VALUE; goto check_done_release_gem_objects;
+		}
+		planned_configs[pipe].fb_gem_obj = (struct intel_i915_gem_object*)_generic_handle_lookup(user_cfg->fb_gem_handle, HANDLE_TYPE_GEM_OBJECT);
+		if (planned_configs[pipe].fb_gem_obj == NULL) {
+			TRACE("    Error: Pipe %d fb_gem_handle %u lookup failed.\n", pipe, user_cfg->fb_gem_handle);
+			status = B_BAD_VALUE; goto check_done_release_gem_objects;
+		}
+		planned_configs[pipe].user_fb_handle = user_cfg->fb_gem_handle; // Store for shared_info
+
+		// --- Transcoder Allocation ---
+		status = i915_get_transcoder_for_pipe(devInfo, pipe, &planned_configs[pipe].assigned_transcoder, port_state,
+											planned_configs, args->num_pipe_configs);
+		if (status != B_OK) { TRACE("    Error: Failed to get transcoder for pipe %d: %s\n", pipe, strerror(status)); goto check_done_release_resources; }
+
+		enum transcoder_id_priv tr_id = planned_configs[pipe].assigned_transcoder;
+		if (temp_transcoder_txn_info[tr_id].is_reserved_for_txn && temp_transcoder_txn_info[tr_id].user_pipe != pipe) {
+			TRACE("    Error: Transcoder %d conflict in transaction. Already reserved by pipe %d, requested by pipe %d.\n",
+				tr_id, temp_transcoder_txn_info[tr_id].user_pipe, pipe);
+			status = B_BUSY; goto check_done_release_resources;
+		}
+		temp_transcoder_txn_info[tr_id].is_reserved_for_txn = true;
+		temp_transcoder_txn_info[tr_id].user_pipe = pipe;
+		TRACE("    Info: Transcoder %d reserved for pipe %d in this transaction.\n", tr_id, pipe);
+
+
+		// --- Clock Calculation (includes preliminary DPLL selection) ---
+		intel_clock_params_t* current_pipe_clocks = &planned_configs[pipe].clock_params;
+		// Initialize cdclk_freq_khz for this pipe's clock calculation
+		current_pipe_clocks->cdclk_freq_khz = devInfo->current_cdclk_freq_khz; // Start with current global
+		status = intel_i915_calculate_display_clocks(devInfo, &user_cfg->mode, pipe, (enum intel_port_id_priv)user_cfg->connector_id, current_pipe_clocks);
+		if (status != B_OK) { TRACE("    Error: Clock calculation failed for pipe %d: %s\n", pipe, strerror(status)); goto check_done_release_resources; }
+
+		// --- DPLL Conflict Check & Transactional Reservation ---
+		int hw_dpll_id = current_pipe_clocks->selected_dpll_id;
+		planned_configs[pipe].assigned_dpll_id = hw_dpll_id; // Store what calculate_clocks selected
+
+		if (hw_dpll_id != -1) { // -1 means no DPLL needed (e.g. VGA, or DSI with internal PLL)
+			if (hw_dpll_id < 0 || hw_dpll_id >= MAX_HW_DPLLS) {
+				TRACE("    Error: Invalid DPLL ID %d returned by calculate_clocks for pipe %d.\n", hw_dpll_id, pipe);
+				status = B_ERROR; goto check_done_release_resources;
+			}
+
+			if (temp_dpll_txn_info[hw_dpll_id].is_reserved_for_txn) { // DPLL already taken by another pipe in *this* transaction
+				// Check for compatible sharing (e.g. DP MST, or identical clock needs for some GENs)
+				// This is a simplified check; PRM rules are complex.
+				if (temp_dpll_txn_info[hw_dpll_id].clock_params.dpll_vco_khz != current_pipe_clocks->dpll_vco_khz ||
+					(temp_dpll_txn_info[hw_dpll_id].clock_params.pixel_clock_khz != current_pipe_clocks->pixel_clock_khz &&
+					 !current_pipe_clocks->is_dp_or_edp /* Allow different PCLK for DP if VCO matches for MST base */ )) {
+					TRACE("    Error: DPLL %d conflict in transaction. Reserved by pipe %d (port %u), requested by pipe %d (port %u) with incompatible params.\n",
+						hw_dpll_id, temp_dpll_txn_info[hw_dpll_id].user_pipe, temp_dpll_txn_info[hw_dpll_id].user_port,
+						pipe, (enum intel_port_id_priv)user_cfg->connector_id);
+					status = B_BUSY; goto check_done_release_resources;
+				}
+				TRACE("    Info: DPLL %d will be shared in transaction by pipe %d (port %u) and pipe %d (port %u).\n",
+					hw_dpll_id, temp_dpll_txn_info[hw_dpll_id].user_pipe, temp_dpll_txn_info[hw_dpll_id].user_port,
+					pipe, (enum intel_port_id_priv)user_cfg->connector_id);
+			} else { // DPLL not yet taken in this transaction, check global state
+				if (devInfo->dplls[hw_dpll_id].is_in_use) {
+					bool current_user_being_disabled = false;
+					for(uint32 k=0; k < args->num_pipe_configs; ++k) {
+						if (!pipe_configs_kernel_copy[k].active &&
+							(enum pipe_id_priv)pipe_configs_kernel_copy[k].pipe_id == devInfo->dplls[hw_dpll_id].user_pipe) {
+							current_user_being_disabled = true;
+							break;
+						}
+					}
+					if (!current_user_being_disabled &&
+						(devInfo->dplls[hw_dpll_id].programmed_params.dpll_vco_khz != current_pipe_clocks->dpll_vco_khz ||
+						(devInfo->dplls[hw_dpll_id].programmed_params.pixel_clock_khz != current_pipe_clocks->pixel_clock_khz &&
+						 !current_pipe_clocks->is_dp_or_edp))) {
+						TRACE("    Error: DPLL %d already in use by active pipe %d (port %u) with incompatible params. New request from pipe %d (port %u).\n",
+							hw_dpll_id, devInfo->dplls[hw_dpll_id].user_pipe, devInfo->dplls[hw_dpll_id].user_port,
+							pipe, (enum intel_port_id_priv)user_cfg->connector_id);
+						status = B_BUSY; goto check_done_release_resources;
+					}
+					TRACE("    Info: DPLL %d currently used by pipe %d (being disabled or compatible) - re-reserving for pipe %d.\n",
+						hw_dpll_id, devInfo->dplls[hw_dpll_id].user_pipe, pipe);
+				}
+				// Reserve for this transaction
+				temp_dpll_txn_info[hw_dpll_id].is_reserved_for_txn = true;
+				temp_dpll_txn_info[hw_dpll_id].user_pipe = pipe;
+				temp_dpll_txn_info[hw_dpll_id].user_port = (enum intel_port_id_priv)user_cfg->connector_id;
+				temp_dpll_txn_info[hw_dpll_id].clock_params = *current_pipe_clocks;
+				TRACE("    Info: DPLL %d reserved for pipe %d, port %u in this transaction.\n", hw_dpll_id, pipe, user_cfg->connector_id);
+			}
+		}
+	} // End of Pass 1 loop
+
+	if (status != B_OK) { // Error occurred during Pass 1
+		goto check_done_release_resources;
+	}
 
 	// Pass 2: Determine final target CDCLK, recalculate HSW CDCLK params if needed, and global bandwidth check.
 	if (active_pipe_count_in_new_config > 0) {
-		final_target_cdclk_khz = get_target_cdclk_for_pclk(devInfo, max_req_pclk_for_new_config_khz);
+		final_target_cdclk_khz = get_target_cdclk_for_config(devInfo, active_pipe_count_in_new_config, max_req_pclk_for_new_config_khz, total_pixel_rate_mhz_in_new_config);
 		if (devInfo->current_cdclk_freq_khz >= final_target_cdclk_khz &&
 		    is_cdclk_sufficient(devInfo, devInfo->current_cdclk_freq_khz, max_req_pclk_for_new_config_khz)) {
 			final_target_cdclk_khz = devInfo->current_cdclk_freq_khz;
@@ -646,384 +805,198 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 	if (fw_status != B_OK) { status = fw_status; TRACE("    Commit Error: Failed to get forcewake: %s\n", strerror(status)); mutex_unlock(&devInfo->display_commit_lock); goto check_done_release_all_resources; }
 
 	// --- Disable Pass ---
+	// Disable pipes that are active in current hw state but inactive or need full modeset in new config.
 	for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
-		if (devInfo->pipes[p].enabled &&
-			(planned_configs[p].user_config == NULL || !planned_configs[p].user_config->active || planned_configs[p].needs_modeset)) {
-			TRACE("    Commit Disable: Disabling pipe %d.\n", p);
-			intel_output_port_state* port = intel_display_get_port_by_id(devInfo, devInfo->pipes[p].cached_clock_params.user_port_for_commit_phase_only); // Need to get port from current state before disabling
-			if (port) intel_i915_port_disable(devInfo, port->logical_port_id);
+		bool should_disable_this_pipe = false;
+		if (devInfo->pipes[p].enabled) { // Only consider pipes currently enabled
+			if (planned_configs[p].user_config == NULL) { // Pipe not mentioned in new config
+				should_disable_this_pipe = true;
+				TRACE("    Commit Disable: Pipe %d not in new config, disabling.\n", p);
+			} else if (!planned_configs[p].user_config->active) { // Pipe explicitly set to inactive
+				should_disable_this_pipe = true;
+				TRACE("    Commit Disable: Pipe %d explicitly set to inactive, disabling.\n", p);
+			} else if (planned_configs[p].needs_modeset) { // Pipe needs a full modeset (even if staying active)
+				should_disable_this_pipe = true;
+				TRACE("    Commit Disable: Pipe %d needs modeset, disabling first.\n", p);
+			}
+		}
+
+		if (should_disable_this_pipe) {
+			// Store resource IDs this pipe was using before disabling it
+			int old_dpll_id = devInfo->pipes[p].cached_clock_params.selected_dpll_id;
+			enum transcoder_id_priv old_transcoder_id = devInfo->pipes[p].current_transcoder;
+			enum intel_port_id_priv old_port_id = devInfo->pipes[p].cached_clock_params.user_port_for_commit_phase_only;
+
+			intel_output_port_state* port_to_disable_on = intel_display_get_port_by_id(devInfo, old_port_id);
+
+			// Actual hardware disable sequence
+			// intel_i915_pipe_disable handles DDI port disable, transcoder disable, and calls i915_release_dpll
 			intel_i915_pipe_disable(devInfo, p);
+
+			// Update software state for the pipe
 			if (devInfo->framebuffer_bo[p]) {
 				intel_i915_gem_object_put(devInfo->framebuffer_bo[p]);
 				devInfo->framebuffer_bo[p] = NULL;
 			}
 			devInfo->framebuffer_user_handle[p] = 0;
-			devInfo->pipes[p].enabled = false;
-			if (port) port->current_pipe = PRIV_PIPE_INVALID; // Unbind port
+			// devInfo->pipes[p].enabled is set by intel_i915_pipe_disable
+			if (port_to_disable_on) port_to_disable_on->current_pipe = PRIV_PIPE_INVALID;
 
-			int dpll_id_to_release = devInfo->pipes[p].cached_clock_params.selected_dpll_id;
-			if (dpll_id_to_release != -1) {
-				bool dpll_needed_by_new_config = false;
+			// Update global DPLL software tracking state
+			// This is now largely handled by i915_release_dpll called from pipe_disable,
+			// but we ensure our view is consistent.
+			if (old_dpll_id != -1 && old_dpll_id < MAX_HW_DPLLS) {
+				bool dpll_still_in_use_by_another_new_pipe = false;
 				for (enum pipe_id_priv np = PRIV_PIPE_A; np < PRIV_MAX_PIPES; ++np) {
+					if (p == np) continue; // Don't check against self
 					if (planned_configs[np].user_config && planned_configs[np].user_config->active &&
-						planned_configs[np].clock_params.selected_dpll_id == dpll_id_to_release && np != p) {
-						dpll_needed_by_new_config = true;
+						planned_configs[np].assigned_dpll_id == old_dpll_id) {
+						dpll_still_in_use_by_another_new_pipe = true;
 						break;
 					}
 				}
-				if (!dpll_needed_by_new_config) {
-					if (dpll_id_to_release >=0 && dpll_id_to_release < MAX_HW_DPLLS) {
-						devInfo->dplls[dpll_id_to_release].is_in_use = false;
-						devInfo->dplls[dpll_id_to_release].user_pipe = PRIV_PIPE_INVALID;
-						devInfo->dplls[dpll_id_to_release].user_port = PRIV_PORT_ID_NONE;
-						TRACE("    Commit Disable: Marked DPLL %d as free due to pipe %d disable.\n", dpll_id_to_release, p);
+				if (!dpll_still_in_use_by_another_new_pipe) {
+					// If i915_release_dpll determined it's free, our global state should reflect that.
+					// If devInfo->dplls[old_dpll_id].is_in_use is true here, it means i915_release_dpll
+					// found another existing user.
+					if (!devInfo->dplls[old_dpll_id].is_in_use) {
+						TRACE("    Commit Disable: DPLL %d confirmed free after pipe %d disable.\n", old_dpll_id, p);
+					}
+				} else {
+					TRACE("    Commit Disable: DPLL %d from disabled pipe %d is being used by another new pipe.\n", old_dpll_id, p);
+				}
+			}
+
+			// Update global Transcoder software tracking state
+			if (old_transcoder_id != PRIV_TRANSCODER_INVALID && old_transcoder_id < PRIV_MAX_TRANSCODERS) {
+				bool transcoder_still_in_use_by_another_new_pipe = false;
+				for (enum pipe_id_priv np = PRIV_PIPE_A; np < PRIV_MAX_PIPES; ++np) {
+					if (p == np) continue;
+					if (planned_configs[np].user_config && planned_configs[np].user_config->active &&
+						planned_configs[np].assigned_transcoder == old_transcoder_id) {
+						transcoder_still_in_use_by_another_new_pipe = true;
+						break;
+					}
+				}
+				if (!transcoder_still_in_use_by_another_new_pipe) {
+					devInfo->transcoders[old_transcoder_id].is_in_use = false;
+					devInfo->transcoders[old_transcoder_id].user_pipe = PRIV_PIPE_INVALID;
+					TRACE("    Commit Disable: Transcoder %d marked free after pipe %d disable.\n", old_transcoder_id, p);
+				} else {
+					TRACE("    Commit Disable: Transcoder %d from disabled pipe %d is being used by another new pipe.\n", old_transcoder_id, p);
+				}
+			}
+		}
+	}
+
+
+	// Program CDCLK if it needs to change and there's at least one active pipe in the new config
+	if (active_pipe_count_in_new_config > 0 &&
+		final_target_cdclk_khz != devInfo->current_cdclk_freq_khz &&
+		final_target_cdclk_khz > 0) {
+
+		intel_clock_params_t final_cdclk_params_for_hw_prog;
+		memset(&final_cdclk_params_for_hw_prog, 0, sizeof(intel_clock_params_t));
+		final_cdclk_params_for_hw_prog.cdclk_freq_khz = final_target_cdclk_khz;
+
+		if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
+			bool hsw_params_found_for_cdclk_prog = false;
+			for(enum pipe_id_priv p_ref = PRIV_PIPE_A; p_ref < PRIV_MAX_PIPES; ++p_ref) {
+				if (planned_configs[p_ref].user_config && planned_configs[p_ref].user_config->active) {
+					if (planned_configs[p_ref].clock_params.cdclk_freq_khz == final_target_cdclk_khz) {
+						final_cdclk_params_for_hw_prog.hsw_cdclk_source_lcpll_freq_khz = planned_configs[p_ref].clock_params.hsw_cdclk_source_lcpll_freq_khz;
+						final_cdclk_params_for_hw_prog.hsw_cdclk_ctl_field_val = planned_configs[p_ref].clock_params.hsw_cdclk_ctl_field_val;
+						hsw_params_found_for_cdclk_prog = true;
+						break;
 					}
 				}
 			}
-		}
-	}
-
-
-	if (active_pipe_count_in_new_config > 0 && final_target_cdclk_khz != devInfo->current_cdclk_freq_khz && final_target_cdclk_khz > 0) {
-		intel_clock_params_t final_cdclk_params_for_hw_prog; memset(&final_cdclk_params_for_hw_prog, 0, sizeof(intel_clock_params_t));
-		final_cdclk_params_for_hw_prog.cdclk_freq_khz = final_target_cdclk_khz;
-		if (IS_HASWELL(devInfo->runtime_caps.device_id)) {
-			bool hsw_params_found = false;
-			for(enum pipe_id_priv p_ref = PRIV_PIPE_A; p_ref < PRIV_MAX_PIPES; ++p_ref) {
-				if (planned_configs[p_ref].user_config && planned_configs[p_ref].user_config->active) {
-					final_cdclk_params_for_hw_prog.hsw_cdclk_source_lcpll_freq_khz = planned_configs[p_ref].clock_params.hsw_cdclk_source_lcpll_freq_khz;
-					final_cdclk_params_for_hw_prog.hsw_cdclk_ctl_field_val = planned_configs[p_ref].clock_params.hsw_cdclk_ctl_field_val;
-					hsw_params_found = true; break;
-				}
+			if (!hsw_params_found_for_cdclk_prog) {
+				status = B_ERROR;
+				TRACE("    Commit Error: No HSW pipe with updated CDCLK params for final target %u kHz.\n", final_target_cdclk_khz);
+				goto commit_failed_entire_transaction;
 			}
-			if (!hsw_params_found) { status = B_ERROR; TRACE("    Commit Error: No active HSW pipe to ref for CDCLK prog.\n"); goto commit_failed_entire_transaction; }
 		}
+
 		status = intel_i915_program_cdclk(devInfo, &final_cdclk_params_for_hw_prog);
-		if (status != B_OK) { TRACE("    Commit Error: intel_i915_program_cdclk failed for target %u kHz: %s\n", final_target_cdclk_khz, strerror(status)); goto commit_failed_entire_transaction; }
-		devInfo->current_cdclk_freq_khz = final_target_cdclk_khz;
-		TRACE("    Commit Info: CDCLK programmed to %u kHz.\n", final_target_cdclk_khz);
+		if (status != B_OK) {
+			TRACE("    Commit Error: intel_i915_program_cdclk failed for target %u kHz: %s\n", final_target_cdclk_khz, strerror(status));
+			goto commit_failed_entire_transaction;
+		}
+		TRACE("    Commit Info: CDCLK programmed to %u kHz.\n", devInfo->current_cdclk_freq_khz);
 	}
 
 	// --- Enable/Configure Pass ---
+	// Enable pipes that are active in new config and were previously disabled or need full modeset.
 	for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
 		if (planned_configs[p].user_config == NULL || !planned_configs[p].user_config->active || !planned_configs[p].needs_modeset)
-			continue; // Skip inactive or unchanged pipes
+			continue;
 
 		const struct i915_display_pipe_config* cfg = planned_configs[p].user_config;
 		intel_output_port_state* port = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)cfg->connector_id);
-		if (!port) { status = B_ERROR; TRACE("    Commit Error: Port %u for pipe %d not found.\n", cfg->connector_id, p); goto commit_failed_entire_transaction; }
+		if (!port) {
+			status = B_ERROR; TRACE("    Commit Error: Port %u for pipe %d not found.\n", cfg->connector_id, p);
+			goto commit_failed_entire_transaction;
+		}
 
-		// Program DPLL for this pipe/port using planned_configs[p].clock_params
-		int dpll_id = planned_configs[p].clock_params.selected_dpll_id;
+		// Update global DPLL state from transactional reservation
+		int dpll_id = planned_configs[p].assigned_dpll_id;
 		if (dpll_id != -1) {
-			if (dpll_id < 0 || dpll_id >= MAX_HW_DPLLS) { status = B_ERROR; TRACE("    Commit Error: Invalid DPLL ID %d for pipe %d.\n", dpll_id, p); goto commit_failed_entire_transaction; }
 			devInfo->dplls[dpll_id].is_in_use = true;
 			devInfo->dplls[dpll_id].user_pipe = p;
 			devInfo->dplls[dpll_id].user_port = (enum intel_port_id_priv)cfg->connector_id;
 			devInfo->dplls[dpll_id].programmed_params = planned_configs[p].clock_params;
 			devInfo->dplls[dpll_id].programmed_freq_khz = planned_configs[p].clock_params.dpll_vco_khz;
-			TRACE("    Commit Info: DPLL %d conceptually programmed and marked in use for pipe %d, port %u.\n", dpll_id, p, cfg->connector_id);
+			TRACE("    Commit Enable: DPLL %d SW state updated for use by pipe %d, port %u.\n", dpll_id, p, cfg->connector_id);
 		}
 
-		status = intel_i915_pipe_enable(devInfo, p, &cfg->mode, &planned_configs[p].clock_params);
-		if (status != B_OK) { TRACE("    Commit Error: Pipe enable failed for pipe %d: %s\n", p, strerror(status)); goto commit_failed_entire_transaction; }
+		// Update global Transcoder state from transactional reservation
+		enum transcoder_id_priv trans_id = planned_configs[p].assigned_transcoder;
+		if (trans_id != PRIV_TRANSCODER_INVALID) {
+			devInfo->transcoders[trans_id].is_in_use = true;
+			devInfo->transcoders[trans_id].user_pipe = p;
+			TRACE("    Commit Enable: Transcoder %d SW state updated for use by pipe %d.\n", trans_id, p);
+		}
 
+		// Program pipe, plane, port, and associated hardware (including actual DPLL hardware programming)
+		status = intel_i915_pipe_enable(devInfo, p, &cfg->mode, &planned_configs[p].clock_params);
+		if (status != B_OK) {
+			TRACE("    Commit Error: Pipe enable (HW programming) failed for pipe %d: %s\n", p, strerror(status));
+			// Rollback software state for resources assigned to this failed pipe
+			if (dpll_id != -1) {
+				devInfo->dplls[dpll_id].is_in_use = false;
+				devInfo->dplls[dpll_id].user_pipe = PRIV_PIPE_INVALID;
+				devInfo->dplls[dpll_id].user_port = PRIV_PORT_ID_NONE;
+			}
+			if (trans_id != PRIV_TRANSCODER_INVALID) {
+				devInfo->transcoders[trans_id].is_in_use = false;
+				devInfo->transcoders[trans_id].user_pipe = PRIV_PIPE_INVALID;
+			}
+			goto commit_failed_entire_transaction;
+		}
+
+		// Update devInfo framebuffer tracking (GEM refcounting handled here)
 		if (devInfo->framebuffer_bo[p] != planned_configs[p].fb_gem_obj) {
 			if(devInfo->framebuffer_bo[p]) intel_i915_gem_object_put(devInfo->framebuffer_bo[p]);
 			devInfo->framebuffer_bo[p] = planned_configs[p].fb_gem_obj;
 			intel_i915_gem_object_get(devInfo->framebuffer_bo[p]);
+		} else if (planned_configs[p].fb_gem_obj) {
+			intel_i915_gem_object_put(planned_configs[p].fb_gem_obj);
+			planned_configs[p].fb_gem_obj = NULL;
 		}
-		devInfo->framebuffer_user_handle[p] = planned_configs[p].user_fb_handle;
-		devInfo->framebuffer_gtt_offset_pages[p] = planned_configs[p].fb_gem_obj->gtt_mapped ? planned_configs[p].fb_gem_obj->gtt_offset_pages : 0xFFFFFFFF;
 
-		devInfo->pipes[p].enabled = true;
+		devInfo->framebuffer_user_handle[p] = planned_configs[p].user_fb_handle;
+		devInfo->framebuffer_gtt_offset_pages[p] = devInfo->framebuffer_bo[p] && devInfo->framebuffer_bo[p]->gtt_mapped ?
+			devInfo->framebuffer_bo[p]->gtt_offset_pages : 0xFFFFFFFF;
+
+		// devInfo->pipes[p].enabled is set by intel_i915_pipe_enable on success
 		devInfo->pipes[p].current_mode = cfg->mode;
-		devInfo->pipes[p].cached_clock_params = planned_configs[p].clock_params;
+		devInfo->pipes[p].cached_clock_params = planned_configs[p].clock_params; // Includes selected_dpll_id
+		devInfo->pipes[p].current_transcoder = trans_id;
 		devInfo->pipes[p].cached_clock_params.user_port_for_commit_phase_only = (enum intel_port_id_priv)cfg->connector_id;
 		port->current_pipe = p;
 	}
 
 
-	if (status == B_OK) {
-		devInfo->shared_info->active_display_count = 0;
-		uint32 primary_pipe_kernel_enum = args->primary_pipe_id;
-		devInfo->shared_info->primary_pipe_index = primary_pipe_kernel_enum;
-
-		for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
-			uint32 p_idx_shared = PipeEnumToArrayIndex(p);
-			if (planned_configs[p].user_config && planned_configs[p].user_config->active) {
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].is_active = true;
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].current_mode = planned_configs[p].user_config->mode;
-				if (planned_configs[p].fb_gem_obj && planned_configs[p].fb_gem_obj->gtt_mapped) {
-					devInfo->shared_info->pipe_display_configs[p_idx_shared].frame_buffer_offset = planned_configs[p].fb_gem_obj->gtt_offset_pages;
-				} else {
-					devInfo->shared_info->pipe_display_configs[p_idx_shared].frame_buffer_offset = 0;
-				}
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].bytes_per_row = planned_configs[p].fb_gem_obj ? planned_configs[p].fb_gem_obj->stride : 0;
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].bits_per_pixel = planned_configs[p].fb_gem_obj ? planned_configs[p].fb_gem_obj->obj_bits_per_pixel : 0;
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].connector_id = planned_configs[p].user_config->connector_id;
-				devInfo->shared_info->active_display_count++;
-			} else {
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].is_active = false;
-				memset(&devInfo->shared_info->pipe_display_configs[p_idx_shared].current_mode, 0, sizeof(display_mode));
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].frame_buffer_offset = 0;
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].bytes_per_row = 0;
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].bits_per_pixel = 0;
-				for(int port_idx=0; port_idx < devInfo->num_ports_detected; ++port_idx) {
-					if (devInfo->ports[port_idx].current_pipe == p) devInfo->ports[port_idx].current_pipe = PRIV_PIPE_INVALID;
-				}
-				devInfo->shared_info->pipe_display_configs[p_idx_shared].connector_id = I915_PORT_ID_USER_NONE;
-			}
-		}
-	}
-
-commit_failed_entire_transaction:
-	if (status != B_OK) { /* TODO: Rollback logic - complex. Might involve trying to restore previous known good state. */ }
-
-commit_failed_release_forcewake_and_lock:
-	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
-	mutex_unlock(&devInfo->display_commit_lock);
-
-check_done_release_all_resources:
-	for (uint32 i = 0; i < PRIV_MAX_PIPES; ++i) {
-		if (planned_configs[i].fb_gem_obj && devInfo->framebuffer_bo[i] != planned_configs[i].fb_gem_obj) {
-			intel_i915_gem_object_put(planned_configs[i].fb_gem_obj);
-		}
-		if (planned_configs[i].assigned_transcoder != PRIV_TRANSCODER_INVALID) {
-			bool committed_and_active = (status == B_OK && planned_configs[i].user_config && planned_configs[i].user_config->active);
-			if (!committed_and_active) {
-				i915_release_transcoder(devInfo, planned_configs[i].assigned_transcoder);
-			}
-		}
-	}
-	if (pipe_configs_kernel_copy != NULL) free(pipe_configs_kernel_copy);
-	TRACE("IOCTL: SET_DISPLAY_CONFIG: Finished with status: %s\n", strerror(status));
-	return status;
-
-check_done_release_transcoders_and_gem:
-	if (planned_configs[pipe].fb_gem_obj) {
-		intel_i915_gem_object_put(planned_configs[pipe].fb_gem_obj);
-		planned_configs[pipe].fb_gem_obj = NULL;
-	}
-check_done_release_transcoders:
-	if (planned_configs[pipe].assigned_transcoder != PRIV_TRANSCODER_INVALID) {
-		i915_release_transcoder(devInfo, planned_configs[pipe].assigned_transcoder);
-		planned_configs[pipe].assigned_transcoder = PRIV_TRANSCODER_INVALID;
-	}
-check_done_release_gem:
-    if (planned_configs[pipe].fb_gem_obj && status != B_OK) {
-        intel_i915_gem_object_put(planned_configs[pipe].fb_gem_obj);
-        planned_configs[pipe].fb_gem_obj = NULL;
-    }
-    goto check_done_release_all_resources;
-}
-
-
-static status_t
-intel_i915_ioctl(void* drv_cookie, uint32 op, void* buffer, size_t length)
-{
-	intel_i915_device_info* devInfo = (intel_i915_device_info*)drv_cookie;
-	status_t status = B_DEV_INVALID_IOCTL;
-
-	switch (op) {
-		case B_GET_ACCELERANT_SIGNATURE:
-			if (length >= sizeof(uint32)) {
-				if (user_strlcpy((char*)buffer, "intel_i915.accelerant", length) < B_OK) return B_BAD_ADDRESS;
-				status = B_OK;
-			} else status = B_BAD_VALUE;
-			break;
-
-		case INTEL_I915_SET_DISPLAY_MODE: {
-			display_mode user_mode;
-			if (length != sizeof(display_mode)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&user_mode, buffer, sizeof(display_mode)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			enum intel_port_id_priv target_port = PRIV_PORT_ID_NONE;
-			for (int i = 0; i < devInfo->num_ports_detected; ++i) {
-				if (devInfo->ports[i].connected) { target_port = devInfo->ports[i].logical_port_id; break; }
-			}
-			if (target_port == PRIV_PORT_ID_NONE && devInfo->num_ports_detected > 0) target_port = devInfo->ports[0].logical_port_id;
-			if (target_port != PRIV_PORT_ID_NONE) {
-				status = intel_display_set_mode_ioctl_entry(devInfo, &user_mode, PRIV_PIPE_A);
-			} else { status = B_DEV_NOT_READY; }
-			break;
-		}
-
-		case INTEL_I915_IOCTL_GEM_CREATE:
-			status = intel_i915_gem_create_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_MMAP_AREA:
-			status = intel_i915_gem_mmap_area_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_CLOSE:
-			status = intel_i915_gem_close_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_EXECBUFFER:
-			status = intel_i915_gem_execbuffer_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_WAIT:
-			status = intel_i915_gem_wait_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_CONTEXT_CREATE:
-			status = intel_i915_gem_context_create_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY:
-			status = intel_i915_gem_context_destroy_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO:
-			status = intel_i915_gem_flush_and_get_seqno_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_GEM_GET_INFO:
-			break;
-
-		case INTEL_I915_GET_DPMS_MODE: {
-			intel_i915_get_dpms_mode_args args;
-			if (length != sizeof(args)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&args.pipe, &((intel_i915_get_dpms_mode_args*)buffer)->pipe, sizeof(args.pipe)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (args.pipe >= PRIV_MAX_PIPES) { status = B_BAD_INDEX; break; }
-			args.mode = devInfo->pipes[args.pipe].current_dpms_mode;
-			if (copy_to_user(&((intel_i915_get_dpms_mode_args*)buffer)->mode, &args.mode, sizeof(args.mode)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			status = B_OK;
-			break;
-		}
-		case INTEL_I915_SET_DPMS_MODE: {
-			intel_i915_set_dpms_mode_args args;
-			if (length != sizeof(args)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (args.pipe >= PRIV_MAX_PIPES) { status = B_BAD_INDEX; break; }
-			status = intel_display_set_pipe_dpms_mode(devInfo, (enum pipe_id_priv)args.pipe, args.mode);
-			break;
-		}
-		case INTEL_I915_MOVE_DISPLAY_OFFSET: {
-			intel_i915_move_display_args args;
-			if (length != sizeof(args)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (args.pipe >= PRIV_MAX_PIPES) { status = B_BAD_INDEX; break; }
-			status = intel_display_set_plane_offset(devInfo, (enum pipe_id_priv)args.pipe, args.x, args.y);
-			break;
-		}
-		case INTEL_I915_SET_INDEXED_COLORS: {
-			intel_i915_set_indexed_colors_args args;
-			if (length != sizeof(args)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (args.pipe >= PRIV_MAX_PIPES || args.count == 0 || args.count > 256 || args.user_color_data_ptr == 0) { status = B_BAD_VALUE; break; }
-			uint8_t* color_data_kernel = (uint8_t*)malloc(args.count * 3);
-			if (color_data_kernel == NULL) { status = B_NO_MEMORY; break; }
-			if (copy_from_user(color_data_kernel, (void*)(uintptr_t)args.user_color_data_ptr, args.count * 3) != B_OK) {
-				free(color_data_kernel); status = B_BAD_ADDRESS; break;
-			}
-			status = intel_display_load_palette(devInfo, (enum pipe_id_priv)args.pipe, args.first_color, args.count, color_data_kernel);
-			free(color_data_kernel);
-			break;
-		}
-		case INTEL_I915_IOCTL_SET_CURSOR_STATE:
-			status = intel_i915_set_cursor_state_ioctl(devInfo, buffer, length);
-			break;
-		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
-			status = intel_i915_set_cursor_bitmap_ioctl(devInfo, buffer, length);
-			break;
-
-		case INTEL_I915_GET_DISPLAY_COUNT:
-			if (length >= sizeof(uint32)) {
-				uint32 count = 0;
-				for(int i=0; i < devInfo->num_ports_detected; ++i) if(devInfo->ports[i].connected) count++;
-				if (count == 0 && devInfo->num_ports_detected > 0) count = 1;
-				if (copy_to_user(buffer, &count, sizeof(uint32)) != B_OK) status = B_BAD_ADDRESS; else status = B_OK;
-			} else status = B_BAD_VALUE;
-			break;
-		case INTEL_I915_GET_DISPLAY_INFO:
-			status = B_DEV_INVALID_IOCTL;
-			break;
-		case INTEL_I915_SET_DISPLAY_CONFIG:
-			if (length != sizeof(struct i915_set_display_config_args)) { status = B_BAD_VALUE; break; }
-			status = i915_set_display_config_ioctl_handler(devInfo, (struct i915_set_display_config_args*)buffer);
-			break;
-		case INTEL_I915_GET_DISPLAY_CONFIG:
-			TRACE("IOCTL: INTEL_I915_GET_DISPLAY_CONFIG received.\n");
-			if (length != sizeof(struct i915_get_display_config_args)) {
-				TRACE("IOCTL: INTEL_I915_GET_DISPLAY_CONFIG: Bad length %lu, expected %lu\n", length, sizeof(struct i915_get_display_config_args));
-				status = B_BAD_VALUE; break;
-			}
-			status = i915_get_display_config_ioctl_handler(devInfo, (struct i915_get_display_config_args*)buffer);
-			TRACE("IOCTL: INTEL_I915_GET_DISPLAY_CONFIG returned status: %s\n", strerror(status));
-			break;
-		case INTEL_I915_WAIT_FOR_DISPLAY_CHANGE:
-			TRACE("IOCTL: INTEL_I915_WAIT_FOR_DISPLAY_CHANGE received.\n");
-			if (length != sizeof(struct i915_display_change_event_ioctl_data)) {
-				TRACE("IOCTL: INTEL_I915_WAIT_FOR_DISPLAY_CHANGE: Bad length %lu, expected %lu\n", length, sizeof(struct i915_display_change_event_ioctl_data));
-				status = B_BAD_VALUE; break;
-			}
-			status = i915_wait_for_display_change_ioctl(devInfo, (struct i915_display_change_event_ioctl_data*)buffer);
-			TRACE("IOCTL: INTEL_I915_WAIT_FOR_DISPLAY_CHANGE returned status: %s\n", strerror(status));
-			break;
-		case INTEL_I915_PROPOSE_SPECIFIC_MODE: {
-			intel_i915_propose_specific_mode_args kargs;
-			if (length != sizeof(kargs)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&kargs, buffer, sizeof(kargs)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			status = B_OK;
-			kargs.result_mode = kargs.target_mode;
-			if (copy_to_user(buffer, &kargs, sizeof(kargs)) != B_OK) status = B_BAD_ADDRESS;
-			break;
-		}
-		case INTEL_I915_GET_PIPE_DISPLAY_MODE: {
-			intel_i915_get_pipe_display_mode_args kargs;
-			if (length != sizeof(kargs)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&kargs.pipe_id, &((intel_i915_get_pipe_display_mode_args*)buffer)->pipe_id, sizeof(kargs.pipe_id)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (kargs.pipe_id >= PRIV_MAX_PIPES) { status = B_BAD_INDEX; break; }
-			if (devInfo->pipes[kargs.pipe_id].enabled) {
-				kargs.pipe_mode = devInfo->pipes[kargs.pipe_id].current_mode;
-				status = B_OK;
-			} else {
-				memset(&kargs.pipe_mode, 0, sizeof(display_mode));
-				status = B_DEV_NOT_READY;
-			}
-			if (status == B_OK && copy_to_user(&((intel_i915_get_pipe_display_mode_args*)buffer)->pipe_mode, &kargs.pipe_mode, sizeof(kargs.pipe_mode)) != B_OK) {
-				status = B_BAD_ADDRESS;
-			}
-			break;
-		}
-		case INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE: {
-			intel_i915_get_retrace_semaphore_args kargs;
-			if (length != sizeof(kargs)) { status = B_BAD_VALUE; break; }
-			if (copy_from_user(&kargs.pipe_id, &((intel_i915_get_retrace_semaphore_args*)buffer)->pipe_id, sizeof(kargs.pipe_id)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			if (kargs.pipe_id >= PRIV_MAX_PIPES) { status = B_BAD_INDEX; break; }
-			kargs.sem = devInfo->vblank_sems[kargs.pipe_id];
-			if (kargs.sem < B_OK) { status = B_UNSUPPORTED; break; }
-			if (copy_to_user(&((intel_i915_get_retrace_semaphore_args*)buffer)->sem, &kargs.sem, sizeof(kargs.sem)) != B_OK) {
-				status = B_BAD_ADDRESS;
-			} else { status = B_OK; }
-			break;
-		}
-		case INTEL_I915_GET_CONNECTOR_INFO:
-			if (length != sizeof(intel_i915_get_connector_info_args)) { status = B_BAD_VALUE; break; }
-			status = i915_get_connector_info_ioctl_handler(devInfo, (intel_i915_get_connector_info_args*)buffer);
-			break;
-
-		case INTEL_I915_GET_SHARED_INFO:
-			if (length != sizeof(intel_i915_get_shared_area_info_args)) { status = B_BAD_VALUE; break; }
-			intel_i915_get_shared_area_info_args shared_args;
-			shared_args.shared_area = devInfo->shared_info_area;
-			if (copy_to_user(buffer, &shared_args, sizeof(shared_args)) != B_OK) { status = B_BAD_ADDRESS; break; }
-			status = B_OK;
-			break;
-
-		default:
-			TRACE("ioctl: Unknown op %lu\n", op);
-			break;
-	}
-	return status;
-}
-
-device_hooks graphics_driver_hooks = {
-	intel_i915_open,
-	intel_i915_close,
-	intel_i915_free,
-	intel_i915_ioctl,
-	NULL, // read
-	NULL, // write
-	NULL, // select
-	NULL, // deselect
-	NULL, // read_pages
-	NULL  // write_pages
-};
-
-[end of src/add-ons/kernel/drivers/graphics/intel_i915/intel_i915.c]
+	if (status == B_OK) { // Update Shared Info only if all commits were successful
+>>>>>>> REPLACE

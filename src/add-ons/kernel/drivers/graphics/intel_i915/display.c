@@ -379,10 +379,151 @@ intel_i915_port_enable(intel_i915_device_info* devInfo, enum intel_port_id_priv 
 void
 intel_i915_port_disable(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id) { /* ... STUB ... */ }
 
+
+// Helper to check if a pipe is being disabled in the current transaction
+// (Copied from clocks.c, ideally this would be a shared utility if needed in multiple files,
+// or planned_configs passed around more consistently)
+static bool
+is_pipe_being_disabled_in_transaction_display(enum pipe_id_priv pipe_to_check,
+	const struct planned_pipe_config* planned_configs, uint32 num_planned_configs)
+{
+	if (planned_configs == NULL || num_planned_configs == 0) return false;
+
+	for (uint32 i = 0; i < num_planned_configs; i++) {
+		if (planned_configs[i].user_config == NULL) continue;
+
+		enum pipe_id_priv planned_pipe_id = (enum pipe_id_priv)planned_configs[i].user_config->pipe_id;
+		if (planned_pipe_id == pipe_to_check && !planned_configs[i].user_config->active) {
+			return true;
+		}
+	}
+	return false;
+}
+
+
 status_t
-i915_get_transcoder_for_pipe(struct intel_i915_device_info* dev, enum pipe_id_priv pipe, enum transcoder_id_priv* selected_transcoder, intel_output_port_state* for_port) { /* ... as before ... */ return B_OK; }
+i915_get_transcoder_for_pipe(struct intel_i915_device_info* devInfo,
+	enum pipe_id_priv target_pipe, enum transcoder_id_priv* selected_transcoder,
+	intel_output_port_state* for_port, /* For future use if port type influences transcoder (e.g. DSI) */
+	const struct planned_pipe_config* planned_configs, uint32 num_planned_configs)
+{
+	if (!devInfo || !selected_transcoder) return B_BAD_VALUE;
+
+	enum transcoder_id_priv required_transcoder = PRIV_TRANSCODER_INVALID;
+	uint32 gen = INTEL_DISPLAY_GEN(devInfo);
+
+	// Determine the required transcoder based on pipe and GEN
+	// On IVB, HSW, SKL (and many others):
+	// Pipe A maps to Transcoder A
+	// Pipe B maps to Transcoder B
+	// Pipe C maps to Transcoder C
+	// eDP often uses Transcoder EDP (which might be TRANSCODER_A on some older gens if only one eDP)
+	// DSI ports have dedicated DSI transcoders.
+
+	// This is a simplified mapping. PRMs and VBT might indicate more complex scenarios.
+	if (for_port && for_port->type == PRIV_OUTPUT_EDP) {
+		// TODO: Check GEN. On some gens (e.g. IVB if Pipe A is eDP), eDP might use TRANSCODER_A.
+		// On HSW/SKL+, TRANSCODER_EDP is distinct.
+		if (gen >= 7) { // HSW+ typically have dedicated TRANSCODER_EDP
+			required_transcoder = PRIV_TRANSCODER_EDP;
+		} else { // Fallback for older or unhandled eDP cases
+			required_transcoder = (enum transcoder_id_priv)target_pipe; // Hope for direct map
+		}
+	} else if (for_port && for_port->type == PRIV_OUTPUT_DSI) {
+		// TODO: Map to PRIV_TRANSCODER_DSI0 or PRIV_TRANSCODER_DSI1 based on port/pipe.
+		// This requires more detailed VBT parsing or fixed assignments.
+		TRACE("Display: get_transcoder: DSI transcoder selection STUBBED for pipe %d.\n", target_pipe);
+		return B_UNSUPPORTED; // Placeholder
+	} else {
+		// Standard pipes A, B, C
+		if (target_pipe == PRIV_PIPE_A) required_transcoder = PRIV_TRANSCODER_A;
+		else if (target_pipe == PRIV_PIPE_B) required_transcoder = PRIV_TRANSCODER_B;
+		else if (target_pipe == PRIV_PIPE_C) required_transcoder = PRIV_TRANSCODER_C;
+		// Note: Pipe D mapping to a standard transcoder is less common or GEN-specific.
+		// It might share with eDP or have its own if 4+ transcoders exist beyond DSI/eDP.
+		else if (target_pipe == PRIV_PIPE_D) {
+			TRACE("Display: get_transcoder: Pipe D to Transcoder mapping STUBBED/needs GEN-specific logic.\n", target_pipe);
+			// For some SKL+ configurations, Pipe D might use what would be Transcoder D if it exists.
+			// Or it might be an alias for TRANSCODER_EDP if Pipe D drives eDP.
+			// Placeholder:
+			if (gen >=9) { /* required_transcoder = PRIV_TRANSCODER_D_CONCEPTUAL; */ }
+			else return B_UNSUPPORTED;
+		}
+	}
+
+	if (required_transcoder == PRIV_TRANSCODER_INVALID || required_transcoder >= PRIV_MAX_TRANSCODERS) {
+		TRACE("Display: get_transcoder: Could not map pipe %d (port type %d) to a valid transcoder.\n",
+			target_pipe, for_port ? for_port->type : -1);
+		return B_BAD_VALUE;
+	}
+
+	TRACE("Display: get_transcoder: Pipe %d (port type %d) requires Transcoder %d.\n",
+		target_pipe, for_port ? for_port->type : -1, required_transcoder);
+
+	// Check if this transcoder is already in use by another pipe that will remain active
+	if (devInfo->transcoders[required_transcoder].is_in_use &&
+		devInfo->transcoders[required_transcoder].user_pipe != target_pipe && // Not the same pipe requesting it
+		!is_pipe_being_disabled_in_transaction_display(devInfo->transcoders[required_transcoder].user_pipe, planned_configs, num_planned_configs))
+	{
+		TRACE("Display: get_transcoder: Transcoder %d is already in use by active pipe %d and cannot be assigned to pipe %d.\n",
+			required_transcoder, devInfo->transcoders[required_transcoder].user_pipe, target_pipe);
+		return B_BUSY; // Transcoders are typically not shared between different logical pipes
+	}
+
+	// Transcoder is available or will be freed by the current transaction.
+	*selected_transcoder = required_transcoder;
+	TRACE("Display: get_transcoder: Assigned Transcoder %d to Pipe %d.\n", *selected_transcoder, target_pipe);
+	return B_OK;
+}
+
 void
-i915_release_transcoder(struct intel_i915_device_info* dev, enum transcoder_id_priv transcoder_to_release) { /* ... as before ... */ }
+i915_release_transcoder(struct intel_i915_device_info* devInfo, enum transcoder_id_priv transcoder_to_release)
+{
+	if (!devInfo || transcoder_to_release == PRIV_TRANSCODER_INVALID || transcoder_to_release >= PRIV_MAX_TRANSCODERS)
+		return;
+
+	TRACE("Display: i915_release_transcoder: Request to release Transcoder %d.\n", transcoder_to_release);
+
+	// This function is called when a pipe (that was using this transcoder) is being disabled.
+	// The IOCTL handler should have already updated devInfo->pipes[pipe].enabled = false.
+	// We need to check if any *other* pipe, that is *still enabled*, is using this transcoder.
+	// This situation (shared transcoder) is rare for standard pipes but could occur with complex mappings
+	// or if the transcoder was assigned incorrectly.
+
+	bool transcoder_still_needed = false;
+	for (enum pipe_id_priv p = PRIV_PIPE_A; p < PRIV_MAX_PIPES; ++p) {
+		if (devInfo->pipes[p].enabled && devInfo->pipes[p].current_transcoder == transcoder_to_release) {
+			// Check if this pipe 'p' is different from the one that *caused* this release call.
+			// The `devInfo->transcoders[transcoder_to_release].user_pipe` should hold the pipe
+			// that was using it *before* this release sequence began for it.
+			// If pipe 'p' is not that original user_pipe, then it's another pipe still needing it.
+			if (p != devInfo->transcoders[transcoder_to_release].user_pipe) {
+				transcoder_still_needed = true;
+				TRACE("Display: release_transcoder: Transcoder %d still needed by active pipe %d.\n",
+					transcoder_to_release, p);
+				break;
+			}
+		}
+	}
+	// Simplified: The IOCTL handler, after disabling a pipe, will update `devInfo->transcoders[].is_in_use`.
+	// This function is called from the commit path after a pipe is disabled.
+	// If `devInfo->transcoders[transcoder_to_release].user_pipe` matches the pipe being disabled,
+	// and no other *currently enabled* pipe in `devInfo->pipes` is using this transcoder, then it's free.
+
+	if (devInfo->transcoders[transcoder_to_release].is_in_use) {
+		// The IOCTL handler should clear this if the pipe using it was successfully disabled.
+		// This function is more of a confirmation or for complex scenarios.
+		// For now, if it's marked in_use, assume the IOCTL handler will manage the state.
+		TRACE("Display: release_transcoder: Transcoder %d is still marked in_use by pipe %d. State managed by IOCTL handler.\n",
+			transcoder_to_release, devInfo->transcoders[transcoder_to_release].user_pipe);
+
+	}
+
+	// Actual hardware disable (e.g. TRANSCONF_DISABLE) is handled by intel_i915_pipe_disable.
+	// This function primarily updates the software tracking state in devInfo->transcoders.
+	// The IOCTL handler will set devInfo->transcoders[transcoder_to_release].is_in_use = false;
+	// after the associated pipe is fully disabled and it's confirmed no other active pipe needs it.
+}
 
 
 // --- Bandwidth Check ---
@@ -395,118 +536,178 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		return B_BAD_VALUE;
 	if (num_active_pipes == 0) return B_OK;
 
-	uint64 total_pixel_data_rate_bytes_sec = 0;
+	uint64 total_data_rate_bytes_sec = 0; // Renamed for clarity, represents memory bandwidth needed
 	uint32 gen = INTEL_DISPLAY_GEN(devInfo);
+	uint32_t actual_num_active_pipes = 0; // Count pipes that are actually active in planned_configs
 
-	TRACE("BWCheck: Start. num_active_pipes: %lu, target_cdclk: %u kHz, max_pclk_in_conf: %u kHz, Gen: %u\n",
-		num_active_pipes, target_overall_cdclk_khz, max_pixel_clk_in_config_khz, gen);
+	TRACE("BWCheck: Start. Num_proposed_pipes: %lu, Target CDCLK: %u kHz, Max PCLK in conf: %u kHz, Gen: %u\n",
+		num_active_pipes, /* This is count of active entries in planned_configs */
+		target_overall_cdclk_khz, max_pixel_clk_in_config_khz, gen);
 
 	for (enum pipe_id_priv pipe_idx = PRIV_PIPE_A; pipe_idx < PRIV_MAX_PIPES; pipe_idx++) {
 		if (planned_configs[pipe_idx].user_config == NULL || !planned_configs[pipe_idx].user_config->active)
 			continue;
 
+		actual_num_active_pipes++;
 		const struct i915_display_pipe_config* user_cfg = planned_configs[pipe_idx].user_config;
 		const display_mode* dm = &user_cfg->mode;
 		intel_output_port_state* port_state = intel_display_get_port_by_id(devInfo, (enum intel_port_id_priv)user_cfg->connector_id);
 		const intel_clock_params_t* clks = &planned_configs[pipe_idx].clock_params;
 
-		if (!port_state) { TRACE("BWCheck: Pipe %d: No port_state for connector_id %u\n", pipe_idx, user_cfg->connector_id); return B_ERROR; }
+		if (!port_state) {
+			TRACE("BWCheck: Pipe %d: No port_state for connector_id %u\n", pipe_idx, user_cfg->connector_id);
+			return B_ERROR; // Should have been caught earlier
+		}
 
 		TRACE("BWCheck: Pipe %d (Port %s, Type %d): Mode %dx%d@%ukHz, Space %d. AdjPCLK: %ukHz, DPLinkRate: %ukHz, DPLanes: %u\n",
 			pipe_idx, port_state->name, port_state->type, dm->timing.h_display, dm->timing.v_display, dm->timing.pixel_clock, dm->space,
 			clks->adjusted_pixel_clock_khz, clks->dp_link_rate_khz, clks->dp_lane_count);
 
-		uint32 bpp_val = get_bpp_from_colorspace(dm->space);
+		uint32 bpp_val = get_bpp_from_colorspace(dm->space); // Bits per pixel
 		uint32 bpp_bytes = bpp_val / 8;
-		if (bpp_bytes == 0) { TRACE("BWCheck: Invalid bpp_bytes for pipe %d\n", pipe_idx); return B_BAD_VALUE; }
-
-		uint64 refresh_hz = 60;
-		if (dm->timing.h_total > 0 && dm->timing.v_total > 0 && dm->timing.pixel_clock > 0) {
-			refresh_hz = (uint64)dm->timing.pixel_clock * 1000 / (dm->timing.h_total * dm->timing.v_total);
+		if (bpp_bytes == 0) {
+			TRACE("BWCheck: Invalid bpp_bytes (%u bpp) for pipe %d\n", bpp_val, pipe_idx);
+			return B_BAD_VALUE;
 		}
-		if (refresh_hz == 0) refresh_hz = 60;
 
-		uint64 pipe_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz * bpp_bytes;
-		total_pixel_data_rate_bytes_sec += pipe_data_rate;
+		// Calculate memory bandwidth for this pipe
+		uint64 refresh_hz_nominal = 60; // Nominal refresh for bandwidth calculation
+		if (dm->timing.h_total > 0 && dm->timing.v_total > 0 && dm->timing.pixel_clock > 0) {
+			refresh_hz_nominal = (uint64)dm->timing.pixel_clock * 1000 / (dm->timing.h_total * dm->timing.v_total);
+		}
+		if (refresh_hz_nominal == 0) refresh_hz_nominal = 60; // Sanity check
 
-		// Per-DDI Link Bandwidth Check
+		uint64 pipe_mem_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz_nominal * bpp_bytes;
+		total_data_rate_bytes_sec += pipe_mem_data_rate;
+
+		// --- Per-DDI Link Bandwidth Check ---
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
-			uint8_t current_lane_count = clks->dp_lane_count; // Use the lane count from clock_params
-			if (clks->dp_link_rate_khz == 0 || current_lane_count == 0) {
+			uint8_t lane_count = clks->dp_lane_count;
+			uint32 link_symbol_clk_khz = clks->dp_link_rate_khz; // This is Symbol Clock (Link Clock / 2 for 8b10b)
+
+			if (link_symbol_clk_khz == 0 || lane_count == 0) {
 				TRACE("BWCheck: Pipe %d (DP): Invalid link_rate (%u kHz) or lane_count (%u) from clock_params.\n",
-					pipe_idx, clks->dp_link_rate_khz, current_lane_count);
-				// This might happen if DPCD read failed and calculate_clocks used a default.
-				// Depending on strictness, could return B_BAD_VALUE or try to proceed with caution.
-				// For now, if essential params are zero, it's safer to fail.
+					pipe_idx, link_symbol_clk_khz, lane_count);
 				return B_BAD_VALUE;
 			}
-			// Effective data rate per lane (kHz), assuming 8b/10b encoding (multiply by 0.8)
-			uint64 link_data_rate_per_lane_khz = (uint64)clks->dp_link_rate_khz * 8 / 10;
-			uint64 total_link_data_rate_khz = link_data_rate_per_lane_khz * current_lane_count;
-			uint64 mode_required_data_rate_khz = (uint64)clks->pixel_clock_khz * bpp_val / 8; // bpp_val is bits per pixel
 
-			TRACE("BWCheck: Pipe %d (DP): Mode req: %" B_PRIu64 " kBytes/s. Link cap: %" B_PRIu64 " kBytes/s (Rate: %u kHz, Lanes: %u).\n",
-				pipe_idx, mode_required_data_rate_khz / 1000, total_link_data_rate_khz / 1000, /* Approximation for logging */
-				clks->dp_link_rate_khz, current_lane_count);
+			// Calculate effective data rate per lane.
+			// DP Link Rate (Gbps) = Symbol Clock (MHz) * 2 (symbols/clock) * bits/symbol (8 for 8b10b) / 1000
+			// Effective Data Rate (Gbps per lane) = Link Rate (Gbps) * EncodingEfficiency
+			// Encoding: 8b/10b for HBR2 and below (efficiency 0.8)
+			//           128b/132b for HBR3 (efficiency ~0.9697)
+			// Link Symbol Clock (kHz) is what's usually in `dp_link_rate_khz`.
+			// Link Rate (kHz per lane) = link_symbol_clk_khz * 10 (for 8b/10b, effectively symbol_clk * 8 data bits)
+			// This seems off. Link Symbol Clock is half the Link Rate.
+			// DP Link Rates: 1.62 Gbps (162000 kHz symbol), 2.7 Gbps (270000 kHz symbol), 5.4 Gbps (540000 kHz symbol HBR2), 8.1 Gbps (810000 kHz symbol HBR3)
+			// Data rate per lane (kHz) = Symbol Clock (kHz) * 8 (for 8b/10b)
+			// For HBR3 (8.1Gbps), encoding is 128b/132b.
+			uint64 effective_data_rate_per_lane_kbytes_sec;
+			if (link_symbol_clk_khz >= 810000) { // HBR3 or higher (assuming 128b/132b)
+				effective_data_rate_per_lane_kbytes_sec = (uint64)link_symbol_clk_khz * 2 * 128 / 132 / 8; // *2 for bits/symbol, /8 for bytes
+			} else { // HBR2 or lower (8b/10b)
+				effective_data_rate_per_lane_kbytes_sec = (uint64)link_symbol_clk_khz * 8 / 10; // Symbol clock * 0.8 for data rate
+			}
 
-			if (mode_required_data_rate_khz > total_link_data_rate_khz) {
-				TRACE("BWCheck: Pipe %d (DP) mode data rate %" B_PRIu64 " kHz exceeds link capacity %" B_PRIu64 " kHz (Link: %u kHz x %u lanes).\n",
-					pipe_idx, mode_required_data_rate_khz, total_link_data_rate_khz, clks->dp_link_rate_khz, current_lane_count);
-				return B_NO_MEMORY;
+			uint64 total_link_data_rate_kbytes_sec = effective_data_rate_per_lane_kbytes_sec * lane_count;
+			uint64 mode_required_data_rate_kbytes_sec = (uint64)clks->pixel_clock_khz * bpp_bytes;
+
+			TRACE("BWCheck: Pipe %d (DP): Mode req: %" B_PRIu64 " kBytes/s. Link cap: %" B_PRIu64 " kBytes/s (SymbolRate: %u kHz, Lanes: %u, Efficiency %s).\n",
+				pipe_idx, mode_required_data_rate_kbytes_sec, total_link_data_rate_kbytes_sec,
+				link_symbol_clk_khz, lane_count, (link_symbol_clk_khz >= 810000 ? "128b/132b" : "8b/10b"));
+
+			if (mode_required_data_rate_kbytes_sec > total_link_data_rate_kbytes_sec) {
+				TRACE("BWCheck: Pipe %d (DP) mode data rate %" B_PRIu64 " kBytes/s exceeds link capacity %" B_PRIu64 " kBytes/s.\n",
+					pipe_idx, mode_required_data_rate_kbytes_sec, total_link_data_rate_kbytes_sec);
+				return B_NO_MEMORY; // Using B_NO_MEMORY as a generic "resource unavailable"
 			}
 		} else if (port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
-			uint32 max_tmds_clk_for_port_khz = 340000; // Default HDMI 1.4-ish limit
-			if (gen >= 9 && INTEL_GRAPHICS_VER(devInfo) >= 9) { // Check graphics version for HDMI 2.0 capabilities
-				max_tmds_clk_for_port_khz = 600000; // HDMI 2.0-ish for newer gens (e.g. SKL+)
-			} else if (IS_HASWELL(devInfo->runtime_caps.device_id) || IS_BROADWELL(devInfo->runtime_caps.device_id)) {
-				// HSW/BDW might support up to 300-340MHz typically
-				max_tmds_clk_for_port_khz = 340000;
-			} else { // Older gens like IVB
-				max_tmds_clk_for_port_khz = 225000; // More conservative for IVB HDMI
-			}
-			// TODO: This should ideally be derived from VBT DDI buffer type or specific device info.
+			// Max TMDS character clock (pixel clock for standard modes)
+			uint32 max_tmds_char_clk_khz = 0;
+			// These limits are per TMDS link (single link DVI is 165MHz, dual link DVI or HDMI can be higher)
+			// HDMI 1.0-1.2: up to 165 MHz (1.65 Gbps/channel)
+			// HDMI 1.3-1.4: up to 340 MHz (3.4 Gbps/channel)
+			// HDMI 2.0: up to 600 MHz (6.0 Gbps/channel)
+			// HDMI 2.1: up to 1200 MHz (12.0 Gbps/channel) - Unlikely for current driver scope
 
-			TRACE("BWCheck: Pipe %d (HDMI/DVI): Adj. PCLK: %u kHz. Max TMDS clock for port: %u kHz (Gen %u).\n",
-				pipe_idx, clks->adjusted_pixel_clock_khz, max_tmds_clk_for_port_khz, gen);
+			// Assume devInfo->platform or devInfo->runtime_caps.graphics_ip.ver helps narrow this down.
+			// These are rough estimates and PRM for specific DDI/PHY is key.
+			if (gen >= 11) max_tmds_char_clk_khz = 600000; // Gen11+ likely supports HDMI 2.0
+			else if (gen >= 9) max_tmds_char_clk_khz = (devInfo->runtime_caps.subsystem_id == 0x2212) ? 300000 : 600000; // SKL/KBL - some SKL might be 300MHz, others 600MHz
+			else if (IS_BROADWELL(devInfo->runtime_caps.device_id)) max_tmds_char_clk_khz = 300000; // BDW often HDMI 1.4
+			else if (IS_HASWELL(devInfo->runtime_caps.device_id)) max_tmds_char_clk_khz = 300000;   // HSW often HDMI 1.4, some variants up to 297MHz
+			else if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) max_tmds_char_clk_khz = 225000; // IVB more likely 225MHz
+			else max_tmds_char_clk_khz = 165000; // Older or default single-link DVI speed
 
-			if (clks->adjusted_pixel_clock_khz > max_tmds_clk_for_port_khz) {
+			TRACE("BWCheck: Pipe %d (HDMI/DVI): Adj. PCLK (TMDS Char Clock): %u kHz. Max TMDS clock for port: %u kHz (Gen %u).\n",
+				pipe_idx, clks->adjusted_pixel_clock_khz, max_tmds_char_clk_khz, gen);
+
+			if (clks->adjusted_pixel_clock_khz > max_tmds_char_clk_khz) {
 				TRACE("BWCheck: Pipe %d (HDMI/DVI) adj. pixel clock %u kHz exceeds port TMDS limit %u kHz.\n",
-					pipe_idx, clks->adjusted_pixel_clock_khz, max_tmds_clk_for_port_khz);
+					pipe_idx, clks->adjusted_pixel_clock_khz, max_tmds_char_clk_khz);
 				return B_NO_MEMORY;
 			}
 		}
 	}
 
-	// Total Memory Bandwidth Check
-	uint64 platform_bw_limit_bytes_sec = 0;
-	if (gen >= 9) platform_bw_limit_bytes_sec = 18ULL * 1024 * 1024 * 1024; // ~18 GB/s for SKL+
-	else if (gen == 8) platform_bw_limit_bytes_sec = 15ULL * 1024 * 1024 * 1024; // ~15 GB/s for BDW
-	else if (gen == 7 && IS_HASWELL(devInfo->runtime_caps.device_id)) platform_bw_limit_bytes_sec = 12ULL * 1024 * 1024 * 1024; // ~12 GB/s for HSW
-	else if (gen == 7 && IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) platform_bw_limit_bytes_sec = 10ULL * 1024 * 1024 * 1024; // ~10 GB/s for IVB
-	else if (gen == 6) platform_bw_limit_bytes_sec = 8ULL * 1024 * 1024 * 1024;  // ~8 GB/s for SNB
-	else platform_bw_limit_bytes_sec = 5ULL * 1024 * 1024 * 1024;  // ~5 GB/s for older
+	// --- Total Memory Bandwidth Check ---
+	// These are very rough estimates. PRMs provide detailed memory controller specs.
+	uint64 platform_memory_bw_gbps = 0;
+	if (gen >= 12) platform_memory_bw_gbps = 40; // TGL/ADL with DDR4/LPDDR4x
+	else if (gen >= 11) platform_memory_bw_gbps = 30; // ICL with LPDDR4x
+	else if (gen >= 9) platform_memory_bw_gbps = 25;  // SKL/KBL with DDR4
+	else if (gen == 8) platform_memory_bw_gbps = 20;  // BDW with DDR3L
+	else if (IS_HASWELL(devInfo->runtime_caps.device_id)) platform_memory_bw_gbps = 15; // HSW with DDR3
+	else if (IS_IVYBRIDGE(devInfo->runtime_caps.device_id)) platform_memory_bw_gbps = 12; // IVB with DDR3
+	else platform_memory_bw_gbps = 8; // Older
 
-	TRACE("BWCheck: Total required pixel data rate: %" B_PRIu64 " Bytes/sec. Approx Platform Memory BW Limit: %" B_PRIu64 " Bytes/sec (Gen %u).\n",
-		total_pixel_data_rate_bytes_sec, platform_bw_limit_bytes_sec, gen);
-	if (total_pixel_data_rate_bytes_sec > platform_bw_limit_bytes_sec) {
-		ERROR("BWCheck: Error - Required display mem bandwidth exceeds approximate platform limit.\n");
+	uint64 platform_bw_limit_bytes_sec = platform_memory_bw_gbps * 1000 * 1000 * 1000 / 8; // Gbps to Bytes/sec
+
+	TRACE("BWCheck: Total required display memory data rate: %" B_PRIu64 " Bytes/sec. Approx Platform Memory BW Limit: %" B_PRIu64 " Bytes/sec (Gen %u).\n",
+		total_data_rate_bytes_sec, platform_bw_limit_bytes_sec, gen);
+
+	// Display typically shouldn't consume the *entire* memory bandwidth. Leave headroom.
+	// A common rule of thumb is display might use 25-50% of total available bandwidth.
+	if (total_data_rate_bytes_sec > (platform_bw_limit_bytes_sec / 2)) { // Using 50% as a rough threshold
+		TRACE("BWCheck: Warning - Required display memory bandwidth %" B_PRIu64 " B/s exceeds 50%% of approx platform limit %" B_PRIu64 " B/s.\n",
+			total_data_rate_bytes_sec, platform_bw_limit_bytes_sec);
+		// Not returning error yet, but this is a warning. Stricter check might return B_NO_MEMORY.
+	}
+	if (total_data_rate_bytes_sec > platform_bw_limit_bytes_sec) { // Absolute check
+		ERROR("BWCheck: Error - Required display memory bandwidth %" B_PRIu64 " B/s exceeds approximate platform limit %" B_PRIu64 " B/s.\n",
+			total_data_rate_bytes_sec, platform_bw_limit_bytes_sec);
 		return B_NO_MEMORY;
 	}
 
-	// CDCLK Sufficiency Check
-	if (target_overall_cdclk_khz > 0 && max_pixel_clk_in_config_khz > 0) {
-		// Basic rule: CDCLK should be at least ~1.5x to 2x the max pixel clock.
-		// This is a simplification; PRMs have detailed formulas.
-		float cdclk_pclk_ratio = 1.5f;
-		if (gen >= 9) cdclk_pclk_ratio = 2.0f; // Newer gens might need higher ratio for more features
-		if (num_active_pipes > 1) cdclk_pclk_ratio += 0.5f * (num_active_pipes - 1); // Increase ratio for more pipes
 
-		if (target_overall_cdclk_khz < (uint32_t)(max_pixel_clk_in_config_khz * cdclk_pclk_ratio)) {
-			TRACE("BWCheck: Warning - Target CDCLK %u kHz might be too low for max PCLK %u kHz (ratio %.1f, num_pipes %u).\n",
-				target_overall_cdclk_khz, max_pixel_clk_in_config_khz, cdclk_pclk_ratio, num_active_pipes);
-			// Not returning error for now, as this is a rough check.
+	// --- CDCLK Sufficiency Check ---
+	// Use the refined get_target_cdclk_for_config logic (or its core calculation part)
+	// to determine if the proposed target_overall_cdclk_khz is adequate.
+	if (target_overall_cdclk_khz > 0 && max_pixel_clk_in_config_khz > 0 && actual_num_active_pipes > 0) {
+		uint32 required_cdclk_for_this_config = 0;
+		// We need total pixel rate for calculate_required_min_cdclk.
+		// It's not directly passed in, so we'd have to recalculate it or approximate.
+		// For now, using the simpler ratio based on max_pixel_clk_in_config_khz and pipe count.
+		// This should ideally call calculate_required_min_cdclk from intel_i915.c if parameters match up.
+		float cdclk_pclk_ratio = 1.5f; // Default
+		if (gen >= 9) cdclk_pclk_ratio = (actual_num_active_pipes > 1) ? 2.2f : 2.0f;
+		else if (gen >= 7) cdclk_pclk_ratio = (actual_num_active_pipes > 1) ? 2.0f : 1.8f;
+
+		required_cdclk_for_this_config = (uint32_t)(max_pixel_clk_in_config_khz * cdclk_pclk_ratio);
+
+		// Add a small fixed overhead for multiple pipes
+		if (actual_num_active_pipes > 1) required_cdclk_for_this_config += 50000 * (actual_num_active_pipes -1);
+
+
+		TRACE("BWCheck: CDCLK Check: Target CDCLK %u kHz. Required for config (max_pclk %u kHz, %u pipes) is ~%u kHz.\n",
+			target_overall_cdclk_khz, max_pixel_clk_in_config_khz, actual_num_active_pipes, required_cdclk_for_this_config);
+
+		if (target_overall_cdclk_khz < required_cdclk_for_this_config) {
+			TRACE("BWCheck: Error - Target CDCLK %u kHz is insufficient for the configuration requiring ~%u kHz.\n",
+				target_overall_cdclk_khz, required_cdclk_for_this_config);
+			return B_NO_MEMORY; // CDCLK is a critical resource
 		}
-		// TODO: Check target_overall_cdclk_khz against platform's absolute max CDCLK capability.
+		// TODO: Also check target_overall_cdclk_khz against platform's absolute max CDCLK from VBT/fuses/PRM.
 	}
 
 	TRACE("BWCheck: All bandwidth checks passed.\n");

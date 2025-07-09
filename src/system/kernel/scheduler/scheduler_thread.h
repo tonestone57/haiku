@@ -282,7 +282,11 @@ Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
 inline bool
 ThreadData::IsRealTime() const
 {
-	return GetBasePriority() >= B_FIRST_REAL_TIME_PRIORITY;
+	// Treat threads from B_REAL_TIME_DISPLAY_PRIORITY upwards as real-time
+	// for the purposes of immediate eligibility and minimum guaranteed slice.
+	// B_FIRST_REAL_TIME_PRIORITY is B_URGENT_PRIORITY (100).
+	// B_REAL_TIME_DISPLAY_PRIORITY is 20.
+	return GetBasePriority() >= B_REAL_TIME_DISPLAY_PRIORITY;
 }
 
 inline bool

@@ -477,6 +477,10 @@ static const int32 kIOBoundScorePenaltyFactor = 2;
 static const int32 kBenefitScoreLagFactor = 1;
 static const int32 kBenefitScoreEligFactor = 2;
 
+// Proposal 2: Define new constant for migration threshold in work stealing
+// Represents 0.5ms of work on a nominal capacity core.
+static const bigtime_t kMinUnweightedNormWorkToSteal = 500;
+
 
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
@@ -782,8 +786,21 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				}
 			}
 
-			// 3. Check if sufficiently starved (positive lag)
-			bool isStarved = candidateTask->Lag() > kMinimumLagToSteal;
+			// 3. Check if sufficiently starved (positive lag) using unweighted normalized work
+			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetBasePriority());
+			if (candidateWeight <= 0) candidateWeight = 1; // Should not happen for active tasks
+			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
+
+			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
+
+			if (isStarved) {
+				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
+					candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal, candidateTask->Lag());
+			}
+			// else { // Optional: Trace if not starved by new criteria
+			// TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " NOT starved (unweighted_owed %" B_PRId64 " <= threshold %" B_PRId64 ").\n",
+			//    candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal);
+			// }
 
 			if (basicChecksPass && isStarved) {
 				// --- b.L-Specific Evaluation ---

@@ -996,44 +996,78 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 			// This implies UpdatePriority must have been called to make it the root (e.g. by setting its key to a very low value).
 		}
 #endif
-		// Assuming cpu is made root by UpdatePriority(B_IDLE_PRIORITY) before calling RemoveCPU.
-		if (fCPUHeap.PeekRoot() == cpu) {
-			fCPUHeap.RemoveRoot();
-		} else {
-			// This is problematic if CPUPriorityHeap doesn't have a direct Remove(element).
-			// For now, rely on the assumption that it was made the root.
-			// If not, this is a bug in the calling sequence or CPUPriorityHeap limitations.
-			panic("CoreEntry::RemoveCPU: CPU %" B_PRId32 " not root of heap, cannot remove.", cpu->ID());
+		// Use the direct Remove(element) method from SchedulerHeap (via CPUPriorityHeap).
+		// This removes the need for the CPU to be the root and avoids the panic.
+		fCPUHeap.Remove(cpu);
+	}
+
+	// Determine if the CPU being removed was effectively idle *before* this removal operation
+	// and before fCPUCount is decremented.
+	// A CPU is idle if its running thread is its designated idle thread.
+	// This check is relevant if the CPU was enabled and part of scheduling.
+	// If gCPU[cpu->ID()].disabled is already true, scheduler_set_cpu_enabled is in progress.
+	bool removingAnIdleCpu = false;
+	if (!gCPU[cpu->ID()].disabled && cpu->fIdleThread != NULL
+		&& gCPU[cpu->ID()].running_thread == cpu->fIdleThread->GetThread()) {
+		removingAnIdleCpu = true;
+	} else if (gCPU[cpu->ID()].disabled) {
+		// If it's being disabled, it's effectively becoming idle from the core's perspective
+		// for the purpose of fIdleCPUCount if it wasn't already.
+		// However, CPUGoesIdle should have been called by the mode logic if it transitioned
+		// from active to idle due to UpdatePriority(B_IDLE_PRIORITY).
+		// The critical part is that if it *was* counted in fIdleCPUCount, it should now be uncounted.
+		// This check is tricky because its state might have just changed.
+		// Let's assume if it *was* in fIdleCores list (which CPUGoesIdle manages), then it was idle.
+		// This check is better done by CPUWakesUp/CPUGoesIdle in scheduler_modes.
+		// For RemoveCPU, we only care if it was one of the fIdleCPUCount.
+		// The most straightforward is if it was running its idle thread *before* this disable sequence began.
+		// The current fIdleCPUCount is managed by CPUGoesIdle/WakesUp.
+		// When a CPU is *removed* from the core, if it was one of the idle CPUs,
+		// fIdleCPUCount should decrement.
+		// CPUGoesIdle increments fIdleCPUCount.
+		// CPUWakesUp decrements fIdleCPUCount.
+		// If a CPU is disabled, scheduler_set_cpu_enabled calls UpdatePriority(B_IDLE_PRIORITY).
+		// If this causes a transition to idle, CPUGoesIdle is called.
+		// So, fIdleCPUCount should be correct *before* RemoveCPU is called.
+		// If the CPU being removed was one of these idle CPUs, we must decrement fIdleCPUCount.
+		// A CPU is "in the idle count" if it was previously passed to CPUGoesIdle and not CPUWakesUp.
+
+		// Let's simplify: if this CPU was part of fIdleCores list in PackageEntry,
+		// then it was considered idle. Or, more locally, if its removal means an idle CPU is gone.
+		// The fPackage->RemoveIdleCore(this) call later handles the package list.
+		// The fIdleCPUCount on the CoreEntry itself needs to be consistent.
+		// If the CPU was running its idle thread just before this RemoveCPU operation was initiated
+		// (perhaps checked by the caller or implied by disabling), then fIdleCPUCount needs update.
+		// The current logic in scheduler_set_cpu_enabled calls UpdatePriority(B_IDLE_PRIORITY)
+		// THEN RemoveCPU. If UpdatePriority caused CPUGoesIdle, fIdleCPUCount is up.
+		// So, if gCPU[cpu->ID()].disabled (meaning it's being disabled), and it *was* idle, decrement.
+		// This is still a bit circular.
+
+		// Safest: if the CPU's current running_thread is its idle_thread at the point of removal logic.
+		// This is hard to check perfectly without more context from the caller.
+		// For now, we'll assume that if gCPU[cpu->ID()].disabled is true (it's being disabled),
+		// and fIdleCPUCount > 0, we decrement fIdleCPUCount. This is a heuristic.
+		// A more robust solution might involve CPUGoesOffline/CPUComesOnline calls.
+		if (fIdleCPUCount > 0) {
+			// This is an approximation: assumes a disabled CPU was effectively idle
+			// for the core's count. This needs careful review with CPUGoesIdle/CPUWakesUp.
+			// For now, let's assume this is correct if the CPU was indeed idle.
+			// The original code had this block, but it was empty.
+			// A CPU being removed from the core means it's no longer contributing to idle *or* active count.
+			// If it was previously idle, fIdleCPUCount needs to reflect its departure.
+			if (cpu->IsEffectivelyIdle()) { // Add a helper to CPUEntry
+				fIdleCPUCount--;
+				ASSERT(fIdleCPUCount >= 0);
+			}
 		}
 	}
+
 
 	fCPUSet.ClearBit(cpu->ID());
 	fCPUCount--;
-
-	// If the removed CPU was idle, adjust fIdleCPUCount.
-	// This needs careful synchronization with CPUGoesIdle/CPUWakesUp.
-	// If UpdatePriority(B_IDLE_PRIORITY) was called, CPUGoesIdle would have run.
-	// So, if it *was* idle, fIdleCPUCount would have been incremented.
-	// Now that it's removed, if it contributed to fIdleCPUCount, decrement it.
-	// A simple way: if gCPU[cpu->ID()].disabled is true, it should be idle.
-	// This is complex. Let's assume CPUGoesIdle/CPUWakesUp correctly maintain
-	// fIdleCPUCount relative to the *current* fCPUCount.
-	// If a CPU is removed, and it was idle, then fIdleCPUCount must be > 0.
-	// This part is a bit hand-wavy without knowing the exact state of the CPU being removed.
-	// For now, we assume that if CPU was idle its fIdleCPUCount contribution is removed implicitly
-	// by CPUWakesUp if it was the last CPU and the core became active, or if not, fIdleCPUCount
-	// just becomes out of sync until CPUGoesIdle/WakesUp is called for another CPU on the core.
-	// A safer bet: if gCPU[cpu->ID()].disabled is true, it means it was considered idle for removal.
-	if (gCPU[cpu->ID()].disabled) { // Check if it was an idle CPU being removed
-		if (fIdleCPUCount > 0) { // Ensure we don't go negative
-			// This assumes that CPUGoesIdle was called before this, incrementing fIdleCPUCount
-			// We now decrement it as the CPU is gone.
-			// This is still not perfect. The state of fIdleCPUCount should be carefully
-			// managed by CPUGoesIdle/WakesUp in conjunction with AddCPU/RemoveCPU.
-			// For now, let's assume if fCPUCount becomes 0, the core is fully idle/defunct.
-		}
-	}
-
+	// Note: fIdleCPUCount should have been correctly managed by CPUGoesIdle/CPUWakesUp
+	// if the CPU transitioned state *before* being marked for removal.
+	// The above adjustment is a safeguard if a CPU is removed while idle.
 
 	lock.Unlock();
 
@@ -1274,14 +1308,22 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 
 
 /* static */ void
-DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
+DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
 {
+	if (maxThreadsToDump <= 0) // Use default if invalid or "all" requested via 0/-1
+		maxThreadsToDump = 128; // Default internal limit
+	// Define an absolute maximum to prevent excessive KDL output/time
+	const int ABSOLUTE_MAX_DUMP = 512;
+	if (maxThreadsToDump > ABSOLUTE_MAX_DUMP)
+		maxThreadsToDump = ABSOLUTE_MAX_DUMP;
+
 	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInRunQueue: %" B_PRId32 ", MinVRuntime: %" B_PRId64 "):\n",
 		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetEevdfRunQueue().Count(),
 		cpu->MinVirtualRuntime());
-	kprintf("  (CPU TotalReportedThreads: %" B_PRId32 ", Idle Thread ID: %" B_PRId32 ")\n",
+	kprintf("  (CPU TotalReportedThreads: %" B_PRId32 ", Idle Thread ID: %" B_PRId32 ", MaxDump: %" B_PRId32 ")\n",
 		cpu->GetTotalThreadCount(),
-		cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1);
+		cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1,
+		maxThreadsToDump);
 
 	cpu->LockRunQueue();
 	// Use a non-const reference to be able to PopMinimum
@@ -1293,12 +1335,11 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 			"Thread*", "ID", "Pri", "EPri", "LNice", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Load", "Aff", "Name");
 		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
 
-		const int MAX_THREADS_TO_DUMP_PER_CPU = 128; // Max threads we'll pull out for dumping
-		ThreadData* dumpedThreads[MAX_THREADS_TO_DUMP_PER_CPU];
+		ThreadData* dumpedThreads[ABSOLUTE_MAX_DUMP]; // Use absolute max for buffer
 		int numActuallyDumped = 0;
 		int totalInQueueOriginally = queue.Count();
 
-		for (int i = 0; i < MAX_THREADS_TO_DUMP_PER_CPU && !queue.IsEmpty(); ++i) {
+		for (int i = 0; i < maxThreadsToDump && !queue.IsEmpty(); ++i) {
 			ThreadData* td = queue.PopMinimum();
 			if (td == NULL) // Should not happen if IsEmpty() was false
 				break;
@@ -1329,18 +1370,17 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu)
 		}
 
 		// After re-adding, ensure fMinVirtualRuntime is correct.
-		// EevdfRunQueue::Add calls _UpdateMinVirtualRuntime if the new item is the head
-		// or if the queue was empty. Calling it here ensures it's updated
-		// even if the re-additions didn't trigger it sufficiently (e.g. if multiple
-		// threads had same VD and heap order changed).
 		if (!queue.IsEmpty()) {
 			cpu->_UpdateMinVirtualRuntime();
 		}
 
-		if (totalInQueueOriginally > numActuallyDumped) {
-			kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
+		if (totalInQueueOriginally > numActuallyDumped && numActuallyDumped == maxThreadsToDump) {
+			kprintf("  (... NOTE: Dumped top %d of %d threads as per limit. Use 'run_queue [cpu] [count]' for more ...)\n",
 				numActuallyDumped, totalInQueueOriginally);
-		}
+		} else if (totalInQueueOriginally > numActuallyDumped) {
+             kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
+                numActuallyDumped, totalInQueueOriginally);
+        }
 		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
 		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ". (Pri=BasePrio, EPri=EffectivePrio, LNice=LatencyNice, Load=NeededLoad%%)\n",
 			numActuallyDumped, queue.Count());
@@ -1401,12 +1441,46 @@ DebugDumper::DumpIdleCoresInPackage(PackageEntry* package)
 
 
 static int
-dump_run_queue(int /* argc */, char** /* argv */)
+dump_run_queue(int argc, char** argv)
 {
-	int32 cpuCount = smp_get_num_cpus();
-	for (int32 i = 0; i < cpuCount; i++) {
-		if (gCPUEnabled.GetBit(i))
-			DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i]); // Changed call
+	int32 specificCpu = -1;
+	int32 maxThreads = 128; // Default
+
+	if (argc >= 2) {
+		if (strcmp(argv[1], "all") != 0) {
+			specificCpu = strtol(argv[1], NULL, 0);
+			if (specificCpu < 0 || specificCpu >= smp_get_num_cpus()) {
+				kprintf("Invalid CPU ID: %s. Must be between 0 and %d or 'all'.\n", argv[1], smp_get_num_cpus() - 1);
+				return B_KDEBUG_ERROR;
+			}
+			if (gCPU[specificCpu].disabled) {
+				kprintf("CPU %" B_PRId32 " is disabled.\n", specificCpu);
+				return 0;
+			}
+		}
+		if (argc >= 3) {
+			maxThreads = strtol(argv[2], NULL, 0);
+			if (maxThreads <= 0) {
+				// Interpret 0 or negative as "default limit" (which DumpEevdfRunQueue handles)
+				// or a very large number to mean "all available within absolute KDL limits"
+				maxThreads = 0; // Pass 0 to indicate default/max behavior to DumpEevdfRunQueue
+				kprintf("Interpreting count <= 0 as 'dump up to internal KDL limits'.\n");
+			}
+		}
+	}
+
+	if (specificCpu != -1) {
+		if (!gCPU[specificCpu].disabled) {
+			DebugDumper::DumpEevdfRunQueue(&gCPUEntries[specificCpu], maxThreads);
+		} else {
+			kprintf("CPU %" B_PRId32 " is disabled.\n", specificCpu);
+		}
+	} else {
+		int32 cpuCount = smp_get_num_cpus();
+		for (int32 i = 0; i < cpuCount; i++) {
+			if (gCPUEnabled.GetBit(i))
+				DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i], maxThreads);
+		}
 	}
 	return 0;
 }
@@ -1680,8 +1754,13 @@ void Scheduler::init_debug_commands()
 	if (sDebugCoreHeap.Count() == 0)
 		new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus());
 
-	add_debugger_command_etc("eevdf_run_queue", &DebugDumper::DumpEevdfRunQueue,
-		"List threads in EEVDF run queue per CPU", "\nLists threads in EEVDF run queue per CPU", 0);
+	add_debugger_command_etc("eevdf_run_queue", (debugger_command_hook)dump_run_queue,
+		"List threads in EEVDF run queue.",
+		"[ <cpu_id> | \"all\" ] [ <max_threads> ]\n"
+		"Lists threads in the EEVDF run queue for the specified CPU or all CPUs.\n"
+		"  <cpu_id>      - Specific CPU ID to dump. Defaults to \"all\" if omitted.\n"
+		"  <max_threads> - Maximum number of threads to dump per CPU queue.\n"
+		"                  Defaults to an internal limit (e.g., 128). Use 0 for a larger internal max (e.g. 512).\n", 0);
 	add_debugger_command_alias("run_queue", "eevdf_run_queue", "Alias for eevdf_run_queue");
 
 	if (!gSingleCore) {

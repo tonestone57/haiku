@@ -40,6 +40,84 @@ static const int32 gNiceToWeight[40] = {
 	/* nice +19 -> index 39 */
 };
 
+// --- New Continuous Weight Calculation Logic ---
+
+// Minimum and maximum weights for the new scheme
+static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight[39]
+static const int32 kNewMaxWeightCap = 88761 * 16; // Similar to current gNiceToWeight[0] * 16
+
+// The new weight table and its initialization function
+static int32 gHaikuContinuousWeights[B_MAX_PRIORITY];
+
+// Prototype function to calculate weights (uses double for precision during generation)
+static int32
+calculate_continuous_haiku_weight_prototype(int32 priority)
+{
+	if (priority == B_IDLE_PRIORITY) // 0
+		return 1; // Smallest distinct weight
+	if (priority > B_IDLE_PRIORITY && priority < B_LOWEST_ACTIVE_PRIORITY) // 1-4
+		return 1 + priority; // Small, distinct weights: 2, 3, 4, 5
+
+	// Clamp priority for the main calculation range
+	// B_LOWEST_ACTIVE_PRIORITY = 5
+	// B_MAX_PRIORITY = 121 (max usable Haiku prio is 120)
+	int32 calcPrio = priority;
+	if (calcPrio < B_LOWEST_ACTIVE_PRIORITY) calcPrio = B_LOWEST_ACTIVE_PRIORITY;
+	if (calcPrio >= B_MAX_PRIORITY) calcPrio = B_MAX_PRIORITY - 1;
+
+	double weight_fp;
+	const double factor_per_haiku_prio = 1.091507805494422; // (1.25)^(1/2.5)
+
+	if (calcPrio < B_REAL_TIME_DISPLAY_PRIORITY) {
+		// Normal Range (B_LOWEST_ACTIVE_PRIORITY to B_REAL_TIME_DISPLAY_PRIORITY - 1)
+		// Anchored at B_NORMAL_PRIORITY (10) = SCHEDULER_WEIGHT_SCALE (1024)
+		weight_fp = SCHEDULER_WEIGHT_SCALE;
+		int delta_priority = B_NORMAL_PRIORITY - calcPrio;
+
+		if (delta_priority > 0) { // Higher actual priority (prio < 10)
+			for (int i = 0; i < delta_priority; ++i) weight_fp *= factor_per_haiku_prio;
+		} else if (delta_priority < 0) { // Lower actual priority (prio > 10)
+			for (int i = 0; i < -delta_priority; ++i) weight_fp /= factor_per_haiku_prio;
+		}
+		// if delta_priority == 0, weight_fp is SCHEDULER_WEIGHT_SCALE
+
+		int32 calculated_weight = static_cast<int32>(round(weight_fp));
+		return max_c(kNewMinActiveWeight, calculated_weight);
+
+	} else {
+		// Real-Time Range (priority >= B_REAL_TIME_DISPLAY_PRIORITY)
+		// Base RT weight for B_REAL_TIME_DISPLAY_PRIORITY (20) is gNiceToWeight[0]
+		double rt_weight_base = (double)gNiceToWeight[0]; // 88761.0
+
+		// Calculate how many steps above B_REAL_TIME_DISPLAY_PRIORITY this priority is
+		int rt_steps = calcPrio - B_REAL_TIME_DISPLAY_PRIORITY;
+
+		weight_fp = rt_weight_base;
+		for (int i = 0; i < rt_steps; ++i) {
+			weight_fp *= factor_per_haiku_prio; // Increase weight for higher RT priorities
+		}
+
+		int32 calculated_weight = static_cast<int32>(round(weight_fp));
+		return min_c(kNewMaxWeightCap, calculated_weight); // Apply cap
+	}
+}
+
+static void
+_init_continuous_weights()
+{
+	for (int32 i = 0; i < B_MAX_PRIORITY; i++) {
+		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
+		// dprintf("Weight for prio %d = %d\n", i, gHaikuContinuousWeights[i]); // For debugging
+	}
+	// Ensure idle is absolutely minimal if prototype didn't set it to 1.
+	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1;
+}
+
+// Toggle to switch between old and new weight calculation for testing.
+// Default to false (old system) until new system is validated.
+static const bool kUseContinuousWeights = false;
+
+// --- Original Haiku priority to nice index mapping ---
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
 // B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
 static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {

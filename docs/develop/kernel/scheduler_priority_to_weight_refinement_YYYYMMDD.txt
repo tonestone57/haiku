@@ -1,0 +1,69 @@
+## Haiku EEVDF Scheduler: Priority-to-Weight Mapping Refinement Proposal - YYYY-MM-DD
+
+**1. Introduction**
+
+This document details an analysis of the Haiku kernel scheduler's current `scheduler_priority_to_weight` function and proposes a refined mapping. The goal of the refinement is to introduce more continuous and granular weight scaling across Haiku's priority spectrum, potentially improving fairness and responsiveness characteristics within the EEVDF (Earliest Eligible Virtual Deadline First) scheduling framework. This is in response to the task: "scheduler_priority_to_weight() Mapping Granularity: Evaluate if a more continuous or logarithmic mapping (similar to Linux CFS sched_prio_to_weight) tied more directly to the SCHEDULER_WEIGHT_SCALE for B_NORMAL_PRIORITY would provide better behavior."
+
+**2. Analysis of Current `scheduler_priority_to_weight` Mapping**
+
+The existing `scheduler_priority_to_weight` function in `src/system/kernel/scheduler/scheduler.cpp` employs a hybrid approach:
+
+*   **Normal Priorities**: Haiku priorities in the typical application range (around `B_NORMAL_PRIORITY`) are mapped to "nice" values using `scheduler_haiku_priority_to_nice_index`. These nice values then index a static table, `gNiceToWeight`, which is based on Linux CFS weights (where nice 0 = weight 1024, and each nice level step approximates a 1.25x weight change). This provides a geometric progression of weights for this limited range.
+*   **Tiered Overrides**: Specific Haiku priority thresholds trigger overrides, assigning weights that are fixed multiples of `gNiceToWeight[0]` (the weight for nice -20, which is 88761). This applies to:
+    *   Idle priorities (lowest fixed weight: 15).
+    *   System Services (e.g., `B_REAL_TIME_DISPLAY_PRIORITY` = 20): weight `gNiceToWeight[0]`.
+    *   Medium-High User RT (e.g., `B_REAL_TIME_PRIORITY` = 30): weight `gNiceToWeight[0] * 2`.
+    *   High User/Kernel RT (e.g., priority 60): weight `gNiceToWeight[0] * 4`.
+    *   Urgent Kernel (e.g., `B_URGENT_PRIORITY` = 100): weight `gNiceToWeight[0] * 8`.
+    *   Max Kernel RT (e.g., `B_MAX_REAL_TIME_PRIORITY` = 120): weight `gNiceToWeight[0] * 16`.
+
+**Identified Issues with the Current Mapping:**
+
+1.  **Large Discrete Jumps**: Significant, abrupt increases in weight occur at the boundaries of these tiers. For instance, a single Haiku priority point change from 19 to 20 can result in a ~35.5x weight increase (from ~2501 to 88761).
+2.  **Lack of Granularity Within Tiers**: Within broad real-time (RT) tiers, multiple distinct Haiku priority levels map to the exact same EEVDF weight. For example, all priorities from 30 to 59 currently receive an identical weight. This means the EEVDF scheduler cannot differentiate their relative importance based on their specific Haiku priority within this range.
+3.  **Impact on EEVDF Proportionality**: While EEVDF aims for CPU time allocation proportional to `1/weight`, the large, non-geometric jumps (especially into RT tiers) deviate from a smooth proportional sharing model across the entire priority spectrum.
+
+**3. Research into Alternative Mappings (Linux CFS)**
+
+The Linux Completely Fair Scheduler (CFS) uses a `prio_to_weight` table where weights follow a consistent geometric progression: each step in "nice" value (from -20 to +19) changes the weight by a factor of approximately 1.25. This ensures that the ratio of CPU time between tasks with a certain nice value difference is constant. Linux typically handles its `SCHED_FIFO` and `SCHED_RR` real-time tasks outside this CFS weight system. Haiku's EEVDF, however, integrates all non-idle threads into its weighted fairness system.
+
+**4. Design of a New `calculate_continuous_haiku_weight_prototype(int32 priority)` Function**
+
+A new hybrid approach is proposed:
+
+*   **Anchor Point**: `B_NORMAL_PRIORITY` (10) maps to `SCHEDULER_WEIGHT_SCALE` (1024).
+*   **Scaling Factor (`F_h`)**: For each single Haiku priority point deviation from `B_NORMAL_PRIORITY`, the weight is scaled by `F_h \approx 1.0915078` (derived from `1.25^(1/2.5)`).
+*   **Normal Priority Range (`priority < B_REAL_TIME_DISPLAY_PRIORITY` (20))**:
+    *   Weights are calculated using `weight = SCHEDULER_WEIGHT_SCALE * (F_h ^ (B_NORMAL_PRIORITY - priority))`.
+    *   `B_IDLE_PRIORITY` (0) maps to a minimal weight of 1.
+    *   Priorities 1-4 map to `1 + priority` (i.e., 2, 3, 4, 5).
+    *   Weights for priorities `B_LOWEST_ACTIVE_PRIORITY` (5) up to 19 follow the geometric curve, clamped by a minimum active weight (`kNewMinActiveWeight = 15`).
+*   **Real-Time Priority Range (`priority >= B_REAL_TIME_DISPLAY_PRIORITY` (20))**:
+    *   The weight for `B_REAL_TIME_DISPLAY_PRIORITY` (20) is set to `gNiceToWeight[0]` (88761) to maintain a strong RT baseline.
+    *   For Haiku priorities `p > B_REAL_TIME_DISPLAY_PRIORITY`, the weight scales geometrically upwards from this RT base using the same factor `F_h`:
+        `weight = 88761.0 * (F_h ^ (p - B_REAL_TIME_DISPLAY_PRIORITY))`.
+    *   Calculated RT weights are capped at a maximum (`kNewMaxWeightCap = 88761 * 16`).
+
+**5. Implementation of the Prototype**
+
+*   The `calculate_continuous_haiku_weight_prototype` function (using `double` for precise generation) was implemented in `scheduler.cpp`.
+*   A static lookup table `static int32 gHaikuContinuousWeights[B_MAX_PRIORITY];` was added.
+*   An initialization function `_init_continuous_weights()` was created to populate this table at startup using the prototype. This is called from `scheduler_init()`.
+*   The main `scheduler_priority_to_weight` function was modified to conditionally use `gHaikuContinuousWeights[priority]` if a boolean toggle `kUseContinuousWeights` (currently defaulting to `false`) is enabled.
+
+**Benefits of the Proposed Mapping:**
+
+*   **Smoother Transitions**: Reduces large weight jumps, particularly for priorities moving into the lower RT range.
+*   **Increased Granularity**: Provides distinct weights for each Haiku priority level, allowing finer EEVDF differentiation.
+*   **Improved Proportionality**: CPU shares should more closely follow a geometric progression based on Haiku priority within the normal and RT ranges (below the cap).
+
+**6. Suggested Test Scenarios for Verification**
+
+(Detailed in the "Suggest Test Scenarios for Verification" plan step completion message. They cover fairness, responsiveness, RT granularity, system feel, and starvation.)
+
+**7. Conclusion and Recommendation**
+
+The proposed continuous/hybrid weight mapping offers a more granular and potentially fairer translation of Haiku priorities for the EEVDF scheduler. It aims to smooth out abrupt changes in scheduling behavior that can result from the current tiered system while preserving the strong preference Haiku traditionally gives to real-time tasks.
+
+**Recommendation**:
+Thoroughly test the new mapping by enabling `kUseContinuousWeights`. If tests demonstrate improved fairness, predictable responsiveness, and no new pathologies (like RT task starvation or instability with very high weights), consider adopting the new continuous mapping as the default. The exact scaling factor (`F_h`), the RT base weight jump, and the maximum weight cap may require further empirical tuning based on performance across a variety of Haiku workloads.

@@ -54,49 +54,86 @@ vga_planar_blit(vesa_shared_info *info, uint8 *src, int32 srcBPR,
 	int32 dstBPR = info->bytes_per_row;
 	uint8 *dst = info->frame_buffer + top * dstBPR + left / 8;
 
-	// TODO: this is awfully slow...
 	// TODO: assumes BGR order
+
+	// Determine the byte range for the destination buffer
+	int32 startXByte = left / 8;
+	int32 endXByte = right / 8;
+	int32 numBytesForRow = endXByte - startXByte + 1;
+
+	// Max width for VGA 4-bit modes like 640x480 is 640 pixels / 8 = 80 bytes.
+	// A stack buffer should be acceptable.
+	if (numBytesForRow <= 0 || numBytesForRow > 128) // Safety check, 128 for ~1024px wide
+		return B_BAD_VALUE;
+	uint8 planeBuffer[numBytesForRow];
+
+	uint8* currentDstRowStart = info->frame_buffer + top * dstBPR + startXByte;
+
 	for (int32 y = top; y <= bottom; y++) {
+		uint8* currentSrcPixel = src;
+
 		for (int32 plane = 0; plane < 4; plane++) {
-			// select the plane we intend to write to and read from
-			gISA->write_io_16(VGA_SEQUENCER_INDEX, (1 << (plane + 8)) | 0x02);
-			gISA->write_io_16(VGA_GRAPHICS_INDEX, (plane << 8) | 0x04);
+			// Prepare the data for the current plane for the entire row segment
+			memset(planeBuffer, 0, numBytesForRow);
+			uint8* srcPixelForPlane = currentSrcPixel;
 
-			uint8* srcHandle = src;
-			uint8* dstHandle = dst;
-			uint8 current8 = dstHandle[0];
-				// we store 8 pixels before writing them back
-
-			int32 x = left;
-			for (; x <= right; x++) {
+			for (int32 x = left; x <= right; x++) {
 				uint8 rgba[4];
-				if (user_memcpy(rgba, srcHandle, 4) < B_OK)
+				// It's generally safer to copy small chunks from user space
+				// rather than holding a pointer across kernel operations.
+				if (user_memcpy(rgba, srcPixelForPlane, 4) < B_OK)
 					return B_BAD_ADDRESS;
-				uint8 pixel = (308 * rgba[2] + 600 * rgba[1]
+
+				// Simple grayscale conversion
+				uint8 grayPixel = (30 * rgba[2] + 59 * rgba[1] + 11 * rgba[0]) / 100;
+					// Using common NTSC coefficients (approx) scaled to avoid large intermediate.
+					// Original: (308 * R + 600 * G + 116 * B) / 16384;
+					// Simplified: (0.299*R + 0.587*G + 0.114*B) -> (30*R + 59*G + 11*B)/100
+					// This is for 0-255 range. The original was for 0-15 range (4 bit).
+					// The bit check `(grayPixel & (1 << plane))` implies grayPixel should be
+					// an index into the 16-color palette for mode 13h type displays,
+					// not a 0-255 grayscale value.
+					// Let's stick to the original calculation's spirit if it expects a 4-bit index.
+					// The original calculation was (308 * r + 600 * g + 116 * b) / 16384
+					// This results in a small number, likely an index.
+					// Max value for 308*255 + 600*255 + 116*255 = (308+600+116)*255 = 1024*255 = 261120
+					// 261120 / 16384 = 15.93, so it produces a 0-15 index.
+
+				grayPixel = (308 * rgba[2] + 600 * rgba[1]
 					+ 116 * rgba[0]) / 16384;
-				srcHandle += 4;
 
-				if (pixel & (1 << plane))
-					current8 |= 0x80 >> (x & 7);
-				else
-					current8 &= ~(0x80 >> (x & 7));
-
-				if ((x & 7) == 7) {
-					// last pixel in 8 pixel group
-					dstHandle[0] = current8;
-					dstHandle++;
-					current8 = dstHandle[0];
+				if (grayPixel & (1 << plane)) {
+					planeBuffer[(x / 8) - startXByte] |= (0x80 >> (x % 8));
 				}
+				srcPixelForPlane += 4;
 			}
 
-			if (x & 7) {
-				// last pixel has not been written yet
-				dstHandle[0] = current8;
+			// Set VGA registers for writing to the current plane
+			gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SR_MAP_MASK);
+			gISA->write_io_8(VGA_SEQUENCER_DATA, 1 << plane);
+
+			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_DATA_ROTATE);
+			gISA->write_io_8(VGA_GRAPHICS_DATA, 0x00); // Write mode 0 (replace), no rotation
+
+			gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_BIT_MASK);
+			gISA->write_io_8(VGA_GRAPHICS_DATA, 0xFF); // Affect all bits
+
+			// Write the prepared plane data for the row segment to VGA memory
+			// This is a direct memory write, not memcpy_to_io, as frame_buffer is mapped.
+			for (int32 i = 0; i < numBytesForRow; i++) {
+				currentDstRowStart[i] = planeBuffer[i];
 			}
 		}
-		dst += dstBPR;
+		currentDstRowStart += dstBPR;
 		src += srcBPR;
 	}
+
+	// Restore VGA registers to a default state (all planes writeable for safety)
+	gISA->write_io_8(VGA_SEQUENCER_INDEX, VGA_SR_MAP_MASK);
+	gISA->write_io_8(VGA_SEQUENCER_DATA, 0x0F); // Enable all planes
+	gISA->write_io_8(VGA_GRAPHICS_INDEX, VGA_GR_BIT_MASK);
+	gISA->write_io_8(VGA_GRAPHICS_DATA, 0xFF); // Affect all bits
+
 	return B_OK;
 }
 

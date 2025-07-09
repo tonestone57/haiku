@@ -2605,6 +2605,11 @@ static const int32 kWorkDifferenceThresholdAbsolute = 200; // Approx. 20% of nom
 
 // Proposal 2: Define new constant for migration threshold
 const bigtime_t MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION = 1000; // 1ms of nominal work
+// Bonus for migrating to an idle CPU during load balancing
+static const bigtime_t TARGET_CPU_IDLE_BONUS_LB = SCHEDULER_TARGET_LATENCY;
+// Penalty factor per queued thread on target CPU during load balancing.
+// Example: If SCHEDULER_MIN_GRANULARITY is 1000us, each queued thread adds a -500us penalty.
+static const bigtime_t TARGET_QUEUE_PENALTY_FACTOR_LB = SCHEDULER_MIN_GRANULARITY / 2;
 
 
 // Helper function to determine b.L-aware load difference threshold
@@ -3013,27 +3018,80 @@ scheduler_perform_load_balance()
 				candidate->GetThread()->id, affinityBonusWallClock, idleTargetCPUOnTargetCore->ID());
 		}
 
+		// Add Target CPU Idle Bonus
+		bigtime_t targetCpuIdleBonus = 0;
+		if (representativeTargetCPU != NULL && representativeTargetCPU->IsEffectivelyIdle()) {
+			// If the chosen representative CPU on the target core is idle, give a bonus.
+			// This is especially useful if affinityBonusWallClock didn't apply (e.g. thread new to this core).
+			// If idleTargetCPUOnTargetCore was already the representativeTargetCPU and affinity bonus applied,
+			// this might double-dip slightly, or we could make it conditional.
+			// For now, add it; it emphasizes moving to truly idle CPUs.
+			targetCpuIdleBonus = TARGET_CPU_IDLE_BONUS_LB;
+			TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 ", target CPU %" B_PRId32 " is idle. Adding idle bonus %" B_PRId64 ".\n",
+				candidate->GetThread()->id, representativeTargetCPU->ID(), targetCpuIdleBonus);
+		}
+
+
 		bigtime_t currentBenefitScore = (kBenefitScoreLagFactor * lagWallClockOnSource)
 									  + (kBenefitScoreEligFactor * eligibilityImprovementWallClock)
 									  + typeBonusWallClock
-									  + affinityBonusWallClock;
+									  + affinityBonusWallClock
+									  + targetCpuIdleBonus; // Added Target CPU Idle Bonus
 
-		if (candidate->IsLikelyIOBound() && affinityBonusWallClock == 0) {
-			currentBenefitScore /= kIOBoundScorePenaltyFactor;
-			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
-				candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
-		} else if (candidate->IsLikelyIOBound() && affinityBonusWallClock != 0) {
-			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity, score not reduced by I/O penalty.\n",
+		// Add Target CPU Queue Depth Penalty
+		bigtime_t queueDepthPenalty = 0;
+		if (representativeTargetCPU != NULL) {
+			// EevdfRunQueue::Count() acquires its own lock, so this is safe.
+			int32 targetQueueDepth = representativeTargetCPU->GetEevdfRunQueue().Count();
+			if (targetQueueDepth > 0) {
+				queueDepthPenalty = - (targetQueueDepth * TARGET_QUEUE_PENALTY_FACTOR_LB);
+				currentBenefitScore += queueDepthPenalty;
+				TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 ", target CPU %" B_PRId32 " has queue depth %" B_PRId32 ". Adding penalty %" B_PRId64 ".\n",
+					candidate->GetThread()->id, representativeTargetCPU->ID(), targetQueueDepth, queueDepthPenalty);
+			}
+		}
+
+		if (candidate->IsLikelyIOBound() && affinityBonusWallClock == 0 && targetCpuIdleBonus == 0) {
+			// Apply I/O bound penalty only if no other strong positive indicator (like affinity or target idle) exists.
+			// This penalty might also be reconsidered if the target queue is very short.
+			if (representativeTargetCPU != NULL && representativeTargetCPU->GetEevdfRunQueue().Count() > 1) { // Example: only penalize if target queue not empty/very short
+				currentBenefitScore /= kIOBoundScorePenaltyFactor;
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity/idle target, target queue > 1), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
+					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
+			} else if (representativeTargetCPU == NULL || representativeTargetCPU->GetEevdfRunQueue().Count() <=1) {
+				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but target queue is short or no other bonus, I/O penalty not applied this time.\n", candidate->GetThread()->id);
+			}
+		} else if (candidate->IsLikelyIOBound() && (affinityBonusWallClock != 0 || targetCpuIdleBonus != 0)) {
+			TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but has wake-affinity or target is idle, I/O penalty not applied.\n",
 				candidate->GetThread()->id);
 		}
 
-		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": lag_wall_src %" B_PRId64 ", elig_improve_wall %" B_PRId64 ", type_bonus_wall %" B_PRId64 ", aff_bonus_wall %" B_PRId64 ", final_score %" B_PRId64 "\n",
-			candidate->GetThread()->id, lagWallClockOnSource, eligibilityImprovementWallClock, typeBonusWallClock, affinityBonusWallClock, currentBenefitScore);
+		TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 ": lag_wall_src %" B_PRId64 ", elig_impr %" B_PRId64 ", type_bonus %" B_PRId64 ", aff_bonus %" B_PRId64 ", idle_bonus %" B_PRId64 ", q_penalty %" B_PRId64 " -> final_score %" B_PRId64 "\n",
+			candidate->GetThread()->id, lagWallClockOnSource, eligibilityImprovementWallClock,
+			typeCompatibilityBonus, affinityBonusWallClock, targetCpuIdleBonus, queueDepthPenalty,
+			currentBenefitScore);
 
 		if (currentBenefitScore > maxBenefitScore) {
-			if (isPCriticalScore && (targetTypeScore == CORE_TYPE_LITTLE) && (sourceTypeScore == CORE_TYPE_BIG || sourceTypeScore == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-				if (currentBenefitScore < (SCHEDULER_TARGET_LATENCY * 2) ) {
-					TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 " is P-Critical. Suppressing move from BIG/UNI Core %" B_PRId32 " to LITTLE Core %" B_PRId32 " due to low benefit score %" B_PRId64 " after penalty.\n",
+			// P-Critical tasks should not be moved from a P-core to an E-core if the benefit isn't very high,
+			// especially if the P-core wasn't critically overloaded.
+			// The typeCompatibilityBonus already applies a penalty for this.
+			// This additional check was to prevent moves if benefit was low *after* penalty.
+			bool isTaskActuallyPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidate->LatencyNice() < -10); // Simpler check for this specific gate
+			if (isTaskActuallyPCritical && (targetType == CORE_TYPE_LITTLE) && (sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
+				// If typeCompatibilityBonus made the score positive but it's not overwhelmingly positive, reconsider.
+				// Example: require benefit to be > some positive threshold like SCHEDULER_TARGET_LATENCY.
+				if (currentBenefitScore < SCHEDULER_TARGET_LATENCY) { // Tunable threshold
+					TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 " is P-Critical. Suppressing move from P-Core %" B_PRId32 " to E-Core %" B_PRId32 " due to insufficient benefit score %" B_PRId64 " (threshold %" B_PRId64 ").\n",
+						candidate->GetThread()->id, sourceCPU->Core()->ID(), finalTargetCore->ID(), currentBenefitScore, SCHEDULER_TARGET_LATENCY);
+					continue; // Skip this candidate if benefit is not high enough for this type of move.
+				}
+			}
+			maxBenefitScore = currentBenefitScore;
+			bestCandidateToMove = candidate;
+		}
+	}
+
+	for (int i = 0; i < checkedCount; ++i) {
 						candidate->GetThread()->id, sourceCPU->Core()->ID(), finalTargetCore->ID(), currentBenefitScore);
 					continue;
 				}

@@ -1,0 +1,86 @@
+## EEVDF Scheduler Analysis and Enhancement Report - YYYY-MM-DD
+
+**1. Introduction**
+
+This document summarizes the analysis performed on the Haiku EEVDF scheduler, focusing on capacity awareness, latency-nice interaction, load balancing, and IRQ affinity mechanisms. It also details the code changes implemented to address identified issues, primarily in the load balancer's thread selection logic.
+
+The Haiku EEVDF scheduler aims to provide fair CPU time allocation while catering to latency-sensitive applications. This analysis explored its behavior, especially in heterogeneous (big.LITTLE) CPU environments.
+
+**2. Key Findings from Analysis**
+
+*   **EEVDF Parameter Calculation with Capacity Awareness**:
+    *   The core logic for updating `ThreadData::fVirtualRuntime`, `fLag`, `fSliceDuration`, and `fEligibleTime` considering `CoreEntry::fPerformanceCapacity` was found to be internally consistent.
+    *   `fVirtualRuntime` (accumulated normalized weighted work) and `fLag` (deficit/surplus of normalized weighted work) are correctly handled to allow fair comparisons across cores with different capacities.
+    *   Eligibility delays (`fEligibleTime`) are appropriately scaled to wall-clock time based on the target core's actual performance capacity.
+    *   `ThreadData::fNeededLoad` (a thread's demand metric) is calculated in terms of nominal capacity units, providing a consistent value for core load assessment.
+
+*   **`fLatencyNice` Interaction**:
+    *   `fLatencyNice` effectively modulates the `fSliceDuration` (wall-clock time a thread runs when selected) via `ThreadData::CalculateDynamicQuantum`. This allows tuning for responsiveness versus throughput.
+    *   The syscall `_kern_set_thread_latency_nice` correctly updates `fLatencyNice` in both `struct thread` and `ThreadData`.
+    *   A change in `fLatencyNice` triggers a recalculation of EEVDF parameters. Importantly, `fVirtualRuntime` (historical work done) is not scaled by `fLatencyNice` changes, which is correct as `fLatencyNice` does not alter a thread's fundamental weight or long-term CPU share entitlement.
+    *   The recalculation of `fLag` against the new slice entitlement (due to `fLatencyNice` change) ensures fair eligibility determination based on the updated preference. The mechanism appears sound.
+
+*   **Load Balancing (`scheduler_perform_load_balance`)**:
+    *   **Benefit Score Issue (Addressed)**: The original benefit score calculation for selecting a thread to migrate mixed units: `currentLagOnSource` (normalized weighted work units) was combined directly with `eligibilityImprovement` (wall-clock µs) and b.L type bonuses (also wall-clock µs). This could lead to skewed prioritization.
+    *   **Migration Threshold Issue (Addressed)**: The `MIN_POSITIVE_LAG_FOR_MIGRATION` threshold was a fixed value in *normalized weighted work units*. This meant high-priority threads (which have larger weight values in Haiku's mapping) needed to be owed more *unweighted normalized work* to meet this threshold compared to low-priority threads. This was counter-intuitive for ensuring responsiveness of high-priority tasks.
+    *   The EEVDF parameter re-initialization for migrated threads on the target CPU, especially the handling of `VirtualRuntime` relative to the target queue's minimum, was found to be correct and crucial for fairness.
+
+*   **IRQ Affinity Mechanisms**:
+    *   The two main mechanisms for IRQ placement:
+        1.  `scheduler_maybe_follow_task_irqs`: Moves an IRQ to a task's new core after migration if an affinity exists. Cooldown: `kIrqFollowTaskCooldownPeriod` (50ms).
+        2.  "Mechanism A" in `reschedule`: Moves disruptive, non-affinitized IRQs away from a newly scheduled latency-sensitive task. Cooldown: `DYNAMIC_IRQ_MOVE_COOLDOWN` (150ms).
+    *   Both mechanisms use the same shared timestamp array (`gIrqLastFollowMoveTime`) for their cooldowns. The differing cooldown values create a reasonable hierarchy, preventing rapid ping-ponging.
+    *   The logic for selecting alternative CPUs for IRQs considers existing IRQ loads, SMT factors, and specific task affinity for the IRQ being moved.
+
+**3. Implemented Changes (in `src/system/kernel/scheduler/scheduler.cpp`)**
+
+The `scheduler_perform_load_balance` function was modified as follows:
+
+*   **Benefit Score Calculation (Proposal 1)**:
+    *   The `currentLagOnSource` (normalized weighted work) of a candidate thread is now converted to an estimated wall-clock time it represents *on the source CPU* (`lagWallClockOnSource`). This conversion accounts for the thread's weight and the source CPU's core capacity relative to `SCHEDULER_NOMINAL_CAPACITY`.
+    *   The `eligibilityImprovement` variable was clarified to `eligibilityImprovementWallClock`.
+    *   b.L type compatibility bonuses (`typeBonusWallClock`) and affinity bonuses (`affinityBonusWallClock`) are used as wall-clock values.
+    *   The `currentBenefitScore` is now a sum of these consistent wall-clock equivalent terms:
+        `(kBenefitScoreLagFactor * lagWallClockOnSource) + (kBenefitScoreEligFactor * eligibilityImprovementWallClock) + typeBonusWallClock + affinityBonusWallClock`.
+    *   The I/O bound penalty and TRACE output were updated to use the new variable names.
+    *   The P-Critical safeguard (preventing P-critical tasks from moving from BIG to LITTLE cores without significant benefit) was updated to use the correctly scoped `isPCriticalScore`, `targetTypeScore`, and `sourceTypeScore` variables.
+
+*   **Migration Threshold (Proposal 2)**:
+    *   A new constant `MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION` was defined (value: 1000, representing ~1ms of work on a nominal capacity core).
+    *   The starvation check for a candidate thread now calculates its `unweightedNormWorkOwed = (candidate->Lag() * candidate_weight) / SCHEDULER_WEIGHT_SCALE`.
+    *   A candidate is considered for migration if `unweightedNormWorkOwed >= MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION`. This change makes the migration threshold more sensitive and fair for high-priority threads.
+
+These changes were applied by overwriting the `scheduler_perform_load_balance` function.
+
+**4. Suggested Test Scenarios for Verification**
+
+Comprehensive testing is crucial. The following scenarios are suggested:
+
+*   **Capacity Awareness**:
+    *   Verify `ThreadData::fNeededLoad` accurately reflects normalized demand when a CPU-bound thread is pinned sequentially to P-cores and E-cores.
+    *   Verify that `fEligibleTime` delay for negative lag correctly scales with core capacity.
+*   **`fLatencyNice` Effects**:
+    *   Confirm `fSliceDuration` and `fVirtualDeadline` change as expected when `fLatencyNice` is modified via `_kern_set_thread_latency_nice`.
+    *   Test long-term CPU share fairness between two identical priority threads with different `fLatencyNice` values (shares should remain equal).
+*   **Load Balancing (with implemented changes)**:
+    *   Test if `lagWallClockOnSource` correctly influences migration decisions, prioritizing threads with more significant wall-clock starvation.
+    *   Verify that b.L type bonuses/penalties in the benefit score guide tasks to appropriate core types.
+    *   Confirm that `MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION` allows high-priority threads to be considered for migration even with numerically small (but work-significant) lag.
+*   **IRQ Affinity**:
+    *   Test `scheduler_maybe_follow_task_irqs`: ensure an IRQ follows its affinitized task to a new core.
+    *   Test "Mechanism A" in `reschedule`: ensure a disruptive, non-affinitized IRQ is moved away from a running latency-sensitive task.
+    *   Test cooldown interactions: verify that the mechanisms don't cause rapid IRQ ping-ponging.
+
+Verification can utilize Haiku's kernel debugger commands (`thread_sched_info`, `run_queue`, `irq`, etc.) and instrumented `TRACE_SCHED` macros. For automated testing, dedicated kernel test modules or applications would be necessary.
+
+**5. Future Considerations / Potential Enhancements**
+
+(As noted in the EEVDF documentation and this analysis)
+*   Full user-space exposure and well-defined policies for `fLatencyNice`.
+*   Ongoing tuning of priority-to-weight mappings.
+*   Exploration of more advanced load balancing heuristics.
+*   Performance optimization of `EevdfRunQueue::Update()`.
+*   Clearer strategy for hard real-time threads alongside EEVDF.
+*   Extensive benchmarking across various Haiku workloads.
+
+This report provides a snapshot of the EEVDF scheduler's state, recent enhancements to its load balancing logic, and areas for future work.

@@ -238,8 +238,82 @@ status_t
 intel_i915_configure_pipe_source_size(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint16 width, uint16 height) { /* ... STUB ... */ return B_OK; }
 status_t
 intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum transcoder_id_priv trans, const display_mode* mode, uint8_t bpp_total) { /* ... STUB ... */ return B_OK; }
+
 status_t
-intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint32 gtt_page_offset, uint16 width, uint16 height, uint16 stride_bytes, color_space format, enum i915_tiling_mode tiling_mode) { /* ... as before ... */ return B_OK; }
+intel_i915_configure_primary_plane(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
+	uint32 gtt_page_offset, uint16 width, uint16 height, uint16 stride_bytes,
+	color_space format, enum i915_tiling_mode tiling_mode,
+	int32_t x_offset, int32_t y_offset)
+{
+	if (!devInfo || !devInfo->mmio_regs_addr) return B_BAD_VALUE;
+	if (pipe >= PRIV_MAX_PIPES) return B_BAD_INDEX;
+
+	TRACE("ConfigurePrimaryPlane: Pipe %d, GTT base page 0x%lx, %ux%u, stride %u, format %d, tiling %d, offset (%ld,%ld)\n",
+		pipe, gtt_page_offset, width, height, stride_bytes, format, tiling_mode, x_offset, y_offset);
+
+	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Or FW_DOMAIN_DISPLAY
+	if (fw_status != B_OK) {
+		TRACE("ConfigurePrimaryPlane: Failed to get forcewake: %s\n", strerror(fw_status));
+		return fw_status;
+	}
+
+	// Program surface base address (DSPSURF / DSPADDR)
+	// Address is in terms of bytes, gtt_page_offset is in pages.
+	uint32_t surface_base_address = gtt_page_offset * B_PAGE_SIZE;
+	intel_i915_write32(devInfo, DSPSURF(pipe), surface_base_address);
+
+	// Program stride (DSPSTRIDE)
+	intel_i915_write32(devInfo, DSPSTRIDE(pipe), stride_bytes);
+
+	// Program plane size (DSPSIZE)
+	// DSPSIZE: ((height - 1) << 16) | (width - 1)
+	uint32_t plane_size_val = (((uint32_t)height - 1) << 16) | ((uint32_t)width - 1);
+	intel_i915_write32(devInfo, DSPSIZE(pipe), plane_size_val);
+
+	// Program plane offset (DSPOFFSET)
+	// DSPOFFSET: ((y_offset) << 16) | (x_offset)
+	// Ensure offsets are within typical hardware limits (e.g., 0 to 4095 or 8191)
+	// For simplicity, using a 16-bit mask for x, assuming y fits.
+	// Actual register bitfields might differ slightly per GEN.
+	uint32_t plane_offset_val = (((uint32_t)y_offset & 0xFFFF) << 16) | ((uint32_t)x_offset & 0xFFFF);
+	intel_i915_write32(devInfo, DSPOFFSET(pipe), plane_offset_val);
+
+
+	// Program plane control (DSPCNTR)
+	uint32_t dspcntr_val = intel_i915_read32(devInfo, DSPCNTR(pipe));
+	dspcntr_val &= ~(DISPPLANE_PIXFORMAT_MASK | DISPPLANE_TILED_X); // Clear format and tiling bits
+
+	// Set pixel format
+	dspcntr_val |= get_dspcntr_format_bits(format);
+
+	// Set tiling mode
+	if (tiling_mode == I915_TILING_X) {
+		dspcntr_val |= DISPPLANE_TILED_X;
+	} else if (tiling_mode == I915_TILING_Y) {
+		// Y tiling bit might be different or implicit on some GENs for primary plane
+		// For Gen6+, Y-tiling is usually managed by fence registers for primary if supported,
+		// or specific bits in surface state for 3D/render engine.
+		// DSPCNTR on older gens might not have a Y-tile bit for primary.
+		// For now, assume X-tile is the main one controllable here.
+		TRACE("ConfigurePrimaryPlane: Y-tiling for primary plane via DSPCNTR not explicitly handled/stubbed.\n");
+	}
+
+	// Ensure trickle feed is disabled (recommended for Gen4+)
+	dspcntr_val |= DISPPLANE_TRICKLE_FEED_DISABLE;
+
+	// Enable plane and gamma (if needed, gamma is often separate)
+	dspcntr_val |= DISPPLANE_ENABLE;
+	// dspcntr_val |= DISPPLANE_GAMMA_ENABLE; // If gamma is controlled here and desired
+
+	intel_i915_write32(devInfo, DSPCNTR(pipe), dspcntr_val);
+	(void)intel_i915_read32(devInfo, DSPCNTR(pipe)); // Posting read
+
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
+	TRACE("ConfigurePrimaryPlane: Pipe %d configured. DSPCNTR: 0x%08lx, DSPSURF: 0x%08lx, DSPSTRIDE: %u, DSPSIZE: 0x%08lx, DSPOFFSET: 0x%08lx\n",
+		pipe, dspcntr_val, surface_base_address, stride_bytes, plane_size_val, plane_offset_val);
+
+	return B_OK;
+}
 
 status_t
 intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
@@ -294,7 +368,8 @@ intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 
 	status = intel_i915_configure_primary_plane(devInfo, pipe, fb_gtt_offset,
 		target_mode->virtual_width, target_mode->virtual_height, stride_bytes,
-		target_mode->space, tiling);
+		target_mode->space, tiling,
+		target_mode->timing.h_display_start, target_mode->timing.v_display_start);
 	if (status != B_OK) {
 		intel_ddi_disable_port(devInfo, port);
 		intel_ddi_post_disable_pipe(devInfo, port, pipe);

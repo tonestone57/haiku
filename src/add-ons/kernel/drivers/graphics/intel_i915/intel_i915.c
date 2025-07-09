@@ -634,6 +634,11 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 		if (user_memcpy(pipe_configs_kernel_copy, (void*)(uintptr_t)args->pipe_configs_ptr, pipe_configs_array_size) != B_OK) {
 			TRACE("    Error: user_memcpy failed for pipe_configs array\n"); free(pipe_configs_kernel_copy); return B_BAD_ADDRESS;
 		}
+		// Ensure mode.h_display_start/v_display_start are set from pos_x/pos_y
+		for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+			pipe_configs_kernel_copy[i].mode.h_display_start = (uint16)pipe_configs_kernel_copy[i].pos_x;
+			pipe_configs_kernel_copy[i].mode.v_display_start = (uint16)pipe_configs_kernel_copy[i].pos_y;
+		}
 	}
 
 	TRACE("IOCTL: SET_DISPLAY_CONFIG: --- Check Phase Start ---\n");

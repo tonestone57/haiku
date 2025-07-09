@@ -270,11 +270,15 @@ Outstanding areas for future work and refinement include:
   - **Tie-Breaking**: Tie-breaking in ``_scheduler_select_cpu_on_core`` (based
     on task count for CPUs with equal load scores) is generally acceptable but could
     be reviewed for EEVDF-specific scenarios if issues arise.
-  - **``EevdfRunQueue::Update()`` Inefficiency**: The current remove-then-add
-    approach for updating a thread's position in the run queue (in
-    ``scheduler_set_thread_priority``) is less efficient than a direct heap sift
-    operation. This is a known area for future performance optimization,
-    potentially requiring changes to ``util/Heap.h`` or a custom heap solution.
+  - **``EevdfRunQueue::Update()`` Efficiency**: The `EevdfRunQueue::Update()` method,
+    which is called when a thread's parameters (like `VirtualDeadline`) change
+    (e.g., in `scheduler_set_thread_priority`), utilizes the underlying
+    `SchedulerHeap::Update()` method. This heap update is efficient (O(log N)),
+    performing a sift-up followed by a sift-down operation from the element's
+    current position, rather than a less efficient remove-then-add sequence.
+    The precondition is that the element's key (VirtualDeadline) must be
+    updated by the caller *before* invoking the update. This is correctly
+    handled by current callers.
   - **Priority-to-Weight Tuning**: The ``scheduler_priority_to_weight()`` mapping
     needs extensive real-world testing and tuning to achieve desired Haiku
     application responsiveness and fairness characteristics across the full

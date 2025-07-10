@@ -615,6 +615,23 @@ ThreadData::UpdateActivity(bigtime_t active)
 
 #endif	// KERNEL_SCHEDULER_THREAD_H
 
+/*
+The following block related to SCHEDULER_WEIGHT_SCALE and gNiceToWeight
+was removed as SCHEDULER_WEIGHT_SCALE is now defined in
+headers/private/system/scheduler_defs.h.
+This block appeared to be inactive or conditionally compiled.
+
+#define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
+
+// Corresponds to nice levels -20 to +19 (Linux CFS compatible)
+// SCHEDULER_WEIGHT_SCALE (1024) is the weight for nice 0.
+static const int32 gNiceToWeight[40] = {
+	// ... (array values) ...
+	// Nice 0 maps to SCHEDULER_WEIGHT_SCALE
+	// ... (array values) ...
+};
+*/
+
 [end of src/system/kernel/scheduler/scheduler_thread.h]
 
 [start of src/system/kernel/scheduler/scheduler.cpp]

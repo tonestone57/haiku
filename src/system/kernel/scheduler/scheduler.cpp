@@ -24,10 +24,10 @@
 // EEVDF Specific Defines (Initial values, require tuning)
 #define SCHEDULER_TARGET_LATENCY		20000		// Target latency for a scheduling period (e.g., 20ms)
 #define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs (e.g., 1ms)
-#define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
+// SCHEDULER_WEIGHT_SCALE is now defined in headers/private/system/scheduler_defs.h
 
 // Corresponds to nice levels -20 to +19 (Linux CFS compatible)
-// SCHEDULER_WEIGHT_SCALE (1024) is the weight for nice 0.
+// SCHEDULER_WEIGHT_SCALE (1024) (defined in scheduler_defs.h) is the weight for nice 0.
 static const int32 gNiceToWeight[40] = {
 	/* nice -20 -> index 0 */ 88761, 71755, 56483, 46273, 36291,
 	/* nice -15 -> index 5 */ 29154, 22382, 18705, 14949, 11916,

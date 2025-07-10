@@ -139,7 +139,7 @@ private:
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
 						int32			fTotalThreadCount;
-						atomic_int32	fEevdfRunQueueTaskCount;
+						volatile int32	fEevdfRunQueueTaskCount;
 
 
 						bigtime_t		fMeasureActiveTime;
@@ -150,7 +150,7 @@ private:
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 
 public:
-	inline				int32			GetEevdfRunQueueTaskCount() const { return atomic_load(&fEevdfRunQueueTaskCount); }
+	inline				int32			GetEevdfRunQueueTaskCount() const { return atomic_get((volatile int32*)&fEevdfRunQueueTaskCount); }
 } CACHE_LINE_ALIGN;
 
 

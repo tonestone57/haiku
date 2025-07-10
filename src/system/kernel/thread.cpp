@@ -266,7 +266,7 @@ Thread::Thread(const char* name, thread_id threadID, struct cpu_ent* cpu)
 	serial_number(-1),
 	hash_next(NULL),
 	priority(-1),
-	latency_nice(LATENCY_NICE_DEFAULT),
+	// latency_nice(LATENCY_NICE_DEFAULT), // REMOVED: Field removed from struct Thread
 	io_priority(-1),
 	cpu(cpu),
 	previous_cpu(NULL),

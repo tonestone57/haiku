@@ -97,8 +97,8 @@ public:
 	inline	bigtime_t	VirtualRuntime() const;
 	inline	void		SetVirtualRuntime(bigtime_t runtime);
 	inline	void		AddVirtualRuntime(bigtime_t runtimeAmount);
-	inline	int8		LatencyNice() const { return fLatencyNice; } // Renamed from fLatencyNice to match getter style
-	inline	void		SetLatencyNice(int8 nice) { fLatencyNice = nice; } // Renamed from fLatencyNice
+	// inline	int8		LatencyNice() const { return fLatencyNice; } // REMOVED
+	// inline	void		SetLatencyNice(int8 nice) { fLatencyNice = nice; } // REMOVED
 
 	// --- State and Lifecycle ---
 	// Called when a thread continues to be ready/running.
@@ -217,7 +217,7 @@ private:
 			bigtime_t	fEligibleTime;				// EEVDF: Wall-clock time when thread can next run.
 			bigtime_t	fSliceDuration;				// EEVDF: Current wall-clock slice/quantum duration.
 			bigtime_t	fVirtualRuntime;			// EEVDF: Accumulated weighted execution time.
-			int8		fLatencyNice;				// EEVDF: Latency preference (-20 to +19), affects slice.
+			// int8		fLatencyNice;				// EEVDF: Latency preference (-20 to +19), affects slice. // REMOVED: Replaced by priority-based slice calculation
 			Scheduler::EevdfRunQueueLink fEevdfLink; // Link for the EEVDF run queue (contains SchedulerHeapLink).
 
 	// I/O-bound detection heuristic fields

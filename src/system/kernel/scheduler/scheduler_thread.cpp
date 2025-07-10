@@ -592,29 +592,25 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		baseSlice = max_c(baseSlice, RT_MIN_GUARANTEED_SLICE);
 	}
 
-	// Modulate by latency_nice.
-	int latencyNiceIdx = latency_nice_to_index(fLatencyNice); // fLatencyNice is int8
-	int32 factor = gLatencyNiceFactors[latencyNiceIdx];
-
-	// Apply factor: (baseSlice * factor) / SCALE
-	// (baseSlice * factor) >> SHIFT is good for powers of 2 SCALE (LATENCY_NICE_FACTOR_SCALE is 1024)
-	bigtime_t modulatedSlice = (baseSlice * factor) >> LATENCY_NICE_FACTOR_SCALE_SHIFT;
+	// Latency_nice modulation is removed. Slice duration is now primarily determined
+	// by the baseSlice (derived from priority/weight), plus subsequent heuristics.
+	bigtime_t finalSlice = baseSlice;
 
 	// Adaptive adjustment for I/O-bound or frequently yielding threads
 	// This should generally not apply to RT threads if RT_MIN_GUARANTEED_SLICE is effective,
 	// but the logic is general (though now conditional on !IsRealTime()).
 	if (!IsRealTime() && fVoluntarySleepTransitions >= IO_BOUND_MIN_TRANSITIONS && fAverageRunBurstTimeEWMA > 0) {
-		if (fAverageRunBurstTimeEWMA < modulatedSlice) {
+		if (fAverageRunBurstTimeEWMA < finalSlice) {
 			// Add a small buffer (e.g., 25% of avg burst or half min granularity)
 			// to prevent slice from being too tight to the average.
 			bigtime_t adaptiveBuffer = max_c(fAverageRunBurstTimeEWMA / 4, kMinSliceGranularity / 2);
 			bigtime_t potentiallyAdaptiveSlice = fAverageRunBurstTimeEWMA + adaptiveBuffer;
 
 			// Only adapt if it's meaningfully shorter and still respects min granularity
-			if (potentiallyAdaptiveSlice < modulatedSlice) {
+			if (potentiallyAdaptiveSlice < finalSlice) {
 				TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 " adapting slice. Original: %" B_PRId64 "us, AvgBurst: %" B_PRId64 "us, Buffer: %" B_PRId64 "us, PotentialAdaptive: %" B_PRId64 "us\n",
-					fThread->id, modulatedSlice, fAverageRunBurstTimeEWMA, adaptiveBuffer, potentiallyAdaptiveSlice);
-				modulatedSlice = potentiallyAdaptiveSlice;
+					fThread->id, finalSlice, fAverageRunBurstTimeEWMA, adaptiveBuffer, potentiallyAdaptiveSlice);
+				finalSlice = potentiallyAdaptiveSlice;
 			}
 		}
 	}
@@ -629,10 +625,10 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 
 		if (num_contenders > HIGH_CONTENTION_THRESHOLD) {
 			bigtime_t dynamic_floor_slice = (bigtime_t)(kMinSliceGranularity * HIGH_CONTENTION_MIN_SLICE_FACTOR);
-			if (modulatedSlice < dynamic_floor_slice) {
+			if (finalSlice < dynamic_floor_slice) {
 				TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 " CPU %" B_PRId32 " high contention (%ld contenders). Slice %" B_PRId64 "us floored to %" B_PRId64 "us.\n",
-					fThread->id, cpu->ID(), num_contenders, modulatedSlice, dynamic_floor_slice);
-				modulatedSlice = dynamic_floor_slice;
+					fThread->id, cpu->ID(), num_contenders, finalSlice, dynamic_floor_slice);
+				finalSlice = dynamic_floor_slice;
 			}
 		}
 	}
@@ -641,18 +637,18 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	// For Real-Time threads, the floor is RT_MIN_GUARANTEED_SLICE.
 	// For others, it's kMinSliceGranularity.
 	if (IsRealTime()) {
-		modulatedSlice = max_c(RT_MIN_GUARANTEED_SLICE, min_c(modulatedSlice, kMaxSliceDuration));
+		finalSlice = max_c(RT_MIN_GUARANTEED_SLICE, min_c(finalSlice, kMaxSliceDuration));
 	} else {
-		modulatedSlice = max_c(kMinSliceGranularity, min_c(modulatedSlice, kMaxSliceDuration));
+		finalSlice = max_c(kMinSliceGranularity, min_c(finalSlice, kMaxSliceDuration));
 	}
 
-	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", latency_nice %d, "
-		"baseSlice %" B_PRId64 "us (RT floor %" B_PRId64 "us), factor %" B_PRId32 "/%d, final modulatedSlice %" B_PRId64 "us (after adapt/contention/RT floor)\n",
-		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()), (int)fLatencyNice,
+	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", "
+		"baseSlice %" B_PRId64 "us (RT floor %" B_PRId64 "us), finalSlice %" B_PRId64 "us (after adapt/contention/RT floor)\n",
+		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()),
 		baseSlice, IsRealTime() ? RT_MIN_GUARANTEED_SLICE : kMinSliceGranularity,
-		factor, (int)LATENCY_NICE_FACTOR_SCALE, modulatedSlice);
+		finalSlice);
 
-	return modulatedSlice;
+	return finalSlice;
 }
 
 

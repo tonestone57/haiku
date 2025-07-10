@@ -17,7 +17,9 @@
 #include <user_debugger.h>
 #include <util/MinMaxHeap.h>
 
-#include "RunQueue.h"
+// #include "RunQueue.h"
+// This file seems to be obsolete or replaced by EevdfRunQueue.h,
+// which is included where specifically needed.
 
 
 // Kernel Scheduler Load Metrics Overview:

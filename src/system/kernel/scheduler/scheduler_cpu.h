@@ -8,7 +8,8 @@
 
 
 #include <OS.h>
-#include <support/atomic.h> // For atomic_get64, etc.
+// #include <support/atomic.h> // For atomic_get64, etc. - Likely provided by OS.h or SupportDefs.h
+// If issues persist, consider <kernel/atomic.h> or arch-specific versions if available.
 
 #include <smp.h>
 #include <thread.h>

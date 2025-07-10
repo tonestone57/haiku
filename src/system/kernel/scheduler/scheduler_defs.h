@@ -47,6 +47,12 @@ latency_nice_to_index(int8 latencyNice)
 // For EWMA: new_avg = (sample / N) + ((N-1)/N * old_avg)
 // We use N = IO_BOUND_EWMA_ALPHA_RECIPROCAL.
 const uint32 IO_BOUND_EWMA_ALPHA_RECIPROCAL = 4;
+
+// SCHEDULER_WEIGHT_SCALE defines the reference weight, typically for a nice 0 thread.
+// Copied from its original definition in src/system/kernel/scheduler/scheduler.cpp
+// TODO: Consolidate this definition if it's needed by more than just scheduler internals,
+//       or ensure it's appropriately scoped if only for scheduler.
+#define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
 // If average run burst time before voluntary sleep is less than this,
 // the thread is considered likely I/O-bound (microseconds).
 const bigtime_t IO_BOUND_BURST_THRESHOLD_US = 2000; // 2ms

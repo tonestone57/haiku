@@ -8,13 +8,6 @@
 #include <OS.h>
 
 
-// EEVDF Specific Defines (Initial values, require tuning)
-// Copied from src/system/kernel/scheduler/scheduler.cpp
-// TODO: Consolidate this definition to a single authoritative header.
-#define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping
-
-const bigtime_t kMinimumLagToSteal = (1000LL * SCHEDULER_WEIGHT_SCALE) / 1024; // Approx 1ms worth for nice 0
-
 struct scheduling_analysis_thread_wait_object;
 
 struct scheduling_analysis_thread {

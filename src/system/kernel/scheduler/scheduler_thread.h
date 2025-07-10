@@ -618,7 +618,7 @@ ThreadData::UpdateActivity(bigtime_t active)
 /*
 The following block related to SCHEDULER_WEIGHT_SCALE and gNiceToWeight
 was removed as SCHEDULER_WEIGHT_SCALE is now defined in
-headers/private/system/scheduler_defs.h.
+src/system/kernel/scheduler/scheduler_defs.h.
 This block appeared to be inactive or conditionally compiled.
 
 #define SCHEDULER_WEIGHT_SCALE			1024		// Nice_0_LOAD, reference weight for prio_to_weight mapping

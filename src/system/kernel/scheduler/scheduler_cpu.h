@@ -281,13 +281,13 @@ inline scheduler_core_type CPUEntry::Type() const {
 inline uint32 CPUEntry::PerformanceCapacity() const {
 	// SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fCore != NULL);
-	return fCore->fPerformanceCapacity;
+	return fCore->PerformanceCapacity(); // Use public getter
 }
 
 inline uint32 CPUEntry::EnergyEfficiency() const {
 	// SCHEDULER_ENTER_FUNCTION();
 	ASSERT(fCore != NULL);
-	return fCore->fEnergyEfficiency;
+	return fCore->EnergyEfficiency(); // Use public getter
 }
 
 
@@ -333,6 +333,8 @@ private:
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
+
+typedef DoublyLinkedList<PackageEntry> IdlePackageList;
 
 
 inline CoreEntry*
@@ -399,7 +401,7 @@ CPUEntry::GetCPU(int32 cpu)
 inline bigtime_t
 CPUEntry::GetCachedMinVirtualRuntime() const
 {
-	return atomic_get64((const int64*)&fMinVirtualRuntime);
+	return atomic_get64(const_cast<int64*>(&fMinVirtualRuntime));
 }
 
 

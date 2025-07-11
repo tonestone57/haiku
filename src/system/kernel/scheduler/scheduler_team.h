@@ -15,6 +15,9 @@ struct TeamSchedulerData : DoublyLinkedListLinkImpl<TeamSchedulerData> {
     bigtime_t   quota_period_usage;         // CPU time consumed in current period (µs)
     bigtime_t   current_quota_allowance;    // Actual µs this team can run in current period
     bool        quota_exhausted;
+
+    bigtime_t   team_virtual_runtime;       // For Tier 1 fair team selection
+
     spinlock    lock;                       // Protects this structure's mutable fields
 
     // Used for a global list of all TeamSchedulerData instances
@@ -26,9 +29,13 @@ struct TeamSchedulerData : DoublyLinkedListLinkImpl<TeamSchedulerData> {
         cpu_quota_percent(0),   // Default: 0% means no guaranteed quota initially
         quota_period_usage(0),
         current_quota_allowance(0),
-        quota_exhausted(false)
+        quota_exhausted(false),
+        team_virtual_runtime(0) // Initialized to 0, will be updated
     {
         B_INITIALIZE_SPINLOCK(&lock);
+        // TODO: Initialize team_virtual_runtime to gGlobalMinTeamVRuntime
+        // This requires gGlobalMinTeamVRuntime to be accessible here or passed.
+        // For now, init to 0. True init to global min will be in scheduler.cpp when adding to list.
     }
 
     // No complex destructor needed for now as it doesn't own heap resources directly.

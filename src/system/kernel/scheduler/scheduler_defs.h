@@ -101,5 +101,15 @@ const bigtime_t kMaxLoadBalanceInterval = 500000;     // e.g., 500ms
 const float kLoadBalanceIntervalIncreaseFactor = 1.25f;
 const float kLoadBalanceIntervalDecreaseFactor = 0.75f;
 
+// Base weight for team-level virtual runtime calculation.
+// A team with 100% quota would effectively use this as its "weight".
+// Teams with lower quota percentages will have their vruntime advance faster.
+#define TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT 100
+
+enum TeamQuotaExhaustionPolicy {
+	TEAM_QUOTA_EXHAUST_STARVATION_LOW = 0, // Default: Threads run at very low priority
+	TEAM_QUOTA_EXHAUST_HARD_STOP = 1,      // Threads are not scheduled at all
+};
+
 
 #endif // _KERNEL_SCHEDULER_DEFS_H

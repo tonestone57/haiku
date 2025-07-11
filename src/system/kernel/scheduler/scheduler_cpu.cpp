@@ -839,7 +839,29 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 					TRACE_SCHED("Team %" B_PRId32 " quota EXHAUSTED. Usage: %" B_PRId64 ", Allowance: %" B_PRId64 "\n",
 						teamSchedData->teamID, teamSchedData->quota_period_usage, teamSchedData->current_quota_allowance);
 				}
+
+				// Update team virtual runtime
+				if (teamSchedData->cpu_quota_percent > 0) {
+					// activeTime is wall-clock time. For team vruntime, we should use
+					// the capacity-normalized work equivalent, similar to thread vruntime.
+					// uint32 coreCapacityForTeamVR = fCore != NULL && fCore->fPerformanceCapacity > 0
+					// 	? fCore->fPerformanceCapacity : SCHEDULER_NOMINAL_CAPACITY;
+					// uint64 normActiveTimeNum = (uint64)activeTime * coreCapacityForTeamVR;
+					// bigtime_t normActiveTime = normActiveTimeNum / SCHEDULER_NOMINAL_CAPACITY;
+					//
+					// For now, let's use raw activeTime for simplicity, can refine with normalization.
+					// The key is relative advancement. If all teams' time is accounted this way,
+					// the divisor (quota_percent) provides the fairness.
+					// If we normalize, then TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT might need to be scaled like SCHEDULER_WEIGHT_SCALE.
+					// Let's stick to simpler for now:
+					bigtime_t vRuntimeIncrease = (activeTime * TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT) / teamSchedData->cpu_quota_percent;
+					teamSchedData->team_virtual_runtime += vRuntimeIncrease;
+					// TRACE_SCHED_TEAM("Team %" B_PRId32 " VR advanced by %" B_PRId64 " (activeTime %" B_PRId64 ", quota %" B_PRIu32 ") to %" B_PRId64 "\n",
+					// 	teamSchedData->teamID, vRuntimeIncrease, activeTime, teamSchedData->cpu_quota_percent, teamSchedData->team_virtual_runtime);
+				}
+				// No unlock for tsd->lock here, it's already outside the if(!teamSchedData->quota_exhausted)
 			}
+			// locker for tsd->lock is released when it goes out of scope
 		}
 	}
 

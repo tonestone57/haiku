@@ -194,6 +194,58 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread) {
 }
 
 
+static void
+scheduler_update_global_min_team_vruntime()
+{
+	if (gTeamSchedulerDataList.IsEmpty()) {
+		// If list is empty, gGlobalMinTeamVRuntime likely remains 0 or its last value.
+		// No teams to advance it further.
+		return;
+	}
+
+	bigtime_t calculatedNewGlobalMin = B_INFINITE_TIMEOUT;
+	bool foundAny = false;
+
+	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
+	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
+	while (tsd != NULL) {
+		InterruptsSpinLocker teamLocker(tsd->lock);
+		// Consider all teams, as even exhausted ones have a vruntime.
+		if (tsd->team_virtual_runtime < calculatedNewGlobalMin) {
+			calculatedNewGlobalMin = tsd->team_virtual_runtime;
+		}
+		foundAny = true;
+		teamLocker.Unlock();
+		tsd = gTeamSchedulerDataList.GetNext(tsd);
+	}
+	listLocker.Unlock();
+
+	if (foundAny) {
+		// gGlobalMinTeamVRuntime should only advance.
+		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
+		if (calculatedNewGlobalMin > currentGlobalVal) {
+			// It's okay if calculatedNewGlobalMin is B_INFINITE_TIMEOUT initially
+			// if all team_virtual_runtimes are also B_INFINITE_TIMEOUT (or very large).
+			// The key is it should only increase from its previous valid value.
+			// If all teams have run and have positive vruntimes, this will be fine.
+			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
+		} else if (calculatedNewGlobalMin < currentGlobalVal && calculatedNewGlobalMin != 0 && currentGlobalVal != 0) {
+			// This case might indicate a team's vruntime was reset or an issue.
+			// For now, we only strictly advance gGlobalMinTeamVRuntime.
+			// However, if all teams are new and their vruntime is 0 (from init),
+			// and global was >0, this path would be hit.
+			// Revisit: if a team is added, its vruntime is set to current global min.
+			// If all teams are deleted and then new ones added, global min could reset.
+			// For now, strict advance unless it's a reset to 0.
+			// The logic in add_team_scheduler_data sets new team VR to current global,
+			// and this function only advances global if a team's VR is higher.
+			// This seems fine.
+		}
+	}
+}
+
+
 static int
 cmd_thread_sched_info(int argc, char** argv)
 {
@@ -326,8 +378,21 @@ bigtime_t gQuotaPeriod = kDefaultQuotaPeriod; // Active quota period
 DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
 spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
 static timer gQuotaResetTimer;
+bigtime_t gGlobalMinTeamVRuntime = 0;
+// spinlock gGlobalMinTeamVRuntimeLock = B_SPINLOCK_INITIALIZER; // If needed for complex updates
 
 static int32 scheduler_reset_team_quotas_event(timer* unused);
+static void scheduler_update_global_min_team_vruntime(); // Declaration
+
+// Elastic Quota Mode
+bool gSchedulerElasticQuotaMode = false; // Default: Off
+static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
+static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
+
+// Team Quota Exhaustion Policy
+TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW; // Default
+static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
+static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 
 class ThreadEnqueuer : public ThreadProcessing {
@@ -425,9 +490,13 @@ void Scheduler::add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL)
 		return;
+
+	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
+
 	InterruptsSpinLocker locker(gTeamSchedulerListLock);
 	gTeamSchedulerDataList.Add(tsd);
-	TRACE_SCHED("Added TeamSchedulerData for team %" B_PRId32 " to global list.\n", tsd->teamID);
+	TRACE_SCHED_TEAM("Added TeamSchedulerData for team %" B_PRId32 " to global list. Initial VR: %" B_PRId64 "\n",
+		tsd->teamID, tsd->team_virtual_runtime);
 }
 
 void Scheduler::remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
@@ -1191,54 +1260,81 @@ reschedule(int32 nextState)
 	oldThread->has_yielded = false;
 
 	// Tier 1: Team Selection Logic
-	// TODO: This is a very basic round-robin for now and needs significant refinement
-	// to properly implement percentage-based fair share.
-	// It also doesn't yet handle team affinity to specific CPUs/cores.
+	// Tier 1: Team Selection Logic
 	TeamSchedulerData* selectedTeamForThisCpu = NULL;
-	static TeamSchedulerData* sLastSelectedTeam = NULL; // Simple static for round robin
+	bigtime_t minTeamVRuntime = B_INFINITE_TIMEOUT;
+	// static TeamSchedulerData* sLastSelectedNominalTeam = NULL; // Replaced by VRuntime logic
+	static TeamSchedulerData* sLastSelectedBorrowingTeam = NULL; // For Pass 2 (Elastic)
 
+	// Pass 1: Try to find a team with available nominal quota, selecting by min team_virtual_runtime
 	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
 	if (!gTeamSchedulerDataList.IsEmpty()) {
-		TeamSchedulerData* startNode = (sLastSelectedTeam != NULL && gTeamSchedulerDataList.Contains(sLastSelectedTeam))
-			? gTeamSchedulerDataList.GetNext(sLastSelectedTeam)
+		TeamSchedulerData* currentTeamIter = gTeamSchedulerDataList.Head();
+		TeamSchedulerData* bestNominalTeam = NULL;
+
+		while (currentTeamIter != NULL) {
+			// TODO: Add team affinity check for this CPU/core
+			InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
+			if (currentTeamIter->cpu_quota_percent > 0 && !currentTeamIter->quota_exhausted) {
+				if (currentTeamIter->team_virtual_runtime < minTeamVRuntime) {
+					minTeamVRuntime = currentTeamIter->team_virtual_runtime;
+					bestNominalTeam = currentTeamIter;
+				} else if (currentTeamIter->team_virtual_runtime == minTeamVRuntime) {
+					// Tie-break: could prefer already active team on this CPU, or lower team ID.
+					// For now, simple lower ID tie-break.
+					if (bestNominalTeam == NULL || currentTeamIter->teamID < bestNominalTeam->teamID) {
+						bestNominalTeam = currentTeamIter;
+					}
+				}
+			}
+			teamDataLocker.Unlock();
+			currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter);
+		}
+		selectedTeamForThisCpu = bestNominalTeam;
+		// sLastSelectedNominalTeam = bestNominalTeam; // No longer needed for RR
+	}
+
+	// Pass 2: If Elastic Mode is ON and no team found in Pass 1, try to find a borrowing team
+	if (selectedTeamForThisCpu == NULL && gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
+		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
+		TeamSchedulerData* startNode = (sLastSelectedBorrowingTeam != NULL
+				&& gTeamSchedulerDataList.Contains(sLastSelectedBorrowingTeam))
+			? gTeamSchedulerDataList.GetNext(sLastSelectedBorrowingTeam)
 			: gTeamSchedulerDataList.Head();
-		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty()) // Wrap around if sLastSelectedTeam was tail
+		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty())
 			startNode = gTeamSchedulerDataList.Head();
 
 		TeamSchedulerData* currentTeamIter = startNode;
-		do {
-			if (currentTeamIter == NULL) { // Should only happen if list became empty
-				if (gTeamSchedulerDataList.IsEmpty()) break;
-				currentTeamIter = gTeamSchedulerDataList.Head(); // Wrap around
-				if (currentTeamIter == NULL) break; // Still empty after re-check
-			}
-
-			// TODO: Check team affinity for this CPU/core if applicable
-			// For now, any team with quota can run on any CPU.
-			InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
-			if (currentTeamIter->cpu_quota_percent > 0 && !currentTeamIter->quota_exhausted) {
-				selectedTeamForThisCpu = currentTeamIter;
-				sLastSelectedTeam = currentTeamIter;
+		if (currentTeamIter != NULL) {
+			do {
+				// TODO: Add team affinity check
+				// A team can borrow if it's exhausted OR has 0% nominal quota but has runnable threads.
+				// The check for "has runnable threads" is implicitly handled by ChooseNextThread later.
+				// Here, we just select a candidate team that *could* borrow.
+				InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
+				// For now, allow any team (even 0% quota) to borrow if elastic mode is on.
+				// A more refined policy might only allow teams with >0% nominal quota to borrow.
+				selectedTeamForThisCpu = currentTeamIter; // Tentatively select
+				sLastSelectedBorrowingTeam = currentTeamIter;
 				teamDataLocker.Unlock();
-				break;
-			}
-			teamDataLocker.Unlock();
+				break; // Pick the first one in round-robin for borrowing for now
 
-			currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter);
-			if (currentTeamIter == NULL && startNode != NULL) // Wrap around
-				currentTeamIter = gTeamSchedulerDataList.Head();
+				// currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter); // This line was causing an infinite loop if startNode was the only exhausted team
+				// if (currentTeamIter == NULL)
+				// 	currentTeamIter = gTeamSchedulerDataList.Head();
 
-		} while (currentTeamIter != startNode && currentTeamIter != NULL);
+			} while (currentTeamIter != startNode); // Loop corrected by breaking after first potential borrower
+		}
+		if (selectedTeamForThisCpu != NULL) {
+			TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 2 (Elastic) selected Team %" B_PRId32 " to borrow.\n",
+				thisCPUId, selectedTeamForThisCpu->teamID);
+		}
 	}
 	listLocker.Unlock();
 
 	cpu->SetCurrentActiveTeam(selectedTeamForThisCpu);
-	if (selectedTeamForThisCpu != NULL) {
-		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Tier 1 selected Team %" B_PRId32 "\n",
-			thisCPUId, selectedTeamForThisCpu->teamID);
-	} else {
-		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Tier 1 found no active, non-exhausted team with quota.\n", thisCPUId);
-	}
+	// TRACE message for selected team moved to SetCurrentActiveTeam
+
 	// End Tier 1 Team Selection Logic
 
 	ThreadData* nextThreadData = NULL;
@@ -2172,6 +2268,7 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore) {
 		scheduler_update_global_min_vruntime();
+		scheduler_update_global_min_team_vruntime(); // For teams
 
 		bool migrationOccurred = scheduler_perform_load_balance();
 
@@ -2240,6 +2337,104 @@ _scheduler_init_kdf_debug_commands()
 		"Get the scheduler's current SMT conflict factor.",
 		"Gets the current value of Scheduler::gSchedulerSMTConflictFactor.", 0);
 	add_debugger_command_alias("get_smt_factor", "scheduler_get_smt_factor", "Alias for scheduler_get_smt_factor");
+
+	add_debugger_command_etc("scheduler_set_elastic_mode", &cmd_scheduler_set_elastic_quota_mode,
+		"Set the scheduler's elastic team quota mode.",
+		"<on|off|1|0>\n"
+		"Enables or disables the elastic redistribution of unused CPU quota.\n", 0);
+	add_debugger_command_alias("set_elastic_quota", "scheduler_set_elastic_mode", "Alias for scheduler_set_elastic_mode");
+
+	add_debugger_command_etc("scheduler_get_elastic_mode", &cmd_scheduler_get_elastic_quota_mode,
+		"Get the scheduler's current elastic team quota mode.",
+		"Prints whether elastic quota redistribution is enabled.", 0);
+	add_debugger_command_alias("get_elastic_quota", "scheduler_get_elastic_mode", "Alias for scheduler_get_elastic_mode");
+
+	add_debugger_command_etc("scheduler_set_exhaustion_policy", &cmd_scheduler_set_exhaustion_policy,
+		"Set the team quota exhaustion policy.",
+		"<starvation|hardstop>\n"
+		"Sets how threads from quota-exhausted teams are treated.\n"
+		"  starvation: Run at very low priority (default).\n"
+		"  hardstop:   Do not schedule at all.", 0);
+	add_debugger_command_alias("set_exhaustion_policy", "scheduler_set_exhaustion_policy", "Alias for scheduler_set_exhaustion_policy");
+
+	add_debugger_command_etc("scheduler_get_exhaustion_policy", &cmd_scheduler_get_exhaustion_policy,
+		"Get the current team quota exhaustion policy.",
+		"Prints the current team quota exhaustion policy.", 0);
+	add_debugger_command_alias("get_exhaustion_policy", "scheduler_get_exhaustion_policy", "Alias for scheduler_get_exhaustion_policy");
+}
+
+
+static int
+cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n");
+		return B_KDEBUG_ERROR;
+	}
+	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
+		gSchedulerElasticQuotaMode = true;
+		kprintf("Scheduler elastic team quota mode enabled.\n");
+	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
+		gSchedulerElasticQuotaMode = false;
+		kprintf("Scheduler elastic team quota mode disabled.\n");
+	} else {
+		kprintf("Error: Invalid argument '%s'. Use 'on' or 'off'.\n", argv[1]);
+		return B_KDEBUG_ERROR;
+	}
+	return 0;
+}
+
+static int
+cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_elastic_mode\n");
+		return B_KDEBUG_ERROR;
+	}
+	kprintf("Scheduler elastic team quota mode is currently: %s\n",
+		gSchedulerElasticQuotaMode ? "ON" : "OFF");
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n");
+		return B_KDEBUG_ERROR;
+	}
+	if (strcmp(argv[1], "starvation") == 0) {
+		gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
+		kprintf("Team quota exhaustion policy set to: Starvation-Low\n");
+	} else if (strcmp(argv[1], "hardstop") == 0) {
+		gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP;
+		kprintf("Team quota exhaustion policy set to: Hard-Stop\n");
+	} else {
+		kprintf("Error: Invalid argument '%s'. Use 'starvation' or 'hardstop'.\n", argv[1]);
+		return B_KDEBUG_ERROR;
+	}
+	return 0;
+}
+
+static int
+cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_exhaustion_policy\n");
+		return B_KDEBUG_ERROR;
+	}
+	const char* policyName = "Unknown";
+	switch (gTeamQuotaExhaustionPolicy) {
+		case TEAM_QUOTA_EXHAUST_STARVATION_LOW:
+			policyName = "Starvation-Low";
+			break;
+		case TEAM_QUOTA_EXHAUST_HARD_STOP:
+			policyName = "Hard-Stop";
+			break;
+	}
+	kprintf("Current team quota exhaustion policy: %s\n", policyName);
+	return 0;
 }
 
 

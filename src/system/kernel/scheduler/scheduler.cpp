@@ -26,20 +26,6 @@
 #define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs (e.g., 1ms)
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
-// Corresponds to nice levels -20 to +19 (Linux CFS compatible)
-// SCHEDULER_WEIGHT_SCALE (1024) (defined in src/system/kernel/scheduler/scheduler_defs.h) is the weight for nice 0.
-static const int32 gNiceToWeight[40] = {
-	/* nice -20 -> index 0 */ 88761, 71755, 56483, 46273, 36291,
-	/* nice -15 -> index 5 */ 29154, 22382, 18705, 14949, 11916,
-	/* nice -10 -> index 10 */  9548,  7620,  6100,  4867,  3906,
-	/*  -5 -> index 15 */  3121,  2501,  1991,  1586,  1277,
-	/*   0 -> index 20 */  1024,   820,   655,   526,   423, // Nice 0 maps to SCHEDULER_WEIGHT_SCALE
-	/*  +5 -> index 25 */   335,   272,   215,   172,   137,
-	/* +10 -> index 30 */   110,    87,    70,    56,    45,
-	/* +15 -> index 35 */    36,    29,    23,    18,    15
-	/* nice +19 -> index 39 */
-};
-
 // --- New Continuous Weight Calculation Logic ---
 
 // Minimum and maximum weights for the new scheme
@@ -139,28 +125,9 @@ static const bool kUseContinuousWeights = true;
 // --- Original Haiku priority to nice index mapping ---
 // Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
 // B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
-// This function becomes unused if scheduler_priority_to_weight directly uses gHaikuContinuousWeights.
-#if 0 // No longer used if kUseContinuousWeights is true and scheduler_priority_to_weight is updated
-static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
-    float effNiceFloat;
-    // B_NORMAL_PRIORITY is 10
-    int relativePriority = priority - B_NORMAL_PRIORITY;
-
-    // Scale: 2.5 Haiku priority points = 1 nice level.
-    effNiceFloat = -((float)relativePriority * 2.0f / 5.0f);
-
-    // Round to nearest integer for nice value
-    int effNice = (int)roundf(effNiceFloat);
-
-    // Clamp effNice. The gNiceToWeight table covers nice -20 to +19.
-    // For general applications (priorities typically 5-19), map them
-    // to nice -15 to +15, which corresponds to indices 5 to 35.
-    effNice = max_c(-15, min_c(effNice, 15));
-
-    // Convert nice value to index for gNiceToWeight (nice -20=idx 0, nice 0=idx 20)
-    return effNice + 20;
-}
-#endif
+// This function is unused as kUseContinuousWeights is true and
+// scheduler_priority_to_weight directly uses gHaikuContinuousWeights.
+// static inline int scheduler_haiku_priority_to_nice_index(int32 priority) { ... }
 
 /*
     Interaction of Team CPU Quotas with Thread Priorities & POSIX nice():

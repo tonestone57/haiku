@@ -230,13 +230,7 @@ extern float gSchedulerSMTConflictFactor; // Value set by current scheduler mode
 
 // --- End Mode-Settable Global Parameters ---
 
-// --- Constants for Cache-Aware Task Placement Bonus ---
-// Allowance for how much more loaded a cache-warm core can be compared to an alternative.
-const int32 kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15% load allowance
-// Maximum load a cache-warm core can have to still be strongly preferred over a cold one.
-const int32 kMaxLoadForWarmCorePreference = kHighLoad;
-// --- End Constants for Cache-Aware Task Placement Bonus ---
-
+// Define load constants first as they are used by kMaxLoadForWarmCorePreference
 const int kLowLoad = kMaxLoad * 20 / 100;
 const int kTargetLoad = kMaxLoad * 55 / 100;
 const int kHighLoad = kMaxLoad * 70 / 100;
@@ -244,6 +238,13 @@ const int kMediumLoad = (kHighLoad + kTargetLoad) / 2;
 const int kVeryHighLoad = (kMaxLoad + kHighLoad) / 2;
 
 const int kLoadDifference = kMaxLoad * 20 / 100;
+
+// --- Constants for Cache-Aware Task Placement Bonus ---
+// Allowance for how much more loaded a cache-warm core can be compared to an alternative.
+const int32 kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15% load allowance
+// Maximum load a cache-warm core can have to still be strongly preferred over a cold one.
+const int32 kMaxLoadForWarmCorePreference = kHighLoad;
+// --- End Constants for Cache-Aware Task Placement Bonus ---
 
 extern bool gSingleCore;
 extern bool gTrackCoreLoad;

@@ -162,23 +162,64 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
 
-	// Starvation-Low Policy for Quota Exhaustion
-	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
+	// Real-Time Thread Quota Bypass check first
+	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
+		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: Thread %" B_PRId32 " (team %" B_PRId32 ") is real-time (prio %" B_PRId32 "), bypassing team quota checks.\n",
+			thread->id, thread->team ? thread->team->id : -1, thread->priority);
+		// Fall through to normal weight calculation at the end of the function.
+	}
+	// Starvation-Low Policy for Quota Exhaustion / Elastic Mode Handling
+	// This block is executed only if the thread is NOT real-time (due to the if/else if structure)
+	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
 		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		// TODO: Add RT bypass check here in Phase 4.
-		// For now, if (tsd->quota_exhausted && !is_rt_bypass_thread(thread))
-		InterruptsSpinLocker locker(tsd->lock); // Lock needed to safely read quota_exhausted
-		bool exhausted = tsd->quota_exhausted;
+		bool isTeamExhausted;
+		bool isBorrowing = false;
+
+		InterruptsSpinLocker locker(tsd->lock);
+		isTeamExhausted = tsd->quota_exhausted;
 		locker.Unlock();
 
-		if (exhausted) {
-			TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted. Applying min weight.\n",
-				thread->team->id, thread->id);
-			return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+		if (isTeamExhausted) {
+			// Check if elastic mode is active AND this thread's CPU is currently
+			// assigned this (exhausted) team for borrowing.
+			if (gSchedulerElasticQuotaMode && thread->cpu != NULL) {
+				CPUEntry* currentCpuOfThread = CPUEntry::GetCPU(thread->cpu->cpu_num);
+				// fCurrentActiveTeam is set by reschedule for the CPU this thread is on.
+				// Reading it here is safe if this function is called for a thread
+				// about to run or already running on this CPU.
+				if (currentCpuOfThread->fCurrentActiveTeam == tsd) {
+					isBorrowing = true;
+					// TRACE_SCHED_TEAM for borrowing was here, but it's better to trace
+					// only when a decision is made to alter weight or not.
+				}
+			}
+
+			if (!isBorrowing) {
+				// Not borrowing, so exhaustion policy applies.
+				if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
+					TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted (Starvation-Low policy). Applying min weight.\n",
+						thread->team->id, thread->id);
+					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+				} else if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
+					// For HARD_STOP, thread selection logic in ChooseNextThread (and its helpers)
+					// will prevent this thread from being chosen. So, scheduler_priority_to_weight
+					// should return its normal weight in case it *is* chosen by some bypass
+					// or exceptional circumstance. If it's not chosen, its weight doesn't matter.
+					TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted (Hard-Stop policy). Returning normal weight; selection logic should prevent running.\n",
+						thread->team->id, thread->id);
+					// Fall through to normal weight calculation.
+				}
+			} else { // isBorrowing is true
+				TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") is exhausted but actively borrowing. Using normal weight.\n",
+					thread->team->id, thread->id);
+				// Fall through to normal weight calculation.
+			}
+			// If isBorrowing is true, or if it's Hard-Stop (and not borrowing),
+			// we fall through to calculate normal weight.
 		}
 	}
 
-    // Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
+	// Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
     // _init_continuous_weights() is called from scheduler_init().
     int32 priority = thread->priority;
 
@@ -326,7 +367,31 @@ cmd_thread_sched_info(int argc, char** argv)
 	}
 
 	schedulerLocker.Unlock();
-	thread->Unlock();
+	// thread->Unlock(); // Unlock thread general lock earlier if Team info needs its own lock
+
+	// Display Team Quota Information
+	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
+		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
+		// Acquire team_scheduler_data lock if it's separate and needed for consistent read
+		// For KDL, direct access might be acceptable as system is paused.
+		// However, if tsd->lock protects these fields, it should be used.
+		// Let's assume for KDL, direct read under paused system is okay for now.
+		// If live, InterruptsSpinLocker team_data_locker(tsd->lock) would be needed.
+		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
+		kprintf("  Quota Percent:      %" B_PRIu32 "%%\n", tsd->cpu_quota_percent);
+		kprintf("  Period Usage (us):  %" B_PRId64 "\n", tsd->quota_period_usage);
+		kprintf("  Current Allowance (us): %" B_PRId64 "\n", tsd->current_quota_allowance);
+		kprintf("  Quota Exhausted:    %s\n", tsd->quota_exhausted ? "yes" : "no");
+		kprintf("  Team VRuntime:      %" B_PRId64 "\n", tsd->team_virtual_runtime);
+	} else if (thread->team != NULL) {
+		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
+		kprintf("  <No team scheduler data available>\n");
+	} else {
+		kprintf("\nTeam Quota Information:\n");
+		kprintf("  <Thread does not belong to a team>\n");
+	}
+
+	thread->Unlock(); // Unlock thread general lock after all info is gathered.
 
 	kprintf("--------------------------------------------------\n");
 	return 0;
@@ -372,27 +437,43 @@ cmd_thread_sched_info(int argc, char** argv)
 
 namespace Scheduler {
 
-// Team Quota Management Globals
+// --- Team CPU Quota Management: Global Variables ---
+//! Default period over which team CPU quotas are enforced (microseconds).
 const bigtime_t kDefaultQuotaPeriod = 100000; // 100ms
-bigtime_t gQuotaPeriod = kDefaultQuotaPeriod; // Active quota period
+//! Currently active quota period (microseconds). Tunable via KDL `team_quota_period`.
+bigtime_t gQuotaPeriod = kDefaultQuotaPeriod;
+//! Global list of all TeamSchedulerData instances, for teams with active quota settings.
 DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
+//! Spinlock protecting `gTeamSchedulerDataList`.
 spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
+//! Timer responsible for periodically calling `scheduler_reset_team_quotas_event`.
 static timer gQuotaResetTimer;
+//! Global minimum virtual runtime observed across all teams. Used to initialize new teams' vruntimes.
 bigtime_t gGlobalMinTeamVRuntime = 0;
-// spinlock gGlobalMinTeamVRuntimeLock = B_SPINLOCK_INITIALIZER; // If needed for complex updates
 
 static int32 scheduler_reset_team_quotas_event(timer* unused);
-static void scheduler_update_global_min_team_vruntime(); // Declaration
+static void scheduler_update_global_min_team_vruntime();
 
-// Elastic Quota Mode
+//! @name Team Quota Tunables
+//@{
+
+//! If true, allows teams that have exhausted their nominal quota to "borrow"
+//! otherwise idle CPU time. Tunable via KDL `scheduler_set_elastic_mode`.
 bool gSchedulerElasticQuotaMode = false; // Default: Off
+
+//! Policy determining how threads from quota-exhausted teams are treated.
+//! See `TeamQuotaExhaustionPolicy` enum in `scheduler_defs.h`.
+//! Tunable via KDL `scheduler_set_exhaustion_policy`.
+TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW; // Default
+
+//@}
+
+// KDL command handlers for team quota tunables
 static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
-
-// Team Quota Exhaustion Policy
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW; // Default
 static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
 static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
+// --- End Team CPU Quota Management ---
 
 
 class ThreadEnqueuer : public ThreadProcessing {
@@ -1294,39 +1375,45 @@ reschedule(int32 nextState)
 		// sLastSelectedNominalTeam = bestNominalTeam; // No longer needed for RR
 	}
 
-	// Pass 2: If Elastic Mode is ON and no team found in Pass 1, try to find a borrowing team
+	// Pass 2: If Elastic Mode is ON and no team found in Pass 1, try to find a borrowing team.
+	// This pass allows any team (regardless of its quota_exhausted status or cpu_quota_percent,
+	// as long as it has runnable threads for this CPU, checked later by ChooseNextThread)
+	// to borrow otherwise idle CPU time.
+	// Current policy: Simple round-robin among all teams in gTeamSchedulerDataList.
+	// This ensures that all teams get a chance to borrow over time.
+	// Future refinements could consider team_virtual_runtime or other metrics for this
+	// borrowing pass if a more sophisticated distribution of idle time is required.
+	// For now, simplicity is favored for redistributing unused cycles.
 	if (selectedTeamForThisCpu == NULL && gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
-		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
+		TRACE_SCHED_TEAM_VERBOSE("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
 		TeamSchedulerData* startNode = (sLastSelectedBorrowingTeam != NULL
 				&& gTeamSchedulerDataList.Contains(sLastSelectedBorrowingTeam))
 			? gTeamSchedulerDataList.GetNext(sLastSelectedBorrowingTeam)
 			: gTeamSchedulerDataList.Head();
-		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty())
+		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty()) // Handle if sLastSelectedBorrowingTeam was removed
 			startNode = gTeamSchedulerDataList.Head();
 
 		TeamSchedulerData* currentTeamIter = startNode;
 		if (currentTeamIter != NULL) {
+			// Iterate once through the list from startNode to find the next team to borrow.
 			do {
-				// TODO: Add team affinity check
-				// A team can borrow if it's exhausted OR has 0% nominal quota but has runnable threads.
-				// The check for "has runnable threads" is implicitly handled by ChooseNextThread later.
-				// Here, we just select a candidate team that *could* borrow.
-				InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
-				// For now, allow any team (even 0% quota) to borrow if elastic mode is on.
-				// A more refined policy might only allow teams with >0% nominal quota to borrow.
-				selectedTeamForThisCpu = currentTeamIter; // Tentatively select
-				sLastSelectedBorrowingTeam = currentTeamIter;
-				teamDataLocker.Unlock();
-				break; // Pick the first one in round-robin for borrowing for now
+				// TODO: Add team affinity check for this CPU/core.
+				// No explicit check for runnable threads here; ChooseNextThread will handle it.
+				// Any team is a candidate for borrowing.
+				selectedTeamForThisCpu = currentTeamIter;
+				sLastSelectedBorrowingTeam = currentTeamIter; // Update for next round-robin cycle
+				break; // Pick the first suitable team in the round-robin sequence.
 
-				// currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter); // This line was causing an infinite loop if startNode was the only exhausted team
+				// currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter); // This loop structure was problematic.
 				// if (currentTeamIter == NULL)
 				// 	currentTeamIter = gTeamSchedulerDataList.Head();
-
-			} while (currentTeamIter != startNode); // Loop corrected by breaking after first potential borrower
+			} while (false); // The loop is effectively broken after the first iteration.
+			                 // The original do-while with GetNext/Head was to cycle.
+			                 // Corrected logic: If startNode is picked, it's used.
+			                 // The sLastSelectedBorrowingTeam ensures next call starts after this one.
 		}
 		if (selectedTeamForThisCpu != NULL) {
-			TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 2 (Elastic) selected Team %" B_PRId32 " to borrow.\n",
+			TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 2 (Elastic) selected Team %" B_PRId32 " to borrow (simple RR).\n",
 				thisCPUId, selectedTeamForThisCpu->teamID);
 		}
 	}

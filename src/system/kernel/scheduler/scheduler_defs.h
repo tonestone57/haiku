@@ -106,9 +106,13 @@ const float kLoadBalanceIntervalDecreaseFactor = 0.75f;
 // Teams with lower quota percentages will have their vruntime advance faster.
 #define TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT 100
 
+/*! \enum TeamQuotaExhaustionPolicy
+    \brief Defines how threads from a team are treated when its CPU quota is exhausted.
+    This policy is tunable via the KDL command `team_quota_policy`.
+*/
 enum TeamQuotaExhaustionPolicy {
-	TEAM_QUOTA_EXHAUST_STARVATION_LOW = 0, // Default: Threads run at very low priority
-	TEAM_QUOTA_EXHAUST_HARD_STOP = 1,      // Threads are not scheduled at all
+	TEAM_QUOTA_EXHAUST_STARVATION_LOW = 0, //!< Default: Threads from an exhausted team run at a very low (idle) priority. Allows progress but heavily deprioritized.
+	TEAM_QUOTA_EXHAUST_HARD_STOP = 1,      //!< Threads from an exhausted team are not scheduled at all (unless they are real-time or borrowing in elastic mode).
 };
 
 

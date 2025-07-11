@@ -85,8 +85,8 @@ static const int MAX_PEEK_ELIGIBLE_CANDIDATES = 3;
 CPUEntry::CPUEntry()
 	:
 	// fMlfqHighestNonEmptyLevel is removed.
-	fIdleThread(NULL), // Initialize fIdleThread
-	fMinVirtualRuntime(0), // Initialize fMinVirtualRuntime. Will be updated by global_min_vruntime.
+	fIdleThread(NULL),
+	fMinVirtualRuntime(0),
 	fLoad(0),
 	fInstantaneousLoad(0.0f),
 	fInstLoadLastUpdateTimeSnapshot(0),
@@ -381,6 +381,55 @@ _PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam,
 }
 
 
+// Helper to find the best REAL-TIME eligible thread from a specific team.
+// Returns the thread data if found (and removes it from the queue), otherwise NULL.
+// The queue lock (fQueueLock) MUST be held by the caller.
+static ThreadData*
+_PeekEligibleRealtimeThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
+	volatile int32* queueTaskCount)
+{
+	if (activeTeam == NULL)
+		return NULL;
+
+	ThreadData* eligibleRTFound = NULL;
+	DoublyLinkedList<ThreadData> temporarilyPoppedList;
+	bigtime_t now = system_time();
+
+	while (!queue.IsEmpty()) {
+		ThreadData* candidate = queue.PopMinimum();
+		atomic_add(queueTaskCount, -1);
+		ASSERT(atomic_load(queueTaskCount) >= 0);
+
+		if (candidate == NULL) break;
+
+		if (candidate->GetThread()->team->team_scheduler_data == activeTeam
+			&& candidate->GetThread()->priority >= B_REAL_TIME_DISPLAY_PRIORITY
+			&& now >= candidate->EligibleTime() && !candidate->IsIdle()) {
+			eligibleRTFound = candidate;
+			break; // Found an eligible RT thread
+		} else {
+			temporarilyPoppedList.Add(candidate);
+			// Optional TRACE messages for why it was skipped (wrong team, not RT, not eligible)
+		}
+	}
+
+	// Re-add non-chosen threads
+	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
+		queue.Add(toReAdd);
+		atomic_add(queueTaskCount, 1);
+	}
+
+	if (eligibleRTFound != NULL) {
+		TRACE_SCHED_TEAM("ChooseNextThread(RT-Team): CPU %" B_PRId32 " chose RT T %" B_PRId32 " from active team %" B_PRId32 " (VD %" B_PRId64 ").\n",
+			cpuID, eligibleRTFound->GetThread()->id, activeTeam->teamID, eligibleRTFound->GetVirtualDeadline());
+	} else {
+		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread(RT-Team): CPU %" B_PRId32 " no eligible RT thread found in active team %" B_PRId32 ".\n",
+			cpuID, activeTeam->teamID);
+	}
+	return eligibleRTFound;
+}
+
+
 ThreadData*
 CPUEntry::PeekEligibleNextThread()
 {
@@ -470,35 +519,50 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 
 	ThreadData* nextThreadData = NULL;
 
-	// Prioritize the fCurrentActiveTeam if set and not exhausted
-	if (fCurrentActiveTeam != NULL && !fCurrentActiveTeam->quota_exhausted) {
+	// Phase 1: Check Real-Time threads from fCurrentActiveTeam (Bypass Quota Exhaustion)
+	if (fCurrentActiveTeam != NULL) {
+		nextThreadData = _PeekEligibleRealtimeThreadFromTeam(fEevdfRunQueue,
+			fCurrentActiveTeam, ID(), &fEevdfRunQueueTaskCount);
+		if (nextThreadData != NULL) {
+			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (bypassing quota check).\n",
+				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);
+		}
+	}
+
+	// Phase 2: Check Non-Real-Time threads from fCurrentActiveTeam (Nominal Quota Check)
+	if (nextThreadData == NULL && fCurrentActiveTeam != NULL && !fCurrentActiveTeam->quota_exhausted) {
 		nextThreadData = _PeekEligibleThreadFromTeam(fEevdfRunQueue,
 			fCurrentActiveTeam, ID(), &fEevdfRunQueueTaskCount);
 		if (nextThreadData != NULL) {
-			// MarkDequeued will be called below if not idle.
-			// _UpdateMinVirtualRuntime() was handled by _PeekEligibleThreadFromTeam
-			// if it popped and re-added items. If it directly returned an item,
-			// it was effectively popped, so min_vruntime might need an update if
-			// the new top of the heap changed. This is covered by the call to
-			// _UpdateMinVirtualRuntime in reschedule() after this function.
+			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected non-RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (within quota).\n",
+				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);
 		} else {
-			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 ", ActiveTeam %" B_PRId32 " has no eligible threads. Falling back.\n",
+			TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 ", ActiveTeam %" B_PRId32 " (within quota) has no eligible non-RT threads.\n",
 				ID(), fCurrentActiveTeam->teamID);
 		}
 	}
 
-	// If no thread from active team, or no active team, or active team exhausted,
-	// try to pick any eligible thread from the run queue.
+	// Phase 3: General Fallback - Pick any eligible thread from any team.
+	// PeekEligibleNextThread needs to be RT-aware implicitly by virtue of
+	// scheduler_priority_to_weight correctly handling RT threads from exhausted teams.
 	if (nextThreadData == NULL) {
+		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " falling back to PeekEligibleNextThread (any team).\n", ID());
 		nextThreadData = PeekEligibleNextThread(); // This pops the thread if found
+		if (nextThreadData != NULL) {
+			TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " PeekEligibleNextThread found T %" B_PRId32 " (Team %" B_PRId32 ").\n",
+				ID(), nextThreadData->GetThread()->id,
+				nextThreadData->GetThread()->team ? nextThreadData->GetThread()->team->id : -1);
+		}
 	}
 
+	// Phase 4: Set idle thread if no other thread is found
 	if (nextThreadData != NULL) {
-		// nextThreadData is already removed from the queue by PeekEligibleNextThread
-		// or _PeekEligibleThreadFromTeam. Mark it as dequeued.
+		// A thread was found (RT, non-RT from active team, or general fallback).
+		// It has already been popped from the queue by the respective Peek function.
 		nextThreadData->MarkDequeued();
 	} else {
-		// No eligible, non-idle thread found. Choose this CPU's idle thread.
+		// No eligible, non-idle thread found by any means. Choose this CPU's idle thread.
+		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " no runnable thread found, selecting idle thread.\n", ID());
 		nextThreadData = fIdleThread;
 		if (nextThreadData == NULL) {
 			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());

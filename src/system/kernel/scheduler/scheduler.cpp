@@ -1107,16 +1107,50 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 
 			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
 
-			if (isStarved) {
-				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
-					candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal, candidateTask->Lag());
-			}
-			// else { // Optional: Trace if not starved by new criteria
-			// TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " NOT starved (unweighted_owed %" B_PRId64 " <= threshold %" B_PRId64 ").\n",
-			//    candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal);
-			// }
+			// --- Team Quota Awareness for Stealing ---
+			bool teamQuotaAllowsSteal = true;
+			if (candThread->team != NULL && candThread->team->team_scheduler_data != NULL) {
+				Scheduler::TeamSchedulerData* tsd = candThread->team->team_scheduler_data;
+				InterruptsSpinLocker teamLocker(tsd->lock);
+				bool isSourceExhausted = tsd->quota_exhausted;
+				bool isSourceBorrowing = false;
+				if (isSourceExhausted && gSchedulerElasticQuotaMode && victimCPUEntry != NULL && victimCPUEntry->fCurrentActiveTeam == tsd) {
+					isSourceBorrowing = true;
+				}
+				teamLocker.Unlock();
 
-			if (basicChecksPass && isStarved) {
+				if (isSourceExhausted && !isSourceBorrowing) {
+					// If from an exhausted, non-borrowing team, require it to be *more* starved
+					isStarved = unweightedNormWorkOwed > (kMinUnweightedNormWorkToSteal * 2);
+					if (!isStarved) {
+						TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, not starved enough (owed %" B_PRId64 ", need > %" B_PRId64 "). DENY steal.\n",
+							candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal * 2);
+						teamQuotaAllowsSteal = false;
+					} else {
+						// It's very starved. Now check if thief is a good quota destination.
+						// If elastic mode is off, or if thief is not an E-core (less likely to be a good borrow target), disallow.
+						if (!gSchedulerElasticQuotaMode || thiefCPU->Core()->Type() != CORE_TYPE_LITTLE) {
+							TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, very starved, but thief CPU %" B_PRId32 " (type %d) not ideal for quota. DENY steal.\n",
+								candThread->id, thiefCPU->ID(), thiefCPU->Core()->Type());
+							teamQuotaAllowsSteal = false;
+						} else {
+							TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, very starved. Thief CPU %" B_PRId32 " (type %d) might allow borrowing. PERMIT (pending b.L).\n",
+								candThread->id, thiefCPU->ID(), thiefCPU->Core()->Type());
+						}
+					}
+				}
+			}
+			// --- End Team Quota Awareness ---
+
+			if (isStarved) { // This 'isStarved' might have been updated by quota logic
+				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > effective_threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
+					candThread->id, unweightedNormWorkOwed,
+					(teamQuotaAllowsSteal && candThread->team && candThread->team->team_scheduler_data && candThread->team->team_scheduler_data->quota_exhausted) ? (kMinUnweightedNormWorkToSteal*2) : kMinUnweightedNormWorkToSteal,
+					candidateTask->Lag());
+			}
+
+
+			if (basicChecksPass && isStarved && teamQuotaAllowsSteal) {
 				// --- b.L-Specific Evaluation ---
 				bool allowStealByBLPolicy = false;
 				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();

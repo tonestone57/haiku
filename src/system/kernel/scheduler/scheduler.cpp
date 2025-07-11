@@ -3603,7 +3603,44 @@ scheduler_perform_load_balance()
 									  + (kBenefitScoreEligFactor * eligibilityImprovementWallClock)
 									  + typeBonusWallClock
 									  + affinityBonusWallClock
-									  + targetCpuIdleBonus; // Added Target CPU Idle Bonus
+									  + targetCpuIdleBonus;
+
+		// --- Team Quota Awareness Penalties ---
+		bigtime_t teamQuotaPenalty = 0;
+		Thread* candidateThread = candidate->GetThread();
+		if (candidateThread->team != NULL && candidateThread->team->team_scheduler_data != NULL) {
+			Scheduler::TeamSchedulerData* tsd = candidateThread->team->team_scheduler_data;
+			InterruptsSpinLocker teamLocker(tsd->lock); // Protect access to tsd fields
+			bool isSourceExhausted = tsd->quota_exhausted;
+			bool isSourceBorrowing = false;
+			if (isSourceExhausted && gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->fCurrentActiveTeam == tsd) {
+				isSourceBorrowing = true;
+			}
+			teamLocker.Unlock();
+
+			if (isSourceExhausted && !isSourceBorrowing) {
+				teamQuotaPenalty -= kTeamQuotaAwarenessPenaltyLB / 2; // Smaller penalty for being from an exhausted team
+				TRACE_SCHED_BL("LoadBalance: T %" B_PRId32 " from exhausted team (not borrowing), penalty %" B_PRId64 "\n",
+					candidateThread->id, kTeamQuotaAwarenessPenaltyLB / 2);
+			}
+
+			// Check if target would also be exhausted (more significant penalty)
+			// This is a simplification; true exhaustion on target depends on complex factors.
+			// We'll assume if source is exhausted, target is likely to also be restrictive
+			// unless it's a significantly different scenario (e.g. different core type for borrowing).
+			// A more accurate check would involve simulating quota state on target, which is too complex here.
+			// For now, if source is exhausted and not borrowing, and target isn't clearly better for quota, apply larger penalty.
+			if (isSourceExhausted && !isSourceBorrowing) {
+				// If target is not an E-core that might allow better borrowing, or if elastic mode is off
+				if (!gSchedulerElasticQuotaMode || (representativeTargetCPU != NULL && representativeTargetCPU->Core()->Type() != CORE_TYPE_LITTLE)) {
+					teamQuotaPenalty -= kTeamQuotaAwarenessPenaltyLB; // Larger penalty
+					TRACE_SCHED_BL("LoadBalance: T %" B_PRId32 " from exhausted team, target non-ideal for quota, total penalty %" B_PRId64 "\n",
+						candidateThread->id, teamQuotaPenalty);
+				}
+			}
+		}
+		currentBenefitScore += teamQuotaPenalty;
+		// --- End Team Quota ---
 
 		// Add Target CPU Queue Depth Penalty
 		bigtime_t queueDepthPenalty = 0;

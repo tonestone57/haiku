@@ -145,7 +145,7 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 	ASSERT(this->GetThread() != NULL);
 	// This function must be called with this thread's scheduler_lock held.
 
-	// 1. Calculate Slice Duration (Quantum)
+	// 1. Calculate Slice Duration (Quantum), passing the contextCpu
 	bigtime_t newSliceDuration = this->CalculateDynamicQuantum(contextCpu);
 	this->SetSliceDuration(newSliceDuration);
 
@@ -554,7 +554,7 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 
 
 bigtime_t
-ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
+ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 
@@ -563,9 +563,8 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 		return B_INFINITE_TIMEOUT;
 	}
 
-	// Get the thread's continuous weight.
-	// scheduler_priority_to_weight now takes Thread* to handle team quota exhaustion.
-	int32 weight = scheduler_priority_to_weight(fThread);
+	// Get the thread's continuous weight, considering the contextCpu for borrowing status.
+	int32 weight = scheduler_priority_to_weight(fThread, contextCpu);
 
 	if (weight <= 0) {
 		// This should not happen as idle (weight 1) is the minimum from gHaikuContinuousWeights.

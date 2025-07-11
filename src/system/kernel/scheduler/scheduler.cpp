@@ -201,21 +201,17 @@ static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
       (see CPUEntry::ChooseNextThread()), ensuring they can meet their latency
       demands even if their team is over budget.
 */
-static inline int32 scheduler_priority_to_weight(const Thread* thread) {
+static inline int32 scheduler_priority_to_weight(const Thread* thread, const CPUEntry* contextCpu) {
 	if (thread == NULL) {
-		// Should not happen in normal operation where a valid thread context is expected.
-		// Return a default low weight.
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
 
 	// Real-Time Thread Quota Bypass check first
 	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: Thread %" B_PRId32 " (team %" B_PRId32 ") is real-time (prio %" B_PRId32 "), bypassing team quota checks.\n",
+		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
 			thread->id, thread->team ? thread->team->id : -1, thread->priority);
-		// Fall through to normal weight calculation at the end of the function.
 	}
 	// Starvation-Low Policy for Quota Exhaustion / Elastic Mode Handling
-	// This block is executed only if the thread is NOT real-time (due to the if/else if structure)
 	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
 		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
 		bool isTeamExhausted;
@@ -223,60 +219,51 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread) {
 
 		InterruptsSpinLocker locker(tsd->lock);
 		isTeamExhausted = tsd->quota_exhausted;
-		locker.Unlock();
+		locker.Unlock(); // Unlock TSD lock before potentially accessing contextCpu fields
 
 		if (isTeamExhausted) {
-			// Check if elastic mode is active AND this thread's CPU is currently
-			// assigned this (exhausted) team for borrowing.
-			if (gSchedulerElasticQuotaMode && thread->cpu != NULL) {
-				CPUEntry* currentCpuOfThread = CPUEntry::GetCPU(thread->cpu->cpu_num);
-				// fCurrentActiveTeam is set by reschedule for the CPU this thread is on.
-				// Reading it here is safe if this function is called for a thread
-				// about to run or already running on this CPU.
-				if (currentCpuOfThread->fCurrentActiveTeam == tsd) {
+			if (gSchedulerElasticQuotaMode && contextCpu != NULL) {
+				// Check if the *contextCpu* (target/current CPU for this weight calculation)
+				// is currently allowing this team (tsd) to borrow.
+				// This requires contextCpu->fCurrentActiveTeam to be accurate for the operation.
+				if (contextCpu->fCurrentActiveTeam == tsd) {
 					isBorrowing = true;
-					// TRACE_SCHED_TEAM for borrowing was here, but it's better to trace
-					// only when a decision is made to alter weight or not.
+				}
+			} else if (gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
+				// Fallback for contexts where contextCpu might not be available (e.g. some direct calls not yet updated)
+				// This is less accurate and should be minimized by updating all callers.
+				CPUEntry* threadActualCpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
+				if (threadActualCpu->fCurrentActiveTeam == tsd) {
+					isBorrowing = true;
+					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
 				}
 			}
 
+
 			if (!isBorrowing) {
-				// Not borrowing, so exhaustion policy applies.
 				if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted (Starvation-Low policy). Applying min weight.\n",
-						thread->team->id, thread->id);
+					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
+						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
 					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 				} else if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
-					// For HARD_STOP, thread selection logic in ChooseNextThread (and its helpers)
-					// will prevent this thread from being chosen. So, scheduler_priority_to_weight
-					// should return its normal weight in case it *is* chosen by some bypass
-					// or exceptional circumstance. If it's not chosen, its weight doesn't matter.
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted (Hard-Stop policy). Returning normal weight; selection logic should prevent running.\n",
-						thread->team->id, thread->id);
+					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
+						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
 					// Fall through to normal weight calculation.
 				}
 			} else { // isBorrowing is true
-				TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") is exhausted but actively borrowing. Using normal weight.\n",
-					thread->team->id, thread->id);
+				TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") is exhausted but actively borrowing on ContextCPU %" B_PRId32 ". Using normal weight.\n",
+					thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
 				// Fall through to normal weight calculation.
 			}
-			// If isBorrowing is true, or if it's Hard-Stop (and not borrowing),
-			// we fall through to calculate normal weight.
 		}
 	}
 
-	// Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
-    // _init_continuous_weights() is called from scheduler_init().
     int32 priority = thread->priority;
-
-    // Clamp priority to be a valid index for gHaikuContinuousWeights.
-    // B_MAX_PRIORITY is 121, so valid indices are 0 to 120.
     if (priority < 0) {
         priority = 0;
     } else if (priority >= B_MAX_PRIORITY) {
         priority = B_MAX_PRIORITY - 1;
     }
-
     return gHaikuContinuousWeights[priority];
 }
 
@@ -890,18 +877,39 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
 		thread->id, oldActualPriority, priority);
 
-	// oldActualPriority is captured before changing thread->priority
-	int32 oldWeight = scheduler_priority_to_weight(thread); // Uses old thread->priority
-
-	thread->priority = priority; // Update priority
-	int32 newWeight = scheduler_priority_to_weight(thread); // Uses new thread->priority
-
 	CPUEntry* cpuContextForUpdate = NULL;
 	bool wasRunning = (thread->state == B_THREAD_RUNNING && thread->cpu != NULL);
-	bool wasReadyAndEnqueued = (thread->state == B_THREAD_READY && threadData->IsEnqueued());
+	bool wasReadyAndEnqueuedPrior = (thread->state == B_THREAD_READY && threadData->IsEnqueued()); // Renamed to avoid conflict
 
 	if (wasRunning) {
 		cpuContextForUpdate = CPUEntry::GetCPU(thread->cpu->cpu_num);
+	} else if (wasReadyAndEnqueuedPrior) {
+		if (thread->previous_cpu != NULL && threadData->Core() != NULL
+			&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
+			cpuContextForUpdate = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
+		} else if (threadData->Core() != NULL && threadData->Core()->CPUCount() > 0) {
+			int32 firstCpuIdOnCore = threadData->Core()->CPUMask().FirstSetBit();
+			if (firstCpuIdOnCore >= 0)
+				cpuContextForUpdate = CPUEntry::GetCPU(firstCpuIdOnCore);
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, using first CPU (%d) of its core (%d) as context for weight calc.\n",
+                thread->id, firstCpuIdOnCore, threadData->Core()->ID() );
+		} else {
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but no valid CPU context found for weight calc. Using NULL.\n", thread->id);
+		}
+	}
+
+	int32 oldWeight = scheduler_priority_to_weight(thread, cpuContextForUpdate);
+
+	thread->priority = priority;
+	int32 newWeight = scheduler_priority_to_weight(thread, cpuContextForUpdate);
+
+	// This wasReadyAndEnqueued was for the state *after* priority change, but it's the same as wasReadyAndEnqueuedPrior
+	// as priority change doesn't change readiness or enqueued status directly.
+	// The original wasRunning and wasReadyAndEnqueued (now wasReadyAndEnqueuedPrior) are what matter
+	// for deciding how to re-evaluate the thread.
+
+	if (wasRunning) {
+		ASSERT(cpuContextForUpdate != NULL); // Should be set if wasRunning
 	} else if (wasReadyAndEnqueued) {
 		if (thread->previous_cpu != NULL && threadData->Core() != NULL
 			&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
@@ -1101,7 +1109,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 			}
 
 			// 3. Check if sufficiently starved (positive lag) using unweighted normalized work
-			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetBasePriority());
+			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetThread(), victimCPUEntry);
 			if (candidateWeight <= 0) candidateWeight = 1; // Should not happen for active tasks
 			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
 
@@ -1370,7 +1378,8 @@ reschedule(int32 nextState)
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
 
-		int32 weight = scheduler_priority_to_weight(oldThreadData->GetThread());
+		// Pass 'cpu' as the context for weight calculation
+		int32 weight = scheduler_priority_to_weight(oldThreadData->GetThread(), cpu);
 		if (weight <= 0)
 			weight = 1; // Prevent division by zero or negative weight issues
 
@@ -3486,7 +3495,7 @@ scheduler_perform_load_balance()
 		}
 
 		// Proposal 2: Use unweighted normalized work for starvation check
-		int32 candidateWeightForLagCheck = scheduler_priority_to_weight(candidate->GetBasePriority());
+		int32 candidateWeightForLagCheck = scheduler_priority_to_weight(candidate->GetThread(), sourceCPU);
 		if (candidateWeightForLagCheck <= 0) candidateWeightForLagCheck = 1;
 		bigtime_t unweightedNormWorkOwed = (candidate->Lag() * candidateWeightForLagCheck) / SCHEDULER_WEIGHT_SCALE;
 
@@ -3505,7 +3514,7 @@ scheduler_perform_load_balance()
 		bigtime_t targetQueueMinVruntime = representativeTargetCPU->GetCachedMinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
 
-		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetBasePriority());
+		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetThread(), sourceCPU);
 		if (candidateWeight <= 0) candidateWeight = 1;
 
 		bigtime_t candidateSliceDuration = candidate->SliceDuration();

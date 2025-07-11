@@ -72,7 +72,7 @@ public:
 	inline	void		SetStolenInterruptTime(bigtime_t interruptTime);
 
 	// --- Quantum Management ---
-			bigtime_t	CalculateDynamicQuantum(CPUEntry* cpu) const;
+			bigtime_t	CalculateDynamicQuantum(const CPUEntry* contextCpu) const;
 	inline	bigtime_t	GetEffectiveQuantum() const;
 	inline	void		SetEffectiveQuantum(bigtime_t quantum);
 	inline	bigtime_t	GetQuantumLeft();

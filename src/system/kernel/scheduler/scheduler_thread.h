@@ -15,6 +15,7 @@
 
 // Haiku System Headers
 #include <OS.h>
+#include <kernel/thread_types.h> // For B_THREAD_ZOMBIE and other thread states
 #include <cpu.h>
 #include <debug.h>
 #include <interrupts.h>

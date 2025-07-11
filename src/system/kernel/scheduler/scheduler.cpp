@@ -587,7 +587,7 @@ static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 // Cooldown period for IRQ follow-task logic to prevent excessive ping-ponging.
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
-#include <support/atomic.h> // For atomic operations
+// #include <support/atomic.h> // For atomic operations - Redundant, provided by SupportDefs.h (via OS.h)
 
 // Tracks the last time an IRQ was moved by the follow-task mechanism
 // or by the proactive mechanism in reschedule() (Task-Contextual IRQ Re-evaluation).

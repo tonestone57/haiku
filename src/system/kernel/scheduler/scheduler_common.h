@@ -123,6 +123,14 @@
 #	define TRACE_SCHED_IO(...) do { } while (false)
 #endif
 
+// Specific trace for Big.LITTLE / Balance debugging
+// #define TRACE_SCHEDULER_BIG_LITTLE
+#ifdef TRACE_SCHEDULER_BIG_LITTLE
+#	define TRACE_SCHED_BL(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_BL(...) do { } while (false)
+#endif
+
 
 namespace Scheduler {
 

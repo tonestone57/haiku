@@ -3861,37 +3861,39 @@ _kern_get_thread_nice_value(thread_id thid, int* outNiceValue)
 	int32 haikuPriority = targetThread->priority;
 	int niceValue;
 
-	// Based on the conversion logic in _kern_set_thread_nice_value:
-	// Haiku Prio 19  (B_REAL_TIME_DISPLAY_PRIORITY - 1) <=> Nice -20
-	// Haiku Prio 10  (B_NORMAL_PRIORITY) <=> Nice 0
-	// Haiku Prio 1   (B_LOWEST_ACTIVE_PRIORITY) <=> Nice +19
+	// Based on the new conversion logic in _kern_set_thread_nice_value:
+	// Haiku Prio 1 (B_LOWEST_ACTIVE_PRIORITY) -> Nice +19
+	// Haiku Prio 10 (B_NORMAL_PRIORITY)      -> Nice 0
+	// Haiku Prio 99 (B_URGENT_PRIORITY - 1)  -> Nice -20
 
 	if (haikuPriority == B_NORMAL_PRIORITY) { // 10
 		niceValue = 0;
-	} else if (haikuPriority > B_NORMAL_PRIORITY) { // Haiku Prio 11-19 maps to Nice -1 to -20
-		// Range: Haiku 11 to 19 (B_REAL_TIME_DISPLAY_PRIORITY - 1)
-		// Maps to Nice -1 to -20
-		// Using points: (Haiku=10, Nice=0) and (Haiku=19, Nice=-20)
-		// Slope: (-20 - 0) / (19 - 10) = -20 / 9
-		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-20.0f / 9.0f);
-		niceValue = (int)roundf(n);
-	} else if (haikuPriority < B_NORMAL_PRIORITY && haikuPriority >= B_LOWEST_ACTIVE_PRIORITY) { // Haiku Prio 1-9 maps to Nice +19 to +1
-		// Range: Haiku 1 (B_LOWEST_ACTIVE_PRIORITY) to 9
-		// Maps to Nice +19 to +1
-		// Using points: (Haiku=10, Nice=0) and (Haiku=1, Nice=19)
+	} else if (haikuPriority < B_NORMAL_PRIORITY) {
+		// Range: Haiku Prio 1 to 9 (maps to Nice +19 down to +1)
+		// Points: (Haiku=1, Nice=19), (Haiku=10, Nice=0)
 		// Slope: (0 - 19) / (10 - 1) = -19 / 9
+		// Formula: nice = 19 + (haikuPriority - 1) * (-19.0 / 9.0)
+		// Or:      nice = 0 + (haikuPriority - 10) * (-19.0 / 9.0)
 		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-19.0f / 9.0f);
-		// This formula calculates delta from nice 0. Example:
-		// Haiku prio 1: (1-10)*(-19/9) = -9 * -19/9 = 19. (Correct)
-		// Haiku prio 9: (9-10)*(-19/9) = -1 * -19/9 = 19/9 = 2.11 (Correct, maps to nice +2)
 		niceValue = (int)roundf(n);
-	} else if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY) { // e.g. B_IDLE_PRIORITY (0)
-		niceValue = 19; // Map idle and other very low to max nice
-	} else { // haikuPriority >= B_REAL_TIME_DISPLAY_PRIORITY (20+)
-		niceValue = -20; // Map all higher priorities to min nice
+		// Clamp to ensure it's within +1 to +19 for this range if priority is B_LOWEST_ACTIVE_PRIORITY
+		if (haikuPriority == B_LOWEST_ACTIVE_PRIORITY && niceValue < 19) niceValue = 19;
+		if (niceValue > 19) niceValue = 19;
+		if (niceValue < 0) niceValue = 0; // Should map to 0 if prio is 10
+	} else { // haikuPriority > B_NORMAL_PRIORITY
+		// Range: Haiku Prio 11 to 99 (maps to Nice -1 down to -20)
+		// Points: (Haiku=10, Nice=0), (Haiku=99, Nice=-20)
+		// Slope: (-20 - 0) / (99 - 10) = -20 / 89
+		// Formula: nice = 0 + (haikuPriority - 10) * (-20.0 / 89.0)
+		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-20.0f / 89.0f);
+		niceValue = (int)roundf(n);
+		// Clamp to ensure it's within -1 to -20 for this range if priority is B_URGENT_PRIORITY -1
+		if (haikuPriority >= (B_URGENT_PRIORITY -1) && niceValue > -20) niceValue = -20;
+		if (niceValue < -20) niceValue = -20;
+		if (niceValue > 0) niceValue = 0; // Should map to 0 if prio is 10
 	}
 
-	// Clamp niceValue to standard range just in case rounding produced an anomaly
+	// Final clamp to POSIX nice value range
 	niceValue = max_c(-20, min_c(niceValue, 19));
 
 	if (user_memcpy(outNiceValue, &niceValue, sizeof(int)) != B_OK)
@@ -3929,50 +3931,42 @@ _kern_set_thread_nice_value(thread_id thid, int niceValue)
 		return B_NOT_ALLOWED;
 	}
 
-	// Convert nice value to Haiku priority
+	// Convert nice value to Haiku priority based on user specification:
+	// nice +19 -> Haiku prio 1 (B_LOWEST_ACTIVE_PRIORITY)
+	// nice 0   -> Haiku prio 10 (B_NORMAL_PRIORITY)
+	// nice -20 -> Haiku prio 99 (B_URGENT_PRIORITY - 1)
 	int32 haikuPriority;
 
 	if (niceValue == 0) {
-		haikuPriority = B_NORMAL_PRIORITY;
-	} else if (niceValue < 0) {
-		// Segment: Nice -20 to -1 (maps to Haiku B_REAL_TIME_DISPLAY_PRIORITY-1 to B_NORMAL_PRIORITY-1)
-		// P1_nice = -20, P1_haiku = B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
-		// P2_nice = 0,   P2_haiku = B_NORMAL_PRIORITY (10)
-		// Slope = (10 - 19) / (0 - (-20)) = -9 / 20
-		float p = (float)(B_REAL_TIME_DISPLAY_PRIORITY - 1)
-			+ (float)(niceValue - (-20)) * (-9.0f / 20.0f);
+		haikuPriority = B_NORMAL_PRIORITY; // 10
+	} else if (niceValue > 0) {
+		// Range: nice +1 to +19 (maps to Haiku prio 10 (exclusive) down to 1)
+		// Points: (nice=0, haiku=10), (nice=19, haiku=1)
+		// Slope: (1 - 10) / (19 - 0) = -9 / 19
+		// Formula: haiku = 10 + niceValue * (-9.0 / 19.0)
+		float p = (float)B_NORMAL_PRIORITY + (float)niceValue * (-9.0f / 19.0f);
 		haikuPriority = (int32)roundf(p);
-	} else { // niceValue > 0
-		// Segment: Nice 1 to 19 (maps to Haiku B_NORMAL_PRIORITY-1 to B_LOWEST_ACTIVE_PRIORITY)
-		// P2_nice = 0,   P2_haiku = B_NORMAL_PRIORITY (10)
-		// P3_nice = 19,  P3_haiku = B_LOWEST_ACTIVE_PRIORITY (1)
-		// Slope = (1 - 10) / (19 - 0) = -9 / 19
-		float p = (float)B_NORMAL_PRIORITY
-			+ (float)(niceValue - 0) * (-9.0f / 19.0f);
+		// Clamp to ensure it doesn't go below B_LOWEST_ACTIVE_PRIORITY due to rounding
+		if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY)
+			haikuPriority = B_LOWEST_ACTIVE_PRIORITY;
+	} else { // niceValue < 0
+		// Range: nice -1 to -20 (maps to Haiku prio 10 (exclusive) up to 99)
+		// Points: (nice=0, haiku=10), (nice=-20, haiku=99)
+		// Slope: (99 - 10) / (-20 - 0) = 89 / -20 = -4.45
+		// Formula: haiku = 10 + niceValue * (-89.0 / 20.0)
+		// (Note: niceValue is negative, so product becomes positive addition to 10)
+		float p = (float)B_NORMAL_PRIORITY + (float)niceValue * (89.0f / -20.0f);
 		haikuPriority = (int32)roundf(p);
+		// Clamp to ensure it doesn't exceed B_URGENT_PRIORITY - 1 due to rounding
+		if (haikuPriority > (B_URGENT_PRIORITY - 1))
+			haikuPriority = (B_URGENT_PRIORITY - 1);
 	}
 
-	// Clamp to Haiku's valid priority range for settable priorities
-	// (scheduler_set_thread_priority might do its own clamping, but good to be explicit)
-	if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY)
-		haikuPriority = B_LOWEST_ACTIVE_PRIORITY;
-	// The problem description states nice -20 maps to B_REAL_TIME_DISPLAY_PRIORITY - 1.
-	// This is 19. The maximum settable user priority is B_REAL_TIME_PRIORITY (100-119 for user RT).
-	// Let's ensure we don't exceed typical user-settable limits unless specifically intended.
-	// The current mapping maxes out at 19.
-	if (haikuPriority >= B_REAL_TIME_DISPLAY_PRIORITY) // Max for this conversion path
-		haikuPriority = B_REAL_TIME_DISPLAY_PRIORITY -1;
-
-
-	// Ensure the priority is within the general settable range.
-	// scheduler_set_thread_priority will also clamp, but this makes our mapping explicit.
-	haikuPriority = max_c(THREAD_MIN_SET_PRIORITY, min_c(haikuPriority, THREAD_MAX_SET_PRIORITY -1));
-	// Using THREAD_MAX_SET_PRIORITY - 1 because B_REAL_TIME_PRIORITY itself is for user RT threads,
-	// and nice values typically don't grant full RT status.
-	// The problem statement: "Nice -20 maps to a Haiku priority just below real-time (B_REAL_TIME_DISPLAY_PRIORITY - 1, which is 99)."
-	// This part seems to have a typo. B_REAL_TIME_DISPLAY_PRIORITY is 20. So B_REAL_TIME_DISPLAY_PRIORITY - 1 is 19.
-	// If the intent was to map to 99 (which is B_URGENT_PRIORITY -1), the mapping points need to change.
-	// Sticking to the provided `B_REAL_TIME_DISPLAY_PRIORITY - 1` for now.
+	// Final clamp to general settable priority range, though the logic above should be within this.
+	// THREAD_MIN_SET_PRIORITY is B_LOWEST_ACTIVE_PRIORITY (1)
+	// THREAD_MAX_SET_PRIORITY is B_URGENT_PRIORITY -1 (99) for user threads.
+	// Real-time priorities (100+) are not settable via nice().
+	haikuPriority = max_c((int32)THREAD_MIN_SET_PRIORITY, min_c(haikuPriority, (int32)THREAD_MAX_SET_PRIORITY));
 
 	TRACE_SCHED("set_nice_value: T %" B_PRId32 ", nice %d -> haiku_prio %" B_PRId32 "\n",
 		thid, niceValue, haikuPriority);

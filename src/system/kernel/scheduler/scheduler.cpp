@@ -4301,6 +4301,45 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 
 // #pragma mark - Team CPU Quota Syscalls
 
+/*
+    Interaction of Team CPU Quotas with Thread Priorities & POSIX nice():
+    --------------------------------------------------------------------
+    Team CPU quotas serve as a budget that dictates how much CPU time a
+    team, as a whole, is entitled to over a defined period (gQuotaPeriod).
+    This budget is primarily enforced by the Tier 1 team selection logic in
+    reschedule(), which considers team_virtual_runtime and quota exhaustion status
+    when deciding which team's threads get preferential access to a CPU.
+
+    Individual thread priorities, typically influenced by POSIX nice() values
+    (which map to Haiku priorities from B_LOWEST_ACTIVE_PRIORITY to
+    B_REAL_TIME_DISPLAY_PRIORITY - 1 for normal user threads via
+    _kern_set_thread_nice_value), determine how threads *within the same team*
+    share that team's allocated CPU time slice(s) when the team is active on a CPU.
+
+    When a team is selected to run on a CPU by the Tier 1 scheduler:
+      - Its threads compete based on their individual EEVDF parameters (Virtual
+        Deadline, lag), which are derived from their Haiku priorities (and thus
+        nice values through the scheduler_priority_to_weight() function).
+      - A thread with a lower nice value (resulting in a higher Haiku priority
+        and a larger EEVDF weight) will generally be favored by the EEVDF algorithm
+        over other threads in the same team with higher nice values.
+
+    Key points regarding the interaction:
+    - Team quotas do not override the *relative* EEVDF scheduling of threads
+      within an active team; they control the team's overall access to CPU resources.
+      Nice values dictate intra-team fairness.
+    - If a team's quota is exhausted, its non-real-time threads are typically
+      deprioritized (e.g., run at an idle-equivalent EEVDF weight by scheduler_priority_to_weight())
+      or prevented from running altogether (by thread selection logic in CPUEntry::ChooseNextThread()),
+      according to the gTeamQuotaExhaustionPolicy. In such a state, their original
+      nice values become less relevant until the team's quota is replenished or
+      they are allowed to borrow CPU time under the elastic quota mode.
+    - Real-time threads (priority >= B_REAL_TIME_DISPLAY_PRIORITY) generally
+      bypass team quota limitations in terms of their EEVDF weight calculation
+      (as handled by scheduler_priority_to_weight()) and thread selection eligibility
+      (see CPUEntry::ChooseNextThread()), ensuring they can meet their latency
+      demands even if their team is over budget.
+*/
 status_t
 _kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
 {

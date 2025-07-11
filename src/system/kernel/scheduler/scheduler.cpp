@@ -72,9 +72,11 @@ calculate_continuous_haiku_weight_prototype(int32 priority)
 	double weight_fp;
 
 	// Calculate relative to B_NORMAL_PRIORITY (10)
-	int priority_delta_from_normal = B_NORMAL_PRIORITY - calcPrio;
+	// Original: int priority_delta_from_normal = B_NORMAL_PRIORITY - calcPrio;
+	// Corrected: exponent should be (calcPrio - B_NORMAL_PRIORITY) so higher Haiku priority numbers get higher weights.
+	int exponent = calcPrio - B_NORMAL_PRIORITY;
 
-	weight_fp = (double)SCHEDULER_WEIGHT_SCALE * pow(haiku_priority_step_factor, priority_delta_from_normal);
+	weight_fp = (double)SCHEDULER_WEIGHT_SCALE * pow(haiku_priority_step_factor, exponent);
 
 	// Apply additional multipliers for kernel/urgent real-time priorities
 	// This creates a steeper increase for priorities >= B_URGENT_DISPLAY_PRIORITY

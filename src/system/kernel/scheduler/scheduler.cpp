@@ -4016,8 +4016,10 @@ scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
 
 // #pragma mark - Syscalls
 
-status_t
-_kern_get_thread_nice_value(thread_id thid, int* outNiceValue)
+// --- Internal Implementation Functions ---
+
+static status_t
+do_get_thread_nice_value(thread_id thid, int* outNiceValue)
 {
 	if (outNiceValue == NULL || !IS_USER_ADDRESS(outNiceValue))
 		return B_BAD_ADDRESS;
@@ -4080,8 +4082,8 @@ _kern_get_thread_nice_value(thread_id thid, int* outNiceValue)
 	return B_OK;
 }
 
-status_t
-_kern_set_thread_nice_value(thread_id thid, int niceValue)
+static status_t
+do_set_thread_nice_value(thread_id thid, int niceValue)
 {
 	// Validate niceValue range
 	if (niceValue < -20 || niceValue > 19)
@@ -4156,8 +4158,8 @@ _kern_set_thread_nice_value(thread_id thid, int niceValue)
 // were removed as fLatencyNice functionality is being replaced by
 // Haiku priority influencing slice duration directly.
 
-bigtime_t
-_user_estimate_max_scheduling_latency(thread_id id)
+static bigtime_t
+do_estimate_max_scheduling_latency(thread_id id)
 {
 	syscall_64_bit_return_value();
 
@@ -4243,8 +4245,8 @@ _user_estimate_max_scheduling_latency(thread_id id)
 }
 
 
-status_t
-_user_set_scheduler_mode(int32 mode)
+static status_t
+do_set_scheduler_mode(int32 mode)
 {
 	scheduler_mode schedulerMode = static_cast<scheduler_mode>(mode);
 	status_t error = scheduler_set_operation_mode(schedulerMode);
@@ -4255,8 +4257,8 @@ _user_set_scheduler_mode(int32 mode)
 }
 
 
-int32
-_user_get_scheduler_mode()
+static int32
+do_get_scheduler_mode()
 {
 	return gCurrentModeID;
 }
@@ -4279,8 +4281,8 @@ _user_get_scheduler_mode()
 	        invalid irqVector, B_BAD_THREAD_ID for invalid thid, B_NO_INIT if the
 	        affinity map is not initialized, or other errors from HashTable.
 */
-status_t
-_user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
+static status_t
+do_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 {
 	// Use UserTeamCapabilities for privilege check.
 	// Assuming CAPABILITY_ID_MANAGE_INTERRUPTS is the appropriate capability.
@@ -4510,8 +4512,8 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
       (see CPUEntry::ChooseNextThread()), ensuring they can meet their latency
       demands even if their team is over budget.
 */
-status_t
-_kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
+static status_t
+do_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
 {
 	// Permission check (e.g., root only)
 	if (geteuid() != 0)
@@ -4575,8 +4577,8 @@ _kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
 	return B_OK;
 }
 
-status_t
-_kern_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
+static status_t
+do_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
 {
 	if (_percent_quota == NULL || !IS_USER_ADDRESS(_percent_quota))
 		return B_BAD_ADDRESS;
@@ -4608,8 +4610,8 @@ _kern_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
 	return B_OK;
 }
 
-status_t
-_kern_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance)
+static status_t
+do_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance)
 {
 	if ((_usage != NULL && !IS_USER_ADDRESS(_usage))
 		|| (_allowance != NULL && !IS_USER_ADDRESS(_allowance))) {

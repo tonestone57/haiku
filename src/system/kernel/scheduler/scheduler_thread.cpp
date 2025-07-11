@@ -422,7 +422,7 @@ ThreadData::ThreadData(Thread* thread)
 	fEligibleTime(0),
 	fSliceDuration(SCHEDULER_TARGET_LATENCY), // Default slice duration
 	fVirtualRuntime(0),
-	fLatencyNice(LATENCY_NICE_DEFAULT),
+	// fLatencyNice(LATENCY_NICE_DEFAULT), // Removed
 	fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
 	fVoluntarySleepTransitions(0),
 	fAffinitizedIrqCount(0)
@@ -435,7 +435,7 @@ ThreadData::Init()
 {
 	_InitBase();
 	fCore = NULL;
-	fLatencyNice = fThread->latency_nice;
+	// fLatencyNice = fThread->latency_nice; // Removed
 
 	Thread* currentThread = thread_get_current_thread();
 	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
@@ -453,7 +453,7 @@ ThreadData::Init(CoreEntry* core)
 {
 	_InitBase();
 	fCore = core;
-	fLatencyNice = fThread->latency_nice;
+	// fLatencyNice = fThread->latency_nice; // Removed
 	fReady = true;
 	fNeededLoad = 0;
 	_ComputeEffectivePriority();
@@ -483,7 +483,7 @@ ThreadData::Dump() const
 	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", fEligibleTime);
 	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", fSliceDuration);
 	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", fVirtualRuntime);
-	kprintf("\t  latency_nice:\t\t%d\n", fLatencyNice);
+	// kprintf("\t  latency_nice:\t\t%d\n", fLatencyNice); // Removed
 }
 
 

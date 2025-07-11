@@ -204,7 +204,7 @@ cmd_thread_sched_info(int argc, char** argv)
 	kprintf("--------------------------------------------------\n");
 
 	kprintf("Base Priority:      %" B_PRId32 "\n", thread->priority);
-	kprintf("Latency Nice (canonical): %d\n", thread->latency_nice); // From struct Thread
+	// kprintf("Latency Nice (canonical): %d\n", thread->latency_nice); // From struct Thread - REMOVED
 
 	if (thread->scheduler_data != NULL) {
 		ThreadData* td = thread->scheduler_data;
@@ -3345,6 +3345,148 @@ scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
 
 
 // #pragma mark - Syscalls
+
+status_t
+_kern_get_thread_nice_value(thread_id thid, int* outNiceValue)
+{
+	if (outNiceValue == NULL || !IS_USER_ADDRESS(outNiceValue))
+		return B_BAD_ADDRESS;
+
+	if (thid <= 0 && thid != B_CURRENT_THREAD_ID)
+		return B_BAD_THREAD_ID;
+
+	Thread* targetThread;
+	if (thid == B_CURRENT_THREAD_ID) {
+		targetThread = thread_get_current_thread();
+		targetThread->AcquireReference();
+	} else {
+		targetThread = Thread::Get(thid);
+		if (targetThread == NULL)
+			return B_BAD_THREAD_ID;
+	}
+	BReference<Thread> threadReference(targetThread, true);
+
+	int32 haikuPriority = targetThread->priority;
+	int niceValue;
+
+	// Based on the conversion logic in _kern_set_thread_nice_value:
+	// Haiku Prio 19  (B_REAL_TIME_DISPLAY_PRIORITY - 1) <=> Nice -20
+	// Haiku Prio 10  (B_NORMAL_PRIORITY) <=> Nice 0
+	// Haiku Prio 1   (B_LOWEST_ACTIVE_PRIORITY) <=> Nice +19
+
+	if (haikuPriority == B_NORMAL_PRIORITY) { // 10
+		niceValue = 0;
+	} else if (haikuPriority > B_NORMAL_PRIORITY) { // Haiku Prio 11-19 maps to Nice -1 to -20
+		// Range: Haiku 11 to 19 (B_REAL_TIME_DISPLAY_PRIORITY - 1)
+		// Maps to Nice -1 to -20
+		// Using points: (Haiku=10, Nice=0) and (Haiku=19, Nice=-20)
+		// Slope: (-20 - 0) / (19 - 10) = -20 / 9
+		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-20.0f / 9.0f);
+		niceValue = (int)roundf(n);
+	} else if (haikuPriority < B_NORMAL_PRIORITY && haikuPriority >= B_LOWEST_ACTIVE_PRIORITY) { // Haiku Prio 1-9 maps to Nice +19 to +1
+		// Range: Haiku 1 (B_LOWEST_ACTIVE_PRIORITY) to 9
+		// Maps to Nice +19 to +1
+		// Using points: (Haiku=10, Nice=0) and (Haiku=1, Nice=19)
+		// Slope: (0 - 19) / (10 - 1) = -19 / 9
+		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-19.0f / 9.0f);
+		// This formula calculates delta from nice 0. Example:
+		// Haiku prio 1: (1-10)*(-19/9) = -9 * -19/9 = 19. (Correct)
+		// Haiku prio 9: (9-10)*(-19/9) = -1 * -19/9 = 19/9 = 2.11 (Correct, maps to nice +2)
+		niceValue = (int)roundf(n);
+	} else if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY) { // e.g. B_IDLE_PRIORITY (0)
+		niceValue = 19; // Map idle and other very low to max nice
+	} else { // haikuPriority >= B_REAL_TIME_DISPLAY_PRIORITY (20+)
+		niceValue = -20; // Map all higher priorities to min nice
+	}
+
+	// Clamp niceValue to standard range just in case rounding produced an anomaly
+	niceValue = max_c(-20, min_c(niceValue, 19));
+
+	if (user_memcpy(outNiceValue, &niceValue, sizeof(int)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	return B_OK;
+}
+
+status_t
+_kern_set_thread_nice_value(thread_id thid, int niceValue)
+{
+	// Validate niceValue range
+	if (niceValue < -20 || niceValue > 19)
+		return B_BAD_VALUE;
+
+	if (thid <= 0 && thid != B_CURRENT_THREAD_ID) // Allow B_CURRENT_THREAD_ID
+		return B_BAD_THREAD_ID;
+
+	Thread* currentThread = thread_get_current_thread();
+	Thread* targetThread;
+
+	if (thid == B_CURRENT_THREAD_ID || thid == currentThread->id) {
+		targetThread = currentThread;
+		targetThread->AcquireReference();
+	} else {
+		targetThread = Thread::Get(thid);
+		if (targetThread == NULL)
+			return B_BAD_THREAD_ID;
+	}
+	BReference<Thread> threadReference(targetThread, true);
+
+	// Permission check: must be root or same team
+	if (targetThread->team != currentThread->team
+		&& currentThread->team->effective_uid != 0) {
+		return B_NOT_ALLOWED;
+	}
+
+	// Convert nice value to Haiku priority
+	int32 haikuPriority;
+
+	if (niceValue == 0) {
+		haikuPriority = B_NORMAL_PRIORITY;
+	} else if (niceValue < 0) {
+		// Segment: Nice -20 to -1 (maps to Haiku B_REAL_TIME_DISPLAY_PRIORITY-1 to B_NORMAL_PRIORITY-1)
+		// P1_nice = -20, P1_haiku = B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
+		// P2_nice = 0,   P2_haiku = B_NORMAL_PRIORITY (10)
+		// Slope = (10 - 19) / (0 - (-20)) = -9 / 20
+		float p = (float)(B_REAL_TIME_DISPLAY_PRIORITY - 1)
+			+ (float)(niceValue - (-20)) * (-9.0f / 20.0f);
+		haikuPriority = (int32)roundf(p);
+	} else { // niceValue > 0
+		// Segment: Nice 1 to 19 (maps to Haiku B_NORMAL_PRIORITY-1 to B_LOWEST_ACTIVE_PRIORITY)
+		// P2_nice = 0,   P2_haiku = B_NORMAL_PRIORITY (10)
+		// P3_nice = 19,  P3_haiku = B_LOWEST_ACTIVE_PRIORITY (1)
+		// Slope = (1 - 10) / (19 - 0) = -9 / 19
+		float p = (float)B_NORMAL_PRIORITY
+			+ (float)(niceValue - 0) * (-9.0f / 19.0f);
+		haikuPriority = (int32)roundf(p);
+	}
+
+	// Clamp to Haiku's valid priority range for settable priorities
+	// (scheduler_set_thread_priority might do its own clamping, but good to be explicit)
+	if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY)
+		haikuPriority = B_LOWEST_ACTIVE_PRIORITY;
+	// The problem description states nice -20 maps to B_REAL_TIME_DISPLAY_PRIORITY - 1.
+	// This is 19. The maximum settable user priority is B_REAL_TIME_PRIORITY (100-119 for user RT).
+	// Let's ensure we don't exceed typical user-settable limits unless specifically intended.
+	// The current mapping maxes out at 19.
+	if (haikuPriority >= B_REAL_TIME_DISPLAY_PRIORITY) // Max for this conversion path
+		haikuPriority = B_REAL_TIME_DISPLAY_PRIORITY -1;
+
+
+	// Ensure the priority is within the general settable range.
+	// scheduler_set_thread_priority will also clamp, but this makes our mapping explicit.
+	haikuPriority = max_c(THREAD_MIN_SET_PRIORITY, min_c(haikuPriority, THREAD_MAX_SET_PRIORITY -1));
+	// Using THREAD_MAX_SET_PRIORITY - 1 because B_REAL_TIME_PRIORITY itself is for user RT threads,
+	// and nice values typically don't grant full RT status.
+	// The problem statement: "Nice -20 maps to a Haiku priority just below real-time (B_REAL_TIME_DISPLAY_PRIORITY - 1, which is 99)."
+	// This part seems to have a typo. B_REAL_TIME_DISPLAY_PRIORITY is 20. So B_REAL_TIME_DISPLAY_PRIORITY - 1 is 19.
+	// If the intent was to map to 99 (which is B_URGENT_PRIORITY -1), the mapping points need to change.
+	// Sticking to the provided `B_REAL_TIME_DISPLAY_PRIORITY - 1` for now.
+
+	TRACE_SCHED("set_nice_value: T %" B_PRId32 ", nice %d -> haiku_prio %" B_PRId32 "\n",
+		thid, niceValue, haikuPriority);
+
+	return scheduler_set_thread_priority(targetThread, haikuPriority);
+}
 
 // REMOVED: _kern_get_thread_latency_nice and _kern_set_thread_latency_nice
 // were removed as fLatencyNice functionality is being replaced by

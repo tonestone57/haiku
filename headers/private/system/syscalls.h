@@ -211,6 +211,9 @@ extern status_t		_kern_unblock_threads(thread_id* threads, uint32 count,
 
 extern bigtime_t	_kern_estimate_max_scheduling_latency(thread_id thread);
 
+extern status_t		_kern_set_thread_nice_value(thread_id thid, int niceValue);
+extern status_t		_kern_get_thread_nice_value(thread_id thid, int* outNiceValue);
+
 // extern status_t		_kern_set_thread_latency_nice(thread_id thid, int8 latencyNice); // REMOVED
 // extern status_t		_kern_get_thread_latency_nice(thread_id thid, int8* outLatencyNice); // REMOVED
 

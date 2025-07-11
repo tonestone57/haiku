@@ -622,7 +622,14 @@ static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
 #include <support/atomic.h> // For atomic operations
 
-// Tracks the last time an IRQ was moved by the follow-task mechanism.
+// Tracks the last time an IRQ was moved by the follow-task mechanism
+// or by the proactive mechanism in reschedule() (Task-Contextual IRQ Re-evaluation).
+// This shared timestamp array is used with two different cooldown periods:
+// 1. `kIrqFollowTaskCooldownPeriod` (e.g., 50ms) for `scheduler_maybe_follow_task_irqs`.
+// 2. `DYNAMIC_IRQ_MOVE_COOLDOWN` (e.g., 150ms) for proactive moves in `reschedule`.
+// A move by either mechanism updates this timestamp. The longer cooldown of the
+// proactive mechanism will thus also delay subsequent follow-task moves for that IRQ,
+// creating a reasonable hierarchy to prevent rapid ping-ponging.
 // MAX_IRQS should be available from <interrupts.h> or its includes.
 static int64 gIrqLastFollowMoveTime[MAX_IRQS]; // Changed to int64 for atomic ops
 // static spinlock gIrqFollowTimeLock = B_SPINLOCK_INITIALIZER; // REMOVED
@@ -2068,6 +2075,12 @@ scheduler_on_thread_destroy(Thread* thread)
 {
 	// Called when a thread is being destroyed.
 	// Cleans up any IRQ-task affinities associated with this thread.
+	// Locking Strategy:
+	// 1. Acquires thread->scheduler_lock to safely read/clear ThreadData::fAffinitizedIrqs.
+	// 2. Then acquires gIrqTaskAffinityLock to update the global sIrqTaskAffinityMap.
+	// This order is important if other operations follow global->specific.
+	// However, given this is a destruction path and isolated, direct specific->global is acceptable here
+	// as long as gIrqTaskAffinityLock is not held while trying to acquire a thread's scheduler_lock elsewhere.
 	if (sIrqTaskAffinityMap != NULL && thread != NULL && thread->scheduler_data != NULL) {
 		ThreadData* threadData = thread->scheduler_data;
 		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
@@ -4265,6 +4278,11 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 	if (thid == 0 || thid == B_CURRENT_THREAD_ID)
 		targetThreadId = thread_get_current_thread_id();
 
+	// Locking Strategy for IRQ-Task Affinity:
+	// 1. Acquire global gIrqTaskAffinityLock to protect sIrqTaskAffinityMap.
+	// 2. If modifying a thread's per-ThreadData fAffinitizedIrqs list, acquire
+	//    that thread's specific scheduler_lock.
+	// This order (global map lock -> specific thread lock) prevents deadlocks.
 	InterruptsSpinLocker locker(gIrqTaskAffinityLock); // Protects sIrqTaskAffinityMap and ThreadData IRQ lists
 
 	thread_id oldTargetThreadId = -1;

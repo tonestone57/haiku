@@ -564,11 +564,8 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 	}
 
 	// Get the thread's continuous weight.
-	int32 priority = GetBasePriority();
-	// Clamp priority for safety, though it should be valid.
-	if (priority < 0) priority = 0;
-	if (priority >= B_MAX_PRIORITY) priority = B_MAX_PRIORITY - 1;
-	int32 weight = scheduler_priority_to_weight(priority); // This now uses gHaikuContinuousWeights
+	// scheduler_priority_to_weight now takes Thread* to handle team quota exhaustion.
+	int32 weight = scheduler_priority_to_weight(fThread);
 
 	if (weight <= 0) {
 		// This should not happen as idle (weight 1) is the minimum from gHaikuContinuousWeights.
@@ -644,7 +641,7 @@ ThreadData::CalculateDynamicQuantum(CPUEntry* cpu) const
 
 	TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 ", "
 		"baseSlice %" B_PRId64 "us (RT floor %" B_PRId64 "us), finalSlice %" B_PRId64 "us (after adapt/contention/RT floor)\n",
-		fThread->id, GetBasePriority(), scheduler_priority_to_weight(GetBasePriority()),
+		fThread->id, GetBasePriority(), scheduler_priority_to_weight(fThread),
 		baseSlice, IsRealTime() ? RT_MIN_GUARANTEED_SLICE : kMinSliceGranularity,
 		finalSlice);
 

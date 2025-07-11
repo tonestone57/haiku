@@ -155,10 +155,32 @@ static inline int scheduler_haiku_priority_to_nice_index(int32 priority) {
 }
 #endif
 
-static inline int32 scheduler_priority_to_weight(int32 priority) {
+static inline int32 scheduler_priority_to_weight(const Thread* thread) {
+	if (thread == NULL) {
+		// Should not happen in normal operation where a valid thread context is expected.
+		// Return a default low weight.
+		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+	}
+
+	// Starvation-Low Policy for Quota Exhaustion
+	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
+		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
+		// TODO: Add RT bypass check here in Phase 4.
+		// For now, if (tsd->quota_exhausted && !is_rt_bypass_thread(thread))
+		InterruptsSpinLocker locker(tsd->lock); // Lock needed to safely read quota_exhausted
+		bool exhausted = tsd->quota_exhausted;
+		locker.Unlock();
+
+		if (exhausted) {
+			TRACE_SCHED_TEAM("scheduler_priority_to_weight: Team %" B_PRId32 " (thread %" B_PRId32 ") quota exhausted. Applying min weight.\n",
+				thread->team->id, thread->id);
+			return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+		}
+	}
+
     // Ensure kUseContinuousWeights is true so gHaikuContinuousWeights is initialized.
     // _init_continuous_weights() is called from scheduler_init().
-    // Given kUseContinuousWeights is true, gHaikuContinuousWeights should be populated.
+    int32 priority = thread->priority;
 
     // Clamp priority to be a valid index for gHaikuContinuousWeights.
     // B_MAX_PRIORITY is 121, so valid indices are 0 to 120.
@@ -618,6 +640,8 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	// Centralized EEVDF parameter update
 	// isNewOrRelocated = true (fresh enqueue), isRequeue = false
 	// This function is called with thread->scheduler_lock held.
+	// Note: UpdateEevdfParameters itself calls CalculateDynamicQuantum,
+	// which will use scheduler_priority_to_weight(thread).
 	threadData->UpdateEevdfParameters(targetCPU, true, false);
 
 	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
@@ -638,10 +662,11 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
 		thread->id, oldActualPriority, priority);
 
-	thread->priority = priority;
+	// oldActualPriority is captured before changing thread->priority
+	int32 oldWeight = scheduler_priority_to_weight(thread); // Uses old thread->priority
 
-	int32 oldWeight = scheduler_priority_to_weight(oldActualPriority);
-	int32 newWeight = scheduler_priority_to_weight(priority);
+	thread->priority = priority; // Update priority
+	int32 newWeight = scheduler_priority_to_weight(thread); // Uses new thread->priority
 
 	CPUEntry* cpuContextForUpdate = NULL;
 	bool wasRunning = (thread->state == B_THREAD_RUNNING && thread->cpu != NULL);
@@ -1078,7 +1103,7 @@ reschedule(int32 nextState)
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
 
-		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+		int32 weight = scheduler_priority_to_weight(oldThreadData->GetThread());
 		if (weight <= 0)
 			weight = 1; // Prevent division by zero or negative weight issues
 
@@ -1146,6 +1171,8 @@ reschedule(int32 nextState)
 				// Update EEVDF parameters for requeue.
 				// isNewOrRelocated = false, isRequeue = true.
 				// scheduler_lock for oldThread is already held.
+				// Note: UpdateEevdfParameters itself calls CalculateDynamicQuantum,
+				// which will use scheduler_priority_to_weight(oldThreadData->GetThread()).
 				oldThreadData->UpdateEevdfParameters(cpu, false, true);
 				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q (after UpdateEevdfParameters), new VD %" B_PRId64 ", new Lag %" B_PRId64 "\n",
 					oldThread->id, oldThreadData->VirtualDeadline(), oldThreadData->Lag());
@@ -1162,6 +1189,57 @@ reschedule(int32 nextState)
 			break;
 	}
 	oldThread->has_yielded = false;
+
+	// Tier 1: Team Selection Logic
+	// TODO: This is a very basic round-robin for now and needs significant refinement
+	// to properly implement percentage-based fair share.
+	// It also doesn't yet handle team affinity to specific CPUs/cores.
+	TeamSchedulerData* selectedTeamForThisCpu = NULL;
+	static TeamSchedulerData* sLastSelectedTeam = NULL; // Simple static for round robin
+
+	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
+	if (!gTeamSchedulerDataList.IsEmpty()) {
+		TeamSchedulerData* startNode = (sLastSelectedTeam != NULL && gTeamSchedulerDataList.Contains(sLastSelectedTeam))
+			? gTeamSchedulerDataList.GetNext(sLastSelectedTeam)
+			: gTeamSchedulerDataList.Head();
+		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty()) // Wrap around if sLastSelectedTeam was tail
+			startNode = gTeamSchedulerDataList.Head();
+
+		TeamSchedulerData* currentTeamIter = startNode;
+		do {
+			if (currentTeamIter == NULL) { // Should only happen if list became empty
+				if (gTeamSchedulerDataList.IsEmpty()) break;
+				currentTeamIter = gTeamSchedulerDataList.Head(); // Wrap around
+				if (currentTeamIter == NULL) break; // Still empty after re-check
+			}
+
+			// TODO: Check team affinity for this CPU/core if applicable
+			// For now, any team with quota can run on any CPU.
+			InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
+			if (currentTeamIter->cpu_quota_percent > 0 && !currentTeamIter->quota_exhausted) {
+				selectedTeamForThisCpu = currentTeamIter;
+				sLastSelectedTeam = currentTeamIter;
+				teamDataLocker.Unlock();
+				break;
+			}
+			teamDataLocker.Unlock();
+
+			currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter);
+			if (currentTeamIter == NULL && startNode != NULL) // Wrap around
+				currentTeamIter = gTeamSchedulerDataList.Head();
+
+		} while (currentTeamIter != startNode && currentTeamIter != NULL);
+	}
+	listLocker.Unlock();
+
+	cpu->SetCurrentActiveTeam(selectedTeamForThisCpu);
+	if (selectedTeamForThisCpu != NULL) {
+		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Tier 1 selected Team %" B_PRId32 "\n",
+			thisCPUId, selectedTeamForThisCpu->teamID);
+	} else {
+		TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Tier 1 found no active, non-exhausted team with quota.\n", thisCPUId);
+	}
+	// End Tier 1 Team Selection Logic
 
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue(); // LOCKING CPU's run queue
@@ -1217,6 +1295,8 @@ reschedule(int32 nextState)
 					// Update EEVDF parameters for the stolen thread.
 					// isNewOrRelocated = true, isRequeue = false.
 					// The thiefCPU is the contextCpu.
+					// Note: UpdateEevdfParameters itself calls CalculateDynamicQuantum,
+					// which will use scheduler_priority_to_weight(actuallyStolenThreadData->GetThread()).
 					actuallyStolenThreadData->UpdateEevdfParameters(cpu, true, false);
 
 					schedulerLocker.Unlock(); // Release lock

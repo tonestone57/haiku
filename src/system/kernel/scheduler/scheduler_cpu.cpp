@@ -103,10 +103,32 @@ CPUEntry::CPUEntry()
 	fEevdfRunQueueTaskCount(0), // Assuming atomic_int32 can be value-initialized like this
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
-	fUpdateLoadEvent(false)
+	fUpdateLoadEvent(false),
+	fCurrentActiveTeam(NULL) // Initialize new field
 {
 	// fSchedulerModeLock was removed.
 	B_INITIALIZE_SPINLOCK(&fQueueLock);
+}
+
+
+void
+CPUEntry::SetCurrentActiveTeam(TeamSchedulerData* teamData)
+{
+	// This function would likely be called by the Tier 1 team scheduler.
+	// It might involve more complex logic later, e.g., if switching active
+	// teams requires flushing certain CPU-local caches or EEVDF state adjustments.
+	// For now, it's a simple assignment.
+	// Locking: The caller (Tier 1 scheduler) must ensure appropriate synchronization.
+	// If this is called from a context that also modifies run queues (like reschedule),
+	// then fQueueLock might need to be held, or a separate lock for fCurrentActiveTeam.
+	// For initial simplicity, assume direct assignment is okay and higher-level logic handles safety.
+	// TODO: Review locking implications.
+	fCurrentActiveTeam = teamData;
+	if (teamData != NULL) {
+		TRACE_SCHED("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
+	} else {
+		TRACE_SCHED("CPU %" B_PRId32 ": Active team cleared.\n", ID());
+	}
 }
 
 
@@ -303,6 +325,61 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 }
 */
 
+// Helper to find the best eligible thread from a specific team in the run queue.
+// Returns the thread data if found (and removes it from the queue), otherwise NULL.
+// The queue lock (fQueueLock) MUST be held by the caller.
+static ThreadData*
+_PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
+	volatile int32* queueTaskCount)
+{
+	if (activeTeam == NULL)
+		return NULL;
+
+	ThreadData* eligibleCandidate = NULL;
+	DoublyLinkedList<ThreadData> temporarilyPoppedList;
+	bigtime_t now = system_time();
+
+	// Similar to PeekEligibleNextThread, but filters by team.
+	while (!queue.IsEmpty()) {
+		ThreadData* candidate = queue.PopMinimum();
+		atomic_add(queueTaskCount, -1);
+		ASSERT(atomic_load(queueTaskCount) >= 0);
+
+		if (candidate == NULL) break;
+
+		if (candidate->GetThread()->team->team_scheduler_data == activeTeam
+			&& now >= candidate->EligibleTime() && !candidate->IsIdle()) {
+			eligibleCandidate = candidate;
+			break;
+		} else {
+			temporarilyPoppedList.Add(candidate);
+			if (candidate->GetThread()->team->team_scheduler_data != activeTeam) {
+				TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 ", T %" B_PRId32 " (team %" B_PRId32 ") not in active team %" B_PRId32 ". Temp pop.\n",
+					cpuID, candidate->GetThread()->id,
+					candidate->GetThread()->team->id, activeTeam->teamID);
+			} else if (now < candidate->EligibleTime()) {
+				TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 ", T %" B_PRId32 " (team %" B_PRId32 ") not eligible (elig %" B_PRId64 ", now %" B_PRId64 "). Temp pop.\n",
+					cpuID, candidate->GetThread()->id, activeTeam->teamID,
+					candidate->EligibleTime(), now);
+			}
+		}
+	}
+
+	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
+		queue.Add(toReAdd);
+		atomic_add(queueTaskCount, 1);
+	}
+
+	if (eligibleCandidate != NULL) {
+		TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 " chose T %" B_PRId32 " from active team %" B_PRId32 " (VD %" B_PRId64 ").\n",
+			cpuID, eligibleCandidate->GetThread()->id, activeTeam->teamID, eligibleCandidate->GetVirtualDeadline());
+	} else {
+		TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 " no eligible thread found in active team %" B_PRId32 ".\n",
+			cpuID, activeTeam->teamID);
+	}
+	return eligibleCandidate;
+}
+
 
 ThreadData*
 CPUEntry::PeekEligibleNextThread()
@@ -372,6 +449,64 @@ CPUEntry::PeekEligibleNextThread()
 	// ensuring consistency.
 
 	return eligibleCandidate;
+}
+
+
+ThreadData*
+CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(are_interrupts_enabled() == false); // Caller must hold the run queue lock.
+
+	// If the old thread (that was just running) is still ready and belongs to
+	// this CPU's core, its EEVDF parameters should be updated, and it should be
+	// re-inserted into the EEVDF run queue.
+	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
+		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
+		fEevdfRunQueue.Add(oldThread);
+		atomic_add(&fEevdfRunQueueTaskCount, 1); // Manually update count as Add doesn't do it here
+		_UpdateMinVirtualRuntime();
+	}
+
+	ThreadData* nextThreadData = NULL;
+
+	// Prioritize the fCurrentActiveTeam if set and not exhausted
+	if (fCurrentActiveTeam != NULL && !fCurrentActiveTeam->quota_exhausted) {
+		nextThreadData = _PeekEligibleThreadFromTeam(fEevdfRunQueue,
+			fCurrentActiveTeam, ID(), &fEevdfRunQueueTaskCount);
+		if (nextThreadData != NULL) {
+			// MarkDequeued will be called below if not idle.
+			// _UpdateMinVirtualRuntime() was handled by _PeekEligibleThreadFromTeam
+			// if it popped and re-added items. If it directly returned an item,
+			// it was effectively popped, so min_vruntime might need an update if
+			// the new top of the heap changed. This is covered by the call to
+			// _UpdateMinVirtualRuntime in reschedule() after this function.
+		} else {
+			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 ", ActiveTeam %" B_PRId32 " has no eligible threads. Falling back.\n",
+				ID(), fCurrentActiveTeam->teamID);
+		}
+	}
+
+	// If no thread from active team, or no active team, or active team exhausted,
+	// try to pick any eligible thread from the run queue.
+	if (nextThreadData == NULL) {
+		nextThreadData = PeekEligibleNextThread(); // This pops the thread if found
+	}
+
+	if (nextThreadData != NULL) {
+		// nextThreadData is already removed from the queue by PeekEligibleNextThread
+		// or _PeekEligibleThreadFromTeam. Mark it as dequeued.
+		nextThreadData->MarkDequeued();
+	} else {
+		// No eligible, non-idle thread found. Choose this CPU's idle thread.
+		nextThreadData = fIdleThread;
+		if (nextThreadData == NULL) {
+			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());
+		}
+	}
+
+	ASSERT(nextThreadData != NULL);
+	return nextThreadData;
 }
 
 

@@ -108,6 +108,10 @@ public:
 
 	inline				bool			IsEffectivelyIdle() const;
 
+	// Team Quota related
+	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler
+	void				SetCurrentActiveTeam(TeamSchedulerData* teamData); // TODO: implement
+
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
 

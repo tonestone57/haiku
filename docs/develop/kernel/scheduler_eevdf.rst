@@ -61,15 +61,12 @@ Slice Duration (``fSliceDuration``)
 This is the target wall-clock duration a thread should run for once it's selected by the
 scheduler before its state (lag, deadline) is re-evaluated.
 
-  - **Determination**: Influenced by the thread's base priority (via ``MapPriorityToEffectiveLevel``
-    and ``kBaseQuanta``) and its ``fLatencyNice`` parameter (which defaults to 0).
-    Higher priority or more latency-sensitive threads (lower ``fLatencyNice``)
-    can receive shorter slices.
+  - **Determination**: Influenced by the thread's base priority (converted to a weight),
+    its real-time status, I/O behavior heuristics, and system contention levels.
+    The ``fLatencyNice`` parameter and its associated syscalls for direct slice
+    duration tuning have been removed.
   - **Current Implementation**: Derived using
-    ``ThreadData::CalculateDynamicQuantum()`` which incorporates base priority and ``fLatencyNice``.
-    The ``fLatencyNice`` mechanism is structurally in place and can be controlled
-    by user-space applications via the ``_kern_set_thread_latency_nice()`` and
-    ``_kern_get_thread_latency_nice()`` syscalls.
+    ``ThreadData::CalculateDynamicQuantum()`` which incorporates these factors.
 
 Eligible Time (``fEligibleTime``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -134,7 +131,7 @@ Handled by ``scheduler_enqueue_in_run_queue()`` in ``scheduler.cpp``:
     CPU fitness metrics (load) used by ``_ChooseCPU`` are still relevant.
 2.  **EEVDF Parameter Initialization**: For the thread being enqueued:
     *   ``fSliceDuration``: Calculated using ``ThreadData::CalculateDynamicQuantum()``,
-      which considers base priority and ``fLatencyNice``.
+      which considers base priority (weight) and other heuristics.
     *   ``fVirtualRuntime``: Initialized to be ``max(current_vruntime, min_vruntime_of_target_queue)``.
     *   ``fLag``: Calculated as ``WeightedSliceEntitlement - (VirtualRuntime - QueueMinVirtualRuntime)``.
     *   ``fEligibleTime``: Calculated based on current time and the new ``fLag``.
@@ -181,10 +178,11 @@ priority (earlier deadline) thread becomes runnable.
 5.  **Context Switch**: If ``nextThread`` is different from ``oldThread``, a context
     switch occurs.
 
-Priority, Weight, and Latency-Nice Handling
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The EEVDF scheduler uses a combination of thread priority, derived weight, and
-a latency-nice parameter to influence thread behavior.
+Priority and Weight Handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The EEVDF scheduler uses a combination of thread priority and its derived weight
+to influence thread behavior. The direct ``latency-nice`` parameter for slice
+tuning has been removed.
 
   - **Priority and Weight**: A thread's base priority (typically corresponding
     to its "nice" value) is converted into a numerical "weight" via the
@@ -198,21 +196,6 @@ a latency-nice parameter to influence thread behavior.
         Higher weight means slower virtual runtime advancement for the same CPU
         time, leading to a larger CPU share.
     *   It scales the "weighted slice entitlement" used in ``fLag`` calculations.
-
-  - **Latency-Nice (``fLatencyNice``)**: This parameter (ranging from -20 to +19,
-    defaulting to 0) allows fine-tuning of a thread's slice duration
-    (``fSliceDuration``) independently of its overall CPU share (weight).
-    *   It is controlled via the ``_kern_set_thread_latency_nice()`` and
-      ``_kern_get_thread_latency_nice()`` syscalls.
-    *   In ``ThreadData::CalculateDynamicQuantum()``, ``fLatencyNice`` adjusts the
-      base quantum derived from thread priority. A lower (more negative)
-      ``fLatencyNice`` value results in a shorter slice, making the thread
-      more responsive (as it gets to be re-evaluated by the scheduler more
-      frequently). A higher value results in a longer slice, favoring throughput.
-    *   This allows, for example, an important but non-CPU-intensive interactive
-      thread to have a short slice for quick response, while a CPU-bound task
-      of similar base priority might have a longer slice if its latency-nice
-      is higher.
 
 Real-Time Thread Handling
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -233,9 +216,8 @@ special treatment to enhance their real-time characteristics:
   - **Minimum Guaranteed Slice**: Real-time threads (priority >= 20) are
     guaranteed a minimum slice duration defined by ``RT_MIN_GUARANTEED_SLICE``
     (typically 2ms). This prevents their slice from becoming excessively short
-    due to very high weights or extremely negative ``fLatencyNice`` values,
-    which could lead to high scheduling overhead. This floor is applied in
-    ``ThreadData::CalculateDynamicQuantum()``.
+    due to very high weights, which could lead to high scheduling overhead.
+    This floor is applied in ``ThreadData::CalculateDynamicQuantum()``.
 
 The combination of these factors (very high weight, immediate eligibility, and
 a guaranteed minimum slice leading to frequent re-evaluation with early
@@ -371,17 +353,17 @@ TODOs / Future Work
 The EEVDF scheduler has undergone significant development, incorporating
 mechanisms for weighted fair queuing, latency-nice control, big.LITTLE
 awareness, and advanced IRQ handling. Key areas previously marked as TODOs,
-such as user-space control for latency-nice, refined priority-to-weight mapping,
+such as refined priority-to-weight mapping,
 fairness in ``scheduler_set_thread_priority()``, enhanced tie-breaking, and
 b.L-aware load balancing/work-stealing, have been substantially addressed.
+The user-space control for a separate latency-nice parameter has been removed.
 
 Ongoing and future areas for refinement and investigation include:
 
   - **Parameter Tuning and Validation**:
     *   **Priority-to-Weight and Slice Durations**: Extensive real-world testing
       and benchmarking are needed to fine-tune the ``gHaikuContinuousWeights``
-      generation, ``kBaseQuanta``, ``gLatencyNiceFactors``,
-      ``SCHEDULER_TARGET_LATENCY``, ``SCHEDULER_MIN_GRANULARITY``, and
+      generation, ``SCHEDULER_TARGET_LATENCY``, ``SCHEDULER_MIN_GRANULARITY``, and
       ``RT_MIN_GUARANTEED_SLICE``. The goal is to optimize Haiku application
       responsiveness, fairness, and real-time performance across diverse workloads
       and hardware.

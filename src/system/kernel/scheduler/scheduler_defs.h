@@ -6,12 +6,6 @@
 #include <OS.h> // For bigtime_t, prio_t
 #include <SupportDefs.h> // For int8, int32, etc.
 
-// Latency Nice configuration
-#define LATENCY_NICE_MIN -20
-#define LATENCY_NICE_MAX 19
-#define LATENCY_NICE_DEFAULT 0
-#define NUM_LATENCY_NICE_LEVELS (LATENCY_NICE_MAX - LATENCY_NICE_MIN + 1)
-
 // Minimum and maximum slice durations in microseconds
 // kMinSliceGranularity ensures that scheduling overhead doesn't dominate.
 // kMaxSliceDuration prevents a single thread from running too long, even if it wants to.
@@ -22,27 +16,6 @@ const bigtime_t kMaxSliceDuration = 100000; // 100ms
 // Factor = 1.0 for latency_nice = 0.
 // Lower latency_nice => smaller factor => shorter slice.
 // Higher latency_nice => larger factor => longer slice.
-// Stored as scaled integers to avoid floating-point arithmetic in the kernel.
-#define LATENCY_NICE_FACTOR_SCALE_SHIFT 10
-#define LATENCY_NICE_FACTOR_SCALE (1 << LATENCY_NICE_FACTOR_SCALE_SHIFT) // 1024
-
-// External declaration for the array of factors.
-// Definition is in scheduler.cpp
-extern const int32 gLatencyNiceFactors[NUM_LATENCY_NICE_LEVELS];
-
-// Helper function to map a latency_nice value to an index in gLatencyNiceFactors.
-static inline int
-latency_nice_to_index(int8 latencyNice)
-{
-    int index = latencyNice - LATENCY_NICE_MIN;
-    // Clamp index to be within the valid range for the array.
-    if (index < 0)
-        return 0;
-    if (index >= NUM_LATENCY_NICE_LEVELS)
-        return NUM_LATENCY_NICE_LEVELS - 1;
-    return index;
-}
-
 // --- Heuristics for I/O-Bound Task Detection ---
 // For EWMA: new_avg = (sample / N) + ((N-1)/N * old_avg)
 // We use N = IO_BOUND_EWMA_ALPHA_RECIPROCAL.

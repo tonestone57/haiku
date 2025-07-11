@@ -582,10 +582,6 @@ static HashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
 static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 
-// Definition for gLatencyNiceFactors declared in scheduler_defs.h
-// Factors are approximations of (1.2)^N, scaled by LATENCY_NICE_FACTOR_SCALE (1024)
-// Index i corresponds to latency_nice = i + LATENCY_NICE_MIN
-
 // Cooldown period for IRQ follow-task logic to prevent excessive ping-ponging.
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
 #include <support/atomic.h> // For atomic operations
@@ -594,15 +590,7 @@ static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
 // MAX_IRQS should be available from <interrupts.h> or its includes.
 static int64 gIrqLastFollowMoveTime[MAX_IRQS]; // Changed to int64 for atomic ops
 // static spinlock gIrqFollowTimeLock = B_SPINLOCK_INITIALIZER; // REMOVED
-// So, index 20 corresponds to latency_nice = 0, factor should be 1024.
-const int32 gLatencyNiceFactors[NUM_LATENCY_NICE_LEVELS] = {
-    // latency_nice = -20 (index 0) to +19 (index 39)
-      27,   32,   38,   46,   55,   66,   79,   95,  114,  137, // -20 to -11
-     164,  197,  236,  284,  340,  409,  490,  588,  706,  847, // -10 to -1
-    1024,                                                       //   0 (index 20)
-    1228, 1474, 1769, 2123, 2548, 3057, 3669, 4403, 5283,        //  +1 to +9
-    6340, 7608, 9130, 10956, 13147, 15776, 18931, 22718, 27261, 32714 // +10 to +19
-};
+// gLatencyNiceFactors array and related comments REMOVED as LatencyNice mechanism is deprecated.
 
 
 }	// namespace Scheduler
@@ -1085,8 +1073,13 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
 				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
 
-				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidateTask->LatencyNice() < -5 || candidateTask->GetLoad() > kHighLoad);
-				bool isTaskEPref = (!isTaskPCritical && (candidateTask->GetBasePriority() < B_NORMAL_PRIORITY || candidateTask->LatencyNice() > 5 || candidateTask->GetLoad() < kLowLoad));
+				// Updated P-Critical and E-Preferring logic to remove LatencyNice dependency
+				// Uses load thresholds similar to those in scheduler_perform_load_balance for consistency
+				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
+					|| candidateTask->GetLoad() > (kMaxLoad * 7 / 10));
+				bool isTaskEPref = (!isTaskPCritical
+					&& (candidateTask->GetBasePriority() < B_NORMAL_PRIORITY
+						|| candidateTask->GetLoad() < (kMaxLoad / 5)));
 
 				TRACE_SCHED_BL_STEAL("WorkSteal Eval: Thief C%d(T%d), Victim C%d(T%d), Task T% " B_PRId32 " (Pcrit %d, EPref %d, Load %" B_PRId32 ", Lag %" B_PRId64 ")\n",
 					thiefCPU->Core()->ID(), thiefCoreType, victimCPUEntry->Core()->ID(), victimCoreType,
@@ -3471,15 +3464,13 @@ scheduler_perform_load_balance()
 		bigtime_t eligibilityImprovementWallClock = candidate->EligibleTime() - estimatedEligibleTimeOnTarget;
 
 		// Task type classification for b.L scheduling decisions
-		// P-Critical: High priority, low latency nice, or high load. Prefers P-cores.
+		// P-Critical: High priority or high load. Prefers P-cores. (LatencyNice removed)
 		bool taskIsPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
-			|| candidate->LatencyNice() < -10 // More aggressive latency sensitivity for P-core preference
-			|| candidate->GetLoad() > (kMaxLoad * 7 / 10)); // Example: >70% load
-		// E-Preferring: Not P-Critical and low priority, high latency nice, or low load. Suitable for E-cores.
+			|| candidate->GetLoad() > (kMaxLoad * 7 / 10));
+		// E-Preferring: Not P-Critical and low priority or low load. Suitable for E-cores. (LatencyNice removed)
 		bool taskIsEPreferring = (!taskIsPCritical
 			&& (candidate->GetBasePriority() < B_NORMAL_PRIORITY
-				|| candidate->LatencyNice() > 8 // More tolerant of latency for E-core preference
-				|| candidate->GetLoad() < (kMaxLoad / 5))); // Example: <20% load
+				|| candidate->GetLoad() < (kMaxLoad / 5)));
 
 		scheduler_core_type sourceType = sourceCPU->Core()->Type();
 		scheduler_core_type targetType = finalTargetCore->Type();

@@ -27,7 +27,7 @@
 #include <timer.h>
 
 // Haiku Utility Headers
-#include <util/AutoDeleter.h>
+#include <shared/AutoDeleter.h> // Corrected path
 #include <util/AutoLock.h>
 #include <util/DoublyLinkedList.h>
 #include <util/Random.h>

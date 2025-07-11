@@ -1,8 +1,11 @@
 #include "EevdfRunQueue.h"
-#include "scheduler_thread.h" // Required for ThreadData::VirtualDeadline() and EevdfGetLink inline definition
-#include "SchedulerHeap.h"    // Required for SchedulerHeap
 
-#include <new> // For std::nothrow
+#include <new> // For std::nothrow (C++ Standard header)
+
+// Project internal headers (alphabetical)
+#include "SchedulerHeap.h"    // Required for SchedulerHeap
+#include "scheduler_thread.h" // Required for ThreadData::VirtualDeadline() and EevdfGetLink inline definition
+
 
 namespace Scheduler {
 

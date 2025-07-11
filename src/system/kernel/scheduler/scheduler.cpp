@@ -3336,6 +3336,7 @@ scheduler_perform_load_balance()
 	int32 minLoadFound = 0x7fffffff;
 
 	// --- Initial Source/Target Core Selection (based on normalized load) ---
+	// Iterate through sharded heaps to find the most loaded (source) and least loaded (target) cores.
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
 		ReadSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
 		CoreEntry* shardBestSource = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum();
@@ -3363,7 +3364,7 @@ scheduler_perform_load_balance()
 	}
 
 	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate) {
-		// If still same or one is null, try a more exhaustive search for a distinct pair
+		// If still same or one is null (e.g., only one core enabled), try a more exhaustive search for a distinct pair.
 		if (sourceCoreCandidate != NULL && targetCoreCandidate == sourceCoreCandidate) {
 			minLoadFound = 0x7fffffff;
 			CoreEntry* alternativeTarget = NULL;
@@ -3377,6 +3378,7 @@ scheduler_perform_load_balance()
 			}
 			targetCoreCandidate = alternativeTarget;
 		}
+		// If still no distinct pair, no load balancing possible.
 		if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate)
 			return migrationPerformed;
 	}
@@ -3393,12 +3395,13 @@ scheduler_perform_load_balance()
 
 
 	// --- Imbalance Check (using b.L-aware load difference threshold) ---
+	// The threshold for migration is adjusted based on core types (e.g., P-to-E vs E-to-P).
 	int32 blAwareLoadDifference = scheduler_get_bl_aware_load_difference_threshold(sourceCoreCandidate, targetCoreCandidate);
 	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + blAwareLoadDifference) {
 		TRACE_SCHED_BL("LoadBalance: No imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") vs TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
 			sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
 			targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
-		return migrationPerformed;
+		return migrationPerformed; // No significant imbalance.
 	}
 
 	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
@@ -3418,35 +3421,40 @@ scheduler_perform_load_balance()
 	// --- Determine finalTargetCore based on mode ---
 	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) { // Power Saving Mode
 		CoreEntry* consolidationCore = NULL;
+		// Try to get the globally designated Small Task Core (STC), often an E-core.
 		if (gCurrentMode != NULL && gCurrentMode->get_consolidation_target_core != NULL)
 			consolidationCore = gCurrentMode->get_consolidation_target_core(NULL); // Pass NULL for global STC
-		// If no STC, try to designate one (power_saving_designate_consolidation_core prefers LITTLEs)
+		// If no STC, try to designate one (prefers LITTLEs).
 		if (consolidationCore == NULL && gCurrentMode != NULL && gCurrentMode->designate_consolidation_core != NULL) {
 			consolidationCore = gCurrentMode->designate_consolidation_core(NULL);
 		}
 
 		if (consolidationCore != NULL) {
+			// Scenario 1: Source is not the STC, and STC has capacity. Consolidate to STC.
 			if (sourceCoreCandidate != consolidationCore &&
-				(consolidationCore->GetLoad() < kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY || consolidationCore->GetInstantaneousLoad() < 0.8f)) {
+				(consolidationCore->GetLoad() < kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY // STC load check (capacity-adjusted)
+				|| consolidationCore->GetInstantaneousLoad() < 0.8f)) { // Also consider instantaneous load.
 				finalTargetCore = consolidationCore;
 				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
 					finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
-			} else if (sourceCoreCandidate == consolidationCore && sourceCoreCandidate->GetLoad() > kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
-				// STC is overloaded, try to find a spill target (preferably another LITTLE)
+			// Scenario 2: Source *is* the STC, and it's very overloaded. Find a spill target.
+			} else if (sourceCoreCandidate == consolidationCore &&
+					   sourceCoreCandidate->GetLoad() > kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
 				CoreEntry* spillTarget = NULL;
 				int32 minSpillLoad = 0x7fffffff;
+				// Prefer spilling to another E-core if available and not too loaded.
 				for (int32 i = 0; i < gCoreCount; ++i) {
 					CoreEntry* core = &gCoreEntries[i];
 					if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
-					// Prefer spilling to a LITTLE core if possible
-					if (core->Type() == CORE_TYPE_LITTLE && core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+					if (core->Type() == CORE_TYPE_LITTLE &&
+						core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
 						if (core->GetLoad() < minSpillLoad) {
 							minSpillLoad = core->GetLoad();
 							spillTarget = core;
 						}
 					}
 				}
-				// If no LITTLE spill target, try any other non-loaded core
+				// If no suitable E-core spill target, try any other non-loaded core.
 				if (spillTarget == NULL) {
 					for (int32 i = 0; i < gCoreCount; ++i) {
 						CoreEntry* core = &gCoreEntries[i];
@@ -3460,28 +3468,40 @@ scheduler_perform_load_balance()
 					}
 				}
 				if (spillTarget != NULL) {
-					finalTargetCore = spillTarget;
+					finalTargetCore = spillTarget; // STC is overloaded, spill to this core.
 					TRACE_SCHED_BL("LoadBalance (PS): STC %" B_PRId32 " overloaded, spilling to Core %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
 						sourceCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
 				} else {
-					// No good spill target, fall back to original targetCoreCandidate if suitable
+					// No good spill target. Fall back to original targetCoreCandidate if it's different from source
+					// and suitable for waking (if it's idle).
 					finalTargetCore = targetCoreCandidate;
-					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
+					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL; // Can't spill to self.
 					if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0
 						&& gCurrentMode->should_wake_core_for_load != NULL) {
-						// should_wake_core_for_load needs to be b.L aware
-						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5)) {
-							finalTargetCore = NULL;
+						// Check if it's okay to wake this idle core for the load.
+						// (should_wake_core_for_load should be b.L aware).
+						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5 /* example load */)) {
+							finalTargetCore = NULL; // Not suitable to wake.
 						}
 					}
 				}
-			} else { /* STC is source but not overloaded, or STC is target but too loaded */ return migrationPerformed; }
-		} else { /* No STC available */ return migrationPerformed; }
+			} else { /* STC is source but not overloaded, or STC is target but too loaded, or STC is fine. No migration. */
+				return migrationPerformed;
+			}
+		} else { /* No STC available/designated. No consolidation-driven migration. */
+			return migrationPerformed;
+		}
+		// If after all PS logic, no valid finalTargetCore, then no migration.
 		if (finalTargetCore == NULL) { return migrationPerformed; }
+		// Select busiest CPU on the source core for migration.
+		// Select busiest CPU on the source core for migration.
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	} else { // Low Latency Mode or other spread policy
 		finalTargetCore = targetCoreCandidate;
-		// b.L Refinement for LL mode: If source is LITTLE and target is LITTLE, but a BIG core is available & better.
+		// b.L Refinement for Low Latency mode:
+		// If both source and initial target are E-cores, check if a P-core is available
+		// and would be a better target (less loaded than the source E-core).
+		// This helps P-Critical tasks escape E-cores if P-cores become free.
 		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD &&
 			sourceCoreCandidate->Type() == CORE_TYPE_LITTLE &&
 			finalTargetCore->Type() == CORE_TYPE_LITTLE) {
@@ -3489,18 +3509,21 @@ scheduler_perform_load_balance()
 			int32 bestBigTargetLoad = 0x7fffffff;
 			for (int32 i = 0; i < gCoreCount; ++i) {
 				CoreEntry* core = &gCoreEntries[i];
+				// Check if it's a P-core (BIG or UNIFORM_PERFORMANCE)
 				if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE)) continue;
+				// Check if this P-core is less loaded than the source E-core and is the best P-core target found so far.
 				if (core->GetLoad() < sourceCoreCandidate->GetLoad() && core->GetLoad() < bestBigTargetLoad) {
 					bestBigTargetLoad = core->GetLoad();
 					bestBigTarget = core;
 				}
 			}
 			if (bestBigTarget != NULL) {
-				finalTargetCore = bestBigTarget;
+				finalTargetCore = bestBigTarget; // Switch target to the better P-core.
 				TRACE_SCHED_BL("LoadBalance (LL): Switched target from LITTLE %" B_PRId32 " to BIG/UNIFORM %" B_PRId32 " (Load %" B_PRId32 ")\n",
 					targetCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->GetLoad());
 			}
 		}
+		// Select busiest CPU on the source core for migration.
 		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
 	}
 
@@ -3510,6 +3533,9 @@ scheduler_perform_load_balance()
 		return migrationPerformed;
 	}
 
+	// --- Thread Selection for Migration ---
+	// Iterate through some of the most starved threads on the sourceCPU's run queue
+	// and pick the one with the highest "benefit score" if moved to the finalTargetCore.
 	ThreadData* threadToMove = NULL;
 	bigtime_t now = system_time();
 
@@ -3517,40 +3543,49 @@ scheduler_perform_load_balance()
 	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
 
 	ThreadData* bestCandidateToMove = NULL;
-	bigtime_t maxBenefitScore = -1;
+	bigtime_t maxBenefitScore = -1; // Higher is better.
 
-	const int MAX_LB_CANDIDATES_TO_CHECK = 10;
-	// MIN_POSITIVE_LAG_FOR_MIGRATION is now MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION (Proposal 2)
+	const int MAX_LB_CANDIDATES_TO_CHECK = 10; // Limit how many threads we evaluate.
+	// MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION (defined globally) is the starvation threshold.
 
-	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK];
+	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK]; // To temporarily hold popped threads.
 	int checkedCount = 0;
 
+	// Pop and check a few top candidates from the source queue.
 	for (int i = 0; i < MAX_LB_CANDIDATES_TO_CHECK && !sourceQueue.IsEmpty(); ++i) {
-		ThreadData* candidate = sourceQueue.PopMinimum();
+		ThreadData* candidate = sourceQueue.PopMinimum(); // Smallest Virtual Deadline
 		if (candidate == NULL) break;
 		tempStorage[checkedCount++] = candidate;
 
+		// Filter out unsuitable candidates:
+		// - Idle threads.
+		// - The thread currently running on the source CPU (it's implicitly handled by reschedule).
+		// - Threads pinned to a specific CPU (unless it's the target, handled by affinity check in benefit score).
+		// - Threads migrated too recently (to prevent ping-ponging).
 		if (candidate->IsIdle() ||
 			candidate->GetThread() == gCPU[sourceCPU->ID()].running_thread ||
-			candidate->GetThread()->pinned_to_cpu != 0 ||
+			candidate->GetThread()->pinned_to_cpu != 0 || // Basic pinning check; affinity mask is checked later.
 			(now - candidate->LastMigrationTime() < kMinTimeBetweenMigrations)) {
 			continue;
 		}
 
-		// Proposal 2: Use unweighted normalized work for starvation check
+		// Starvation Check: Ensure the thread is owed a significant amount of unweighted,
+		// capacity-normalized work. This makes the check fair across priorities.
 		int32 candidateWeightForLagCheck = scheduler_priority_to_weight(candidate->GetThread(), sourceCPU);
-		if (candidateWeightForLagCheck <= 0) candidateWeightForLagCheck = 1;
+		if (candidateWeightForLagCheck <= 0) candidateWeightForLagCheck = 1; // Safety for weight calculation.
 		bigtime_t unweightedNormWorkOwed = (candidate->Lag() * candidateWeightForLagCheck) / SCHEDULER_WEIGHT_SCALE;
 
 		if (unweightedNormWorkOwed < MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION) {
 			TRACE_SCHED_LB("LoadBalance: Candidate T %" B_PRId32 " unweighted_norm_work_owed %" B_PRId64 " < threshold %" B_PRId64 ". Skipping.\n",
 				candidate->GetThread()->id, unweightedNormWorkOwed, MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION);
-			continue;
+			continue; // Not starved enough to be considered.
 		}
-		// End Proposal 2 change for starvation check
+		// End starvation check.
 
-		bigtime_t currentLagOnSource = candidate->Lag(); // Keep this for TRACE_SCHED if needed, or use lagNormWeightedOnSource
+		// This is the thread's current weighted lag on the source CPU.
+		bigtime_t currentLagOnSource = candidate->Lag();
 
+		// Select a representative (least loaded) CPU on the target core to estimate parameters.
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
 		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
 

@@ -418,7 +418,7 @@ cmd_thread_sched_info(int argc, char** argv)
 #include <stdlib.h>
 #include <stdio.h>
 
-#include <UserTeamCapabilities.h> // Added for capability checks
+// #include <UserTeamCapabilities.h> // Added for capability checks - Temporarily commented out
 
 #include "scheduler_common.h"
 #include "scheduler_cpu.h"
@@ -4284,12 +4284,10 @@ do_get_scheduler_mode()
 static status_t
 do_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 {
-	// Use UserTeamCapabilities for privilege check.
-	// Assuming CAPABILITY_ID_MANAGE_INTERRUPTS is the appropriate capability.
-	// This capability identifier would need to be defined in <UserTeamCapabilitiesDefs.h>
-	// or a similar central place if not already present.
-	if (!gUserTeamCapabilities.HasNamedCapability(CAPABILITY_ID_MANAGE_INTERRUPTS)) {
-		TRACE_SCHED_IRQ_ERR("_user_set_irq_task_colocation: Caller lacks CAPABILITY_ID_MANAGE_INTERRUPTS.\n");
+	// TODO: Define proper capability/privilege check.
+	// For now, using euid check as a placeholder, similar to other syscalls.
+	if (geteuid() != 0) {
+		// TRACE_SCHED_IRQ_ERR("_user_set_irq_task_colocation: Caller not privileged (euid != 0).\n");
 		return B_NOT_ALLOWED;
 	}
 

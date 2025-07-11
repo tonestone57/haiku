@@ -450,7 +450,7 @@ static void
 power_saving_switch_to_mode()
 {
 	gKernelKDistFactor = 0.5f; // TODO EEVDF: Re-evaluate usefulness or repurpose for slice calculation. Currently no direct effect.
-	gSchedulerBaseQuantumMultiplier = 1.5f; // Affects SliceDuration via GetBaseQuantumForLevel
+	// gSchedulerBaseQuantumMultiplier = 1.5f; // Obsolete MLFQ variable, EEVDF uses different slice logic
 	// gSchedulerAgingThresholdMultiplier = 1.5f; // Aging is obsolete with EEVDF
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 	Scheduler::sSmallTaskCore = NULL;
@@ -582,16 +582,16 @@ power_saving_choose_core(const ThreadData* threadData)
 	ASSERT(threadData != NULL);
 
 	// 1. Thread Type Inference
-	bool threadIsPCritical = (threadData->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
-								|| threadData->LatencyNice() < 0 // More aggressive P-Crit for PS if very low nice
-								|| threadData->GetLoad() > (kMaxLoad * 7 / 10)); // Higher demand threshold
+	// LatencyNice() has been removed. P-Critical is high priority or high load.
+	// E-Preferential is not P-Critical and low priority or low load.
+	bool threadIsPCritical = (threadData->GetBasePriority() > B_NORMAL_PRIORITY
+								|| threadData->GetLoad() > (kMaxLoad * 7 / 10));
 	bool threadIsEPreferential = (!threadIsPCritical &&
-								(threadData->GetBasePriority() < B_LOW_PRIORITY // Lower prio for Epref
-								|| threadData->LatencyNice() > 10 // Higher nice for Epref
-								|| threadData->GetLoad() < (kMaxLoad * 2 / 10))); // Lower demand for Epref
+								(threadData->GetBasePriority() < B_LOW_PRIORITY
+								|| threadData->GetLoad() < (kMaxLoad * 2 / 10)));
 
-	TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", LatNice %d, Prio %" B_PRId32 ") IsPCrit: %d, IsEPref: %d\n",
-		threadData->GetThread()->id, threadData->GetLoad(), threadData->LatencyNice(),
+	TRACE_SCHED_BL("PS choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", Prio %" B_PRId32 ") IsPCrit: %d, IsEPref: %d\n",
+		threadData->GetThread()->id, threadData->GetLoad(),
 		threadData->GetBasePriority(), threadIsPCritical, threadIsEPreferential);
 
 	// 2. Initialization

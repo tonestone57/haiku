@@ -106,7 +106,7 @@ public:
 	inline				bigtime_t		MinVirtualRuntime();
 	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
 
-	inline				bool			IsEffectivelyIdle() const;
+						bool			IsEffectivelyIdle() const; // Moved to .cpp
 
 	// Team Quota related
 	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler

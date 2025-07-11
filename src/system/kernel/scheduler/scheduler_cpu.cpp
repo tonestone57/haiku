@@ -43,12 +43,33 @@ int32 gPackageCount;
 
 }	// namespace Scheduler
 
+// Definition of CPUEntry::IsEffectivelyIdle()
+// Needs to be in .cpp file because it uses ThreadData::GetThread(),
+// requiring the full definition of ThreadData.
+bool
+Scheduler::CPUEntry::IsEffectivelyIdle() const
+{
+	// This CPU is effectively idle if it's currently running its designated idle thread.
+	// Note: This doesn't consider whether the CPU is *about to be* idled or is disabled.
+	// It reflects the current running state.
+	// The fIdleThread member must be non-NULL for this check to be meaningful.
+	if (fIdleThread == NULL) {
+		// This might happen if called very early or on a misconfigured CPU.
+		// A CPU without an idle thread cannot truly be idle in the scheduler's sense.
+		return false;
+	}
+	// gCPU is an array of cpu_ent, which has running_thread.
+	// fIdleThread is ThreadData*, GetThread() returns Thread*
+	return gCPU[fCPUNumber].running_thread == fIdleThread->GetThread();
+}
+
+
 using namespace Scheduler;
 
 
 class Scheduler::DebugDumper {
 public:
-	static	void		DumpEevdfRunQueue(CPUEntry* cpu); // Renamed
+	static	void		DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump);
 	static	void		DumpCoreLoadHeapEntry(CoreEntry* core);
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 

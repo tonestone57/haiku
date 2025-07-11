@@ -289,12 +289,23 @@ cmd_thread_sched_info(int argc, char** argv)
 #include "scheduler_profiler.h"
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
+#include "scheduler_team.h" // For TeamSchedulerData
 #include "EevdfRunQueue.h"
 
 #include <util/HashTable.h>
+#include <util/DoublyLinkedList.h> // For the global list
 
 
 namespace Scheduler {
+
+// Team Quota Management Globals
+const bigtime_t kDefaultQuotaPeriod = 100000; // 100ms
+bigtime_t gQuotaPeriod = kDefaultQuotaPeriod; // Active quota period
+DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
+spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
+static timer gQuotaResetTimer;
+
+static int32 scheduler_reset_team_quotas_event(timer* unused);
 
 
 class ThreadEnqueuer : public ThreadProcessing {
@@ -386,6 +397,33 @@ const int32 gLatencyNiceFactors[NUM_LATENCY_NICE_LEVELS] = {
 
 
 }	// namespace Scheduler
+
+// Implementation of global list management functions for TeamSchedulerData
+void Scheduler::add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
+{
+	if (tsd == NULL)
+		return;
+	InterruptsSpinLocker locker(gTeamSchedulerListLock);
+	gTeamSchedulerDataList.Add(tsd);
+	TRACE_SCHED("Added TeamSchedulerData for team %" B_PRId32 " to global list.\n", tsd->teamID);
+}
+
+void Scheduler::remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
+{
+	if (tsd == NULL)
+		return;
+	InterruptsSpinLocker locker(gTeamSchedulerListLock);
+	// Ensure it's actually in the list before trying to remove, though Remove() should be safe.
+	if (tsd->GetDoublyLinkedListLink()->previous != NULL || tsd->GetDoublyLinkedListLink()->next != NULL
+		|| gTeamSchedulerDataList.Head() == tsd) {
+		gTeamSchedulerDataList.Remove(tsd);
+		TRACE_SCHED("Removed TeamSchedulerData for team %" B_PRId32 " from global list.\n", tsd->teamID);
+	} else {
+		// This might happen if it was already removed or never added.
+		TRACE_SCHED_WARNING("remove_team_scheduler_data_from_global_list: TeamSchedulerData for team %" B_PRId32 " not found in list or already removed.\n", tsd->teamID);
+	}
+}
+
 
 using namespace Scheduler;
 
@@ -2170,6 +2208,51 @@ scheduler_init()
 	for (int i = 0; i < MAX_IRQS; ++i) {
 		atomic_store_64(&gIrqLastFollowMoveTime[i], 0);
 	}
+
+	// Initialize Team Quota Management
+	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
+	// gTeamSchedulerListLock is already initialized statically
+
+	// Start the quota reset timer
+	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod,
+		B_PERIODIC_TIMER);
+}
+
+
+static int32
+Scheduler::scheduler_reset_team_quotas_event(timer* /*unused*/)
+{
+	SCHEDULER_ENTER_FUNCTION();
+	TRACE_SCHED("Scheduler: Resetting team CPU quotas for new period (%" B_PRId64 " us).\n", gQuotaPeriod);
+
+	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
+	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
+	while (tsd != NULL) {
+		InterruptsSpinLocker tsdLocker(tsd->lock); // Lock individual TSD
+		tsd->quota_period_usage = 0;
+		if (tsd->cpu_quota_percent > 0 && tsd->cpu_quota_percent <= 100) {
+			tsd->current_quota_allowance = (gQuotaPeriod * tsd->cpu_quota_percent) / 100;
+		} else if (tsd->cpu_quota_percent > 100) {
+			// Allow oversubscription conceptually, up to gQuotaPeriod for this team.
+			// Actual enforcement that total doesn't exceed 100% * num_cores is complex and
+			// might be better handled by a higher-level policy or admission control.
+			// For now, cap allowance at gQuotaPeriod if percent > 100.
+			tsd->current_quota_allowance = gQuotaPeriod;
+		}
+		else { // 0% or invalid
+			tsd->current_quota_allowance = 0;
+		}
+		tsd->quota_exhausted = false;
+
+		// dprintf("Team %" B_PRId32 ": quota reset. Allowance: %" B_PRId64 " us for %" B_PRIu32 "%% (Period: %" B_PRId64 " us)\n",
+		//    tsd->teamID, tsd->current_quota_allowance, tsd->cpu_quota_percent, gQuotaPeriod);
+
+		tsdLocker.Unlock();
+		tsd = gTeamSchedulerDataList.GetNext(tsd);
+	}
+	listLocker.Unlock();
+
+	return B_HANDLED_INTERRUPT;
 }
 
 
@@ -3798,3 +3881,150 @@ _user_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 
 // The following would typically be in a syscall table definition file:
 // SYSCALL(_user_set_irq_task_colocation, 3) // name, arg count
+
+
+// #pragma mark - Team CPU Quota Syscalls
+
+status_t
+_kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
+{
+	// Permission check (e.g., root only)
+	if (geteuid() != 0)
+		return B_NOT_ALLOWED;
+
+	if (percent_quota > 1000) { // Allow for fine-grained control, e.g. 1000 = 100.0%
+		// Or simply cap at 100 if direct percentage is intended.
+		// For now, let's assume percent_quota is direct percentage (0-100).
+		// Revisit if a different scale (like permilli) is desired.
+		// Let's assume for now percent_quota is 0-100.
+		// A value > 100 might be used for over-subscription later.
+		// For initial implementation, let's cap at 100 for simplicity, can be relaxed.
+		if (percent_quota > 100) // Cap at 100% for now.
+			return B_BAD_VALUE;
+	}
+
+	Team* team = Team::Get(teamId);
+	if (team == NULL)
+		return B_BAD_TEAM_ID;
+	BReference<Team> teamRef(team, true);
+
+	if (team->team_scheduler_data == NULL) {
+		// This should ideally not happen if TeamSchedulerData is created with Team.
+		// Potentially create it here if it's missing for some reason,
+		// or return an error. For now, assume it should exist.
+		dprintf("_kern_set_team_cpu_quota: Team %" B_PRId32 " has no scheduler data!\n", teamId);
+		return B_ERROR; // Or B_NO_INIT
+	}
+
+	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
+	InterruptsSpinLocker locker(tsd->lock);
+
+	tsd->cpu_quota_percent = percent_quota;
+	// Recalculate allowance immediately based on current gQuotaPeriod
+	if (tsd->cpu_quota_percent > 0 && tsd->cpu_quota_percent <= 100) {
+		tsd->current_quota_allowance = (gQuotaPeriod * tsd->cpu_quota_percent) / 100;
+	} else if (tsd->cpu_quota_percent > 100) {
+		tsd->current_quota_allowance = gQuotaPeriod; // Cap allowance
+	}
+	 else { // 0%
+		tsd->current_quota_allowance = 0;
+	}
+
+	// If quota is reduced below current usage, mark as exhausted.
+	// Otherwise, if it was exhausted and now has allowance, un-exhaust it.
+	if (tsd->current_quota_allowance > 0 && tsd->quota_period_usage < tsd->current_quota_allowance) {
+		tsd->quota_exhausted = false;
+	} else if (tsd->current_quota_allowance == 0 || tsd->quota_period_usage >= tsd->current_quota_allowance) {
+		if (tsd->current_quota_allowance > 0) // Only mark exhausted if it had some allowance
+			tsd->quota_exhausted = true;
+		else
+			tsd->quota_exhausted = false; // 0% quota is not "exhausted" in the sense of having used up a limit
+	}
+
+
+	locker.Unlock();
+
+	TRACE_SCHED("Team %" B_PRId32 " CPU quota set to %" B_PRIu32 "%%. New allowance: %" B_PRId64 " us.\n",
+		teamId, percent_quota, tsd->current_quota_allowance);
+
+	return B_OK;
+}
+
+status_t
+_kern_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
+{
+	if (_percent_quota == NULL || !IS_USER_ADDRESS(_percent_quota))
+		return B_BAD_ADDRESS;
+
+	Team* team = Team::Get(teamId);
+	if (team == NULL)
+		return B_BAD_TEAM_ID;
+	BReference<Team> teamRef(team, true);
+
+	if (team->team_scheduler_data == NULL) {
+		// Should have scheduler data. If not, perhaps return a default?
+		// Or indicate an error. For now, assume it exists.
+		dprintf("_kern_get_team_cpu_quota: Team %" B_PRId32 " has no scheduler data!\n", teamId);
+		// Default to 0 if not found, but this is an anomaly.
+		uint32 zeroQuota = 0;
+		if (user_memcpy(_percent_quota, &zeroQuota, sizeof(uint32)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_ERROR; // Indicate issue
+	}
+
+	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
+	InterruptsSpinLocker locker(tsd->lock);
+	uint32 currentQuota = tsd->cpu_quota_percent;
+	locker.Unlock();
+
+	if (user_memcpy(_percent_quota, &currentQuota, sizeof(uint32)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	return B_OK;
+}
+
+status_t
+_kern_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance)
+{
+	if ((_usage != NULL && !IS_USER_ADDRESS(_usage))
+		|| (_allowance != NULL && !IS_USER_ADDRESS(_allowance))) {
+		return B_BAD_ADDRESS;
+	}
+	if (_usage == NULL && _allowance == NULL) // Nothing to do
+		return B_OK;
+
+	Team* team = Team::Get(teamId);
+	if (team == NULL)
+		return B_BAD_TEAM_ID;
+	BReference<Team> teamRef(team, true);
+
+	if (team->team_scheduler_data == NULL) {
+		dprintf("_kern_get_team_cpu_usage: Team %" B_PRId32 " has no scheduler data!\n", teamId);
+		// If no data, perhaps return 0 for usage/allowance
+		bigtime_t zeroVal = 0;
+		if (_usage != NULL) {
+			if (user_memcpy(_usage, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
+		}
+		if (_allowance != NULL) {
+			if (user_memcpy(_allowance, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
+		}
+		return B_ERROR; // Indicate issue
+	}
+
+	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
+	InterruptsSpinLocker locker(tsd->lock);
+	bigtime_t currentUsage = tsd->quota_period_usage;
+	bigtime_t currentAllowance = tsd->current_quota_allowance;
+	locker.Unlock();
+
+	if (_usage != NULL) {
+		if (user_memcpy(_usage, &currentUsage, sizeof(bigtime_t)) != B_OK)
+			return B_BAD_ADDRESS;
+	}
+	if (_allowance != NULL) {
+		if (user_memcpy(_allowance, &currentAllowance, sizeof(bigtime_t)) != B_OK)
+			return B_BAD_ADDRESS;
+	}
+
+	return B_OK;
+}

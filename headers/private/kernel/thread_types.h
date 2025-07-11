@@ -70,6 +70,7 @@ struct xsi_sem_context;			// defined in xsi_semaphore.cpp
 
 namespace Scheduler {
 	struct ThreadData;
+	struct TeamSchedulerData; // Forward declaration
 }
 
 namespace BKernel {
@@ -477,6 +478,7 @@ struct Team : TeamThreadIteratorEntry<team_id>, KernelReferenceable,
 	struct list		sem_list;		// protected by sSemsSpinlock
 	struct list		port_list;		// protected by sPortsLock
 	struct arch_team arch_info;
+	Scheduler::TeamSchedulerData* team_scheduler_data; // For per-team CPU quotas
 
 	addr_t			user_data;
 	area_id			user_data_area;

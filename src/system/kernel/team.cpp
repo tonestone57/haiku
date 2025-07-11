@@ -61,6 +61,7 @@
 #include <util/AutoLock.h>
 #include <util/ThreadAutoLock.h>
 
+#include "scheduler/scheduler_team.h" // For TeamSchedulerData
 #include "TeamThreadTables.h"
 
 
@@ -424,6 +425,11 @@ TeamNotificationService::Notify(uint32 eventCode, Team* team)
 
 //	#pragma mark - Team
 
+// Forward declaration for now, will be implemented in scheduler.cpp
+namespace Scheduler {
+	void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd);
+	void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd);
+}
 
 Team::Team(team_id id, bool kernel)
 {
@@ -433,6 +439,8 @@ Team::Team(team_id id, bool kernel)
 
 	hash_next = parent = NULL;
 	serial_number = -1;
+
+	team_scheduler_data = NULL; // Initialize pointer
 
 	group_id = session_id = -1;
 	group = NULL;
@@ -507,6 +515,21 @@ Team::Team(team_id id, bool kernel)
 	fUserDefinedTimerCount = 0;
 
 	fCoreDumpCondition = NULL;
+
+	// Initialize scheduler data for non-kernel teams
+	if (!kernel) {
+		team_scheduler_data = new(std::nothrow) Scheduler::TeamSchedulerData(this->id);
+		if (team_scheduler_data != NULL) {
+			// This function will be implemented in scheduler.cpp or scheduler_team.cpp
+			// It needs to acquire gTeamSchedulerListLock.
+			// For now, we assume it exists and will be linked.
+			Scheduler::add_team_scheduler_data_to_global_list(team_scheduler_data);
+		} else {
+			// This is a problem, but Team::Create will likely fail later if other
+			// allocations also fail. For now, just note it.
+			dprintf("Team::Team: Failed to allocate TeamSchedulerData for team %" B_PRId32 "\n", this->id);
+		}
+	}
 }
 
 
@@ -526,6 +549,15 @@ Team::~Team()
 
 	if (fQueuedSignalsCounter != NULL)
 		fQueuedSignalsCounter->ReleaseReference();
+
+	// Clean up scheduler data
+	if (team_scheduler_data != NULL) {
+		// This function will be implemented in scheduler.cpp or scheduler_team.cpp
+		// It needs to acquire gTeamSchedulerListLock.
+		Scheduler::remove_team_scheduler_data_from_global_list(team_scheduler_data);
+		delete team_scheduler_data;
+		team_scheduler_data = NULL;
+	}
 
 	while (thread_death_entry* threadDeathEntry = dead_threads.RemoveHead())
 		free(threadDeathEntry);
@@ -549,6 +581,7 @@ Team::~Team()
 Team::Create(team_id id, const char* name, bool kernel)
 {
 	// create the team object
+	// Note: TeamSchedulerData is now allocated within Team's constructor
 	Team* team = new(std::nothrow) Team(id, kernel);
 	if (team == NULL)
 		return NULL;

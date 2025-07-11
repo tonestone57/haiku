@@ -221,6 +221,10 @@ extern status_t		_kern_set_scheduler_mode(int32 mode);
 extern int32		_kern_get_scheduler_mode(void);
 extern status_t		_kern_get_loadavg(struct loadavg* info, size_t size);
 
+extern status_t		_kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota);
+extern status_t		_kern_get_team_cpu_quota(team_id teamId, uint32* _percent_quota);
+extern status_t		_kern_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance);
+
 // user/group functions
 extern gid_t		_kern_getgid(bool effective);
 extern uid_t		_kern_getuid(bool effective);

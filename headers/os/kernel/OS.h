@@ -365,6 +365,10 @@ extern status_t		on_exit_thread(void (*callback)(void *), void *data);
 extern status_t set_thread_nice_value(thread_id thid, int niceValue);
 extern status_t get_thread_nice_value(thread_id thid, int* outNiceValue);
 
+extern status_t		set_team_cpu_quota(team_id team, uint32 percent_quota);
+extern status_t		get_team_cpu_quota(team_id team, uint32* _percent_quota);
+extern status_t		get_team_cpu_usage(team_id team, bigtime_t* _usage, bigtime_t* _allowance);
+
 extern thread_id 	find_thread(const char *name);
 
 extern status_t		send_data(thread_id thread, int32 code, const void *buffer,

@@ -689,6 +689,23 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 		// Let the thread itself account for its consumed CPU time.
 		// This now also updates fTimeUsedInCurrentQuantum
 		oldThreadData->UpdateActivity(activeTime);
+
+		// Account for team quota usage
+		if (oldThread->team != NULL && oldThread->team->team_scheduler_data != NULL) {
+			Scheduler::TeamSchedulerData* teamSchedData = oldThread->team->team_scheduler_data;
+			InterruptsSpinLocker locker(teamSchedData->lock);
+			if (!teamSchedData->quota_exhausted) {
+				teamSchedData->quota_period_usage += activeTime;
+				if (teamSchedData->quota_period_usage >= teamSchedData->current_quota_allowance
+					&& teamSchedData->current_quota_allowance > 0) {
+					// Don't mark exhausted if allowance is 0 (e.g. 0% quota)
+					// unless specific policy dictates 0% means no run time.
+					teamSchedData->quota_exhausted = true;
+					TRACE_SCHED("Team %" B_PRId32 " quota EXHAUSTED. Usage: %" B_PRId64 ", Allowance: %" B_PRId64 "\n",
+						teamSchedData->teamID, teamSchedData->quota_period_usage, teamSchedData->current_quota_allowance);
+				}
+			}
+		}
 	}
 
 	// If CPU load tracking is enabled, update load metrics and potentially

@@ -275,6 +275,7 @@ Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
 	return &element->fEevdfLink.fSchedulerHeapLink;
 }
 
+// LatencyNice() and SetLatencyNice() methods REMOVED as latency_nice is deprecated.
 
 inline bool
 ThreadData::IsRealTime() const
@@ -451,7 +452,7 @@ inline void ThreadData::SetSliceDuration(bigtime_t duration) { fSliceDuration = 
 inline bigtime_t ThreadData::VirtualRuntime() const { return fVirtualRuntime; }
 inline void ThreadData::SetVirtualRuntime(bigtime_t runtime) { fVirtualRuntime = runtime; }
 inline void ThreadData::AddVirtualRuntime(bigtime_t runtimeAmount) { fVirtualRuntime += runtimeAmount; }
-// LatencyNice getter/setter already defined inline due to fLatencyNice member.
+// LatencyNice getter/setter methods and fThread->latency_nice field are deprecated and removed.
 
 // --- State and Lifecycle ---
 inline void

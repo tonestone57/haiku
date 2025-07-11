@@ -1917,11 +1917,12 @@ scheduler_reschedule(int32 nextState)
 
 	// --- Mechanism A: Task-Contextual IRQ Re-evaluation ---
 	if (nextThread != NULL && !nextThreadData->IsIdle() && nextThread->cpu != NULL) {
-		bool isHighlyLatencySensitive = (nextThread->priority >= B_URGENT_DISPLAY_PRIORITY
-			|| (nextThread->scheduler_data != NULL && nextThread->scheduler_data->LatencyNice() < -10));
+		// LatencyNice hint removed, sensitivity based purely on priority.
+		bool isHighlyLatencySensitive = (nextThread->priority >= B_URGENT_DISPLAY_PRIORITY);
 
 		if (isHighlyLatencySensitive) {
-			TRACE_SCHED_IRQ_DYNAMIC("Resched: Next T%" B_PRId32 " is latency sensitive. Checking IRQs on CPU %" B_PRId32 "\n", nextThread->id, thisCPUId);
+			TRACE_SCHED_IRQ_DYNAMIC("Resched: Next T%" B_PRId32 " is latency sensitive (prio %" B_PRId32 "). Checking IRQs on CPU %" B_PRId32 "\n",
+				nextThread->id, nextThread->priority, thisCPUId);
 			CPUEntry* currentCpuEntry = CPUEntry::GetCPU(thisCPUId); // Same as 'cpu'
 			irq_assignment* irqsToPotentiallyMove[MAX_IRQS_PER_CPU]; // Max possible IRQs on one CPU
 			int32 moveCount = 0;

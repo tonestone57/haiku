@@ -68,11 +68,10 @@ struct VMAddressSpace;
 struct user_mutex_context;		// defined in user_mutex.cpp
 struct xsi_sem_context;			// defined in xsi_semaphore.cpp
 
-// Removed problematic forward declarations for Scheduler::ThreadData and Scheduler::TeamSchedulerData
-// namespace Scheduler {
-//	struct ThreadData;
-//	struct TeamSchedulerData;
-// }
+namespace Scheduler {
+	struct ThreadData;
+	struct TeamSchedulerData; // Forward declaration
+}
 
 namespace BKernel {
 	struct Team;

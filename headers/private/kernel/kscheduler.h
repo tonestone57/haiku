@@ -98,6 +98,17 @@ int32 _user_get_scheduler_mode(void);
 
 status_t _user_get_loadavg(struct loadavg* info, size_t size);
 
+// Syscalls related to nice values and team CPU quotas
+// Note: Named _user_... to match expectations from syscall_dispatcher/table.
+// Kernel implementations are in scheduler.cpp.
+status_t _user_set_thread_nice_value(thread_id thid, int niceValue);
+status_t _user_get_thread_nice_value(thread_id thid, int* niceValue);
+status_t _user_set_team_cpu_quota(team_id tmid, uint32 percent_quota);
+status_t _user_get_team_cpu_quota(team_id tmid, uint32* percent_quota);
+status_t _user_get_team_cpu_usage(team_id tmid, bigtime_t* usage, bigtime_t* allowance);
+// TODO: _user_set_irq_task_colocation prototype might also belong here if not elsewhere.
+// For now, only adding the ones that caused build errors.
+
 
 #ifdef __cplusplus
 }

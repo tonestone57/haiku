@@ -29,7 +29,7 @@ const bigtime_t kLowLatencyCacheExpire = 30000;  // 30ms (New Value)
 static void
 low_latency_switch_to_mode()
 {
-	gKernelKDistFactor = 0.3f; // TODO EEVDF: Re-evaluate usefulness or repurpose for slice calculation. Currently no direct effect.
+	// gKernelKDistFactor = 0.3f; // REMOVED - Unused by EEVDF
 	gSchedulerBaseQuantumMultiplier = 1.0f; // Affects SliceDuration via GetBaseQuantumForLevel
 	// gSchedulerAgingThresholdMultiplier = 1.0f; // Aging is obsolete with EEVDF
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
@@ -47,8 +47,8 @@ low_latency_switch_to_mode()
 	gModeIrqTargetFactor = 0.4f;
 	gModeMaxTargetCpuIrqLoad = 600;
 
-	dprintf("scheduler: Low Latency mode activated. DTQ Factor: %.2f (EEVDF: effect TBD), BaseQuantumMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
-		gKernelKDistFactor, gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
+	dprintf("scheduler: Low Latency mode activated. BaseQuantumMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
+		gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 
@@ -126,18 +126,15 @@ low_latency_choose_core(const ThreadData* threadData)
 	ASSERT(threadData != NULL);
 
 	// 1. Thread Type Inference
+	// LatencyNice is deprecated. P-Critical determined by high priority or high load.
 	bool threadIsPCritical = (threadData->GetBasePriority() >= B_REAL_TIME_DISPLAY_PRIORITY
-								|| threadData->LatencyNice() < -5 // More sensitive LatencyNice for P-Crit
 								|| threadData->GetLoad() > (kMaxLoad * 7 / 10)); // Higher demand threshold
 	// In LL mode, we are less concerned about explicitly identifying E-Preferential.
 	// Non-P-Critical threads are treated as flexible but will still prefer higher capacity/idle cores.
-	// bool threadIsEPreferential = (!threadIsPCritical && (threadData->GetBasePriority() < B_NORMAL_PRIORITY
-	// 								|| threadData->LatencyNice() > 5
-	// 								|| threadData->GetLoad() < (kMaxLoad * 3 / 10)));
-	// For LL, let's simplify: if not P-Critical, it's "other".
+	// For LL, if not P-Critical, it's "other".
 
-	TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", LatNice %d, Prio %" B_PRId32 ") IsPCritical: %d\n",
-		threadData->GetThread()->id, threadData->GetLoad(), threadData->LatencyNice(),
+	TRACE_SCHED_BL("LL choose_core: T %" B_PRId32 " (Load %" B_PRId32 ", Prio %" B_PRId32 ") IsPCritical: %d\n",
+		threadData->GetThread()->id, threadData->GetLoad(),
 		threadData->GetBasePriority(), threadIsPCritical);
 
 	// 2. Initialization

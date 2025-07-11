@@ -17,13 +17,9 @@ EevdfDeadlineCompare::IsKeyLess(const ThreadData* a, const ThreadData* b) const
 {
 	// This is used by the heap's internal sift operations.
 	// It should return true if a's "key" (virtual deadline) is less than b's.
-	if (a == NULL || b == NULL) {
-		// This case should ideally not be hit if the heap is used correctly
-		// with non-NULL elements. However, to be safe:
-		if (a == NULL && b != NULL) return false; // NULL is not less than non-NULL
-		if (a != NULL && b == NULL) return true;  // Non-NULL is less than NULL (for sorting purposes)
-		return false; // both NULL or undefined
-	}
+	// Null checks removed based on the assumption that SchedulerHeap will only
+	// store non-null ThreadData pointers. An ASSERT is added to SchedulerHeap::Insert.
+	ASSERT(a != NULL && b != NULL);
 	return a->VirtualDeadline() < b->VirtualDeadline();
 }
 

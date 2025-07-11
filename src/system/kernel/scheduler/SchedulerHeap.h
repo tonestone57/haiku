@@ -312,6 +312,7 @@ SCHEDULER_HEAP_CLASS_NAME::Insert(ElementType element)
 			return result;
 	}
 	ASSERT(fLastElement < fSize);
+	ASSERT(element != NULL && "Attempting to insert NULL element into SchedulerHeap");
 
 	SchedulerHeapLink<ElementType, ElementType>* link = fGetLink(element);
 	ASSERT(link->fIndex == -1 && "Element already in heap?");

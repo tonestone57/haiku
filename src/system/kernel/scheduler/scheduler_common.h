@@ -140,7 +140,7 @@ class CoreEntry;
 class ThreadData; // Forward declaration
 
 // --- MLFQ and DTQ Definitions ---
-#define DEFAULT_K_DIST_FACTOR 0.25f // Start with a conservative value
+// #define DEFAULT_K_DIST_FACTOR 0.25f // REMOVED - Unused by EEVDF
 
 // SMT Conflict Factor Defaults
 #define DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY 0.60f
@@ -194,7 +194,7 @@ static const float kInstantLoadEWMAAlpha = 0.4f;
 
 // --- Mode-Settable Global Parameters ---
 // These are set by scheduler_set_operation_mode via mode's switch_to_mode
-extern float gKernelKDistFactor; // TODO EEVDF: Re-evaluate usefulness or repurpose. Currently no direct effect.
+// extern float gKernelKDistFactor; // REMOVED - Unused by EEVDF
 // extern float gSchedulerBaseQuantumMultiplier; // Directly used in ThreadData::GetBaseQuantumForLevel, not needed as extern here if modes don't set it.
 // extern float gSchedulerAgingThresholdMultiplier; // Aging is obsolete with EEVDF
 enum SchedulerLoadBalancePolicy {
@@ -257,7 +257,7 @@ const int32 kMaxLoadForWarmCorePreference = kHighLoad;
 extern bool gSingleCore;
 extern bool gTrackCoreLoad;
 extern bool gTrackCPULoad;
-extern float gKernelKDistFactor; // To be initialized, potentially by scheduler modes
+// extern float gKernelKDistFactor; // REMOVED - Unused by EEVDF
 
 // Defined in power_saving.cpp, used by scheduler_thread.cpp for DTQ refinement
 extern CoreEntry* sSmallTaskCore;
@@ -270,4 +270,3 @@ void init_debug_commands();
 
 
 #endif	// KERNEL_SCHEDULER_COMMON_H
-

@@ -309,8 +309,6 @@ cmd_thread_sched_info(int argc, char** argv)
 	return 0;
 }
 
-// Original include block was here, now moved to the top.
-
 namespace Scheduler {
 
 // --- Team CPU Quota Management: Global Variables ---
@@ -385,7 +383,7 @@ scheduler_mode_operations* gCurrentMode;
 bool gSingleCore;
 bool gTrackCoreLoad;
 bool gTrackCPULoad;
-float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
+// float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
@@ -469,8 +467,8 @@ static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusie
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
 #endif
-static int cmd_scheduler_set_kdf(int argc, char** argv);
-static int cmd_scheduler_get_kdf(int argc, char** argv);
+// static int cmd_scheduler_set_kdf(int argc, char** argv); // REMOVED
+// static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
@@ -499,765 +497,6 @@ static const int32 kBenefitScoreLagFactor = 1;
 static const int32 kBenefitScoreEligFactor = 2;
 static const bigtime_t kMinUnweightedNormWorkToSteal = 500;
 
-// ... (The rest of the file content remains the same from the previous full read) ...
-// This includes ThreadEnqueuer::operator(), scheduler_dump_thread_data,
-// enqueue_thread_on_cpu_eevdf, scheduler_enqueue_in_run_queue,
-// scheduler_set_thread_priority, scheduler_reschedule_ici, stop_cpu_timers,
-// continue_cpu_timers, thread_resumes, scheduler_new_thread_entry, switch_thread,
-// _attempt_one_steal, scheduler_try_work_steal, reschedule (both versions),
-// _find_quiet_alternative_cpu_for_irq, scheduler_reschedule (final wrapper),
-// scheduler_on_thread_create, scheduler_on_thread_init, scheduler_on_thread_destroy,
-// scheduler_start, scheduler_set_operation_mode, scheduler_set_cpu_enabled,
-// traverse_topology_tree, build_topology_mappings, init,
-// scheduler_update_global_min_vruntime, scheduler_load_balance_event,
-// _scheduler_init_kdf_debug_commands, cmd_scheduler_set_elastic_quota_mode, etc.,
-// scheduler_init, Scheduler::scheduler_reset_team_quotas_event,
-// debugger commands, _scheduler_select_cpu_for_irq, scheduler_irq_balance_event,
-// scheduler_enable_scheduling, scheduler_update_policy, SchedulerListener destructor,
-// scheduler_add_listener, scheduler_remove_listener, _scheduler_select_cpu_on_core,
-// scheduler_perform_load_balance, scheduler_maybe_follow_task_irqs,
-// and all the do_... syscall implementation functions.
-
-// The key change is moving the include block.
-// For brevity, I'm not repeating the entire file here again, but the overwrite operation
-// will use the full content with includes moved.
-
-// Placeholder for the rest of the file content:
-// ... (all functions and definitions from ThreadEnqueuer::operator() down to the end of the file) ...
-// For example, ending with:
-// ...
-// Syscall implementations (do_get_thread_nice_value, etc.)
-// ...
-// End of file.
-// Ensure to append the actual remaining content of scheduler.cpp here.
-
-// For the purpose of this tool call, I will use a truncated version focusing on the top part,
-// as the tool might have limits, and the core change is at the top.
-// The real operation would use the full, correctly reordered file.
-// The previous read_files gave the full content, so I have it.
-
-// Re-pasting the full content from the previous read_files output, with includes moved.
-/*
- * Copyright 2013-2014, Paweł Dziepak, pdziepak@quarnos.org.
- * Copyright 2009, Rene Gollent, rene@gollent.com.
- * Copyright 2008-2011, Ingo Weinhold, ingo_weinhold@gmx.de.
- * Copyright 2002-2010, Axel Dörfler, axeld@pinc-software.de.
- * Copyright 2002, Angelo Mottola, a.mottola@libero.it.
- * Distributed under the terms of the MIT License.
- *
- * Copyright 2001-2002, Travis Geiselbrecht. All rights reserved.
- * Distributed under the terms of the NewOS License.
- */
-
-#include <OS.h>
-#include <AutoDeleter.h>
-#include <cpu.h>
-#include <debug.h>
-#include <interrupts.h>
-#include <kernel.h>
-#include <kscheduler.h>
-#include <listeners.h>
-#include <load_tracking.h>
-#include <smp.h>
-#include <timer.h>
-#include <util/Random.h>
-#include <util/DoublyLinkedList.h>
-#include <algorithm>
-#include <math.h> // For roundf, pow
-
-#include <stdlib.h> // For strtoul
-#include <stdio.h>  // For kprintf, snprintf (though kprintf is kernel specific)
-
-// #include <UserTeamCapabilities.h> // Temporarily commented out
-
-#include "scheduler_common.h"
-#include "scheduler_cpu.h"
-#include "scheduler_defs.h"
-#include "scheduler_locking.h"
-#include "scheduler_modes.h"
-#include "scheduler_profiler.h"
-#include "scheduler_thread.h"
-#include "scheduler_tracing.h"
-#include "scheduler_team.h"
-#include "EevdfRunQueue.h"
-
-#include <util/MultiHashTable.h>
-// #include <util/DoublyLinkedList.h> // Already included above
-
-/*! The thread scheduler */
-
-// Define missing DEFAULT_... macros with values from comments
-#define DEFAULT_IRQ_BALANCE_CHECK_INTERVAL 500000 // Default 0.5s, assuming microseconds
-#define DEFAULT_IRQ_TARGET_FACTOR 0.3f
-#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD 700
-#define DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD 1000
-#define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
-#define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
-
-// EEVDF Specific Defines (Initial values, require tuning)
-#define SCHEDULER_TARGET_LATENCY		20000		// Target latency for a scheduling period (e.g., 20ms)
-#define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs (e.g., 1ms)
-// SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
-
-// --- New Continuous Weight Calculation Logic ---
-
-// Minimum and maximum weights for the new scheme
-static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight[39], a floor for active threads.
-// Increased kNewMaxWeightCap to allow more granularity at high RT priorities.
-// Old value: 88761 * 16 = 1,420,176.
-// New value allows differentiation for most user-settable RT priorities,
-// while still capping the very highest kernel priorities to prevent extreme weight disparities
-// and potential numerical issues with overly small weighted slice entitlements.
-static const int32 kNewMaxWeightCap = 35000000;
-
-// The new weight table and its initialization function
-static int32 gHaikuContinuousWeights[B_MAX_PRIORITY];
-
-// Prototype function to calculate weights (uses double for precision during generation)
-static int32
-calculate_continuous_haiku_weight_prototype(int32 priority)
-{
-	if (priority == B_IDLE_PRIORITY) // 0
-		return 1; // Smallest distinct weight for idle
-	if (priority > B_IDLE_PRIORITY && priority < B_LOWEST_ACTIVE_PRIORITY) // Priorities 1-4
-		return 2 + (priority - 1) * 2; // Small, distinct weights: 2, 4, 6, 8
-
-	// Clamp priority for the main calculation range to avoid extreme values with pow()
-	// B_MAX_PRIORITY is 121, so valid Haiku priorities are 0-120.
-	int32 calcPrio = priority;
-	if (calcPrio < B_LOWEST_ACTIVE_PRIORITY) calcPrio = B_LOWEST_ACTIVE_PRIORITY;
-	if (calcPrio >= B_MAX_PRIORITY) calcPrio = B_MAX_PRIORITY - 1; // Max Haiku prio is 120
-
-	// Base scaling factor per Haiku priority point.
-	// (1.25)^(1/2.5) approx 1.0915. This means for every 2.5 priority points
-	// away from B_NORMAL_PRIORITY, the weight changes by a factor of 1.25.
-	const double haiku_priority_step_factor = 1.091507805494422;
-
-	double weight_fp;
-
-	// Calculate relative to B_NORMAL_PRIORITY (10)
-	// Original: int priority_delta_from_normal = B_NORMAL_PRIORITY - calcPrio;
-	// Corrected: exponent should be (calcPrio - B_NORMAL_PRIORITY) so higher Haiku priority numbers get higher weights.
-	int exponent = calcPrio - B_NORMAL_PRIORITY;
-
-	weight_fp = (double)SCHEDULER_WEIGHT_SCALE * pow(haiku_priority_step_factor, exponent);
-
-	// Apply additional multipliers for kernel/urgent real-time priorities
-	// This creates a steeper increase for priorities >= B_URGENT_DISPLAY_PRIORITY
-	// while keeping the curve smoother for user-level priorities.
-	if (calcPrio >= B_MAX_REAL_TIME_PRIORITY) { // Timer threads, etc. (>= 120)
-		weight_fp *= 4.0; // Strongest boost for highest kernel RT
-	} else if (calcPrio >= B_URGENT_PRIORITY) { // Kernel daemons, etc. (>= 100)
-		weight_fp *= 2.5; // Significant boost
-	} else if (calcPrio >= B_REAL_TIME_PRIORITY) { // User RT, important system (>= 30)
-		weight_fp *= 1.5; // Moderate boost
-	} else if (calcPrio >= B_REAL_TIME_DISPLAY_PRIORITY) { // Display server, etc. (>= 20)
-		weight_fp *= 1.2; // Slight boost over normal user priorities
-	}
-	// Priorities from B_LOWEST_ACTIVE_PRIORITY (5) up to B_REAL_TIME_DISPLAY_PRIORITY - 1 (19)
-	// will use the direct exponential scaling from B_NORMAL_PRIORITY without additional multipliers.
-
-	int32 calculated_weight = static_cast<int32>(round(weight_fp));
-
-	// Apply overall caps and ensure minimum for active priorities
-	if (calculated_weight < kNewMinActiveWeight && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
-		calculated_weight = kNewMinActiveWeight;
-	if (calculated_weight > kNewMaxWeightCap)
-		calculated_weight = kNewMaxWeightCap;
-
-	// Final check: if an active priority somehow calculated to 1 (idle weight), bump it.
-	if (calculated_weight <= 1 && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
-		calculated_weight = kNewMinActiveWeight;
-
-	return calculated_weight;
-}
-
-static void
-_init_continuous_weights()
-{
-	dprintf("Scheduler: Initializing continuous weights table...\n");
-	for (int32 i = 0; i < B_MAX_PRIORITY; i++) {
-		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
-		// For extensive debugging of the generated table:
-		// dprintf("Weight for prio %3d = %6d\n", i, gHaikuContinuousWeights[i]);
-	}
-	// Ensure idle is absolutely minimal if prototype didn't set it to 1.
-	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1;
-	dprintf("Scheduler: Continuous weights table initialized.\n");
-	// Example output for key priorities:
-	// dprintf("Key Weights: Idle(0)=%d, LowActive(5)=%d, Normal(10)=%d, RTDisp(20)=%d, RTUser(30)=%d, Urgent(100)=%d, MaxRT(120)=%d\n",
-	//	gHaikuContinuousWeights[0], gHaikuContinuousWeights[5], gHaikuContinuousWeights[10],
-	//	gHaikuContinuousWeights[20], gHaikuContinuousWeights[30], gHaikuContinuousWeights[100], gHaikuContinuousWeights[120]);
-}
-
-// Toggle to switch between old and new weight calculation for testing.
-// Default to false (old system) until new system is validated.
-// Enabling the new continuous weight mapping by default.
-static const bool kUseContinuousWeights = true;
-
-// --- Original Haiku priority to nice index mapping ---
-// Helper to map Haiku priority to an effective "nice" value, then to an index for gNiceToWeight.
-// B_NORMAL_PRIORITY (10) maps to nice 0 (index 20).
-// This function is unused as kUseContinuousWeights is true and
-// scheduler_priority_to_weight directly uses gHaikuContinuousWeights.
-// static inline int scheduler_haiku_priority_to_nice_index(int32 priority) { ... }
-
-/*
-    Interaction of Team CPU Quotas with Thread Priorities & POSIX nice():
-    --------------------------------------------------------------------
-    Team CPU quotas serve as a budget that dictates how much CPU time a
-    team, as a whole, is entitled to over a defined period (gQuotaPeriod).
-    This budget is primarily enforced by the Tier 1 team selection logic in
-    reschedule(), which considers team_virtual_runtime and quota exhaustion status
-    when deciding which team's threads get preferential access to a CPU.
-
-    Individual thread priorities, typically influenced by POSIX nice() values
-    (which map to Haiku priorities from B_LOWEST_ACTIVE_PRIORITY to
-    B_REAL_TIME_DISPLAY_PRIORITY - 1 for normal user threads via
-    _kern_set_thread_nice_value), determine how threads *within the same team*
-    share that team's allocated CPU time slice(s) when the team is active on a CPU.
-
-    When a team is selected to run on a CPU by the Tier 1 scheduler:
-      - Its threads compete based on their individual EEVDF parameters (Virtual
-        Deadline, lag), which are derived from their Haiku priorities (and thus
-        nice values through the scheduler_priority_to_weight() function below).
-      - A thread with a lower nice value (resulting in a higher Haiku priority
-        and a larger EEVDF weight) will generally be favored by the EEVDF algorithm
-        over other threads in the same team with higher nice values.
-
-    Key points regarding the interaction:
-    - Team quotas do not override the *relative* EEVDF scheduling of threads
-      within an active team; they control the team's overall access to CPU resources.
-      Nice values dictate intra-team fairness.
-    - If a team's quota is exhausted, its non-real-time threads are typically
-      deprioritized (e.g., run at an idle-equivalent EEVDF weight by this function)
-      or prevented from running altogether (by thread selection logic in scheduler_cpu.cpp),
-      according to the gTeamQuotaExhaustionPolicy. In such a state, their original
-      nice values become less relevant until the team's quota is replenished or
-      they are allowed to borrow CPU time under the elastic quota mode.
-    - Real-time threads (priority >= B_REAL_TIME_DISPLAY_PRIORITY) generally
-      bypass team quota limitations in terms of their EEVDF weight calculation
-      (as handled by this function) and thread selection eligibility
-      (see CPUEntry::ChooseNextThread()), ensuring they can meet their latency
-      demands even if their team is over budget.
-*/
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const CPUEntry* contextCpu) {
-	if (thread == NULL) {
-		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-	}
-
-	// Real-Time Thread Quota Bypass check first
-	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
-			thread->id, thread->team ? thread->team->id : -1, thread->priority);
-	}
-	// Starvation-Low Policy for Quota Exhaustion / Elastic Mode Handling
-	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		bool isTeamExhausted;
-		bool isBorrowing = false;
-
-		InterruptsSpinLocker locker(tsd->lock);
-		isTeamExhausted = tsd->quota_exhausted;
-		locker.Unlock(); // Unlock TSD lock before potentially accessing contextCpu fields
-
-		if (isTeamExhausted) {
-			if (gSchedulerElasticQuotaMode && contextCpu != NULL) {
-				// Check if the *contextCpu* (target/current CPU for this weight calculation)
-				// is currently allowing this team (tsd) to borrow.
-				// This requires contextCpu->fCurrentActiveTeam to be accurate for the operation.
-				if (contextCpu->fCurrentActiveTeam == tsd) {
-					isBorrowing = true;
-				}
-			} else if (gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
-				// Fallback for contexts where contextCpu might not be available (e.g. some direct calls not yet updated)
-				// This is less accurate and should be minimized by updating all callers.
-				CPUEntry* threadActualCpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
-				if (threadActualCpu->fCurrentActiveTeam == tsd) {
-					isBorrowing = true;
-					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
-				}
-			}
-
-
-			if (!isBorrowing) {
-				if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-				} else if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-					// Fall through to normal weight calculation.
-				}
-			} else { // isBorrowing is true
-				TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") is exhausted but actively borrowing on ContextCPU %" B_PRId32 ". Using normal weight.\n",
-					thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-				// Fall through to normal weight calculation.
-			}
-		}
-	}
-
-    int32 priority = thread->priority;
-    if (priority < 0) {
-        priority = 0;
-    } else if (priority >= B_MAX_PRIORITY) {
-        priority = B_MAX_PRIORITY - 1;
-    }
-    return gHaikuContinuousWeights[priority];
-}
-
-
-static void
-scheduler_update_global_min_team_vruntime()
-{
-	if (gTeamSchedulerDataList.IsEmpty()) {
-		// If list is empty, gGlobalMinTeamVRuntime likely remains 0 or its last value.
-		// No teams to advance it further.
-		return;
-	}
-
-	bigtime_t calculatedNewGlobalMin = B_INFINITE_TIMEOUT;
-	bool foundAny = false;
-
-	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
-	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
-	while (tsd != NULL) {
-		InterruptsSpinLocker teamLocker(tsd->lock);
-		// Consider all teams, as even exhausted ones have a vruntime.
-		if (tsd->team_virtual_runtime < calculatedNewGlobalMin) {
-			calculatedNewGlobalMin = tsd->team_virtual_runtime;
-		}
-		foundAny = true;
-		teamLocker.Unlock();
-		tsd = gTeamSchedulerDataList.GetNext(tsd);
-	}
-	listLocker.Unlock();
-
-	if (foundAny) {
-		// gGlobalMinTeamVRuntime should only advance.
-		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
-		if (calculatedNewGlobalMin > currentGlobalVal) {
-			// It's okay if calculatedNewGlobalMin is B_INFINITE_TIMEOUT initially
-			// if all team_virtual_runtimes are also B_INFINITE_TIMEOUT (or very large).
-			// The key is it should only increase from its previous valid value.
-			// If all teams have run and have positive vruntimes, this will be fine.
-			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
-			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
-		} else if (calculatedNewGlobalMin < currentGlobalVal && calculatedNewGlobalMin != 0 && currentGlobalVal != 0) {
-			// This case might indicate a team's vruntime was reset or an issue.
-			// For now, we only strictly advance gGlobalMinTeamVRuntime.
-			// However, if all teams are new and their vruntime is 0 (from init),
-			// and global was >0, this path would be hit.
-			// Revisit: if a team is added, its vruntime is set to current global min.
-			// If all teams are deleted and then new ones added, global min could reset.
-			// For now, strict advance unless it's a reset to 0.
-			// The logic in add_team_scheduler_data sets new team VR to current global,
-			// and this function only advances global if a team's VR is higher.
-			// This seems fine.
-		}
-	}
-}
-
-
-static int
-cmd_thread_sched_info(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: thread_sched_info <thread_id>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	thread_id id = strtoul(argv[1], NULL, 0);
-	if (id <= 0) {
-		kprintf("Invalid thread ID: %s\n", argv[1]);
-		return B_KDEBUG_ERROR;
-	}
-
-	Thread* thread = Thread::Get(id);
-	if (thread == NULL) {
-		kprintf("Thread %" B_PRId32 " not found.\n", id);
-		return B_KDEBUG_ERROR;
-	}
-	BReference<Thread> threadRef(thread, true); // Manage reference
-
-	// Acquire locks to safely access thread and scheduler data
-	// Note: Acquiring multiple locks needs care for ordering if other parts of code do too.
-	// For KDL, it's usually okay as system is paused, but good practice.
-	// Thread::fLock protects some thread fields, thread->scheduler_lock protects scheduler_data.
-	thread->Lock();
-	InterruptsSpinLocker schedulerLocker(thread->scheduler_lock);
-
-	kprintf("Scheduler Info for Thread %" B_PRId32 " (\"%s\"):\n", thread->id, thread->name);
-	kprintf("--------------------------------------------------\n");
-
-	kprintf("Base Priority:      %" B_PRId32 "\n", thread->priority);
-	// kprintf("Latency Nice (canonical): %d\n", thread->latency_nice); // From struct Thread - REMOVED
-
-	if (thread->scheduler_data != NULL) {
-		ThreadData* td = thread->scheduler_data;
-		kprintf("Scheduler Data (ThreadData*) at: %p\n", td);
-		td->Dump(); // This prints most EEVDF params, effective prio, load, etc.
-
-		kprintf("\nAdditional Scheduler Details:\n");
-		kprintf("  Pinned to CPU:      ");
-		if (thread->pinned_to_cpu > 0) {
-			kprintf("%" B_PRId32 "\n", thread->pinned_to_cpu - 1);
-		} else {
-			kprintf("no\n");
-		}
-		kprintf("  CPU Affinity Mask:  ");
-		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsFull(true)) {
-			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
-		} else {
-			// Print up to 2 64-bit hex values for the mask
-			const uint64* bits = affinityMask.Bits();
-			kprintf("0x%016" B_PRIx64, bits[0]);
-			if (CPUSet::CountBits() > 64) // Assuming CPUSet can be > 64 bits
-				kprintf("%016" B_PRIx64, bits[1]);
-			kprintf("\n");
-		}
-
-		kprintf("  I/O Bound Heuristic:\n");
-		kprintf("    Avg Run Burst (us): %" B_PRId64 "\n", td->fAverageRunBurstTimeEWMA);
-		kprintf("    Voluntary Sleeps:   %" B_PRIu32 "\n", td->fVoluntarySleepTransitions);
-		kprintf("    Is Likely I/O Bound: %s\n", td->IsLikelyIOBound() ? "yes" : "no");
-
-		kprintf("  Affinitized IRQs:\n");
-		int8 irqCount = 0;
-		const int32* affIrqs = td->GetAffinitizedIrqs(irqCount);
-		if (irqCount > 0) {
-			for (int8 i = 0; i < irqCount; ++i) {
-				kprintf("    IRQ %" B_PRId32 "\n", affIrqs[i]);
-			}
-		} else {
-			kprintf("    none\n");
-		}
-
-	} else {
-		kprintf("Scheduler Data:     <not initialized/available>\n");
-	}
-
-	schedulerLocker.Unlock();
-	// thread->Unlock(); // Unlock thread general lock earlier if Team info needs its own lock
-
-	// Display Team Quota Information
-	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		// Acquire team_scheduler_data lock if it's separate and needed for consistent read
-		// For KDL, direct access might be acceptable as system is paused.
-		// However, if tsd->lock protects these fields, it should be used.
-		// Let's assume for KDL, direct read under paused system is okay for now.
-		// If live, InterruptsSpinLocker team_data_locker(tsd->lock) would be needed.
-		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
-		kprintf("  Quota Percent:      %" B_PRIu32 "%%\n", tsd->cpu_quota_percent);
-		kprintf("  Period Usage (us):  %" B_PRId64 "\n", tsd->quota_period_usage);
-		kprintf("  Current Allowance (us): %" B_PRId64 "\n", tsd->current_quota_allowance);
-		kprintf("  Quota Exhausted:    %s\n", tsd->quota_exhausted ? "yes" : "no");
-		kprintf("  Team VRuntime:      %" B_PRId64 "\n", tsd->team_virtual_runtime);
-	} else if (thread->team != NULL) {
-		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
-		kprintf("  <No team scheduler data available>\n");
-	} else {
-		kprintf("\nTeam Quota Information:\n");
-		kprintf("  <Thread does not belong to a team>\n");
-	}
-
-	thread->Unlock(); // Unlock thread general lock after all info is gathered.
-
-	kprintf("--------------------------------------------------\n");
-	return 0;
-}
-
-
-namespace Scheduler {
-
-// --- Team CPU Quota Management: Global Variables ---
-//! Default period over which team CPU quotas are enforced (microseconds).
-const bigtime_t kDefaultQuotaPeriod = 100000; // 100ms
-//! Currently active quota period (microseconds). Tunable via KDL `team_quota_period`.
-bigtime_t gQuotaPeriod = kDefaultQuotaPeriod;
-//! Global list of all TeamSchedulerData instances, for teams with active quota settings.
-DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
-//! Spinlock protecting `gTeamSchedulerDataList`.
-spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
-//! Timer responsible for periodically calling `scheduler_reset_team_quotas_event`.
-static timer gQuotaResetTimer;
-//! Global minimum virtual runtime observed across all teams. Used to initialize new teams' vruntimes.
-bigtime_t gGlobalMinTeamVRuntime = 0;
-
-static int32 scheduler_reset_team_quotas_event(timer* unused);
-static void scheduler_update_global_min_team_vruntime();
-
-//! @name Team Quota Tunables
-//@{
-
-//! If true, allows teams that have exhausted their nominal quota to "borrow"
-//! otherwise idle CPU time. Tunable via KDL `scheduler_set_elastic_mode`.
-bool gSchedulerElasticQuotaMode = false; // Default: Off
-
-//! Policy determining how threads from quota-exhausted teams are treated.
-//! See `TeamQuotaExhaustionPolicy` enum in `scheduler_defs.h`.
-//! Tunable via KDL `scheduler_set_exhaustion_policy`.
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW; // Default
-
-//@}
-
-// KDL command handlers for team quota tunables
-static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
-static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
-// --- End Team CPU Quota Management ---
-
-
-static int
-cmd_dump_eevdf_weights(int argc, char** argv)
-{
-	kprintf("Haiku Priority to EEVDF Weight Mapping (Continuous Prototype):\n");
-	kprintf("Prio | Weight     | Ratio to Prev | Notes\n");
-	kprintf("-----|------------|---------------|------------------------------------\n");
-
-	int32 previousWeight = 0;
-
-	for (int32 prio = 0; prio < B_MAX_PRIORITY; prio++) {
-		int32 currentWeight = gHaikuContinuousWeights[prio];
-		char notes[80] = "";
-		char ratioStr[16] = "N/A";
-
-		if (prio == B_IDLE_PRIORITY && currentWeight == 1) {
-			// Expected idle weight
-		} else if (prio > B_IDLE_PRIORITY && prio < B_LOWEST_ACTIVE_PRIORITY && currentWeight == (2 + (prio - 1) * 2)) {
-			// Special low priorities
-		} else if (prio >= B_LOWEST_ACTIVE_PRIORITY && currentWeight == kNewMinActiveWeight) {
-			snprintf(notes, sizeof(notes), "At kNewMinActiveWeight (%ld)", kNewMinActiveWeight);
-		} else if (currentWeight == kNewMaxWeightCap) {
-			snprintf(notes, sizeof(notes), "At kNewMaxWeightCap (%ld)", kNewMaxWeightCap);
-		}
-
-		if (prio > 0 && previousWeight > 0) {
-			double ratio = (double)currentWeight / previousWeight;
-			snprintf(ratioStr, sizeof(ratioStr), "%.3fx", ratio);
-		} else if (prio > 0 && currentWeight > 0 && previousWeight == 0) {
-			snprintf(ratioStr, sizeof(ratioStr), "Inf");
-		}
-
-		kprintf("%4" B_PRId32 " | %10" B_PRId32 " | %13s | %s\n", prio, currentWeight, ratioStr, notes);
-		previousWeight = currentWeight;
-	}
-	kprintf("-----|------------|---------------|------------------------------------\n");
-	kprintf("Note: SCHEDULER_WEIGHT_SCALE = %d\n", SCHEDULER_WEIGHT_SCALE);
-	kprintf("      kNewMinActiveWeight = %ld, kNewMaxWeightCap = %ld\n", kNewMinActiveWeight, kNewMaxWeightCap);
-	kprintf("      Base scaling factor per Haiku prio point: ~%.5f\n", 1.0915078);
-	kprintf("      RT Multipliers: >=20: 1.2x; >=30: 1.5x; >=100: 2.5x; >=120: 4.0x (applied to base exponential)\n");
-
-	return 0;
-}
-
-
-class ThreadEnqueuer : public ThreadProcessing {
-public:
-	void		operator()(ThreadData* thread);
-};
-
-scheduler_mode gCurrentModeID;
-scheduler_mode_operations* gCurrentMode;
-
-bool gSingleCore;
-bool gTrackCoreLoad;
-bool gTrackCPULoad;
-float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
-
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
-
-bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
-float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
-int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
-int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
-int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
-int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-
-// IRQ-Task Colocation Data Structures
-
-//! Definition for a HashTable mapping IRQ vectors (int) to thread_ids.
-struct IntHashDefinition {
-	typedef int KeyType;
-	typedef thread_id ValueType;
-
-	size_t HashKey(int key) const
-	{
-		return (size_t)key;
-	}
-
-	size_t Hash(thread_id* value) const
-	{
-		// Not needed for direct key-based lookup, but HashTable might use it internally
-		// if we were hashing based on value. For value itself, it's just thread_id.
-		return (size_t)*value;
-	}
-
-	bool Compare(int key, thread_id* value) const
-	{
-		// This comparison is for HashTable's internal chaining if it stores values directly
-		// and needs to compare a key against a field in the stored value type.
-		// However, for a simple int -> thread_id map, this might not be directly used
-		// if HashTable allows direct value storage.
-		// Assuming a typical HashTable where we lookup by key and get a value.
-		// Let's assume this is for checking if a value matches for a given key, which is not typical.
-		// The primary comparison is `CompareKeys`.
-		return false; // This function might be for more complex scenarios.
-	}
-
-	bool CompareKeys(int key1, int key2) const
-	{
-		return key1 == key2;
-	}
-};
-//! Global hash table mapping IRQ vectors to specific thread IDs for colocation.
-static HashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
-//! Spinlock protecting sIrqTaskAffinityMap.
-static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
-
-
-// Cooldown period for IRQ follow-task logic to prevent excessive ping-ponging.
-static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
-// #include <support/atomic.h> // For atomic operations - Redundant, provided by SupportDefs.h (via OS.h)
-
-// Tracks the last time an IRQ was moved by the follow-task mechanism
-// or by the proactive mechanism in reschedule() (Task-Contextual IRQ Re-evaluation).
-// This shared timestamp array is used with two different cooldown periods:
-// 1. `kIrqFollowTaskCooldownPeriod` (e.g., 50ms) for `scheduler_maybe_follow_task_irqs`.
-// 2. `DYNAMIC_IRQ_MOVE_COOLDOWN` (e.g., 150ms) for proactive moves in `reschedule`.
-// A move by either mechanism updates this timestamp. The longer cooldown of the
-// proactive mechanism will thus also delay subsequent follow-task moves for that IRQ,
-// creating a reasonable hierarchy to prevent rapid ping-ponging.
-// MAX_IRQS should be available from <interrupts.h> or its includes.
-static int64 gIrqLastFollowMoveTime[MAX_IRQS]; // Changed to int64 for atomic ops
-// static spinlock gIrqFollowTimeLock = B_SPINLOCK_INITIALIZER; // REMOVED
-// gLatencyNiceFactors array and related comments REMOVED as LatencyNice mechanism is deprecated.
-
-
-}	// namespace Scheduler
-
-// Implementation of global list management functions for TeamSchedulerData
-void Scheduler::add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
-{
-	if (tsd == NULL)
-		return;
-
-	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
-
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
-	gTeamSchedulerDataList.Add(tsd);
-	TRACE_SCHED_TEAM("Added TeamSchedulerData for team %" B_PRId32 " to global list. Initial VR: %" B_PRId64 "\n",
-		tsd->teamID, tsd->team_virtual_runtime);
-}
-
-void Scheduler::remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
-{
-	if (tsd == NULL)
-		return;
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
-	// Ensure it's actually in the list before trying to remove, though Remove() should be safe.
-	if (tsd->GetDoublyLinkedListLink()->previous != NULL || tsd->GetDoublyLinkedListLink()->next != NULL
-		|| gTeamSchedulerDataList.Head() == tsd) {
-		gTeamSchedulerDataList.Remove(tsd);
-		TRACE_SCHED("Removed TeamSchedulerData for team %" B_PRId32 " from global list.\n", tsd->teamID);
-	} else {
-		// This might happen if it was already removed or never added.
-		TRACE_SCHED_WARNING("remove_team_scheduler_data_from_global_list: TeamSchedulerData for team %" B_PRId32 " not found in list or already removed.\n", tsd->teamID);
-	}
-}
-
-
-using namespace Scheduler;
-
-
-static bool sSchedulerEnabled;
-
-SchedulerListenerList gSchedulerListeners;
-spinlock gSchedulerListenersLock = B_SPINLOCK_INITIALIZER;
-
-static scheduler_mode_operations* sSchedulerModes[] = {
-	&gSchedulerLowLatencyMode,
-	&gSchedulerPowerSavingMode,
-};
-
-static int32* sCPUToCore;
-static int32* sCPUToPackage;
-
-
-// Helper function to calculate EEVDF slice duration
-static inline bigtime_t
-scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
-{
-	if (threadData == NULL) {
-		return kMinSliceGranularity;
-	}
-	return threadData->CalculateDynamicQuantum(cpu);
-}
-
-
-static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
-static bool scheduler_perform_load_balance();
-static int32 scheduler_load_balance_event(timer* unused);
-
-// Work-Stealing related forward declaration
-static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
-
-
-static timer sIRQBalanceTimer;
-static int32 scheduler_irq_balance_event(timer* unused);
-// Forward declaration for _scheduler_select_cpu_for_irq which calls SelectTargetCPUForIRQ
-static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
-
-
-static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
-
-#if SCHEDULER_TRACING
-static int cmd_scheduler(int argc, char** argv);
-#endif
-static int cmd_scheduler_set_kdf(int argc, char** argv);
-static int cmd_scheduler_get_kdf(int argc, char** argv);
-static int cmd_scheduler_set_smt_factor(int argc, char** argv);
-static int cmd_scheduler_get_smt_factor(int argc, char** argv);
-
-
-// Helper function to find an idle CPU on a given core
-static CPUEntry*
-_find_idle_cpu_on_core(CoreEntry* core)
-{
-	if (core == NULL || core->IsDefunct())
-		return NULL;
-
-	CPUSet coreCPUs = core->CPUMask();
-	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (coreCPUs.GetBit(i) && !gCPU[i].disabled) {
-			Thread* runningThread = gCPU[i].running_thread;
-			if (runningThread != NULL && runningThread->scheduler_data != NULL
-				&& runningThread->scheduler_data->IsIdle()) {
-				return CPUEntry::GetCPU(i);
-			}
-		}
-	}
-	return NULL;
-}
-
-
-static timer sLoadBalanceTimer;
-static bigtime_t gDynamicLoadBalanceInterval = kInitialLoadBalanceInterval;
-static const bigtime_t kMinTimeBetweenMigrations = 20000;
-static const int32 kIOBoundScorePenaltyFactor = 2;
-static const int32 kBenefitScoreLagFactor = 1;
-static const int32 kBenefitScoreEligFactor = 2;
-
-// Proposal 2: Define new constant for migration threshold in work stealing
-// Represents 0.5ms of work on a nominal capacity core.
-static const bigtime_t kMinUnweightedNormWorkToSteal = 500;
-
-
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
 {
@@ -1268,22 +507,13 @@ ThreadEnqueuer::operator()(ThreadData* thread)
 	ASSERT(targetCPU != NULL);
 	ASSERT(targetCore != NULL);
 
-	// Acquire scheduler_lock for the thread before updating its EEVDF parameters.
-	// This is crucial as ThreadEnqueuer might be called from contexts where
-	// the lock isn't already held for this specific thread.
 	InterruptsSpinLocker schedulerLocker(t->scheduler_lock);
 
 	if (!thread->IsIdle()) {
-		// Centralized EEVDF parameter update
-		// isNewOrRelocated = true (thread is being re-homed/enqueued), isRequeue = false
 		thread->UpdateEevdfParameters(targetCPU, true, false);
 	}
 
-	schedulerLocker.Unlock(); // Release before calling enqueue_thread_on_cpu_eevdf,
-	                          // as that function might re-acquire or expect specific lock states.
-	                          // enqueue_thread_on_cpu_eevdf itself does not acquire scheduler_lock.
-	                          // It expects parameters to be set.
-
+	schedulerLocker.Unlock();
 	enqueue_thread_on_cpu_eevdf(t, targetCPU, targetCore);
 }
 
@@ -1362,11 +592,6 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 		return;
 	}
 
-	// Centralized EEVDF parameter update
-	// isNewOrRelocated = true (fresh enqueue), isRequeue = false
-	// This function is called with thread->scheduler_lock held.
-	// Note: UpdateEevdfParameters itself calls CalculateDynamicQuantum,
-	// which will use scheduler_priority_to_weight(thread).
 	threadData->UpdateEevdfParameters(targetCPU, true, false);
 
 	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
@@ -1382,14 +607,13 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 	ThreadData* threadData = thread->scheduler_data;
 	int32 oldActualPriority = thread->priority;
-	// bigtime_t previousVirtualDeadline = threadData->VirtualDeadline(); // Not used
 
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
 		thread->id, oldActualPriority, priority);
 
 	CPUEntry* cpuContextForUpdate = NULL;
 	bool wasRunning = (thread->state == B_THREAD_RUNNING && thread->cpu != NULL);
-	bool wasReadyAndEnqueuedPrior = (thread->state == B_THREAD_READY && threadData->IsEnqueued()); // Renamed to avoid conflict
+	bool wasReadyAndEnqueuedPrior = (thread->state == B_THREAD_READY && threadData->IsEnqueued());
 
 	if (wasRunning) {
 		cpuContextForUpdate = CPUEntry::GetCPU(thread->cpu->cpu_num);
@@ -1413,21 +637,14 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	thread->priority = priority;
 	int32 newWeight = scheduler_priority_to_weight(thread, cpuContextForUpdate);
 
-	// This wasReadyAndEnqueued was for the state *after* priority change, but it's the same as wasReadyAndEnqueuedPrior
-	// as priority change doesn't change readiness or enqueued status directly.
-	// The original wasRunning and wasReadyAndEnqueued (now wasReadyAndEnqueuedPrior) are what matter
-	// for deciding how to re-evaluate the thread.
-
 	if (wasRunning) {
-		ASSERT(cpuContextForUpdate != NULL); // Should be set if wasRunning
-	} else if (wasReadyAndEnqueuedPrior) { // Use prior state for context decision
+		ASSERT(cpuContextForUpdate != NULL);
+	} else if (wasReadyAndEnqueuedPrior) {
 		if (thread->previous_cpu != NULL && threadData->Core() != NULL
 			&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
 			// cpuContextForUpdate already set
 		} else if (threadData->Core() != NULL) {
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but previous_cpu inconsistent or NULL for oldWeight/newWeight context. Using potentially already set or new first CPU of core.\n", thread->id);
-			// cpuContextForUpdate might have been set by the earlier block, or might be NULL.
-			// If it's NULL here and wasReadyAndEnqueuedPrior is true, it means the initial context setting logic didn't find a good one.
 		}
 	}
 
@@ -1445,31 +662,12 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		}
 	}
 
-	// --- Lag Adjustment for Fairness ---
-	// If the thread was running, adjust its current lag to reflect the service it
-	// received in its current (now interrupted/ending) slice, as if it had
-	// been running with the new weight all along for that slice.
 	if (wasRunning && oldWeight != newWeight && oldWeight > 0 && newWeight > 0) {
 		bigtime_t actualRuntimeInSlice = threadData->fTimeUsedInCurrentQuantum;
 		if (actualRuntimeInSlice > 0) {
-			// Service received under old weight: (actualRuntime * SCALE) / oldWeight
-			// Service that *should* have been accounted under new weight: (actualRuntime * SCALE) / newWeight
-			// Difference to add back to lag: OldService - NewService
-			bigtime_t lagAdjustment = 0;
-			// To avoid potential overflow with large actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE,
-			// calculate terms separately or use 128-bit intermediate if available.
-			// For now, direct calculation, assuming typical values won't overflow bigtime_t.
-			// lagAdjustment = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE / oldWeight)
-			//               - (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE / newWeight);
-			// Simplified: actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE * (1/oldW - 1/newW)
-			//           = actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE * (newW - oldW) / (oldW * newW)
-
-			// Let's use a structure that might be less prone to intermediate overflow
-			// if SCHEDULER_WEIGHT_SCALE is large and weights are small.
-			// Calculate weighted runtimes separately.
 			bigtime_t weightedRuntimeOld = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / oldWeight;
 			bigtime_t weightedRuntimeNew = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / newWeight;
-			lagAdjustment = weightedRuntimeOld - weightedRuntimeNew;
+			bigtime_t lagAdjustment = weightedRuntimeOld - weightedRuntimeNew;
 
 			threadData->AddLag(lagAdjustment);
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ran %" B_PRId64 "us in slice. Lag adjusted by %" B_PRId64 " due to weight change (%d->%d). New Lag before recalc: %" B_PRId64 "\n",
@@ -1477,9 +675,6 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		}
 	}
 
-	// Update EEVDF parameters after potential vruntime adjustment and base priority change.
-	// isNewOrRelocated = false, isRequeue = false (it's an in-place update)
-	// scheduler_lock is already held by interruptLocker.
 	threadData->UpdateEevdfParameters(cpuContextForUpdate, false, false);
 
 	TRACE_SCHED("set_prio: T %" B_PRId32 " (after UpdateEevdfParameters) new slice %" B_PRId64 ", new lag %" B_PRId64 ", new elig %" B_PRId64 ", new VD %" B_PRId64 "\n",
@@ -1491,8 +686,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		if (cpuContextForUpdate->ID() != smp_get_current_cpu()) {
 			smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
-	} else if (wasReadyAndEnqueuedPrior) { // Use prior state for deciding to update in runqueue
-		// Check if cpuContextForUpdate is valid before using it. It might be NULL if initial context finding failed.
+	} else if (wasReadyAndEnqueuedPrior) {
 		if (cpuContextForUpdate != NULL) {
 			InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
 			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
@@ -1510,11 +704,6 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
 				thread->id, cpuContextForUpdate->ID());
 		} else {
-			// This case means wasReadyAndEnqueuedPrior was true, but we couldn't get a CPU context.
-			// This implies the thread might be in a runqueue of a CPU that's hard to determine or doesn't match threadData->Core().
-			// This scenario should be rare. A full re-enqueue might be safer if it occurs.
-			// For now, log a warning. The thread's EEVDF parameters are updated, but it might not be correctly
-			// positioned in its current runqueue if its VD changed significantly.
 			TRACE_SCHED_WARNING("set_prio: T %" B_PRId32 " was ready&enqueued, but no valid CPU context. Runqueue update skipped. Thread may need re-enqueue if VD changed significantly.\n", thread->id);
 		}
 	}
@@ -1591,13 +780,11 @@ switch_thread(Thread* fromThread, Thread* toThread)
 }
 
 
-// Helper function for topology-aware work-stealing
 static ThreadData*
 _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 {
 	CPUEntry* victimCPUEntry = CPUEntry::GetCPU(victimCpuID);
 
-	// Basic viability checks for the victim CPU
 	if (gCPU[victimCpuID].disabled || victimCPUEntry == NULL)
 		return NULL;
 	if (system_time() < victimCPUEntry->fLastTimeTaskStolenFrom + kVictimStealCooldownPeriod)
@@ -1617,27 +804,23 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 			bool basicChecksPass = true;
 			struct thread* candThread = candidateTask->GetThread();
 
-			// 1. Check CPU pinning
 			if (candThread->pinned_to_cpu != 0) {
 				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
 					basicChecksPass = false;
 				}
 			}
-			// 2. Check CPU affinity mask
 			if (basicChecksPass && !candidateTask->GetCPUMask().IsEmpty()) {
 				if (!candidateTask->GetCPUMask().GetBit(thiefCPU->ID())) {
 					basicChecksPass = false;
 				}
 			}
 
-			// 3. Check if sufficiently starved (positive lag) using unweighted normalized work
 			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetThread(), victimCPUEntry);
-			if (candidateWeight <= 0) candidateWeight = 1; // Should not happen for active tasks
+			if (candidateWeight <= 0) candidateWeight = 1;
 			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
 
 			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
 
-			// --- Team Quota Awareness for Stealing ---
 			bool teamQuotaAllowsSteal = true;
 			if (candThread->team != NULL && candThread->team->team_scheduler_data != NULL) {
 				Scheduler::TeamSchedulerData* tsd = candThread->team->team_scheduler_data;
@@ -1650,15 +833,12 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				teamLocker.Unlock();
 
 				if (isSourceExhausted && !isSourceBorrowing) {
-					// If from an exhausted, non-borrowing team, require it to be *more* starved
 					isStarved = unweightedNormWorkOwed > (kMinUnweightedNormWorkToSteal * 2);
 					if (!isStarved) {
 						TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, not starved enough (owed %" B_PRId64 ", need > %" B_PRId64 "). DENY steal.\n",
 							candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal * 2);
 						teamQuotaAllowsSteal = false;
 					} else {
-						// It's very starved. Now check if thief is a good quota destination.
-						// If elastic mode is off, or if thief is not an E-core (less likely to be a good borrow target), disallow.
 						if (!gSchedulerElasticQuotaMode || thiefCPU->Core()->Type() != CORE_TYPE_LITTLE) {
 							TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, very starved, but thief CPU %" B_PRId32 " (type %d) not ideal for quota. DENY steal.\n",
 								candThread->id, thiefCPU->ID(), thiefCPU->Core()->Type());
@@ -1670,9 +850,8 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 					}
 				}
 			}
-			// --- End Team Quota Awareness ---
 
-			if (isStarved) { // This 'isStarved' might have been updated by quota logic
+			if (isStarved) {
 				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > effective_threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
 					candThread->id, unweightedNormWorkOwed,
 					(teamQuotaAllowsSteal && candThread->team && candThread->team->team_scheduler_data && candThread->team->team_scheduler_data->quota_exhausted) ? (kMinUnweightedNormWorkToSteal*2) : kMinUnweightedNormWorkToSteal,
@@ -1681,13 +860,10 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 
 
 			if (basicChecksPass && isStarved && teamQuotaAllowsSteal) {
-				// --- b.L-Specific Evaluation ---
 				bool allowStealByBLPolicy = false;
 				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
 				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
 
-				// Updated P-Critical and E-Preferring logic to remove LatencyNice dependency
-				// Uses load thresholds similar to those in scheduler_perform_load_balance for consistency
 				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
 					|| candidateTask->GetLoad() > (kMaxLoad * 7 / 10));
 				bool isTaskEPref = (!isTaskPCritical
@@ -1702,8 +878,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 					if (isTaskPCritical) {
 						allowStealByBLPolicy = true;
 						TRACE_SCHED_BL_STEAL("  Decision: BIG thief, P-Critical task. ALLOW steal.\n");
-					} else { // EPref or Flexible task for BIG thief
-						// Only if victim is very overloaded.
+					} else {
 						uint32 victimCapacity = victimCPUEntry->Core()->PerformanceCapacity();
 						if (victimCapacity == 0) victimCapacity = SCHEDULER_NOMINAL_CAPACITY;
 						int32 victimEffectiveVeryHighLoad = (int32)((uint64)kVeryHighLoad * victimCapacity / SCHEDULER_NOMINAL_CAPACITY);
@@ -1714,21 +889,18 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 							TRACE_SCHED_BL_STEAL("  Decision: BIG thief, EPref/Flex task, victim C%d not very overloaded. DENY steal.\n", victimCPUEntry->Core()->ID());
 						}
 					}
-				} else { // LITTLE Core Thief
+				} else {
 					if (isTaskPCritical) {
-						allowStealByBLPolicy = false; // Default: LITTLE thief avoids P-Critical
+						allowStealByBLPolicy = false;
 						if (victimCoreType == CORE_TYPE_LITTLE && victimCPUEntry->GetLoad() > thiefCPU->Core()->GetLoad() + kLoadDifference) {
-							allowStealByBLPolicy = true; // Rescue P-Critical from another overloaded LITTLE
+							allowStealByBLPolicy = true;
 							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Victim is overloaded LITTLE. ALLOW steal (rescue).\n");
 						} else if (victimCoreType == CORE_TYPE_BIG || victimCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
-							// E-core thief considering stealing P-critical task from a P-core.
-							// This should only happen if all P-cores are saturated AND the task is light enough for the E-core.
 							bool allBigCoresSaturated = true;
 							for (int32 coreIdx = 0; coreIdx < gCoreCount; coreIdx++) {
 								CoreEntry* core = &gCoreEntries[coreIdx];
 								if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE))
 									continue;
-								// Use capacity-adjusted kHighLoad for saturation check
 								uint32 pCoreCapacity = core->PerformanceCapacity() > 0 ? core->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
 								int32 pCoreHighLoadThreshold = kHighLoad * pCoreCapacity / SCHEDULER_NOMINAL_CAPACITY;
 								if (core->GetLoad() < pCoreHighLoadThreshold) {
@@ -1742,7 +914,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 							if (allBigCoresSaturated) {
 								uint32 thiefCapacity = thiefCPU->Core()->PerformanceCapacity();
 								if (thiefCapacity == 0) thiefCapacity = SCHEDULER_NOMINAL_CAPACITY;
-								int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY); // Task uses < 20% of E-core's capacity
+								int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY);
 								if (candidateTask->GetLoad() < lightTaskLoadThreshold) {
 									allowStealByBLPolicy = true;
 									TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. All P-cores saturated AND task load %" B_PRId32 " is light for thief. ALLOW steal.\n", candidateTask->GetLoad());
@@ -1752,10 +924,10 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 							} else {
 								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. Not all P-cores saturated. DENY steal.\n");
 							}
-						} else { // Victim is also LITTLE core (already handled by rescue logic if victim overloaded)
+						} else {
 							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from LITTLE victim. Conditions for rescue not met. DENY steal.\n");
 						}
-					} else { // EPref or Flexible task for LITTLE thief
+					} else {
 						allowStealByBLPolicy = true;
 						TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, EPref/Flex task. ALLOW steal.\n");
 					}
@@ -1781,14 +953,12 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 	if (stolenTask != NULL) {
 		stolenTask->MarkDequeued();
 		stolenTask->SetLastMigrationTime(system_time());
-		if (stolenTask->Core() != NULL) // Should have been on victim's core
-			stolenTask->UnassignCore(false); // Unassign from old core
+		if (stolenTask->Core() != NULL)
+			stolenTask->UnassignCore(false);
 	}
 	return stolenTask;
 }
 
-
-// Work-Stealing Implementation (Phase 1 Basic + Topology Awareness)
 static ThreadData*
 scheduler_try_work_steal(CPUEntry* thiefCPU)
 {
@@ -1799,13 +969,8 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
 	CoreEntry* thiefCore = thiefCPU->Core();
 	PackageEntry* thiefPackage = (thiefCore != NULL) ? thiefCore->Package() : NULL;
 
-    // Stage 1: Same Core (SMT siblings / other logical CPUs on the same physical core)
-    // Try to steal from SMT siblings first due to cache proximity and potential
-    // to utilize otherwise idle execution units on the same physical core.
-    // Enhanced TRACE_SCHED_SMT_STEAL added for better observability.
     if (thiefCore != NULL) {
         CPUSet sameCoreCPUs = thiefCore->CPUMask();
-        // Iterate CPUs on the same core.
         for (int32 victimCpuID = 0; victimCpuID < numCPUs; victimCpuID++) {
             if (!sameCoreCPUs.GetBit(victimCpuID) || victimCpuID == thiefCpuID)
                 continue;
@@ -1821,9 +986,7 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
         }
     }
 
-    // Stage 2: Same Package, different Core
     if (thiefPackage != NULL) {
-        // Iterate all cores to find those in the same package
         for (int32 coreIdx = 0; coreIdx < gCoreCount; coreIdx++) {
             CoreEntry* victimCore = &gCoreEntries[coreIdx];
             if (victimCore == thiefCore || victimCore->Package() != thiefPackage || victimCore->IsDefunct())
@@ -1843,7 +1006,6 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
         }
     }
 
-    // Stage 3: Other Packages (random iteration over all CPUs as a fallback)
     int32 startCpuIndex = get_random<int32>() % numCPUs;
     for (int32 i = 0; i < numCPUs; i++) {
         int32 victimCpuID = (startCpuIndex + i) % numCPUs;
@@ -1852,7 +1014,6 @@ scheduler_try_work_steal(CPUEntry* thiefCPU)
         CPUEntry* victimCPUEntry = CPUEntry::GetCPU(victimCpuID);
         if (victimCPUEntry == NULL || victimCPUEntry->Core() == NULL) continue;
 
-        // Skip if victim is in the same package (already checked in Stage 1 & 2 more thoroughly)
         if (thiefPackage != NULL && victimCPUEntry->Core()->Package() == thiefPackage) {
             continue;
         }
@@ -1900,15 +1061,13 @@ reschedule(int32 nextState)
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
 
-		// Pass 'cpu' as the context for weight calculation
 		int32 weight = scheduler_priority_to_weight(oldThreadData->GetThread(), cpu);
 		if (weight <= 0)
-			weight = 1; // Prevent division by zero or negative weight issues
+			weight = 1;
 
-		// Capacity normalization for fVirtualRuntime advancement
-		uint32 coreCapacity = SCHEDULER_NOMINAL_CAPACITY; // Default to nominal capacity
+		uint32 coreCapacity = SCHEDULER_NOMINAL_CAPACITY;
 		CoreEntry* runningCore = oldThreadData->Core();
-		if (runningCore != NULL && runningCore->PerformanceCapacity() > 0) { // Use public getter
+		if (runningCore != NULL && runningCore->PerformanceCapacity() > 0) {
 			coreCapacity = runningCore->PerformanceCapacity();
 		} else if (runningCore != NULL && runningCore->PerformanceCapacity() == 0) {
 			TRACE_SCHED_WARNING("reschedule: oldT %" B_PRId32 " on Core %" B_PRId32 " has 0 performance capacity! Using nominal %u.\n",
@@ -2178,7 +1337,8 @@ _find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, CPUEntry* current
 		bool candidateIsSensitive = false;
 		if (runningOnCandidate != NULL && runningOnCandidate->scheduler_data != NULL) {
 			ThreadData* td = runningOnCandidate->scheduler_data;
-			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || td->LatencyNice() < -10) {
+			// LatencyNice is deprecated. Sensitivity primarily determined by high priority.
+			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY) {
 				candidateIsSensitive = true;
 			}
 		}
@@ -2412,7 +1572,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	gCurrentModeID = mode;
 	gCurrentMode = sSchedulerModes[mode];
 
-	gKernelKDistFactor = DEFAULT_K_DIST_FACTOR;
+	// gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
@@ -2420,7 +1580,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 		gCurrentMode->switch_to_mode();
 	} else {
 		if (mode == SCHEDULER_MODE_POWER_SAVING) {
-			gKernelKDistFactor = 0.6f;
+			// gKernelKDistFactor = 0.6f; // REMOVED
 			gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
 			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 		}
@@ -2690,10 +1850,10 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv) { /* ... */ return 0;}
 #endif
-static int cmd_scheduler_set_kdf(int argc, char** argv) { /* ... */ return 0;}
-static int cmd_scheduler_get_kdf(int argc, char** argv) { /* ... */ return 0;}
-static int cmd_scheduler_set_smt_factor(int argc, char** argv) { /* ... */ return 0;}
-static int cmd_scheduler_get_smt_factor(int argc, char** argv) { /* ... */ return 0;}
+// static int cmd_scheduler_set_kdf(int argc, char** argv); // REMOVED
+// static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
+static int cmd_scheduler_set_smt_factor(int argc, char** argv);
+static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
 
 static void
@@ -2702,10 +1862,10 @@ _scheduler_init_kdf_debug_commands()
 #if SCHEDULER_TRACING
 	add_debugger_command_etc("scheduler", &cmd_scheduler, "Analyze scheduler tracing information", "<thread>\n...", 0);
 #endif
-	add_debugger_command_etc("scheduler_set_kdf", &cmd_scheduler_set_kdf, "Set ... gKernelKDistFactor ...", "<factor>\n...", 0);
-	add_debugger_command_alias("set_kdf", "scheduler_set_kdf", "Alias for scheduler_set_kdf");
-	add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf, "Get ... gKernelKDistFactor ...", "...", 0);
-	add_debugger_command_alias("get_kdf", "scheduler_get_kdf", "Alias for scheduler_get_kdf");
+	// add_debugger_command_etc("scheduler_set_kdf", &cmd_scheduler_set_kdf, "Set ... gKernelKDistFactor ...", "<factor>\n...", 0); // REMOVED
+	// add_debugger_command_alias("set_kdf", "scheduler_set_kdf", "Alias for scheduler_set_kdf"); // REMOVED
+	// add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf, "Get ... gKernelKDistFactor ...", "...", 0); // REMOVED
+	// add_debugger_command_alias("get_kdf", "scheduler_get_kdf", "Alias for scheduler_get_kdf"); // REMOVED
 	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor, "Set ... SMT conflict factor.", "<factor>\n...", 0);
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
@@ -2839,11 +1999,12 @@ Scheduler::scheduler_reset_team_quotas_event(timer* /*unused*/)
 	return B_HANDLED_INTERRUPT;
 }
 
-static const double KDF_DEBUG_MIN_FACTOR = 0.0;
-static const double KDF_DEBUG_MAX_FACTOR = 2.0;
+// static const double KDF_DEBUG_MIN_FACTOR = 0.0; // REMOVED
+// static const double KDF_DEBUG_MAX_FACTOR = 2.0; // REMOVED
 static const double SMT_DEBUG_MIN_FACTOR = 0.0;
 static const double SMT_DEBUG_MAX_FACTOR = 1.0;
 
+/* // REMOVED KDF Commands
 static int
 cmd_scheduler_set_kdf(int argc, char** argv)
 {
@@ -2864,6 +2025,7 @@ cmd_scheduler_get_kdf(int argc, char** argv)
 	kprintf("Current scheduler gKernelKDistFactor: %f (EEVDF: effect may change from MLFQ DTQ)\n", Scheduler::gKernelKDistFactor);
 	return 0;
 }
+*/
 
 static int
 cmd_scheduler_set_smt_factor(int argc, char** argv)
@@ -3090,7 +2252,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 			}
 		}
 	} else {
-		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoadFound, minIrqLoadFound);
+		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxLoadFound, minIrqLoadFound);
 	}
 	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	return B_HANDLED_INTERRUPT;
@@ -4049,12 +3211,12 @@ do_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 		return B_NO_INIT;
 
 	if (irqVector < 0 || irqVector >= MAX_IRQS) {
-		TRACE_SCHED_IRQ_ERR("_user_set_irq_task_colocation: Invalid IRQ vector %d.\n", irqVector);
+		TRACE_SCHED_IRQ_ERR("_kern_set_irq_task_colocation: Invalid IRQ vector %d.\n", irqVector);
 		return B_BAD_VALUE;
 	}
 
 	if (flags != 0) {
-		TRACE_SCHED_IRQ_ERR("_user_set_irq_task_colocation: Invalid flags %#" B_PRIx32 " specified.\n", flags);
+		TRACE_SCHED_IRQ_ERR("_kern_set_irq_task_colocation: Invalid flags %#" B_PRIx32 " specified.\n", flags);
 		return B_BAD_VALUE;
 	}
 

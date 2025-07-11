@@ -25,6 +25,7 @@
 #include <load_tracking.h>
 #include <smp.h>
 #include <thread.h>
+#include <kernel/thread_defs.h> // For B_THREAD_ZOMBIE and other thread states
 #include <timer.h>
 
 // Haiku Utility Headers

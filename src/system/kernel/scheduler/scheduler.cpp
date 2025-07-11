@@ -43,8 +43,13 @@ static const int32 gNiceToWeight[40] = {
 // --- New Continuous Weight Calculation Logic ---
 
 // Minimum and maximum weights for the new scheme
-static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight[39]
-static const int32 kNewMaxWeightCap = 88761 * 16; // Similar to current gNiceToWeight[0] * 16
+static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight[39], a floor for active threads.
+// Increased kNewMaxWeightCap to allow more granularity at high RT priorities.
+// Old value: 88761 * 16 = 1,420,176.
+// New value allows differentiation for most user-settable RT priorities,
+// while still capping the very highest kernel priorities to prevent extreme weight disparities
+// and potential numerical issues with overly small weighted slice entitlements.
+static const int32 kNewMaxWeightCap = 35000000;
 
 // The new weight table and its initialization function
 static int32 gHaikuContinuousWeights[B_MAX_PRIORITY];
@@ -515,6 +520,50 @@ static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
 static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 // --- End Team CPU Quota Management ---
+
+
+static int
+cmd_dump_eevdf_weights(int argc, char** argv)
+{
+	kprintf("Haiku Priority to EEVDF Weight Mapping (Continuous Prototype):\n");
+	kprintf("Prio | Weight     | Ratio to Prev | Notes\n");
+	kprintf("-----|------------|---------------|------------------------------------\n");
+
+	int32 previousWeight = 0;
+
+	for (int32 prio = 0; prio < B_MAX_PRIORITY; prio++) {
+		int32 currentWeight = gHaikuContinuousWeights[prio];
+		char notes[80] = "";
+		char ratioStr[16] = "N/A";
+
+		if (prio == B_IDLE_PRIORITY && currentWeight == 1) {
+			// Expected idle weight
+		} else if (prio > B_IDLE_PRIORITY && prio < B_LOWEST_ACTIVE_PRIORITY && currentWeight == (2 + (prio - 1) * 2)) {
+			// Special low priorities
+		} else if (prio >= B_LOWEST_ACTIVE_PRIORITY && currentWeight == kNewMinActiveWeight) {
+			snprintf(notes, sizeof(notes), "At kNewMinActiveWeight (%ld)", kNewMinActiveWeight);
+		} else if (currentWeight == kNewMaxWeightCap) {
+			snprintf(notes, sizeof(notes), "At kNewMaxWeightCap (%ld)", kNewMaxWeightCap);
+		}
+
+		if (prio > 0 && previousWeight > 0) {
+			double ratio = (double)currentWeight / previousWeight;
+			snprintf(ratioStr, sizeof(ratioStr), "%.3fx", ratio);
+		} else if (prio > 0 && currentWeight > 0 && previousWeight == 0) {
+			snprintf(ratioStr, sizeof(ratioStr), "Inf");
+		}
+
+		kprintf("%4" B_PRId32 " | %10" B_PRId32 " | %13s | %s\n", prio, currentWeight, ratioStr, notes);
+		previousWeight = currentWeight;
+	}
+	kprintf("-----|------------|---------------|------------------------------------\n");
+	kprintf("Note: SCHEDULER_WEIGHT_SCALE = %d\n", SCHEDULER_WEIGHT_SCALE);
+	kprintf("      kNewMinActiveWeight = %ld, kNewMaxWeightCap = %ld\n", kNewMinActiveWeight, kNewMaxWeightCap);
+	kprintf("      Base scaling factor per Haiku prio point: ~%.5f\n", 1.0915078);
+	kprintf("      RT Multipliers: >=20: 1.2x; >=30: 1.5x; >=100: 2.5x; >=120: 4.0x (applied to base exponential)\n");
+
+	return 0;
+}
 
 
 class ThreadEnqueuer : public ThreadProcessing {
@@ -2482,6 +2531,10 @@ _scheduler_init_kdf_debug_commands()
 		"Get the current team quota exhaustion policy.",
 		"Prints the current team quota exhaustion policy.", 0);
 	add_debugger_command_alias("get_exhaustion_policy", "scheduler_get_exhaustion_policy", "Alias for scheduler_get_exhaustion_policy");
+
+	add_debugger_command_etc("dump_eevdf_weights", &cmd_dump_eevdf_weights,
+		"Dump the Haiku priority to EEVDF weight mapping table.",
+		"\nPrints the entire mapping table used by the EEVDF scheduler.\n", 0);
 }
 
 

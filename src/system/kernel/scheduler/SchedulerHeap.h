@@ -13,10 +13,10 @@
 #include <debug.h>
 #include <SupportDefs.h>
 
-// Forward declaration for friend class if SchedulerHeap is namespaced
 namespace Scheduler {
+
+// Forward declaration for friend class
 template<typename Element, typename Compare, typename GetLink> class SchedulerHeap;
-}
 
 // Note: The Key template parameter is kept for structural compatibility with the original
 // Heap.h, but for EEVDF's SchedulerHeap, the Compare policy directly uses ElementType
@@ -70,6 +70,7 @@ public:
 
 #define SCHEDULER_HEAP_TEMPLATE_LIST	\
 	template<typename ElementType, typename Compare, typename GetLink>
+// SCHEDULER_HEAP_CLASS_NAME will be just SchedulerHeap, as it's inside the namespace
 #define SCHEDULER_HEAP_CLASS_NAME	SchedulerHeap<ElementType, Compare, GetLink>
 
 // The KeyType parameter is removed from SchedulerHeap class template,
@@ -406,5 +407,7 @@ SCHEDULER_HEAP_CLASS_NAME::_MoveDown(int32 index)
 			break; // No children
 	}
 }
+
+} // namespace Scheduler
 
 #endif	// KERNEL_SCHEDULER_HEAP_H

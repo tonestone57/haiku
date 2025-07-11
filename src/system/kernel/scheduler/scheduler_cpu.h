@@ -155,7 +155,7 @@ private:
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 
 public:
-	inline				int32			GetEevdfRunQueueTaskCount() const { return atomic_get((volatile int32*)&fEevdfRunQueueTaskCount); }
+	inline				int32			GetEevdfRunQueueTaskCount() const { return atomic_get(const_cast<int32*>(&fEevdfRunQueueTaskCount)); }
 } CACHE_LINE_ALIGN;
 
 
@@ -244,9 +244,14 @@ private:
 						spinlock		fCPULock;
 
 						// big.LITTLE / Heterogeneous properties
+private: // Make these private and add public getters
 						scheduler_core_type fCoreType;
 						uint32			fPerformanceCapacity;	// Relative to SCHEDULER_NOMINAL_CAPACITY
 						uint32			fEnergyEfficiency;		// Abstract scale, higher is more efficient
+public:
+	inline				scheduler_core_type Type() const { return fCoreType; }
+	inline				uint32			PerformanceCapacity() const { return fPerformanceCapacity; }
+	inline				uint32			EnergyEfficiency() const { return fEnergyEfficiency; }
 
 
 						bigtime_t		fActiveTime;
@@ -270,7 +275,7 @@ private:
 inline scheduler_core_type CPUEntry::Type() const {
 	// SCHEDULER_ENTER_FUNCTION(); // Optional for such simple forwarding
 	ASSERT(fCore != NULL);
-	return fCore->fCoreType;
+	return fCore->Type(); // Use the new public getter in CoreEntry
 }
 
 inline uint32 CPUEntry::PerformanceCapacity() const {

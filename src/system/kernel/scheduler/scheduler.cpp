@@ -431,7 +431,7 @@ cmd_thread_sched_info(int argc, char** argv)
 #include "scheduler_team.h" // For TeamSchedulerData
 #include "EevdfRunQueue.h"
 
-#include <util/HashTable.h>
+#include <util/MultiHashTable.h> // CORRECTED INCLUDE
 #include <util/DoublyLinkedList.h> // For the global list
 
 
@@ -884,14 +884,17 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 	if (wasRunning) {
 		ASSERT(cpuContextForUpdate != NULL); // Should be set if wasRunning
-	} else if (wasReadyAndEnqueued) {
+	} else if (wasReadyAndEnqueuedPrior) { // Use prior state for context decision
 		if (thread->previous_cpu != NULL && threadData->Core() != NULL
 			&& CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
-			cpuContextForUpdate = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
+			// cpuContextForUpdate already set
 		} else if (threadData->Core() != NULL) {
-			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but previous_cpu inconsistent or NULL. Skipping vruntime/lag adjustment.\n", thread->id);
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but previous_cpu inconsistent or NULL for oldWeight/newWeight context. Using potentially already set or new first CPU of core.\n", thread->id);
+			// cpuContextForUpdate might have been set by the earlier block, or might be NULL.
+			// If it's NULL here and wasReadyAndEnqueuedPrior is true, it means the initial context setting logic didn't find a good one.
 		}
 	}
+
 
 	if (cpuContextForUpdate != NULL && oldWeight != newWeight && newWeight > 0) {
 		InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
@@ -952,23 +955,32 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		if (cpuContextForUpdate->ID() != smp_get_current_cpu()) {
 			smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
-	} else if (wasReadyAndEnqueued) {
-		ASSERT(cpuContextForUpdate != NULL);
-		InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
-		cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
-		queueLocker.Unlock();
-		Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
-		if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
-			|| (system_time() >= threadData->EligibleTime()
-				&& threadData->VirtualDeadline() < currentOnThatCpu->scheduler_data->VirtualDeadline())) {
-			if (cpuContextForUpdate->ID() == smp_get_current_cpu()) {
-				gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
-			} else {
-				smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+	} else if (wasReadyAndEnqueuedPrior) { // Use prior state for deciding to update in runqueue
+		// Check if cpuContextForUpdate is valid before using it. It might be NULL if initial context finding failed.
+		if (cpuContextForUpdate != NULL) {
+			InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
+			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
+			queueLocker.Unlock();
+			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
+			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
+				|| (system_time() >= threadData->EligibleTime()
+					&& threadData->VirtualDeadline() < currentOnThatCpu->scheduler_data->VirtualDeadline())) {
+				if (cpuContextForUpdate->ID() == smp_get_current_cpu()) {
+					gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
+				} else {
+					smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+				}
 			}
+			TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
+				thread->id, cpuContextForUpdate->ID());
+		} else {
+			// This case means wasReadyAndEnqueuedPrior was true, but we couldn't get a CPU context.
+			// This implies the thread might be in a runqueue of a CPU that's hard to determine or doesn't match threadData->Core().
+			// This scenario should be rare. A full re-enqueue might be safer if it occurs.
+			// For now, log a warning. The thread's EEVDF parameters are updated, but it might not be correctly
+			// positioned in its current runqueue if its VD changed significantly.
+			TRACE_SCHED_WARNING("set_prio: T %" B_PRId32 " was ready&enqueued, but no valid CPU context. Runqueue update skipped. Thread may need re-enqueue if VD changed significantly.\n", thread->id);
 		}
-		TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
-			thread->id, cpuContextForUpdate->ID());
 	}
 	return oldActualPriority;
 }
@@ -1728,7 +1740,7 @@ _find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, CPUEntry* current
 		bool candidateIsSensitive = false;
 		if (runningOnCandidate != NULL && runningOnCandidate->scheduler_data != NULL) {
 			ThreadData* td = runningOnCandidate->scheduler_data;
-			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || td->LatencyNice() < -10) {
+			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || td->LatencyNice() < -10) { // LatencyNice() usage here is illustrative of a sensitivity check
 				candidateIsSensitive = true;
 			}
 		}
@@ -1802,7 +1814,7 @@ scheduler_reschedule(int32 nextState)
 		if (nextState == THREAD_STATE_WAITING || nextState == THREAD_STATE_SLEEPING) {
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
-		int32 weight = scheduler_priority_to_weight(oldThreadData->GetBasePriority());
+		int32 weight = scheduler_priority_to_weight(oldThreadData->GetThread(), cpu); // Pass cpu context
 		if (weight <= 0) weight = 1;
 		uint32 coreCapacity = cpu->Core()->PerformanceCapacity() > 0 ? cpu->Core()->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
 		uint64 numerator = (uint64)actualRuntime * coreCapacity * SCHEDULER_WEIGHT_SCALE;
@@ -2702,6 +2714,9 @@ scheduler_init()
 	// Start the quota reset timer
 	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod,
 		B_PERIODIC_TIMER);
+
+	// Initialize the continuous weight table
+	_init_continuous_weights();
 }
 
 
@@ -2838,8 +2853,8 @@ scheduler_irq_balance_event(timer* /* unused */)
 	TRACE_SCHED_IRQ("Proactive IRQ Balance Check running\n");
 	CPUEntry* sourceCpuMaxIrq = NULL;
 	CPUEntry* targetCandidateCpuMinIrq = NULL;
-	int32 maxIrqLoad = -1;
-	int32 minIrqLoad = 0x7fffffff;
+	int32 maxIrqLoadFound = -1; // Renamed from maxIrqLoad to avoid confusion
+	int32 minIrqLoadFound = 0x7fffffff; // Renamed from minIrqLoad
 	int32 enabledCpuCount = 0;
 
 	CoreEntry* preferredTargetCoreForPS = NULL;
@@ -2872,8 +2887,8 @@ scheduler_irq_balance_event(timer* /* unused */)
 		CPUEntry* currentCpu = CPUEntry::GetCPU(i);
 		int32 currentTotalIrqLoad = currentCpu->CalculateTotalIrqLoad();
 
-		if (sourceCpuMaxIrq == NULL || currentTotalIrqLoad > maxIrqLoad) {
-			maxIrqLoad = currentTotalIrqLoad;
+		if (sourceCpuMaxIrq == NULL || currentTotalIrqLoad > maxIrqLoadFound) {
+			maxIrqLoadFound = currentTotalIrqLoad;
 			sourceCpuMaxIrq = currentCpu;
 		}
 
@@ -2890,9 +2905,9 @@ scheduler_irq_balance_event(timer* /* unused */)
 		}
 
 
-		if (targetCandidateCpuMinIrq == NULL || effectiveLoadForComparison < minIrqLoad) {
+		if (targetCandidateCpuMinIrq == NULL || effectiveLoadForComparison < minIrqLoadFound) {
 			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) { // Don't pick source as target unless it's the only option
-				minIrqLoad = effectiveLoadForComparison; // Store the effective load for comparison
+				minIrqLoadFound = effectiveLoadForComparison; // Store the effective load for comparison
 				targetCandidateCpuMinIrq = currentCpu;    // Store the actual CPU
 			}
 		}
@@ -2900,16 +2915,16 @@ scheduler_irq_balance_event(timer* /* unused */)
 
 	// If after preferring STC/LITTLEs, the target is still the source, try to find any other valid target.
 	if (targetCandidateCpuMinIrq == NULL || (targetCandidateCpuMinIrq == sourceCpuMaxIrq && enabledCpuCount > 1)) {
-		minIrqLoad = 0x7fffffff; // Reset minLoad for a general search
+		minIrqLoadFound = 0x7fffffff; // Reset minLoad for a general search
 		CPUEntry* generalFallbackTarget = NULL;
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (!gCPUEnabled.GetBit(i) || CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
 				continue;
 			CPUEntry* potentialTarget = CPUEntry::GetCPU(i);
 			int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
-			if (generalFallbackTarget == NULL || potentialTargetLoad < minIrqLoad) {
+			if (generalFallbackTarget == NULL || potentialTargetLoad < minIrqLoadFound) {
 				generalFallbackTarget = potentialTarget;
-				minIrqLoad = potentialTargetLoad; // Here minIrqLoad is actual load for fallback
+				minIrqLoadFound = potentialTargetLoad; // Here minIrqLoadFound is actual load for fallback
 			}
 		}
 		targetCandidateCpuMinIrq = generalFallbackTarget;
@@ -2923,9 +2938,9 @@ scheduler_irq_balance_event(timer* /* unused */)
 
 	// Use actual load of the chosen target for imbalance check, not its effective load used for selection.
 	int32 actualTargetMinIrqLoad = targetCandidateCpuMinIrq->CalculateTotalIrqLoad();
-	if (maxIrqLoad > gHighAbsoluteIrqThreshold && maxIrqLoad > actualTargetMinIrqLoad + gSignificantIrqLoadDifference) {
+	if (maxIrqLoadFound > gHighAbsoluteIrqThreshold && maxIrqLoadFound > actualTargetMinIrqLoad + gSignificantIrqLoadDifference) {
 		TRACE_SCHED_IRQ("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (Actual IRQ load %" B_PRId32 ")\n",
-			sourceCpuMaxIrq->ID(), maxIrqLoad, targetCandidateCpuMinIrq->ID(), actualTargetMinIrqLoad);
+			sourceCpuMaxIrq->ID(), maxIrqLoadFound, targetCandidateCpuMinIrq->ID(), actualTargetMinIrqLoad);
 		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
 		int32 candidateCount = 0;
 		{
@@ -3072,7 +3087,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 			}
 		}
 	} else {
-		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxLoadFound, minIrqLoad);
+		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoadFound, minIrqLoadFound);
 	}
 	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	return B_HANDLED_INTERRUPT;
@@ -3373,7 +3388,7 @@ scheduler_perform_load_balance()
 
 	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
 		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
-		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad());
+		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference); // Corrected variable name
 
 	CPUEntry* sourceCPU = NULL;
 	CPUEntry* targetCPU = NULL;
@@ -3559,7 +3574,7 @@ scheduler_perform_load_balance()
 		bigtime_t targetQueueMinVruntime = representativeTargetCPU->GetCachedMinVirtualRuntime();
 		bigtime_t estimatedVRuntimeOnTarget = max_c(candidate->VirtualRuntime(), targetQueueMinVruntime);
 
-		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetThread(), sourceCPU);
+		int32 candidateWeight = scheduler_priority_to_weight(candidate->GetThread(), sourceCPU); // Use sourceCPU for current weight
 		if (candidateWeight <= 0) candidateWeight = 1;
 
 		bigtime_t candidateSliceDuration = candidate->SliceDuration();
@@ -3582,10 +3597,10 @@ scheduler_perform_load_balance()
 		}
 
 		// Proposal 1: Benefit Score Calculation (incorporating lagWallClockOnSource)
-		bigtime_t lagNormWeightedOnSource = currentLagOnSource;
+		bigtime_t lagNormWeightedOnSource = currentLagOnSource; // This is already weighted
 
 		// sourceCandidateWeight is candidateWeightForLagCheck
-		// lagNormUnweightedOnSource was calculated above for Proposal 2 starvation check
+		bigtime_t lagNormUnweightedOnSource = unweightedNormWorkOwed; // From starvation check
 
 		uint32 sourceCoreTrueCapacity = sourceCPU->Core()->PerformanceCapacity();
 		if (sourceCoreTrueCapacity == 0) {
@@ -3689,7 +3704,7 @@ scheduler_perform_load_balance()
 
 		bigtime_t currentBenefitScore = (kBenefitScoreLagFactor * lagWallClockOnSource)
 									  + (kBenefitScoreEligFactor * eligibilityImprovementWallClock)
-									  + typeBonusWallClock
+									  + typeCompatibilityBonus // typeBonusWallClock was the old name
 									  + affinityBonusWallClock
 									  + targetCpuIdleBonus;
 
@@ -3768,7 +3783,7 @@ scheduler_perform_load_balance()
 			// especially if the P-core wasn't critically overloaded.
 			// The typeCompatibilityBonus already applies a penalty for this.
 			// This additional check was to prevent moves if benefit was low *after* penalty.
-			bool isTaskActuallyPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY || candidate->LatencyNice() < -10); // Simpler check for this specific gate
+			bool isTaskActuallyPCritical = (candidate->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY); // Simplified check for this gate
 			if (isTaskActuallyPCritical && (targetType == CORE_TYPE_LITTLE) && (sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
 				// If typeCompatibilityBonus made the score positive but it's not overwhelmingly positive, reconsider.
 				// Example: require benefit to be > some positive threshold like SCHEDULER_TARGET_LATENCY.
@@ -3776,16 +3791,6 @@ scheduler_perform_load_balance()
 					TRACE_SCHED_BL("LoadBalance: Candidate T %" B_PRId32 " is P-Critical. Suppressing move from P-Core %" B_PRId32 " to E-Core %" B_PRId32 " due to insufficient benefit score %" B_PRId64 " (threshold %" B_PRId64 ").\n",
 						candidate->GetThread()->id, sourceCPU->Core()->ID(), finalTargetCore->ID(), currentBenefitScore, SCHEDULER_TARGET_LATENCY);
 					continue; // Skip this candidate if benefit is not high enough for this type of move.
-				}
-			}
-			maxBenefitScore = currentBenefitScore;
-			bestCandidateToMove = candidate;
-		}
-	}
-
-	for (int i = 0; i < checkedCount; ++i) {
-						candidate->GetThread()->id, sourceCPU->Core()->ID(), finalTargetCore->ID(), currentBenefitScore);
-					continue;
 				}
 			}
 			maxBenefitScore = currentBenefitScore;
@@ -3808,7 +3813,7 @@ scheduler_perform_load_balance()
 
 	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
 	if (targetCPU == NULL || targetCPU == sourceCPU) {
-		if (threadToMove != NULL) {
+		if (threadToMove != NULL) { // threadToMove should not be NULL here due to above check
 			sourceQueue.Add(threadToMove);
 		}
 		sourceCPU->UnlockRunQueue();
@@ -4107,7 +4112,7 @@ do_set_thread_nice_value(thread_id thid, int niceValue)
 
 	// Permission check: must be root or same team
 	if (targetThread->team != currentThread->team
-		&& currentThread->team->effective_uid != 0) {
+		&& currentThread->team->effective_uid != 0) { // Using effective_uid for root check
 		return B_NOT_ALLOWED;
 	}
 
@@ -4181,8 +4186,8 @@ do_estimate_max_scheduling_latency(thread_id id)
 	if (threadData == NULL || threadData->IsIdle())
 		return 0; // Idle or no scheduler data means effectively zero or undefined latency here
 
-	ThreadData* td = thread->scheduler_data;
-	if (td == NULL || td->IsIdle())
+	ThreadData* td = thread->scheduler_data; // Redundant with threadData above
+	if (td == NULL || td->IsIdle()) // Should be caught by above check
 		return 0;
 
 	bigtime_t now = system_time();
@@ -4209,7 +4214,7 @@ do_estimate_max_scheduling_latency(thread_id id)
 			CPUEntry* cpu = NULL;
 			if (thread->previous_cpu != NULL) {
 				cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-				if (cpu->Core() != td->Core())  // Ensure consistency
+				if (cpu != NULL && cpu->Core() != td->Core())  // Ensure consistency. Add NULL check for cpu before Core()
 					cpu = NULL;
 			}
 			if (cpu != NULL) {
@@ -4286,7 +4291,7 @@ do_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
 {
 	// TODO: Define proper capability/privilege check.
 	// For now, using euid check as a placeholder, similar to other syscalls.
-	if (geteuid() != 0) {
+	if (geteuid() != 0) { // Placeholder for privilege check
 		// TRACE_SCHED_IRQ_ERR("_user_set_irq_task_colocation: Caller not privileged (euid != 0).\n");
 		return B_NOT_ALLOWED;
 	}
@@ -4514,7 +4519,7 @@ static status_t
 do_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
 {
 	// Permission check (e.g., root only)
-	if (geteuid() != 0)
+	if (geteuid() != 0) // Placeholder for privilege check
 		return B_NOT_ALLOWED;
 
 	if (percent_quota > 1000) { // Allow for fine-grained control, e.g. 1000 = 100.0%
@@ -4559,97 +4564,4 @@ do_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
 	// Otherwise, if it was exhausted and now has allowance, un-exhaust it.
 	if (tsd->current_quota_allowance > 0 && tsd->quota_period_usage < tsd->current_quota_allowance) {
 		tsd->quota_exhausted = false;
-	} else if (tsd->current_quota_allowance == 0 || tsd->quota_period_usage >= tsd->current_quota_allowance) {
-		if (tsd->current_quota_allowance > 0) // Only mark exhausted if it had some allowance
-			tsd->quota_exhausted = true;
-		else
-			tsd->quota_exhausted = false; // 0% quota is not "exhausted" in the sense of having used up a limit
-	}
-
-
-	locker.Unlock();
-
-	TRACE_SCHED("Team %" B_PRId32 " CPU quota set to %" B_PRIu32 "%%. New allowance: %" B_PRId64 " us.\n",
-		teamId, percent_quota, tsd->current_quota_allowance);
-
-	return B_OK;
-}
-
-static status_t
-do_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
-{
-	if (_percent_quota == NULL || !IS_USER_ADDRESS(_percent_quota))
-		return B_BAD_ADDRESS;
-
-	Team* team = Team::Get(teamId);
-	if (team == NULL)
-		return B_BAD_TEAM_ID;
-	BReference<Team> teamRef(team, true);
-
-	if (team->team_scheduler_data == NULL) {
-		// Should have scheduler data. If not, perhaps return a default?
-		// Or indicate an error. For now, assume it exists.
-		dprintf("_kern_get_team_cpu_quota: Team %" B_PRId32 " has no scheduler data!\n", teamId);
-		// Default to 0 if not found, but this is an anomaly.
-		uint32 zeroQuota = 0;
-		if (user_memcpy(_percent_quota, &zeroQuota, sizeof(uint32)) != B_OK)
-			return B_BAD_ADDRESS;
-		return B_ERROR; // Indicate issue
-	}
-
-	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
-	InterruptsSpinLocker locker(tsd->lock);
-	uint32 currentQuota = tsd->cpu_quota_percent;
-	locker.Unlock();
-
-	if (user_memcpy(_percent_quota, &currentQuota, sizeof(uint32)) != B_OK)
-		return B_BAD_ADDRESS;
-
-	return B_OK;
-}
-
-static status_t
-do_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance)
-{
-	if ((_usage != NULL && !IS_USER_ADDRESS(_usage))
-		|| (_allowance != NULL && !IS_USER_ADDRESS(_allowance))) {
-		return B_BAD_ADDRESS;
-	}
-	if (_usage == NULL && _allowance == NULL) // Nothing to do
-		return B_OK;
-
-	Team* team = Team::Get(teamId);
-	if (team == NULL)
-		return B_BAD_TEAM_ID;
-	BReference<Team> teamRef(team, true);
-
-	if (team->team_scheduler_data == NULL) {
-		dprintf("_kern_get_team_cpu_usage: Team %" B_PRId32 " has no scheduler data!\n", teamId);
-		// If no data, perhaps return 0 for usage/allowance
-		bigtime_t zeroVal = 0;
-		if (_usage != NULL) {
-			if (user_memcpy(_usage, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
-		}
-		if (_allowance != NULL) {
-			if (user_memcpy(_allowance, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
-		}
-		return B_ERROR; // Indicate issue
-	}
-
-	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
-	InterruptsSpinLocker locker(tsd->lock);
-	bigtime_t currentUsage = tsd->quota_period_usage;
-	bigtime_t currentAllowance = tsd->current_quota_allowance;
-	locker.Unlock();
-
-	if (_usage != NULL) {
-		if (user_memcpy(_usage, &currentUsage, sizeof(bigtime_t)) != B_OK)
-			return B_BAD_ADDRESS;
-	}
-	if (_allowance != NULL) {
-		if (user_memcpy(_allowance, &currentAllowance, sizeof(bigtime_t)) != B_OK)
-			return B_BAD_ADDRESS;
-	}
-
-	return B_OK;
-}
+	} else if (tsd->current_quota_allowance == 0 || tsd->quota_period_usage >= tsd->

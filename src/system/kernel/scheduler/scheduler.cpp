@@ -3063,14 +3063,43 @@ scheduler_irq_balance_event(timer* /* unused */)
 				// or keep it WITH the task. The current logic prioritizes moving to the task's
 				// current/previous core if specified as preferredTargetCore.
 
-				TRACE_SCHED_IRQ("Proactive IRQ: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")%s\n",
-					irqToMove->irq, irqToMove->load,
-					sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
-					finalTargetCpu->ID(), finalTargetCpu->Core()->ID(), // preferredTargetCore is finalTargetCpu->Core()
-					hasAffinity ? " (affinity considered)" : "");
-				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+		// Cooldown check for periodic balancer
+		bigtime_t now = system_time();
+		// Using kIrqFollowTaskCooldownPeriod as a generic minimum interval between any programmatic IRQ moves.
+		// A dedicated, possibly longer, cooldown for periodic balance could also be used.
+		// For example: const bigtime_t kPeriodicIrqBalanceCooldown = gIRQBalanceCheckInterval * 3 / 4;
+		bigtime_t cooldownToRespect = kIrqFollowTaskCooldownPeriod; // Use the shorter follow-task cooldown as a general floor.
+
+		bool proceedWithMove = false;
+		bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqToMove->irq]);
+
+		if (now >= lastRecordedMoveTime + cooldownToRespect) {
+			// Attempt to update the timestamp using CAS to ensure atomicity if multiple entities
+			// (though unlikely for periodic balancer itself) might try to update.
+			// For periodic balancer, a simple atomic_store_64 might be sufficient if it's the only one
+			// that would move an IRQ without prior CAS, but using CAS is safer.
+			if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], lastRecordedMoveTime, now)) {
+				proceedWithMove = true;
 			} else {
-				TRACE_SCHED_IRQ("Proactive IRQ: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source. IRQ remains on CPU %" B_PRId32 ".\n",
+				TRACE_SCHED_IRQ("Periodic IRQ Balance: CAS failed for IRQ %d, move deferred due to concurrent update.\n", irqToMove->irq);
+			}
+		} else {
+			TRACE_SCHED_IRQ("Periodic IRQ Balance: IRQ %d for T %" B_PRId32
+				" is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64
+				", cooldown %" B_PRId64 "). Skipping move.\n",
+				irqToMove->irq, -1, /* No specific thread here */ lastRecordedMoveTime, now, cooldownToRespect);
+		}
+
+		if (proceedWithMove) {
+			TRACE_SCHED_IRQ("Periodic IRQ Balance: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")%s\n",
+				irqToMove->irq, irqToMove->load,
+				sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
+				finalTargetCpu->ID(), finalTargetCpu->Core()->ID(),
+				hasAffinity ? " (affinity considered)" : "");
+			assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+		}
+			} else {
+		TRACE_SCHED_IRQ("Periodic IRQ Balance: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source. IRQ remains on CPU %" B_PRId32 ".\n",
 					irqToMove->irq, preferredTargetCore->ID(), sourceCpuMaxIrq->ID());
 			}
 		}

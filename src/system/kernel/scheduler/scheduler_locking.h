@@ -8,7 +8,7 @@
 
 
 #include <cpu.h>
-#include <int.h>
+#include <stdint.h>
 #include <smp.h>
 
 #include "scheduler_cpu.h"

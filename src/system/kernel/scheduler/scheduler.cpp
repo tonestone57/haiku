@@ -10,6 +10,42 @@
  * Distributed under the terms of the NewOS License.
  */
 
+#include <OS.h>
+
+#include <AutoDeleter.h>
+#include <cpu.h>
+#include <debug.h>
+#include <interrupts.h>
+#include <kernel.h>
+#include <kscheduler.h>
+#include <listeners.h>
+#include <load_tracking.h>
+#include <smp.h>
+#include <timer.h>
+#include <util/Random.h>
+#include <util/DoublyLinkedList.h>
+#include <algorithm>
+#include <math.h> // For roundf
+
+#include <stdlib.h>
+#include <stdio.h>
+
+// #include <UserTeamCapabilities.h> // Added for capability checks - Temporarily commented out
+
+#include "scheduler_common.h"
+#include "scheduler_cpu.h"
+#include "scheduler_defs.h"
+#include "scheduler_locking.h"
+#include "scheduler_modes.h"
+#include "scheduler_profiler.h"
+#include "scheduler_thread.h"
+#include "scheduler_tracing.h"
+#include "scheduler_team.h" // For TeamSchedulerData
+#include "EevdfRunQueue.h"
+
+#include <util/MultiHashTable.h>
+#include <util/DoublyLinkedList.h> // For the global list
+#include <SupportDefs.h> // For atomic operations
 
 /*! The thread scheduler */
 
@@ -398,43 +434,6 @@ cmd_thread_sched_info(int argc, char** argv)
 }
 
 
-#include <OS.h>
-
-#include <AutoDeleter.h>
-#include <cpu.h>
-#include <debug.h>
-#include <interrupts.h>
-#include <kernel.h>
-#include <kscheduler.h>
-#include <listeners.h>
-#include <load_tracking.h>
-#include <smp.h>
-#include <timer.h>
-#include <util/Random.h>
-#include <util/DoublyLinkedList.h>
-#include <algorithm>
-#include <math.h> // For roundf
-
-#include <stdlib.h>
-#include <stdio.h>
-
-// #include <UserTeamCapabilities.h> // Added for capability checks - Temporarily commented out
-
-#include "scheduler_common.h"
-#include "scheduler_cpu.h"
-#include "scheduler_defs.h"
-#include "scheduler_locking.h"
-#include "scheduler_modes.h"
-#include "scheduler_profiler.h"
-#include "scheduler_thread.h"
-#include "scheduler_tracing.h"
-#include "scheduler_team.h" // For TeamSchedulerData
-#include "EevdfRunQueue.h"
-
-#include <util/HashTable.h>
-#include <util/DoublyLinkedList.h> // For the global list
-
-
 namespace Scheduler {
 
 // --- Team CPU Quota Management: Global Variables ---
@@ -587,7 +586,7 @@ static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 // Cooldown period for IRQ follow-task logic to prevent excessive ping-ponging.
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000; // 50ms
-#include <support/atomic.h> // For atomic operations
+
 
 // Tracks the last time an IRQ was moved by the follow-task mechanism
 // or by the proactive mechanism in reschedule() (Task-Contextual IRQ Re-evaluation).

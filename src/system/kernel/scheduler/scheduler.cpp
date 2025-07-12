@@ -68,7 +68,7 @@ static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight
 static const int32 kNewMaxWeightCap = 35000000;
 
 // The new weight table and its initialization function
-static int32 gHaikuContinuousWeights[B_MAX_USER_PRIORITY + 1];
+static int32 gHaikuContinuousWeights[B_REAL_TIME_PRIORITY + 1];
 
 // Prototype function to calculate weights (uses double for precision during generation)
 static int32
@@ -81,7 +81,7 @@ calculate_continuous_haiku_weight_prototype(int32 priority)
 
 	int32 calcPrio = priority;
 	if (calcPrio < B_LOWEST_ACTIVE_PRIORITY) calcPrio = B_LOWEST_ACTIVE_PRIORITY;
-	if (calcPrio > B_MAX_USER_PRIORITY) calcPrio = B_MAX_USER_PRIORITY; // Clamp to max valid prio
+	if (calcPrio > B_REAL_TIME_PRIORITY) calcPrio = B_REAL_TIME_PRIORITY; // Clamp to max valid prio
 
 	const double haiku_priority_step_factor = 1.091507805494422;
 	double weight_fp;
@@ -115,7 +115,7 @@ static void
 _init_continuous_weights()
 {
 	dprintf("Scheduler: Initializing continuous weights table...\n");
-	for (int32 i = 0; i <= B_MAX_USER_PRIORITY; i++) { // Iterate up to and including B_MAX_USER_PRIORITY
+	for (int32 i = 0; i <= B_REAL_TIME_PRIORITY; i++) { // Iterate up to and including B_REAL_TIME_PRIORITY
 		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
 	}
 	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1; // Ensure idle is minimal after loop
@@ -174,10 +174,10 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const CPU
     int32 priority = thread->priority;
     if (priority < 0) {
         priority = 0;
-    } else if (priority > B_MAX_USER_PRIORITY) { // Ensure we don't go out of bounds
-        priority = B_MAX_USER_PRIORITY;
+    } else if (priority > B_REAL_TIME_PRIORITY) { // Ensure we don't go out of bounds
+        priority = B_REAL_TIME_PRIORITY;
     }
-    // Array is indexed 0 to B_MAX_USER_PRIORITY, so direct use is fine now.
+    // Array is indexed 0 to B_REAL_TIME_PRIORITY, so direct use is fine now.
     return gHaikuContinuousWeights[priority];
 }
 
@@ -341,7 +341,7 @@ cmd_dump_eevdf_weights(int argc, char** argv)
 
 	int32 previousWeight = 0;
 
-	for (int32 prio = 0; prio < B_MAX_USER_PRIORITY; prio++) {
+	for (int32 prio = 0; prio < B_REAL_TIME_PRIORITY; prio++) {
 		int32 currentWeight = gHaikuContinuousWeights[prio];
 		char notes[80] = "";
 		char ratioStr[16] = "N/A";

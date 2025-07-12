@@ -332,6 +332,9 @@ extern int32 gModeMaxTargetCpuIrqLoad;
 // - Methodology: Vary factor in small increments for each mode and observe metrics.
 extern float gSchedulerSMTConflictFactor; // Value set by current scheduler mode.
 extern bool gSchedulerElasticQuotaMode;
+extern TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy;
+extern DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
+extern spinlock gTeamSchedulerListLock;
 
 // --- End Mode-Settable Global Parameters ---
 

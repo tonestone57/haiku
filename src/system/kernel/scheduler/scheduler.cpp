@@ -125,7 +125,7 @@ _init_continuous_weights()
 
 static const bool kUseContinuousWeights = true;
 
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const CPUEntry* contextCpu) {
+static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpu) {
 	if (thread == NULL) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
@@ -324,8 +324,6 @@ bigtime_t gGlobalMinTeamVRuntime = 0;
 
 static int32 scheduler_reset_team_quotas_event(timer* unused);
 static void scheduler_update_global_min_team_vruntime();
-
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 
 static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);

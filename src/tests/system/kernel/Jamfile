@@ -77,6 +77,8 @@ SimpleTest yield_test : yield_test.cpp ;
 
 SimpleTest UserGroupStressTest : UserGroupStressTest.cpp ;
 
+SimpleTest SecurityStressTest : SecurityStressTest.cpp ;
+
 SimpleTest TcpIpStressTest : TcpIpStressTest.cpp ;
 
 SimpleTest sigint_bug113_test : sigint_bug113_test.cpp ;

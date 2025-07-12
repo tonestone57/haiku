@@ -87,6 +87,16 @@
                                ((trans) == PRIV_TRANSCODER_C ? _PIPE_C_BASE : 0x0 )))
 // TODO: Add PRIV_TRANSCODER_D to _TRANSCODER_PCH if it follows _PIPE_D_BASE pattern on some PCH gens.
 
+// --- Pipe Timing Registers ---
+#define HTOTAL(pipe)			(_PIPE(pipe) + 0x0000)
+#define HBLANK(pipe)			(_PIPE(pipe) + 0x0004)
+#define HSYNC(pipe)				(_PIPE(pipe) + 0x0008)
+#define VTOTAL(pipe)			(_PIPE(pipe) + 0x000C)
+#define VBLANK(pipe)			(_PIPE(pipe) + 0x0010)
+#define VSYNC(pipe)				(_PIPE(pipe) + 0x0014)
+#define PIPE_SRC(pipe)			(_PIPE(pipe) + 0x001C)
+#define PIPE_CONF(pipe)			(_PIPE(pipe) + 0x0008)
+
 // --- Primary Plane Registers (Gen7: IVB/HSW, also similar for Gen8/9 primary plane A/B) ---
 // These are relative to _PIPE(pipe) for pre-SKL.
 // For SKL+, primary plane registers are relative to _TRANSCODER_SKL(transcoder), e.g., PLANE_CTL(trans).
@@ -553,6 +563,7 @@
 
 // DDI Buffer Transition Registers (primarily for HDMI electricals on HSW+)
 // These are per-DDI port. Example for DDI A. Offsets are relative to DDI_BUF_CTL.
+#define DDI_BUF_CTL(port_idx)      (0x64000 + (port_idx) * 0x100)
 #define DDI_BUF_TRANS_LO(port_idx, i)      (DDI_BUF_CTL(port_idx) + 0x8 + (i) * 8)
 #define DDI_BUF_TRANS_HI(port_idx, i)      (DDI_BUF_CTL(port_idx) + 0xC + (i) * 8)
 	// TODO: Define specific bitfields for DDI_BUF_TRANS_LO/HI for HDMI:
@@ -1074,6 +1085,50 @@
 	#define CHROMAKEY_ENABLE_BIT			(1U << 31)     // Example enable bit
 	#define CHROMAKEY_MASK_RGB_BITS			0x00FFFFFF     // Example: Compare R, G, B
 
+
+// --- 3D Pipeline Registers ---
+#define GFX_MODE				0x2050
+#define GFX_MODE_3D_PIPELINE_ENABLE	(1 << 0)
+#define GFX_MODE_RASTERIZER_ENABLE	(1 << 1)
+#define GFX_MODE_TEXTURE_ENABLE		(1 << 2)
+
+#define GFX_FLUSH				0x2070
+#define GFX_FLUSH_RENDER_CACHE		(1 << 0)
+
+#define GFX_INSTR_2				0x2084
+#define GFX_INSTR_2_VS_ENABLE		(1 << 0)
+#define GFX_INSTR_2_PS_ENABLE		(1 << 1)
+#define GFX_INSTR_2_CS_ENABLE		(1 << 2)
+#define GFX_INSTR_2_GS_ENABLE		(1 << 3)
+#define GFX_INSTR_2_HS_ENABLE		(1 << 4)
+#define GFX_INSTR_2_DS_ENABLE		(1 << 5)
+
+#define VS_CTL					0x2080
+#define VS_CTL_ENABLE			(1 << 0)
+
+#define RASTER_CTL				0x2090
+#define RASTER_CTL_ENABLE		(1 << 0)
+
+// --- Media (MFX) Registers ---
+#define MFX_CTL					0x3000
+#define MFX_CTL_ENABLE			(1 << 0)
+#define MFX_CMD_BUFFER			0x3010
+#define MFX_CMD_BUFFER_SIZE		0x3014
+
+#define MFX_AVC_CTL				0x3100
+#define MFX_AVC_CTL_ENABLE		(1 << 0)
+#define MFX_AVC_SLICE_CTL		0x3110
+#define MFX_AVC_SLICE_DATA		0x3120
+
+#define MFX_VC1_CTL				0x3200
+#define MFX_VC1_CTL_ENABLE		(1 << 0)
+#define MFX_VC1_SLICE_CTL		0x3210
+#define MFX_VC1_SLICE_DATA		0x3220
+
+#define HUC_HEVC_CTL			0x3300
+#define HUC_HEVC_CTL_ENABLE		(1 << 0)
+#define HUC_HEVC_SLICE_CTL		0x3310
+#define HUC_HEVC_SLICE_DATA		0x3320
 
 // TODO: add more registers!
 

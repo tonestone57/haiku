@@ -1,28 +1,21 @@
-/*
- * Copyright 2023, Haiku, Inc. All rights reserved.
- * Distributed under the terms of the MIT License.
- *
- * Authors:
- *		Jules Maintainer
- */
-
 #include "pipe_3d.h"
 #include "intel_i915_priv.h"
-#include "vertex_shader.h"
-#include "fragment_shader.h"
-#include "rasterizer.h"
+#include "registers.h"
 
 status_t
 intel_3d_init(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement 3D pipeline initialization.
-	intel_vertex_shader_init(devInfo);
-	intel_fragment_shader_init(devInfo);
-	return intel_rasterizer_init(devInfo);
+	uint32 gfx_mode = intel_i915_read32(devInfo, GFX_MODE);
+	gfx_mode |= GFX_MODE_3D_PIPELINE_ENABLE;
+	intel_i915_write32(devInfo, GFX_MODE, gfx_mode);
+
+	return B_OK;
 }
 
 void
 intel_3d_uninit(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement 3D pipeline uninitialization.
+	uint32 gfx_mode = intel_i915_read32(devInfo, GFX_MODE);
+	gfx_mode &= ~GFX_MODE_3D_PIPELINE_ENABLE;
+	intel_i915_write32(devInfo, GFX_MODE, gfx_mode);
 }

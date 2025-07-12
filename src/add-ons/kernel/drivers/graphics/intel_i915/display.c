@@ -204,22 +204,67 @@ intel_i915_display_uninit(intel_i915_device_info* devInfo) { /* ... (as before) 
 
 status_t
 intel_i915_configure_pipe_timings(intel_i915_device_info* devInfo, enum transcoder_id_priv trans, const display_mode* mode) {
-	TRACE("DISPLAY: configure_pipe_timings for Transcoder %d (STUB)\n", trans);
-	// TODO: Write HTOTAL, HBLANK, HSYNC, VTOTAL, VBLANK, VSYNC registers for the given transcoder.
-	// Registers are GEN-specific (e.g., HTOTAL_A, HBLANK_A vs TRANS_HTOTAL(trans), etc.)
+	if (trans >= PRIV_MAX_TRANSCODERS || !mode)
+		return B_BAD_VALUE;
+
+	uint32 htotal = (uint32)(mode->timing.h_total - 1) << 16 | (mode->timing.h_display - 1);
+	uint32 hblank = (uint32)(mode->timing.h_blank_end - 1) << 16 | (mode->timing.h_blank_start - 1);
+	uint32 hsync = (uint32)(mode->timing.h_sync_end - 1) << 16 | (mode->timing.h_sync_start - 1);
+	uint32 vtotal = (uint32)(mode->timing.v_total - 1) << 16 | (mode->timing.v_display - 1);
+	uint32 vblank = (uint32)(mode->timing.v_blank_end - 1) << 16 | (mode->timing.v_blank_start - 1);
+	uint32 vsync = (uint32)(mode->timing.v_sync_end - 1) << 16 | (mode->timing.v_sync_start - 1);
+
+	intel_i915_write32(devInfo, HTOTAL(trans), htotal);
+	intel_i915_write32(devInfo, HBLANK(trans), hblank);
+	intel_i915_write32(devInfo, HSYNC(trans), hsync);
+	intel_i915_write32(devInfo, VTOTAL(trans), vtotal);
+	intel_i915_write32(devInfo, VBLANK(trans), vblank);
+	intel_i915_write32(devInfo, VSYNC(trans), vsync);
+
 	return B_OK;
 }
 status_t
 intel_i915_configure_pipe_source_size(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint16 width, uint16 height) {
-	TRACE("DISPLAY: configure_pipe_source_size for Pipe %d to %ux%u (STUB)\n", pipe, width, height);
-	// TODO: Write PIPESRC register for the given pipe. ((height-1) << 16) | (width-1)
+	if (pipe >= PRIV_MAX_PIPES)
+		return B_BAD_VALUE;
+
+	uint32 pipesrc = (uint32)(height - 1) << 16 | (width - 1);
+	intel_i915_write32(devInfo, PIPE_SRC(pipe), pipesrc);
+
 	return B_OK;
 }
 status_t
 intel_i915_configure_transcoder_pipe(intel_i915_device_info* devInfo, enum transcoder_id_priv trans, const display_mode* mode, uint8_t bpp_total) {
-	TRACE("DISPLAY: configure_transcoder_pipe for Transcoder %d (STUB)\n", trans);
-	// TODO: Write TRANSCONF register: enable, BPC, interlace mode.
-	// Also TRANS_DP_CTL for DisplayPort specific settings if applicable.
+	if (trans >= PRIV_MAX_TRANSCODERS || !mode)
+		return B_BAD_VALUE;
+
+	uint32 transconf = intel_i915_read32(devInfo, TRANSCONF(trans));
+	transconf &= ~TRANSCONF_PIPE_BPC_MASK;
+	switch (bpp_total) {
+		case 18:
+			transconf |= TRANSCONF_PIPE_BPC_6_FIELD;
+			break;
+		case 24:
+			transconf |= TRANSCONF_PIPE_BPC_8_FIELD;
+			break;
+		case 30:
+			transconf |= TRANSCONF_PIPE_BPC_10_FIELD;
+			break;
+		case 36:
+			transconf |= TRANSCONF_PIPE_BPC_12_FIELD;
+			break;
+		default:
+			transconf |= TRANSCONF_PIPE_BPC_8_FIELD;
+			break;
+	}
+	transconf &= ~TRANSCONF_INTERLACE_MASK;
+	if (mode->timing.flags & B_INTERLACED)
+		transconf |= TRANSCONF_INTERLACED_FIELD0_IVB;
+	else
+		transconf |= TRANSCONF_PROGRESSIVE_IVB;
+
+	intel_i915_write32(devInfo, TRANSCONF(trans), transconf);
+
 	return B_OK;
 }
 
@@ -365,10 +410,10 @@ intel_i915_pipe_enable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe,
 	if (status != B_OK) { goto cleanup_ddi_port; }
 
 	// 7. Enable Pipe (PIPE_CONF register)
-	// TODO: Write PIPE_CONF(pipe) register with PIPE_CONF_ENABLE and other settings (BPC, etc.)
-	// uint32_t pipe_conf_val = PIPE_CONF_ENABLE | ... ;
-	// intel_i915_write32(devInfo, PIPE_CONF(pipe), pipe_conf_val);
-	// spin for pipe enable status if needed.
+	uint32_t pipe_conf_val = intel_i915_read32(devInfo, PIPE_CONF(pipe));
+	pipe_conf_val |= PIPE_CONF_ENABLE;
+	intel_i915_write32(devInfo, PIPE_CONF(pipe), pipe_conf_val);
+	intel_i915_wait_for_vblank(devInfo, pipe);
 
 	// 8. Enable Plane (DSPCNTR register)
 	status = intel_i915_plane_enable(devInfo, pipe, true);
@@ -416,13 +461,10 @@ intel_i915_pipe_disable(intel_i915_device_info* devInfo, enum pipe_id_priv pipe)
 	// TODO: Wait for plane disable if necessary (e.g. by polling or vblank)
 
 	// 2. Disable Pipe (PIPE_CONF)
-	// TODO: Write PIPE_CONF(pipe) register, clearing PIPE_CONF_ENABLE.
-	// uint32_t pipe_conf_val = intel_i915_read32(devInfo, PIPE_CONF(pipe));
-	// pipe_conf_val &= ~PIPE_CONF_ENABLE;
-	// intel_i915_write32(devInfo, PIPE_CONF(pipe), pipe_conf_val);
-	// TODO: Wait for pipe disable (e.g. by polling PIPE_CONF or using vblank events)
-	// For now, just a delay.
-	spin(1000); // 1ms delay, replace with proper wait.
+	uint32_t pipe_conf_val = intel_i915_read32(devInfo, PIPE_CONF(pipe));
+	pipe_conf_val &= ~PIPE_CONF_ENABLE;
+	intel_i915_write32(devInfo, PIPE_CONF(pipe), pipe_conf_val);
+	intel_i915_wait_for_vblank(devInfo, pipe);
 
 	// 3. Disable DDI Port and Post-Disable Hook
 	if (port) {

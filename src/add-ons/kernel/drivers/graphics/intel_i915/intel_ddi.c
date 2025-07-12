@@ -343,24 +343,81 @@ intel_dp_write_dpcd(intel_i915_device_info* devInfo, intel_output_port_state* po
 }
 
 
+static status_t
+intel_dp_link_training_clock_recovery(intel_i915_device_info* devInfo, intel_output_port_state* port,
+                                       const intel_clock_params_t* clock_params)
+{
+	uint8_t voltage_swing;
+	uint8_t pre_emphasis;
+	uint8_t lane_status[2];
+	int tries;
+
+	for (voltage_swing = 0; voltage_swing < 4; voltage_swing++) {
+		for (pre_emphasis = 0; pre_emphasis < 4; pre_emphasis++) {
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 0, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 1, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 2, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 3, voltage_swing, pre_emphasis);
+
+			intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_1);
+
+			for (tries = 0; tries < 5; tries++) {
+				spin(100);
+				intel_dp_get_lane_status_and_adjust_request(devInfo, port, lane_status, NULL);
+				if (intel_dp_is_cr_done(lane_status, clock_params->dp_lane_count))
+					return B_OK;
+			}
+		}
+	}
+
+	return B_ERROR;
+}
+
+static status_t
+intel_dp_link_training_channel_equalization(intel_i915_device_info* devInfo, intel_output_port_state* port,
+                                             const intel_clock_params_t* clock_params)
+{
+	uint8_t voltage_swing;
+	uint8_t pre_emphasis;
+	uint8_t lane_status[2];
+	int tries;
+
+	for (voltage_swing = 0; voltage_swing < 4; voltage_swing++) {
+		for (pre_emphasis = 0; pre_emphasis < 4; pre_emphasis++) {
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 0, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 1, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 2, voltage_swing, pre_emphasis);
+			intel_dp_set_lane_voltage_swing_pre_emphasis(devInfo, port, 3, voltage_swing, pre_emphasis);
+
+			intel_dp_set_link_train_pattern(devInfo, port, DPCD_TRAINING_PATTERN_2);
+
+			for (tries = 0; tries < 5; tries++) {
+				spin(400);
+				intel_dp_get_lane_status_and_adjust_request(devInfo, port, lane_status, NULL);
+				if (intel_dp_is_ce_done(lane_status, clock_params->dp_lane_count))
+					return B_OK;
+			}
+		}
+	}
+
+	return B_ERROR;
+}
+
 status_t
 intel_dp_link_training(intel_i915_device_info* devInfo, intel_output_port_state* port,
                         const intel_clock_params_t* clock_params)
 {
-	if (!devInfo || !port || !clock_params) return B_BAD_VALUE;
-	TRACE("DDI: dp_link_training: Port %d (STUB - full training sequence is complex)\n", port->logical_port_id);
-	uint8_t test_val;
-	status_t aux_test = intel_dp_read_dpcd(devInfo, port, DPCD_DPCD_REV, &test_val, 1);
-	if (aux_test == B_UNSUPPORTED || aux_test == B_DEV_NOT_READY) { // If GMBUS/AUX path fails
-		TRACE("DDI: dp_link_training: AUX channel not functional or stubbed, assuming link training 'succeeded' conceptually.\n");
-		return B_OK;
-	} else if (aux_test != B_OK) {
-		TRACE("DDI: dp_link_training: DPCD read failed (%s), cannot proceed.\n", strerror(aux_test));
-		return aux_test;
-	}
-	// If AUX read worked, but full training logic is not here, return error.
-	TRACE("DDI: dp_link_training: Full link training logic not implemented, returning error for now.\n");
-	return B_ERROR;
+	status_t status;
+
+	status = intel_dp_link_training_clock_recovery(devInfo, port, clock_params);
+	if (status != B_OK)
+		return status;
+
+	status = intel_dp_link_training_channel_equalization(devInfo, port, clock_params);
+	if (status != B_OK)
+		return status;
+
+	return B_OK;
 }
 
 

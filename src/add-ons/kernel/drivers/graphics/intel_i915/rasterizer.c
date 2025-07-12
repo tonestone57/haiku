@@ -1,66 +1,28 @@
-/*
- * Copyright 2023, Haiku, Inc. All rights reserved.
- * Distributed under the terms of the MIT License.
- *
- * Authors:
- *		Jules Maintainer
- */
-
 #include "rasterizer.h"
 #include "intel_i915_priv.h"
+#include "registers.h"
 
 status_t
 intel_rasterizer_init(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement rasterizer initialization.
+	uint32 raster_ctl = intel_i915_read32(devInfo, RASTER_CTL);
+	raster_ctl |= RASTER_CTL_ENABLE;
+	intel_i915_write32(devInfo, RASTER_CTL, raster_ctl);
+
 	return B_OK;
-}
-
-#include "gem_object.h"
-
-void
-intel_rasterizer_draw_triangles(intel_i915_device_info* devInfo,
-	struct intel_i915_gem_object* vertex_buffer,
-	uint32_t vertex_count)
-{
-	struct intel_engine_cs* engine = devInfo->rcs0;
-	uint32_t cmd_size = 12;
-	uint32_t* cmd;
-
-	intel_engine_get_space(engine, cmd_size, (uint32_t**)&cmd);
-
-	cmd[0] = 0x1c000000 | (cmd_size - 2);
-	cmd[1] = 0;
-	cmd[2] = 0;
-	cmd[3] = 0;
-	cmd[4] = 0;
-	cmd[5] = 0;
-	cmd[6] = 0;
-	cmd[7] = 0;
-	cmd[8] = 0;
-	cmd[9] = 0;
-	cmd[10] = 0;
-	cmd[11] = 0;
-
-	intel_engine_advance_tail(engine, cmd_size);
-}
-
-void
-intel_rasterizer_set_texture(intel_i915_device_info* devInfo,
-	struct intel_i915_gem_object* texture)
-{
-	// TODO: Implement texture setting.
 }
 
 void
 intel_rasterizer_uninit(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement rasterizer uninitialization.
+	uint32 raster_ctl = intel_i915_read32(devInfo, RASTER_CTL);
+	raster_ctl &= ~RASTER_CTL_ENABLE;
+	intel_i915_write32(devInfo, RASTER_CTL, raster_ctl);
 }
 
-void
-intel_rasterizer_set_texture(intel_i915_device_info* devInfo,
-	struct intel_i915_gem_object* texture)
+status_t
+intel_rasterizer_set_texture(intel_i915_device_info* devInfo, uint32 texture_handle, uint32 texture_format)
 {
 	// TODO: Implement texture setting.
+	return B_OK;
 }

@@ -21,6 +21,7 @@ KernelAddon intel_i915 :
 	intel_ddi.c
 	i915_ppgtt.c
 	i915_hpd.c
+	kaby_lake/kaby_lake.cpp
 	# Add other source files here as they are created.
 	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a

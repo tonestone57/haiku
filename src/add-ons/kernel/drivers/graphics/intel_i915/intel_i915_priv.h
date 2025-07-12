@@ -49,7 +49,7 @@ enum intel_platform {
 	INTEL_BROADWELL,
 	// Gen9
 	INTEL_SKYLAKE,
-	INTEL_KABYLAKE, // Example, add more as needed
+	INTEL_KABYLAKE,
 	INTEL_COFFEELAKE, // Often grouped with Kaby Lake for display
 	INTEL_COMETLAKE,  // Also Gen9.5 based like Kaby/Coffee
 	INTEL_GEMINILAKE, // LP Gen9
@@ -159,6 +159,11 @@ struct intel_static_caps { // Simplified from intel_device_info flags
 #define IS_SKYLAKE_GT3(devid) ((devid) == 0x1926 || (devid) == 0x192a || (devid) == 0x192b)
 #define IS_SKYLAKE(devid) (IS_SKYLAKE_GT1(devid) || IS_SKYLAKE_GT2(devid) || IS_SKYLAKE_GT3(devid))
 
+#define INTEL_KABYLAKE_GT1_IDS 0x5902, 0x5906, 0x590A, 0x590B
+#define INTEL_KABYLAKE_GT2_IDS 0x5912, 0x5916, 0x591A, 0x591B, 0x591D, 0x591E
+#define INTEL_KABYLAKE_GT3_IDS 0x5926, 0x5927
+#define INTEL_KABYLAKE_GT4_IDS 0x593B, 0x593D
+
 #define IS_KABYLAKE_ULT_GT1(devid) ((devid) == 0x5906)
 #define IS_KABYLAKE_DT_GT1(devid)  ((devid) == 0x5902)
 #define IS_KABYLAKE_ULT_GT2(devid) ((devid) == 0x5916 || (devid) == 0x5921) // GT2F included
@@ -170,6 +175,13 @@ struct intel_static_caps { // Simplified from intel_device_info flags
 #define IS_KABYLAKE(devid) (IS_KABYLAKE_ULT_GT1(devid) || IS_KABYLAKE_DT_GT1(devid) || IS_KABYLAKE_ULT_GT2(devid) || \
                             IS_KABYLAKE_ULX_GT2(devid) || IS_KABYLAKE_DT_GT2(devid) || IS_KABYLAKE_MOBILE_GT2(devid) || \
                             IS_KABYLAKE_WKS_GT2(devid) || IS_KABYLAKE_ULT_GT3(devid))
+
+#define IS_KABYLAKE_MASK(devid) ( \
+	(devid) == INTEL_KABYLAKE_GT1_IDS || \
+	(devid) == INTEL_KABYLAKE_GT2_IDS || \
+	(devid) == INTEL_KABYLAKE_GT3_IDS || \
+	(devid) == INTEL_KABYLAKE_GT4_IDS \
+)
 
 #define IS_GEMINILAKE(devid) ((devid) == 0x3185 || (devid) == 0x3184)
 

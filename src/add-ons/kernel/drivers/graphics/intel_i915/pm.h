@@ -65,6 +65,8 @@ void intel_i915_pm_suspend(intel_i915_device_info* devInfo);
 void intel_i915_pm_resume(intel_i915_device_info* devInfo);
 void intel_enable_rc6(intel_i915_device_info* devInfo);
 void intel_disable_rc6(intel_i915_device_info* devInfo);
+void intel_set_rps(intel_i915_device_info* devInfo, uint8_t val);
+void intel_set_rc_state(intel_i915_device_info* devInfo, uint32_t state);
 
 #ifdef __cplusplus
 }

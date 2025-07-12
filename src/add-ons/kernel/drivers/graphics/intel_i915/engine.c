@@ -146,18 +146,35 @@ intel_engine_guc_submit(struct intel_engine_cs* engine,
 	struct intel_i915_gem_context* context)
 {
 	intel_i915_device_info* devInfo = engine->dev_priv;
-	struct guc_context_desc desc;
-	struct guc_command cmd;
+	uint32_t* cmd_queue = (uint32_t*)devInfo->guc_log_cpu_addr;
+	uint32_t head = cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4];
+	uint32_t tail = cmd_queue[GUC_CMD_QUEUE_TAIL_OFFSET / 4];
+	uint32_t size = cmd_queue[GUC_CMD_QUEUE_SIZE_OFFSET / 4];
+	uint32_t space = (head - tail - 1 + size) % size;
 
+	if (space < 2) {
+		return B_NO_MEMORY;
+	}
+
+	struct guc_context_desc desc;
 	desc.context_id = context->id;
 	desc.priority = 0;
 	desc.padding = 0;
 	desc.wg_context_address = context->hw_image_obj->gtt_offset_pages * B_PAGE_SIZE;
 
+	struct guc_command cmd;
 	cmd.command = 0x1001; // GUC_CMD_SUBMIT_CONTEXT
 	cmd.length = sizeof(desc);
 
-	// TODO: Write the command to the GuC's command queue.
+	uint32_t* cmd_addr = &cmd_queue[tail];
+	memcpy(cmd_addr, &cmd, sizeof(cmd));
+	cmd_addr += sizeof(cmd) / 4;
+	memcpy(cmd_addr, &desc, sizeof(desc));
+
+	tail = (tail + (sizeof(cmd) + sizeof(desc)) / 4) % size;
+	cmd_queue[GUC_CMD_QUEUE_TAIL_OFFSET / 4] = tail;
+
+	intel_i915_write32(devInfo, 0xc030, 1); // DOORBELL_TO_GUC
 
 	return B_OK;
 }

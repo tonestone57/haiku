@@ -338,6 +338,18 @@ intel_disable_rc6(intel_i915_device_info* devInfo)
 }
 
 void
+intel_set_rps(intel_i915_device_info* devInfo, uint8_t val)
+{
+	intel_i915_write32(devInfo, GEN6_RPNSWREQ, (val << RPNSWREQ_TARGET_PSTATE_SHIFT));
+}
+
+void
+intel_set_rc_state(intel_i915_device_info* devInfo, uint32_t state)
+{
+	intel_i915_write32(devInfo, DE_RC_STATE, state);
+}
+
+void
 intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 {
 	if (!devInfo || !devInfo->rps_state || !devInfo->rps_state->rc6_supported || !devInfo->mmio_regs_addr) {

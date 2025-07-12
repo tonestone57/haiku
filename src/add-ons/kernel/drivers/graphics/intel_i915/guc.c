@@ -14,12 +14,17 @@
 #include <image.h>
 #include <stdio.h>
 
-#define GUC_FIRMWARE_PATH "/lib/firmware/intel/kbl_guc_ver9_39.bin"
+#include "i915_platform_data.h"
 
 status_t
 intel_guc_init(intel_i915_device_info* devInfo)
 {
-	const char* path = GUC_FIRMWARE_PATH;
+	char path[256];
+	snprintf(path, sizeof(path), "/lib/firmware/intel/%s_guc_ver%d_%d.bin",
+		intel_platform_name(devInfo->platform),
+		INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id),
+		devInfo->runtime_caps.revision_id);
+
 	FILE* fp = fopen(path, "rb");
 	if (fp == NULL) {
 		return ENOENT;

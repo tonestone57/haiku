@@ -23,6 +23,11 @@ struct guc_command {
 	uint32_t data[0];
 };
 
+#define GUC_CMD_QUEUE_HEAD_OFFSET	0x0
+#define GUC_CMD_QUEUE_TAIL_OFFSET	0x4
+#define GUC_CMD_QUEUE_SIZE_OFFSET	0x8
+#define GUC_CMD_QUEUE_STATUS_OFFSET	0xc
+
 #ifdef __cplusplus
 extern "C" {
 #endif

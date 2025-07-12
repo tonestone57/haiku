@@ -34,5 +34,14 @@ extern const int gIntelPlatformDataSize;
 #define SZ_64K  (1U << 1)
 #define SZ_2M   (1U << 2)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+const char* intel_platform_name(enum intel_platform platform);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* I915_PLATFORM_DATA_H */

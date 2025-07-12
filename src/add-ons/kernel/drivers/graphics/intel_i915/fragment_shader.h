@@ -5,26 +5,20 @@
  * Authors:
  *		Jules Maintainer
  */
-#ifndef HUC_H
-#define HUC_H
+#ifndef FRAGMENT_SHADER_H
+#define FRAGMENT_SHADER_H
 
 #include "intel_i915_priv.h"
-
-struct huc_command {
-	uint32_t command;
-	uint32_t length;
-	uint32_t data[0];
-};
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-status_t intel_huc_init(intel_i915_device_info* devInfo);
-void intel_huc_uninit(intel_i915_device_info* devInfo);
+status_t intel_fragment_shader_init(intel_i915_device_info* devInfo);
+void intel_fragment_shader_uninit(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* HUC_H */
+#endif /* FRAGMENT_SHADER_H */

@@ -311,3 +311,38 @@ const intel_platform_info_map_t gIntelPlatformData[] = {
 };
 
 const int gIntelPlatformDataSize = sizeof(gIntelPlatformData) / sizeof(intel_platform_info_map_t) -1; // -1 for placeholder
+
+const char*
+intel_platform_name(enum intel_platform platform)
+{
+	switch (platform) {
+		case INTEL_IVYBRIDGE:
+			return "ivb";
+		case INTEL_HASWELL:
+			return "hsw";
+		case INTEL_BROADWELL:
+			return "bdw";
+		case INTEL_SKYLAKE:
+			return "skl";
+		case INTEL_KABYLAKE:
+			return "kbl";
+		case INTEL_COFFEELAKE:
+			return "cfl";
+		case INTEL_COMETLAKE:
+			return "cml";
+		case INTEL_GEMINILAKE:
+			return "glk";
+		case INTEL_ICELAKE:
+			return "icl";
+		case INTEL_JASPERLAKE:
+			return "jkl";
+		case INTEL_TIGERLAKE:
+			return "tgl";
+		case INTEL_ALDERLAKE_P:
+			return "adlp";
+		case INTEL_ALDERLAKE_S:
+			return "adls";
+		default:
+			return "unknown";
+	}
+}

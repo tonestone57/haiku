@@ -9,6 +9,8 @@
 #include "huc_hevc.h"
 #include "intel_i915_priv.h"
 
+#include "huc.h"
+
 status_t
 intel_huc_hevc_init(intel_i915_device_info* devInfo)
 {

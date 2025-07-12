@@ -9,12 +9,14 @@
 #include "pipe_3d.h"
 #include "intel_i915_priv.h"
 #include "vertex_shader.h"
+#include "fragment_shader.h"
 
 status_t
 intel_3d_init(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement 3D pipeline initialization.
-	return intel_vertex_shader_init(devInfo);
+	intel_vertex_shader_init(devInfo);
+	return intel_fragment_shader_init(devInfo);
 }
 
 void

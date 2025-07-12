@@ -5,26 +5,20 @@
  * Authors:
  *		Jules Maintainer
  */
-#ifndef HUC_H
-#define HUC_H
+#ifndef MFX_AVC_H
+#define MFX_AVC_H
 
 #include "intel_i915_priv.h"
-
-struct huc_command {
-	uint32_t command;
-	uint32_t length;
-	uint32_t data[0];
-};
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-status_t intel_huc_init(intel_i915_device_info* devInfo);
-void intel_huc_uninit(intel_i915_device_info* devInfo);
+status_t intel_mfx_avc_init(intel_i915_device_info* devInfo);
+void intel_mfx_avc_uninit(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* HUC_H */
+#endif /* MFX_AVC_H */

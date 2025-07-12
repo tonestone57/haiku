@@ -125,7 +125,6 @@ _init_continuous_weights()
 static const bool kUseContinuousWeights = true;
 
 static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
-	const CPUEntry* contextCpu = static_cast<const CPUEntry*>(contextCpuVoid);
 	if (thread == NULL) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
@@ -144,12 +143,12 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 		locker.Unlock();
 
 		if (isTeamExhausted) {
-			if (gSchedulerElasticQuotaMode && contextCpu != NULL) {
+			if (Scheduler::gSchedulerElasticQuotaMode && contextCpu != NULL) {
 				if (contextCpu->fCurrentActiveTeam == tsd) {
 					isBorrowing = true;
 				}
-			} else if (gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
-				CPUEntry* threadActualCpu = CPUEntry::GetCPU(thread->cpu->cpu_num);
+			} else if (Scheduler::gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
+				Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
 				if (threadActualCpu->fCurrentActiveTeam == tsd) {
 					isBorrowing = true;
 					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
@@ -157,11 +156,11 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 			}
 
 			if (!isBorrowing) {
-				if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
+				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
 					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
 						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
 					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-				} else if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
+				} else if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
 					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
 						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
 				}
@@ -186,15 +185,15 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 static void
 scheduler_update_global_min_team_vruntime()
 {
-	if (gTeamSchedulerDataList.IsEmpty()) {
+	if (Scheduler::gTeamSchedulerDataList.IsEmpty()) {
 		return;
 	}
 
 	bigtime_t calculatedNewGlobalMin = B_INFINITE_TIMEOUT;
 	bool foundAny = false;
 
-	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
-	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
+	InterruptsSpinLocker listLocker(Scheduler::gTeamSchedulerListLock);
+	Scheduler::TeamSchedulerData* tsd = Scheduler::gTeamSchedulerDataList.Head();
 	while (tsd != NULL) {
 		InterruptsSpinLocker teamLocker(tsd->lock);
 		if (tsd->team_virtual_runtime < calculatedNewGlobalMin) {
@@ -202,7 +201,7 @@ scheduler_update_global_min_team_vruntime()
 		}
 		foundAny = true;
 		teamLocker.Unlock();
-		tsd = gTeamSchedulerDataList.GetNext(tsd);
+		tsd = Scheduler::gTeamSchedulerDataList.GetNext(tsd);
 	}
 	listLocker.Unlock();
 

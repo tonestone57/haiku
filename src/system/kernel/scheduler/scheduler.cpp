@@ -47,7 +47,7 @@
 #include <util/MultiHashTable.h>
 #include <kernel/thread.h>
 #include <syscall_numbers.h>
-#include <stdint.h>
+#include <cstdint>
 
 
 /*! The thread scheduler */

@@ -146,9 +146,9 @@ CPUEntry::SetCurrentActiveTeam(TeamSchedulerData* teamData)
 	// TODO: Review locking implications.
 	fCurrentActiveTeam = teamData;
 	if (teamData != NULL) {
-		TRACE_SCHED("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
+		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
 	} else {
-		TRACE_SCHED("CPU %" B_PRId32 ": Active team cleared.\n", ID());
+		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team cleared.\n", ID());
 	}
 }
 

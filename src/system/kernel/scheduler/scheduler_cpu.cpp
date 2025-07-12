@@ -1045,11 +1045,11 @@ CPUPriorityHeap::Dump()
 	// Higher SMTScore means more desirable CPU. EffSMTLd is the underlying load value (lower is better).
 	// We also calculate the current effective SMT load on the fly for comparison/verification.
 
-	CPUEntry* tempEntries[MAX_CPUS]; // Max possible CPUs on a core
+	CPUEntry* tempEntries[SMP_MAX_CPUS]; // Max possible CPUs on a core
 	int32 count = 0;
 
 	CPUEntry* entry = PeekRoot();
-	while (entry && count < MAX_CPUS) {
+	while (entry && count < SMP_MAX_CPUS) {
 		tempEntries[count++] = entry;
 		RemoveRoot();
 		entry = PeekRoot();
@@ -1150,7 +1150,7 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	InterruptsSpinLocker lock(fCPULock);
+	SpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1298,8 +1298,10 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		{
 			WriteSpinLocker heapsLock(gCoreHeapsShardLock[this->ID() % kNumCoreLoadHeapShards]);
 			if (this->GetMinMaxHeapLink()->fIndex != -1) {
-				if (fHighLoad) gCoreHighLoadHeap.Remove(this);
-				else gCoreLoadHeap.Remove(this);
+				if (fHighLoad)
+					gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
+				else
+					gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
 			}
 		}
 		if (fPackage != NULL) {
@@ -1566,13 +1568,13 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
 				snprintf(affinityStr, sizeof(affinityStr), "CPU%d", t->pinned_to_cpu - 1);
 			} else if (!td->GetCPUMask().IsEmpty() && !td->GetCPUMask().IsFull()) {
 				// Just show first bit of mask for brevity in this table. Full mask in thread_sched_info.
-				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", td->GetCPUMask().Bits()[0]);
+				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", td->GetCPUMask().Bits(0));
 			} else {
 				strcpy(affinityStr, "-");
 			}
 
 			kprintf("  %p  %-7" B_PRId32 " %-5" B_PRId32 " %-5" B_PRId32 " %-5d %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %-3" B_PRId32 "%% %-8s %s\n",
-				t, t->id, t->priority, td->GetEffectivePriority(), (int)td->LatencyNice(),
+				t, t->id, t->priority, td->GetEffectivePriority(), 0,
 				td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
 				td->SliceDuration(), td->VirtualRuntime(),
 				td->GetLoad() / (kMaxLoad / 100), affinityStr, t->name);
@@ -1812,7 +1814,7 @@ scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFro
 	// Clamp to absolute minimum and a scaled version of the mode's base maximum.
 	dynamicTargetLoad = max_c(kDynamicIrqLoadAbsoluteMin, dynamicTargetLoad);
 	dynamicTargetLoad = min_c(dynamicTargetLoad, (int32)(baseMaxIrqLoadFromMode * kDynamicIrqLoadMaxFactor * 1.1f)); // Allow slightly above baseMax * maxFactor as a hard cap
-	dynamicTargetLoad = min_c(dynamicTargetLoad, DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD * 2); // Overall sanity cap
+	dynamicTargetLoad = min_c(dynamicTargetLoad, (int32)(gHighAbsoluteIrqThreshold * 2)); // Overall sanity cap
 
 	TRACE_SCHED_IRQ("GetDynamicMaxIrqTarget: CPU %" B_PRId32 ", instLoad %.2f, baseMode %" B_PRId32 ", effFactor %.2f -> dynamicTarget %" B_PRId32 "\n",
 		cpu->ID(), cpuInstantLoad, baseMaxIrqLoadFromMode, effectiveFactor, dynamicTargetLoad);
@@ -1822,11 +1824,11 @@ scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFro
 
 
 // These are defined in scheduler.cpp
-extern HashTable<IntHashDefinition>* sIrqTaskAffinityMap;
+extern BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap;
 extern spinlock gIrqTaskAffinityLock;
 
 // These are defined in scheduler.cpp
-extern HashTable<IntHashDefinition>* sIrqTaskAffinityMap;
+extern BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap;
 extern spinlock gIrqTaskAffinityLock;
 
 /*! Selects the best CPU on a given target core to receive an IRQ.
@@ -1862,7 +1864,7 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		if (sIrqTaskAffinityMap->Lookup(irqVector, &thid) == B_OK) {
 			affinityLocker.Unlock(); // Unlock early
 
-			Thread* task = thread_get_kernel_thread(thid);
+			Thread* task = thread_get_thread_struct_locked(thid);
 			if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 				CPUEntry* taskCpuEntry = CPUEntry::GetCPU(task->cpu->cpu_num);
 				if (taskCpuEntry->Core() == targetCore) {
@@ -2037,4 +2039,3 @@ void Scheduler::init_debug_commands()
 // I will ensure the implementation of _UpdateMinVirtualRuntime uses this.
 // The diff from the previous step already includes this.
 
-[end of src/system/kernel/scheduler/scheduler_cpu.cpp]

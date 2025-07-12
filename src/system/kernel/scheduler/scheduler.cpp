@@ -1347,7 +1347,6 @@ scheduler_reschedule(int32 nextState)
 
 	int32 thisCPUId = smp_get_current_cpu();
 	CPUEntry* cpu = CPUEntry::GetCPU(thisCPUId);
-	Thread* oldThread = thread_get_current_thread();
 
 	// Original reschedule logic up to choosing nextThread (condensed)
 	// This part needs to be exactly as it was, only the Mechanism A part is added
@@ -1673,7 +1672,7 @@ init()
 		int32 shardHeapSize = gCoreCount / Scheduler::kNumCoreLoadHeapShards + 4;
 		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
-		rw_lock_init(&gCoreHeapsShardLock[i], "core_heap_shard_lock");
+		B_INITIALIZE_RW_SPINLOCK(&gCoreHeapsShardLock[i]);
 	}
 	new(&gIdlePackageList) IdlePackageList;
 

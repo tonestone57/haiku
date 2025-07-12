@@ -43,7 +43,7 @@
 #include "EevdfRunQueue.h"
 #include <thread_defs.h>
 
-#include <util/MultiHashTable.h>
+#include <util/OpenHashTable.h>
 // #include <util/DoublyLinkedList.h> // Already included above
 
 /*! The thread scheduler */
@@ -207,9 +207,9 @@ scheduler_update_global_min_team_vruntime()
 	listLocker.Unlock();
 
 	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
+		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -365,7 +365,7 @@ cmd_dump_eevdf_weights(int argc, char** argv)
 	}
 	kprintf("-----|------------|---------------|------------------------------------\n");
 	kprintf("Note: SCHEDULER_WEIGHT_SCALE = %d\n", SCHEDULER_WEIGHT_SCALE);
-	kprintf("      kNewMinActiveWeight = %ld, kNewMaxWeightCap = %ld\n", kNewMinActiveWeight, kNewMaxWeightCap);
+	kprintf("      kNewMinActiveWeight = %d, kNewMaxWeightCap = %d\n", kNewMinActiveWeight, kNewMaxWeightCap);
 	kprintf("      Base scaling factor per Haiku prio point: ~%.5f\n", 1.0915078);
 	kprintf("      RT Multipliers: >=20: 1.2x; >=30: 1.5x; >=100: 2.5x; >=120: 4.0x (applied to base exponential)\n");
 
@@ -404,15 +404,15 @@ struct IntHashDefinition {
 	bool Compare(int key, thread_id* value) const { return false; }
 	bool CompareKeys(int key1, int key2) const { return key1 == key2; }
 };
-static HashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
+static BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
 static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
-static int64 gIrqLastFollowMoveTime[MAX_IRQS];
+static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
-}	// namespace Scheduler
+static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
-void Scheduler::add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
+void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
 	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
@@ -422,7 +422,7 @@ void Scheduler::add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 		tsd->teamID, tsd->team_virtual_runtime);
 }
 
-void Scheduler::remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
+void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
 	InterruptsSpinLocker locker(gTeamSchedulerListLock);
@@ -434,6 +434,8 @@ void Scheduler::remove_team_scheduler_data_from_global_list(TeamSchedulerData* t
 		TRACE_SCHED_WARNING("remove_team_scheduler_data_from_global_list: TeamSchedulerData for team %" B_PRId32 " not found in list or already removed.\n", tsd->teamID);
 	}
 }
+
+}	// namespace Scheduler
 
 using namespace Scheduler;
 

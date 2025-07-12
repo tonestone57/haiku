@@ -63,6 +63,8 @@ public:
 
 	inline	uint32		CountSetBits() const;
 
+	inline	int32		FirstSetBit() const;
+
 	inline uint32		Bits(uint32 index) const { return fBitmap[index];}
 public:
 	static	const int	kArrayBits = 32;
@@ -225,6 +227,17 @@ CPUSet::CountSetBits() const
 		count += __builtin_popcount(fBitmap[i]);
 	}
 	return count;
+}
+
+
+inline int32
+CPUSet::FirstSetBit() const
+{
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (GetBit(i))
+			return i;
+	}
+	return -1;
 }
 
 

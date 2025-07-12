@@ -370,7 +370,6 @@ extern CoreEntry* sSmallTaskCore;
 
 
 void init_debug_commands();
-int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid);
 
 
 }	// namespace Scheduler

@@ -1939,73 +1939,6 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 	return 0;
 }
 
-static int
-cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = true;
-		kprintf("Scheduler elastic team quota mode enabled.\n");
-	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = false;
-		kprintf("Scheduler elastic team quota mode disabled.\n");
-	} else {
-		kprintf("Invalid argument. Use 'on' or 'off'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_elastic_mode\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler elastic team quota mode: %s\n",
-		Scheduler::gSchedulerElasticQuotaMode ? "on" : "off");
-	return 0;
-}
-
-static int
-cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "starvation") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
-		kprintf("Scheduler team quota exhaustion policy set to: starvation\n");
-	} else if (strcmp(argv[1], "hardstop") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP;
-		kprintf("Scheduler team quota exhaustion policy set to: hardstop\n");
-	} else {
-		kprintf("Invalid argument. Use 'starvation' or 'hardstop'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_exhaustion_policy\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler team quota exhaustion policy: %s\n",
-		Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW ? "starvation" : "hardstop");
-	return 0;
-}
 
 static int
 cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
@@ -2236,7 +2169,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 						}
 					} else {
 						affinityLocker.Lock();
-						sIrqTaskAffinityMap->Remove(&irqToMove->irq);
+						sIrqTaskAffinityMap->Remove(sIrqTaskAffinityMap->Lookup(irqToMove->irq));
 						affinityLocker.Unlock();
 						hasAffinity = false;
 						TRACE_SCHED_IRQ("IRQBalance: IRQ %d had stale affinity for T %" B_PRId32 ". Cleared.\n",
@@ -2479,7 +2412,7 @@ scheduler_perform_load_balance()
 	int32 minLoadFound = 0x7fffffff;
 
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
-		ReadLocker shardLocker(gCoreHeapsShardLock[shardIdx]);
+		ReadSpinLocker shardLocker(gCoreHeapsShardLock[shardIdx]);
 		CoreEntry* shardBestSource = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum();
 		if (shardBestSource != NULL && !shardBestSource->IsDefunct() && shardBestSource->GetLoad() > maxLoadFound) {
 			maxLoadFound = shardBestSource->GetLoad();
@@ -2562,7 +2495,7 @@ scheduler_perform_load_balance()
 				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
 					finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
 			} else if (sourceCoreCandidate == consolidationCore &&
-					   (uint32)sourceCoreCandidate->GetLoad() > (uint32)kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+					   sourceCoreCandidate->GetLoad() > (int32)(kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 				CoreEntry* spillTarget = NULL;
 				int32 minSpillLoad = 0x7fffffff;
 				for (int32 i = 0; i < gCoreCount; ++i) {

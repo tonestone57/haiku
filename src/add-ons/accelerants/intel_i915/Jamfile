@@ -6,6 +6,7 @@ Accelerant intel_i915 :
 	accelerant.c
 	hooks.c
 	accel_2d.c
+	accel_utils.c
 	kaby_lake/kaby_lake.cpp
 	# Add other source files here as they are created
 	: libbe.so libdevice.so libroot.so

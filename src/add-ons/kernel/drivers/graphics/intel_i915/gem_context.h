@@ -54,6 +54,11 @@ typedef struct intel_i915_gem_context {
 	// Per-engine software state for this context
 	struct intel_context_engine_state engine_states[NUM_ENGINES]; // Indexed by enum intel_engine_id
 
+	// For execlists
+	struct intel_i915_gem_object* ring_buffer;
+	uint32_t ring_head;
+	uint32_t ring_tail;
+
 	// TODO: Add more specific context-global state if needed,
 	//       e.g., overall context status, GPU virtual address space manager for PPGTT.
 

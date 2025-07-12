@@ -308,13 +308,18 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	}
 
 	uint32_t num_dwords = args.cmd_buffer_length / sizeof(uint32_t);
-	status = intel_engine_get_space(engine, num_dwords, &ring_dword_offset);
-	if (status != B_OK) goto exec_cleanup_ctx_rels; // Use the new label
 
-	for (uint32_t i = 0; i < num_dwords; i++) {
-		intel_engine_write_dword(engine, ring_dword_offset + i, ((uint32_t*)cmd_buffer_kernel_addr)[i]);
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		status = intel_engine_execlists_submit(engine, engine->current_context);
+	} else {
+		status = intel_engine_get_space(engine, num_dwords, &ring_dword_offset);
+		if (status != B_OK) goto exec_cleanup_ctx_rels; // Use the new label
+
+		for (uint32_t i = 0; i < num_dwords; i++) {
+			intel_engine_write_dword(engine, ring_dword_offset + i, ((uint32_t*)cmd_buffer_kernel_addr)[i]);
+		}
+		intel_engine_advance_tail(engine, num_dwords);
 	}
-	intel_engine_advance_tail(engine, num_dwords);
 
 exec_cleanup_ctx_rels: // New label to ensure on_demand_gtt_maps are processed before other puts
 	// Cleanup on-demand GTT mappings for this execbuf

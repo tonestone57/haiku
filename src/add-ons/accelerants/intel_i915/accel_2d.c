@@ -34,6 +34,7 @@
  */
 
 #include "accelerant.h"       // For gInfo, accelerant_info, IOCTL codes and args
+#include "accel_utils.h"
 #include <unistd.h>           // For ioctl
 #include <syslog.h>           // For syslog
 #include <string.h>           // For memcpy, memset

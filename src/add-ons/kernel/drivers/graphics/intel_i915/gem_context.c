@@ -231,6 +231,15 @@ intel_i915_gem_context_create(intel_i915_device_info* devInfo, uint32 flags,
 		status = B_BAD_VALUE;
 	}
 
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		status = intel_i915_gem_object_create(devInfo, 4096,
+			I915_BO_ALLOC_CONTIGUOUS | I915_BO_ALLOC_CPU_CLEAR | I915_BO_ALLOC_PINNED,
+			0, 0, 0, &ctx->ring_buffer);
+		if (status != B_OK) {
+			goto err_cleanup_ppgtt;
+		}
+	}
+
 	if (status != B_OK) {
 err_cleanup_ppgtt:
 		if (ctx->ppgtt) {

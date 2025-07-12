@@ -4,8 +4,7 @@
 #include <lock.h> // For spinlock
 #include "SchedulerHeap.h" // Use our specialized heap
 
-// Forward declaration
-struct thread;
+#include <kernel/thread.h>
 
 namespace Scheduler {
 

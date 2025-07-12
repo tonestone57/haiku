@@ -44,8 +44,11 @@
 #include "EevdfRunQueue.h"
 #include <thread_defs.h>
 
-#include <util/OpenHashTable.h>
-// #include <util/DoublyLinkedList.h> // Already included above
+#include <util/MultiHashTable.h>
+#include <kernel/thread.h>
+#include <syscall_numbers.h>
+#include <kernel/int.h>
+
 
 /*! The thread scheduler */
 
@@ -182,37 +185,6 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 }
 
 
-static void
-scheduler_update_global_min_team_vruntime()
-{
-	if (Scheduler::gTeamSchedulerDataList.IsEmpty()) {
-		return;
-	}
-
-	bigtime_t calculatedNewGlobalMin = B_INFINITE_TIMEOUT;
-	bool foundAny = false;
-
-	InterruptsSpinLocker listLocker(Scheduler::gTeamSchedulerListLock);
-	Scheduler::TeamSchedulerData* tsd = Scheduler::gTeamSchedulerDataList.Head();
-	while (tsd != NULL) {
-		InterruptsSpinLocker teamLocker(tsd->lock);
-		if (tsd->team_virtual_runtime < calculatedNewGlobalMin) {
-			calculatedNewGlobalMin = tsd->team_virtual_runtime;
-		}
-		foundAny = true;
-		teamLocker.Unlock();
-		tsd = Scheduler::gTeamSchedulerDataList.GetNext(tsd);
-	}
-	listLocker.Unlock();
-
-	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
-		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
-			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
-		}
-	}
-}
 
 
 static int
@@ -322,13 +294,6 @@ spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
 static timer gQuotaResetTimer;
 bigtime_t gGlobalMinTeamVRuntime = 0;
 
-static int32 scheduler_reset_team_quotas_event(timer* unused);
-static void scheduler_update_global_min_team_vruntime();
-
-static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
-static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 static int
 cmd_dump_eevdf_weights(int argc, char** argv)
@@ -828,7 +793,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				InterruptsSpinLocker teamLocker(tsd->lock);
 				bool isSourceExhausted = tsd->quota_exhausted;
 				bool isSourceBorrowing = false;
-				if (isSourceExhausted && gSchedulerElasticQuotaMode && victimCPUEntry != NULL && victimCPUEntry->fCurrentActiveTeam == tsd) {
+				if (isSourceExhausted && gSchedulerElasticQuotaMode && victimCPUEntry != NULL && victimCPUEntry->GetCurrentActiveTeam() == tsd) {
 					isSourceBorrowing = true;
 				}
 				teamLocker.Unlock();
@@ -867,9 +832,6 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 
 				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
 					|| candidateTask->GetLoad() > (kMaxLoad * 7 / 10));
-				bool isTaskEPref = (!isTaskPCritical
-					&& (candidateTask->GetBasePriority() < B_NORMAL_PRIORITY
-						|| candidateTask->GetLoad() < (kMaxLoad / 5)));
 
 				TRACE_SCHED_BL_STEAL("WorkSteal Eval: Thief C%d(T%d), Victim C%d(T%d), Task T% " B_PRId32 " (Pcrit %d, EPref %d, Load %" B_PRId32 ", Lag %" B_PRId64 ")\n",
 					thiefCPU->Core()->ID(), thiefCoreType, victimCPUEntry->Core()->ID(), victimCoreType,
@@ -937,9 +899,9 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				if (allowStealByBLPolicy) {
 					stolenTask = victimQueue.PopMinimum();
 					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
-					atomic_add(&victimCPUEntry->fTotalThreadCount, -1);
-					ASSERT(victimCPUEntry->fTotalThreadCount >=0);
-					victimCPUEntry->_UpdateMinVirtualRuntime();
+					atomic_add(&victimCPUEntry->GetTotalThreadCount(), -1);
+					ASSERT(victimCPUEntry->GetTotalThreadCount() >=0);
+					victimCPUEntry->MinVirtualRuntime();
 
 					TRACE_SCHED_BL_STEAL("  SUCCESS: CPU %" B_PRId32 "(C%d,T%d) STOLE T%" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d)\n",
 						thiefCPU->ID(), thiefCPU->Core()->ID(), thiefCoreType,
@@ -1044,7 +1006,6 @@ reschedule(int32 nextState)
 	CoreEntry* core = cpu->Core();
 
 	Thread* oldThread = thread_get_current_thread();
-	ThreadData* oldThreadData = oldThread->scheduler_data;
 
 	oldThreadData->StopCPUTime();
 
@@ -1055,10 +1016,10 @@ reschedule(int32 nextState)
 	oldThread->state = nextState;
 	oldThreadData->SetStolenInterruptTime(gCPU[thisCPUId].interrupt_time);
 
-	bigtime_t actualRuntime = oldThreadData->fTimeUsedInCurrentQuantum;
+	bigtime_t actualRuntime = oldThreadData->TimeUsedInCurrentQuantum();
 
 	if (!oldThreadData->IsIdle()) {
-		if (nextState == THREAD_STATE_WAITING || nextState == THREAD_STATE_SLEEPING) {
+		if (nextState == B_THREAD_WAITING || nextState == B_THREAD_SLEEPING) {
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
 
@@ -1253,7 +1214,7 @@ reschedule(int32 nextState)
 						actuallyStolenThreadData->MarkEnqueued(cpu->Core());
 						lock.Unlock();
 					}
-					atomic_add(&cpu->fTotalThreadCount, 1);
+					atomic_add(&cpu->GetTotalThreadCount(), 1);
 				} else {
 					cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
 				}
@@ -1262,7 +1223,7 @@ reschedule(int32 nextState)
 	}
 
 	if (!gCPU[thisCPUId].disabled)
-		cpu->_UpdateMinVirtualRuntime();
+		cpu->MinVirtualRuntime();
 	cpu->UnlockRunQueue();
 
 	Thread* nextThread = nextThreadData->GetThread();
@@ -1402,7 +1363,7 @@ scheduler_reschedule(int32 nextState)
 	reschedule(nextState); // Calls the full reschedule logic defined above
 
 	// --- Mechanism A: Task-Contextual IRQ Re-evaluation (after nextThread is chosen) ---
-	Thread* nextThread = cpu->fRunningThread; // Assuming fRunningThread is updated by reschedule()
+	Thread* nextThread = gCPU[thisCPUId].running_thread;
 	ThreadData* nextThreadData = (nextThread != NULL) ? nextThread->scheduler_data : NULL;
 
 	if (nextThreadData != NULL && !nextThreadData->IsIdle() && nextThread->cpu != NULL) {
@@ -1412,7 +1373,7 @@ scheduler_reschedule(int32 nextState)
 			TRACE_SCHED_IRQ_DYNAMIC("Resched (wrapper): Next T%" B_PRId32 " is latency sensitive (prio %" B_PRId32 "). Checking IRQs on CPU %" B_PRId32 "\n",
 				nextThread->id, nextThread->priority, thisCPUId);
 			CPUEntry* currentCpuEntry = cpu;
-			irq_assignment* irqsToPotentiallyMove[MAX_IRQS_PER_CPU];
+			irq_assignment* irqsToPotentiallyMove[SMP_MAX_CPUS];
 			int32 moveCount = 0;
 			bigtime_t now = system_time();
 
@@ -1425,7 +1386,7 @@ scheduler_reschedule(int32 nextState)
 					if (sIrqTaskAffinityMap != NULL) {
 						InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
 						thread_id mappedTid;
-						if (sIrqTaskAffinityMap->Lookup(assignedIrq->irq, &mappedTid) == B_OK && mappedTid == nextThread->id) {
+						if (sIrqTaskAffinityMap->Lookup(assignedIrq->irq) != NULL && *(sIrqTaskAffinityMap->Lookup(assignedIrq->irq)) == nextThread->id) {
 							isExplicitlyColocated = true;
 						}
 						affinityMapLocker.Unlock(); // Correctly unlock inside if
@@ -1445,7 +1406,7 @@ scheduler_reschedule(int32 nextState)
 				if (altCPU != NULL) {
 					bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
 					if (now >= lastRecordedMoveTime + DYNAMIC_IRQ_MOVE_COOLDOWN) {
-						if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
+						if (atomic_test_and_set64(&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
 							TRACE_SCHED_IRQ_DYNAMIC("Resched (wrapper): Moving IRQ %d (load %d) from CPU %d to altCPU %d for T%" B_PRId32 "\n",
 								irqToMove->irq, irqToMove->load, thisCPUId, altCPU->ID(), nextThread->id);
 							assign_io_interrupt_to_cpu(irqToMove->irq, altCPU->ID());
@@ -1526,7 +1487,9 @@ scheduler_on_thread_destroy(Thread* thread)
 				thread_id currentMappedTid = -1;
 				if (sIrqTaskAffinityMap->Lookup(irq, &currentMappedTid) == B_OK
 					&& currentMappedTid == thread->id) {
-					sIrqTaskAffinityMap->Remove(irq);
+					thread_id* value = sIrqTaskAffinityMap->Lookup(irq);
+					if (value != NULL)
+						sIrqTaskAffinityMap->Remove(value);
 					TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed, removed its affinity for IRQ %" B_PRId32 " from global map.\n",
 						thread->id, irq);
 				} else {
@@ -1724,7 +1687,7 @@ init()
 	}
 	new(&gIdlePackageList) IdlePackageList;
 
-	for (int32 i = 0; i < MAX_CPUS; i++) {
+	for (int32 i = 0; i < SMP_MAX_CPUS; i++) {
 		atomic_set64(&gReportedCpuMinVR[i], 0);
 	}
 
@@ -1792,7 +1755,7 @@ init()
 // Global minimum virtual runtime for the system
 bigtime_t gGlobalMinVirtualRuntime = 0;
 spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
-int64 gReportedCpuMinVR[MAX_CPUS];
+int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
 
 static void
@@ -1883,50 +1846,9 @@ _scheduler_init_kdf_debug_commands()
 }
 
 
-static int
-cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 2) { kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n"); return B_KDEBUG_ERROR; }
-	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
-		gSchedulerElasticQuotaMode = true; kprintf("Scheduler elastic team quota mode enabled.\n");
-	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
-		gSchedulerElasticQuotaMode = false; kprintf("Scheduler elastic team quota mode disabled.\n");
-	} else { kprintf("Error: Invalid argument '%s'. Use 'on' or 'off'.\n", argv[1]); return B_KDEBUG_ERROR; }
-	return 0;
-}
 
-static int
-cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 1) { kprintf("Usage: scheduler_get_elastic_mode\n"); return B_KDEBUG_ERROR; }
-	kprintf("Scheduler elastic team quota mode is currently: %s\n", gSchedulerElasticQuotaMode ? "ON" : "OFF");
-	return 0;
-}
 
-static int
-cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 2) { kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n"); return B_KDEBUG_ERROR;}
-	if (strcmp(argv[1], "starvation") == 0) {
-		gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW; kprintf("Team quota exhaustion policy set to: Starvation-Low\n");
-	} else if (strcmp(argv[1], "hardstop") == 0) {
-		gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP; kprintf("Team quota exhaustion policy set to: Hard-Stop\n");
-	} else { kprintf("Error: Invalid argument '%s'. Use 'starvation' or 'hardstop'.\n", argv[1]); return B_KDEBUG_ERROR; }
-	return 0;
-}
 
-static int
-cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 1) { kprintf("Usage: scheduler_get_exhaustion_policy\n"); return B_KDEBUG_ERROR; }
-	const char* policyName = "Unknown";
-	switch (gTeamQuotaExhaustionPolicy) {
-		case TEAM_QUOTA_EXHAUST_STARVATION_LOW: policyName = "Starvation-Low"; break;
-		case TEAM_QUOTA_EXHAUST_HARD_STOP: policyName = "Hard-Stop"; break;
-	}
-	kprintf("Current team quota exhaustion policy: %s\n", policyName);
-	return 0;
-}
 
 
 void
@@ -1954,7 +1876,7 @@ scheduler_init()
 	_scheduler_init_kdf_debug_commands();
 	add_debugger_command_etc("thread_sched_info", &cmd_thread_sched_info, "Dump detailed scheduler information for a specific thread", "<thread_id>\n...", 0);
 
-	sIrqTaskAffinityMap = new(std::nothrow) HashTable<IntHashDefinition>;
+	sIrqTaskAffinityMap = new(std::nothrow) BOpenHashTable<IntHashDefinition>;
 	if (sIrqTaskAffinityMap == NULL) {
 		panic("scheduler_init: Failed to allocate IRQ-Task affinity map!");
 	} else if (sIrqTaskAffinityMap->Init() != B_OK) {
@@ -1964,7 +1886,7 @@ scheduler_init()
 	}
 
 	for (int i = 0; i < NUM_IO_VECTORS; ++i) {
-		atomic_store_64(&gIrqLastFollowMoveTime[i], 0);
+		atomic_set64(&gIrqLastFollowMoveTime[i], 0);
 	}
 
 	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
@@ -2181,11 +2103,12 @@ scheduler_irq_balance_event(timer* /* unused */)
 			if (sIrqTaskAffinityMap != NULL) {
 				InterruptsSpinLocker affinityLocker(gIrqTaskAffinityLock);
 				thread_id affinitized_thid;
-				if (sIrqTaskAffinityMap->Lookup(irqToMove->irq, &affinitized_thid) == B_OK) {
+				if (sIrqTaskAffinityMap->Lookup(irqToMove->irq) != NULL) {
+					affinitized_thid = *(sIrqTaskAffinityMap->Lookup(irqToMove->irq));
 					hasAffinity = true;
 					affinityLocker.Unlock();
 
-					Thread* task = thread_get_kernel_thread(affinitized_thid);
+					Thread* task = thread_get_thread_struct_locked(affinitized_thid);
 					if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 						CPUEntry* taskCpu = CPUEntry::GetCPU(task->cpu->cpu_num);
 
@@ -2229,7 +2152,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 				bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
 
 				if (now >= lastRecordedMoveTime + cooldownToRespect) {
-					if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
+					if (atomic_test_and_set64(&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
 						proceedWithMove = true;
 					} else {
 						TRACE_SCHED_IRQ("Periodic IRQ Balance: CAS failed for IRQ %d, move deferred due to concurrent update.\n", irqToMove->irq);
@@ -2325,7 +2248,8 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				continue;
 		}
 
-		int32 currentSmtScore = currentCPU->GetValue();
+		float effectiveSmtLoad;
+		int32 currentSmtScore = currentCPU->_CalculateSmtAwareKey(effectiveSmtLoad);
 
 		bool isBetter = false;
 		if (bestCPU == NULL) {
@@ -2528,7 +2452,7 @@ scheduler_perform_load_balance()
 
 		if (consolidationCore != NULL) {
 			if (sourceCoreCandidate != consolidationCore &&
-				(consolidationCore->GetLoad() < kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY
+				(consolidationCore->GetLoad() < (int32)(kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)
 				|| consolidationCore->GetInstantaneousLoad() < 0.8f)) {
 				finalTargetCore = consolidationCore;
 				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
@@ -2541,7 +2465,7 @@ scheduler_perform_load_balance()
 					CoreEntry* core = &gCoreEntries[i];
 					if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
 					if (core->Type() == CORE_TYPE_LITTLE &&
-						core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+						core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 						if (core->GetLoad() < minSpillLoad) {
 							minSpillLoad = core->GetLoad();
 							spillTarget = core;
@@ -2708,7 +2632,7 @@ scheduler_perform_load_balance()
 				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
 					typeCompatibilityBonus += E_TO_P_BONUS_PCRITICAL;
 				} else if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
-					if (sourceCPU->Core()->GetLoad() < kVeryHighLoad * sourceCPU->Core()->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)
+						if (sourceCPU->Core()->GetLoad() < (int32)(kVeryHighLoad * sourceCPU->Core()->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY))
 						typeCompatibilityBonus -= P_TO_E_PENALTY_HIGH_LOAD_SOURCE;
 					else
 						typeCompatibilityBonus -= P_TO_E_PENALTY_DEFAULT;
@@ -2765,7 +2689,7 @@ scheduler_perform_load_balance()
 			InterruptsSpinLocker teamLocker(tsd->lock);
 			bool isSourceExhausted = tsd->quota_exhausted;
 			bool isSourceBorrowing = false;
-			if (isSourceExhausted && gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->fCurrentActiveTeam == tsd) {
+			if (isSourceExhausted && gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->GetCurrentActiveTeam() == tsd) {
 				isSourceBorrowing = true;
 			}
 			teamLocker.Unlock();
@@ -2853,8 +2777,8 @@ scheduler_perform_load_balance()
 		return migrationPerformed;
 	}
 
-	atomic_add(&sourceCPU->fTotalThreadCount, -1);
-	ASSERT(sourceCPU->fTotalThreadCount >=0);
+		atomic_add(&sourceCPU->GetTotalThreadCount(), -1);
+		ASSERT(sourceCPU->GetTotalThreadCount() >=0);
 	sourceCPU->_UpdateMinVirtualRuntime();
 
 	threadToMove->MarkDequeued();
@@ -2922,92 +2846,6 @@ scheduler_perform_load_balance()
 	return migrationPerformed;
 }
 
-static void
-scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
-	const int32* affinitizedIrqList, int8 irqListCount,
-	CoreEntry* newCore, CPUEntry* newCpu)
-{
-	if (migratedThreadId <= 0 || affinitizedIrqList == NULL || irqListCount == 0 || newCore == NULL)
-		return;
-
-	TRACE_SCHED_IRQ("FollowTask: T %" B_PRId32 " moved to core %" B_PRId32 "/CPU %" B_PRId32
-		". Checking %d affinitized IRQs.\n",
-		migratedThreadId, newCore->ID(), newCpu ? newCpu->ID() : -1, irqListCount);
-
-	for (int8 i = 0; i < irqListCount; ++i) {
-		int32 irqVector = affinitizedIrqList[i];
-		int32 currentIrqCpuNum = -1;
-		int32 mappedVector = -1;
-		irq_assignment* assignment = get_irq_assignment(irqVector, &currentIrqCpuNum, &mappedVector);
-		int32 actualIrqLoad = 0;
-		if (assignment != NULL) {
-			actualIrqLoad = assignment->load;
-		} else {
-			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " - no current assignment found. Skipping follow logic.\n",
-				irqVector, migratedThreadId);
-			continue;
-		}
-
-		if (actualIrqLoad == 0) {
-			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " has zero load. Skipping follow logic.\n",
-				irqVector, migratedThreadId);
-			continue;
-		}
-
-		if (currentIrqCpuNum != -1) {
-			CPUEntry* currentIrqHandlingCpuEntry = CPUEntry::GetCPU(currentIrqCpuNum);
-			if (currentIrqHandlingCpuEntry != NULL && currentIrqHandlingCpuEntry->Core() == newCore) {
-				if (newCpu != NULL && currentIrqCpuNum == newCpu->ID()) {
-					TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is already on the specific target CPU %" B_PRId32 " (core %" B_PRId32 "). Optimal.\n",
-						irqVector, migratedThreadId, newCpu->ID(), newCore->ID());
-					continue;
-				}
-				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is already on target core %" B_PRId32 " (CPU %" B_PRId32 "). Will re-evaluate best CPU on this core.\n",
-					irqVector, migratedThreadId, newCore->ID(), currentIrqCpuNum);
-			}
-		}
-
-		CPUEntry* targetCpuForIrq = _scheduler_select_cpu_for_irq(newCore, irqVector, actualIrqLoad);
-
-		if (targetCpuForIrq == NULL) {
-			TRACE_SCHED_IRQ("FollowTask: No suitable CPU found on core %" B_PRId32 " for IRQ %" B_PRId32 " (load %" B_PRId32 ") for T %" B_PRId32 ".\n",
-				newCore->ID(), irqVector, actualIrqLoad, migratedThreadId);
-			continue;
-		}
-
-		if (currentIrqCpuNum == targetCpuForIrq->ID()) {
-			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32 " is confirmed to be optimally placed on CPU %" B_PRId32 " (core %" B_PRId32 "). No move needed.\n",
-				irqVector, migratedThreadId, targetCpuForIrq->ID(), newCore->ID());
-			continue;
-		}
-
-		bigtime_t now = system_time();
-		bool proceedWithMove = false;
-		bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqVector]);
-
-		if (now >= lastRecordedMoveTime + kIrqFollowTaskCooldownPeriod) {
-			if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqVector], now, lastRecordedMoveTime)) {
-				proceedWithMove = true;
-				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
-					" - Cooldown passed, CAS successful (old_ts %" B_PRId64 ", new_ts %" B_PRId64 "). Allowing move from CPU %" B_PRId32 " to %" B_PRId32 ".\n",
-					irqVector, migratedThreadId, lastRecordedMoveTime, now, currentIrqCpuNum, targetCpuForIrq->ID());
-			} else {
-				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
-					" - Cooldown passed, but CAS failed. Another CPU likely updated timestamp. Move deferred.\n",
-					irqVector, migratedThreadId);
-			}
-		} else {
-			TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
-				" is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64
-				", cooldown %" B_PRId64 "). Skipping move.\n",
-				irqVector, migratedThreadId, lastRecordedMoveTime, now, kIrqFollowTaskCooldownPeriod);
-		}
-
-		if (proceedWithMove) {
-			assign_io_interrupt_to_cpu(irqVector, targetCpuForIrq->ID());
-		}
-	}
-}
 
 
 // Syscall implementations (do_... functions) follow...
@@ -3019,11 +2857,11 @@ do_get_thread_nice_value(thread_id thid, int* outNiceValue)
 	if (outNiceValue == NULL || !IS_USER_ADDRESS(outNiceValue))
 		return B_BAD_ADDRESS;
 
-	if (thid <= 0 && thid != B_CURRENT_THREAD_ID)
+	if (thid <= 0 && thid != B_CURRENT_THREAD)
 		return B_BAD_THREAD_ID;
 
 	Thread* targetThread;
-	if (thid == B_CURRENT_THREAD_ID) {
+	if (thid == B_CURRENT_THREAD) {
 		targetThread = thread_get_current_thread();
 		targetThread->AcquireReference();
 	} else {
@@ -3066,13 +2904,13 @@ do_set_thread_nice_value(thread_id thid, int niceValue)
 	if (niceValue < -20 || niceValue > 19)
 		return B_BAD_VALUE;
 
-	if (thid <= 0 && thid != B_CURRENT_THREAD_ID)
+	if (thid <= 0 && thid != B_CURRENT_THREAD)
 		return B_BAD_THREAD_ID;
 
 	Thread* currentThread = thread_get_current_thread();
 	Thread* targetThread;
 
-	if (thid == B_CURRENT_THREAD_ID || thid == currentThread->id) {
+	if (thid == B_CURRENT_THREAD || thid == currentThread->id) {
 		targetThread = currentThread;
 		targetThread->AcquireReference();
 	} else {
@@ -3111,76 +2949,6 @@ do_set_thread_nice_value(thread_id thid, int niceValue)
 	return scheduler_set_thread_priority(targetThread, haikuPriority);
 }
 
-static bigtime_t
-do_estimate_max_scheduling_latency(thread_id id)
-{
-	syscall_64_bit_return_value();
-
-	Thread* currentThread = thread_get_current_thread();
-	Thread* thread;
-	bool isCurrentThread = (id < 0 || id == currentThread->id);
-
-	if (isCurrentThread) {
-		thread = currentThread;
-		thread->AcquireReference();
-	} else {
-		thread = Thread::Get(id);
-		if (thread == NULL)
-			return B_BAD_THREAD_ID;
-	}
-	BReference<Thread> threadReference(thread, true);
-
-	ThreadData* threadData = thread->scheduler_data;
-	if (threadData == NULL || threadData->IsIdle())
-		return 0;
-
-	ThreadData* td = thread->scheduler_data;
-	if (td == NULL || td->IsIdle())
-		return 0;
-
-	bigtime_t now = system_time();
-	bigtime_t estimatedLatency = 0;
-
-	if (now < td->EligibleTime()) {
-		estimatedLatency = td->EligibleTime() - now;
-	}
-
-	if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL) {
-		if (now >= td->EligibleTime()) {
-			estimatedLatency = 0;
-		}
-	} else if (thread->state == B_THREAD_READY && td->IsEnqueued()) {
-		if (now >= td->EligibleTime()) {
-			estimatedLatency += td->SliceDuration();
-			CPUEntry* cpu = NULL;
-			if (thread->previous_cpu != NULL) {
-				cpu = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-				if (cpu != NULL && cpu->Core() != td->Core())
-					cpu = NULL;
-			}
-			if (cpu != NULL) {
-				estimatedLatency += (bigtime_t)(cpu->GetInstantaneousLoad() * SCHEDULER_TARGET_LATENCY);
-			} else {
-				estimatedLatency += SCHEDULER_TARGET_LATENCY / 2;
-			}
-		}
-	} else {
-		if (td->EligibleTime() <= now) {
-			estimatedLatency += SCHEDULER_TARGET_LATENCY;
-		}
-	}
-
-	bigtime_t modeMaxLatency = SCHEDULER_TARGET_LATENCY * 5;
-	if (gCurrentMode != NULL && gCurrentMode->maximum_latency > 0) {
-		modeMaxLatency = gCurrentMode->maximum_latency;
-	}
-
-	if (estimatedLatency > 0 && estimatedLatency < kMinSliceGranularity
-	    && !(thread->state == B_THREAD_RUNNING && now >= td->EligibleTime())) {
-		estimatedLatency = kMinSliceGranularity;
-	}
-	return min_c(estimatedLatency, modeMaxLatency);
-}
 
 
 static status_t
@@ -3195,291 +2963,7 @@ do_set_scheduler_mode(int32 mode)
 }
 
 
-static int32
-do_get_scheduler_mode()
-{
-	return gCurrentModeID;
-}
 
-static status_t
-do_set_irq_task_colocation(int irqVector, thread_id thid, uint32 flags)
-{
-	if (geteuid() != 0) {
-		return B_NOT_ALLOWED;
-	}
 
-	if (sIrqTaskAffinityMap == NULL)
-		return B_NO_INIT;
 
-	if (irqVector < 0 || irqVector >= MAX_IRQS) {
-		TRACE_SCHED_IRQ_ERR("_kern_set_irq_task_colocation: Invalid IRQ vector %d.\n", irqVector);
-		return B_BAD_VALUE;
-	}
 
-	if (flags != 0) {
-		TRACE_SCHED_IRQ_ERR("_kern_set_irq_task_colocation: Invalid flags %#" B_PRIx32 " specified.\n", flags);
-		return B_BAD_VALUE;
-	}
-
-	thread_id targetThreadId = thid;
-	if (thid == 0 || thid == B_CURRENT_THREAD_ID)
-		targetThreadId = thread_get_current_thread_id();
-
-	InterruptsSpinLocker locker(gIrqTaskAffinityLock);
-
-	thread_id oldTargetThreadId = -1;
-	bool hadOldAffinity = (sIrqTaskAffinityMap->Lookup(irqVector, &oldTargetThreadId) == B_OK);
-	bool affinityChanged = false;
-	status_t status = B_OK;
-
-	if (targetThreadId == -1) {
-		if (hadOldAffinity) {
-			sIrqTaskAffinityMap->Remove(irqVector);
-			Thread* oldThread = Thread::Get(oldTargetThreadId);
-			if (oldThread != NULL) {
-				BReference<Thread> oldThreadRef(oldThread, true);
-				InterruptsSpinLocker schedulerLocker(oldThread->scheduler_lock);
-				if (oldThread->scheduler_data != NULL) {
-					oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
-				}
-			}
-			affinityChanged = true;
-			TRACE_SCHED_IRQ("SetIrqTaskColocation: Cleared affinity for IRQ %d (was for T %" B_PRId32 ")\n", irqVector, oldTargetThreadId);
-		}
-	} else {
-		Thread* targetThread = Thread::Get(targetThreadId);
-		if (targetThread == NULL || thread_is_zombie(targetThreadId)) {
-			status = B_BAD_THREAD_ID;
-			if (hadOldAffinity) {
-				sIrqTaskAffinityMap->Remove(irqVector);
-				Thread* oldThread = Thread::Get(oldTargetThreadId);
-				if (oldThread != NULL) {
-					BReference<Thread> oldThreadRef(oldThread, true);
-					InterruptsSpinLocker schedulerLocker(oldThread->scheduler_lock);
-					if (oldThread->scheduler_data != NULL) {
-						oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
-					}
-				}
-				affinityChanged = true;
-				TRACE_SCHED_IRQ("SetIrqTaskColocation: New target T %" B_PRId32 " invalid, cleared old affinity for IRQ %d from T %" B_PRId32 "\n",
-					targetThreadId, irqVector, oldTargetThreadId);
-			}
-		} else {
-			BReference<Thread> targetThreadRef(targetThread, true);
-			bool addedToNewThreadData = false;
-			{
-				InterruptsSpinLocker targetSchedulerLocker(targetThread->scheduler_lock);
-				if (targetThread->scheduler_data != NULL) {
-					addedToNewThreadData = targetThread->scheduler_data->AddAffinitizedIrq(irqVector);
-				} else {
-					status = B_ERROR;
-					TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: T %" B_PRId32 " has NULL scheduler_data.\n", targetThreadId);
-				}
-			}
-
-			if (status == B_OK && !addedToNewThreadData) {
-				status = B_NO_MEMORY;
-				TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: FAILED to add IRQ %d to T %" B_PRId32 "'s ThreadData list (list full?).\n",
-					irqVector, targetThreadId);
-			}
-
-			if (status == B_OK) {
-				if (hadOldAffinity && oldTargetThreadId != targetThreadId) {
-					Thread* oldThread = Thread::Get(oldTargetThreadId);
-					if (oldThread != NULL) {
-						BReference<Thread> oldThreadRef(oldThread, true);
-						InterruptsSpinLocker oldSchedulerLocker(oldThread->scheduler_lock);
-						if (oldThread->scheduler_data != NULL) {
-							oldThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
-						}
-					}
-				}
-				status = sIrqTaskAffinityMap->Put(irqVector, targetThreadId);
-				if (status == B_OK) {
-					affinityChanged = (hadOldAffinity ? (oldTargetThreadId != targetThreadId) : true);
-					TRACE_SCHED_IRQ("SetIrqTaskColocation: Updated sIrqTaskAffinityMap: IRQ %d -> T %" B_PRId32 " (was T %" B_PRId32 ")\n",
-						irqVector, targetThreadId, hadOldAffinity ? oldTargetThreadId : -1);
-				} else {
-					TRACE_SCHED_IRQ_ERR("SetIrqTaskColocation: FAILED to update map for IRQ %d to T %" B_PRId32 ". Rolling back ThreadData.\n",
-						irqVector, targetThreadId);
-					InterruptsSpinLocker targetSchedulerLocker(targetThread->scheduler_lock);
-					if (targetThread->scheduler_data != NULL) {
-						targetThread->scheduler_data->RemoveAffinitizedIrq(irqVector);
-					}
-				}
-			}
-		}
-	}
-
-	locker.Unlock();
-
-	if (status == B_OK && affinityChanged) {
-		int32 currentCpuNum = -1;
-		int32 mappedVector = -1;
-		get_irq_assignment(irqVector, &currentCpuNum, &mappedVector);
-
-		if (targetThreadId != -1) {
-			Thread* thread = Thread::Get(targetThreadId);
-			if (thread != NULL) {
-				BReference<Thread> threadRef(thread, true);
-				CPUEntry* preferredCpuEntry = NULL;
-				CoreEntry* preferredCoreEntry = NULL;
-
-				thread->Lock();
-				InterruptsSpinLocker schedLock(thread->scheduler_lock);
-				if (thread->scheduler_data != NULL) {
-					if (thread->state == B_THREAD_RUNNING && thread->cpu != NULL) {
-						preferredCpuEntry = CPUEntry::GetCPU(thread->cpu->cpu_num);
-						if (preferredCpuEntry != NULL)
-							preferredCoreEntry = preferredCpuEntry->Core();
-					} else if (thread->scheduler_data->Core() != NULL) {
-						preferredCoreEntry = thread->scheduler_data->Core();
-						irq_assignment* assignment = get_irq_assignment(irqVector, NULL, NULL);
-						int32 irqLoad = assignment ? assignment->load : 100;
-						preferredCpuEntry = _scheduler_select_cpu_for_irq(preferredCoreEntry, irqVector, irqLoad);
-					}
-				}
-				schedLock.Unlock();
-				thread->Unlock();
-
-				if (preferredCpuEntry != NULL && (currentCpuNum == -1 || currentCpuNum != preferredCpuEntry->ID())) {
-					TRACE_SCHED_IRQ("SetIrqTaskColocation: IRQ %d affinity set to T %" B_PRId32 ". Triggering move to CPU %" B_PRId32 " (core %" B_PRId32 ").\n",
-						irqVector, targetThreadId, preferredCpuEntry->ID(), preferredCoreEntry->ID());
-					assign_io_interrupt_to_cpu(irqVector, preferredCpuEntry->ID());
-				} else if (preferredCpuEntry != NULL) {
-					TRACE_SCHED_IRQ("SetIrqTaskColocation: IRQ %d affinity set to T %" B_PRId32 ". IRQ already on preferred CPU %" B_PRId32 ".\n",
-						irqVector, targetThreadId, preferredCpuEntry->ID());
-				}
-			}
-		} else {
-			TRACE_SCHED_IRQ("SetIrqTaskColocation: IRQ %d affinity cleared. Triggering rebalance.\n", irqVector);
-			assign_io_interrupt_to_cpu(irqVector, -1);
-		}
-	}
-
-	return status;
-}
-
-static status_t
-do_set_team_cpu_quota(team_id teamId, uint32 percent_quota)
-{
-	if (geteuid() != 0)
-		return B_NOT_ALLOWED;
-
-	if (percent_quota > 100)
-			return B_BAD_VALUE;
-
-	Team* team = Team::Get(teamId);
-	if (team == NULL)
-		return B_BAD_TEAM_ID;
-	BReference<Team> teamRef(team, true);
-
-	if (team->team_scheduler_data == NULL) {
-		dprintf("_kern_set_team_cpu_quota: Team %" B_PRId32 " has no scheduler data!\n", teamId);
-		return B_ERROR;
-	}
-
-	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
-	InterruptsSpinLocker locker(tsd->lock);
-
-	tsd->cpu_quota_percent = percent_quota;
-	if (tsd->cpu_quota_percent > 0 && tsd->cpu_quota_percent <= 100) {
-		tsd->current_quota_allowance = (gQuotaPeriod * tsd->cpu_quota_percent) / 100;
-	} else if (tsd->cpu_quota_percent > 100) {
-		tsd->current_quota_allowance = gQuotaPeriod;
-	}
-	 else {
-		tsd->current_quota_allowance = 0;
-	}
-
-	if (tsd->current_quota_allowance > 0 && tsd->quota_period_usage < tsd->current_quota_allowance) {
-		tsd->quota_exhausted = false;
-	} else if (tsd->current_quota_allowance == 0 || tsd->quota_period_usage >= tsd->current_quota_allowance) {
-		if (tsd->current_quota_allowance > 0)
-			tsd->quota_exhausted = true;
-		else
-			tsd->quota_exhausted = false;
-	}
-
-	locker.Unlock();
-
-	TRACE_SCHED("Team %" B_PRId32 " CPU quota set to %" B_PRIu32 "%%. New allowance: %" B_PRId64 " us.\n",
-		teamId, percent_quota, tsd->current_quota_allowance);
-
-	return B_OK;
-}
-
-static status_t
-do_get_team_cpu_quota(team_id teamId, uint32* _percent_quota)
-{
-	if (_percent_quota == NULL || !IS_USER_ADDRESS(_percent_quota))
-		return B_BAD_ADDRESS;
-
-	Team* team = Team::Get(teamId);
-	if (team == NULL)
-		return B_BAD_TEAM_ID;
-	BReference<Team> teamRef(team, true);
-
-	if (team->team_scheduler_data == NULL) {
-		dprintf("_kern_get_team_cpu_quota: Team %" B_PRId32 " has no scheduler data!\n", teamId);
-		uint32 zeroQuota = 0;
-		if (user_memcpy(_percent_quota, &zeroQuota, sizeof(uint32)) != B_OK)
-			return B_BAD_ADDRESS;
-		return B_ERROR;
-	}
-
-	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
-	InterruptsSpinLocker locker(tsd->lock);
-	uint32 currentQuota = tsd->cpu_quota_percent;
-	locker.Unlock();
-
-	if (user_memcpy(_percent_quota, &currentQuota, sizeof(uint32)) != B_OK)
-		return B_BAD_ADDRESS;
-
-	return B_OK;
-}
-
-static status_t
-do_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance)
-{
-	if ((_usage != NULL && !IS_USER_ADDRESS(_usage))
-		|| (_allowance != NULL && !IS_USER_ADDRESS(_allowance))) {
-		return B_BAD_ADDRESS;
-	}
-	if (_usage == NULL && _allowance == NULL)
-		return B_OK;
-
-	Team* team = Team::Get(teamId);
-	if (team == NULL)
-		return B_BAD_TEAM_ID;
-	BReference<Team> teamRef(team, true);
-
-	if (team->team_scheduler_data == NULL) {
-		dprintf("_kern_get_team_cpu_usage: Team %" B_PRId32 " has no scheduler data!\n", teamId);
-		bigtime_t zeroVal = 0;
-		if (_usage != NULL) {
-			if (user_memcpy(_usage, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
-		}
-		if (_allowance != NULL) {
-			if (user_memcpy(_allowance, &zeroVal, sizeof(bigtime_t)) != B_OK) return B_BAD_ADDRESS;
-		}
-		return B_ERROR;
-	}
-
-	Scheduler::TeamSchedulerData* tsd = team->team_scheduler_data;
-	InterruptsSpinLocker locker(tsd->lock);
-	bigtime_t currentUsage = tsd->quota_period_usage;
-	bigtime_t currentAllowance = tsd->current_quota_allowance;
-	locker.Unlock();
-
-	if (_usage != NULL) {
-		if (user_memcpy(_usage, &currentUsage, sizeof(bigtime_t)) != B_OK)
-			return B_BAD_ADDRESS;
-	}
-	if (_allowance != NULL) {
-		if (user_memcpy(_allowance, &currentAllowance, sizeof(bigtime_t)) != B_OK)
-			return B_BAD_ADDRESS;
-	}
-
-	return B_OK;
-}

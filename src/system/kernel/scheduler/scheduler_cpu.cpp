@@ -659,7 +659,7 @@ CPUEntry::UpdatePriority(int32 newSmtAwareKey) // Parameter renamed for clarity
 	} else {
 		// CPU is disabled. If it's in the heap, remove it.
 		if (GetHeapLink()->fIndex != -1) {
-			fCore->CPUHeap()->Remove(this);
+			fCore->CPUHeap()->RemoveRoot();
 		}
 	}
 
@@ -1150,7 +1150,7 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	SpinLocker lock(fCPULock);
+	InterruptsSpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1212,7 +1212,7 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	ASSERT(fCPUCount > 0);
 
 	if (cpu->GetHeapLink()->fIndex != -1) {
-		fCPUHeap.Remove(cpu);
+		fCPUHeap.RemoveRoot();
 	}
 
 	// Determine if the CPU being removed was effectively idle *before* this removal operation
@@ -1296,7 +1296,7 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 			fInstantaneousLoad = 0.0f;
 		}
 		{
-			WriteSpinLocker heapsLock(gCoreHeapsLock);
+			WriteSpinLocker heapsLock(gCoreHeapsShardLock[this->ID() % kNumCoreLoadHeapShards]);
 			if (this->GetMinMaxHeapLink()->fIndex != -1) {
 				if (fHighLoad) gCoreHighLoadHeap.Remove(this);
 				else gCoreLoadHeap.Remove(this);
@@ -1737,7 +1737,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 		CoreEntry* core = &gCoreEntries[i];
 		if (core->CPUCount() > 0 && !core->IsDefunct()) {
 			const char* typeStr = "UNK";
-			switch (core->fCoreType) {
+			switch (core->Type()) {
 				case CORE_TYPE_UNIFORM_PERFORMANCE: typeStr = "UNI"; break;
 				case CORE_TYPE_LITTLE: typeStr = "LTL"; break;
 				case CORE_TYPE_BIG:    typeStr = "BIG"; break;
@@ -1747,7 +1747,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 				core->ID(),
 				core->Package() ? core->Package()->PackageID() : -1,
 				typeStr,
-				core->fPerformanceCapacity);
+				core->PerformanceCapacity());
 			kprintf("    CPUs in Priority Heap (Key is SMT-Aware):\n");
 			core->CPUHeap()->Dump(); // This will call the modified CPUPriorityHeap::Dump
 		}

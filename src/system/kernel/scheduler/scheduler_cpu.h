@@ -247,17 +247,6 @@ private:
 						CPUPriorityHeap	fCPUHeap;
 						spinlock		fCPULock;
 
-						// big.LITTLE / Heterogeneous properties
-private: // Make these private and add public getters
-						scheduler_core_type fCoreType;
-						uint32			fPerformanceCapacity;	// Relative to SCHEDULER_NOMINAL_CAPACITY
-						uint32			fEnergyEfficiency;		// Abstract scale, higher is more efficient
-public:
-	inline				scheduler_core_type Type() const { return fCoreType; }
-	inline				uint32			PerformanceCapacity() const { return fPerformanceCapacity; }
-	inline				uint32			EnergyEfficiency() const { return fEnergyEfficiency; }
-
-
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
 
@@ -269,6 +258,16 @@ public:
 						bigtime_t		fLastLoadUpdate;
 						bool			fDefunct;
 						rw_spinlock		fLoadLock;
+
+						// big.LITTLE / Heterogeneous properties
+private: // Make these private and add public getters
+						scheduler_core_type fCoreType;
+						uint32			fPerformanceCapacity;	// Relative to SCHEDULER_NOMINAL_CAPACITY
+						uint32			fEnergyEfficiency;		// Abstract scale, higher is more efficient
+public:
+	inline				scheduler_core_type Type() const { return fCoreType; }
+	inline				uint32			PerformanceCapacity() const { return fPerformanceCapacity; }
+	inline				uint32			EnergyEfficiency() const { return fEnergyEfficiency; }
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;

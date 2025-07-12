@@ -10,11 +10,16 @@
 
 #include "intel_i915_priv.h"
 
-#define GEN9_RING_BASE			0x2000
-#define GEN9_RING_CTL(engine)		(GEN9_RING_BASE + (engine) * 0x100 + 0x34)
-#define GEN9_RING_HEAD(engine)		(GEN9_RING_BASE + (engine) * 0x100 + 0x38)
-#define GEN9_RING_TAIL(engine)		(GEN9_RING_BASE + (engine) * 0x100 + 0x3C)
-#define GEN9_RING_START(engine)		(GEN9_RING_BASE + (engine) * 0x100 + 0x30)
+#define GEN9_RING_BASE					0x2000
+#define GEN9_RING_CTL(engine)			(GEN9_RING_BASE + (engine) * 0x100 + 0x34)
+#define GEN9_RING_HEAD(engine)			(GEN9_RING_BASE + (engine) * 0x100 + 0x38)
+#define GEN9_RING_TAIL(engine)			(GEN9_RING_BASE + (engine) * 0x100 + 0x3C)
+#define GEN9_RING_START(engine)			(GEN9_RING_BASE + (engine) * 0x100 + 0x30)
+
+#define GEN9_RCS_BASE					(GEN9_RING_BASE + 0x0)
+#define GEN9_BCS_BASE					(GEN9_RING_BASE + 0x200)
+#define GEN9_VCS_BASE					(GEN9_RING_BASE + 0x400)
+#define GEN9_VECS_BASE					(GEN9_RING_BASE + 0x1c00)
 
 #ifdef __cplusplus
 extern "C" {

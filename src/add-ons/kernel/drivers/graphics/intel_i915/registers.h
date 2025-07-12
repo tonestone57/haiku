@@ -553,8 +553,8 @@
 
 // DDI Buffer Transition Registers (primarily for HDMI electricals on HSW+)
 // These are per-DDI port. Example for DDI A. Offsets are relative to DDI_BUF_CTL.
-// #define DDI_BUF_TRANS_LO(port_idx)      (DDI_BUF_CTL(port_idx) + 0x8) // Conceptual Offset
-// #define DDI_BUF_TRANS_HI(port_idx)      (DDI_BUF_CTL(port_idx) + 0xC) // Conceptual Offset
+#define DDI_BUF_TRANS_LO(port_idx, i)      (DDI_BUF_CTL(port_idx) + 0x8 + (i) * 8)
+#define DDI_BUF_TRANS_HI(port_idx, i)      (DDI_BUF_CTL(port_idx) + 0xC + (i) * 8)
 	// TODO: Define specific bitfields for DDI_BUF_TRANS_LO/HI for HDMI:
 	// e.g., HSW_DDI_BUF_TRANS_HDMI_DEEMPHASIS_SHIFT, _MASK
 	//      HSW_DDI_BUF_TRANS_HDMI_VSWING_SHIFT, _MASK

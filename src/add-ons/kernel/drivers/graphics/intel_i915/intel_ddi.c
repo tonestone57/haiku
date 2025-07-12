@@ -19,6 +19,33 @@
 
 // --- DDI Core Functions (Placeholders) ---
 
+// Kaby Lake DDI buffer translation table
+static const struct ddi_buf_trans {
+	uint32_t trans1;
+	uint32_t trans2;
+} kbl_ddi_buf_trans_hdmi[] = {
+	{ 0x00000000, 0x00000000 },
+	{ 0x00000000, 0x00000000 },
+	{ 0x00000000, 0x00000000 },
+	{ 0x00000000, 0x00000000 },
+	{ 0x00000000, 0x00000000 },
+};
+
+static void
+kbl_ddi_buffer_trans_init(intel_i915_device_info* devInfo, enum intel_port_id_priv port_id)
+{
+	const struct ddi_buf_trans* ddi_buf_trans;
+	int i, n_entries;
+
+	ddi_buf_trans = kbl_ddi_buf_trans_hdmi;
+	n_entries = ARRAY_SIZE(kbl_ddi_buf_trans_hdmi);
+
+	for (i = 0; i < n_entries; i++) {
+		intel_i915_write32(devInfo, DDI_BUF_TRANS_LO(port_id, i), ddi_buf_trans[i].trans1);
+		intel_i915_write32(devInfo, DDI_BUF_TRANS_HI(port_id, i), ddi_buf_trans[i].trans2);
+	}
+}
+
 // Forward declaration for the new parser function
 static status_t
 intel_dp_parse_dpcd_data(intel_i915_device_info* devInfo,
@@ -444,6 +471,9 @@ intel_hdmi_configure(intel_i915_device_info* devInfo, intel_output_port_state* p
 	if (!devInfo || !port || !mode || !clock_params) return B_BAD_VALUE;
 	TRACE("DDI: hdmi_configure: Port %d for mode %dx%d (STUB)\n",
 		port->logical_port_id, mode->timing.h_display, mode->timing.v_display);
+
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id))
+		kbl_ddi_buffer_trans_init(devInfo, port->logical_port_id);
 
 	intel_ddi_send_avi_infoframe(devInfo, port, port->current_pipe, mode);
 	intel_ddi_setup_audio(devInfo, port, port->current_pipe, mode);

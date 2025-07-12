@@ -58,7 +58,16 @@ kaby_lake_update_tail(struct intel_engine_cs* engine, uint32_t tail)
 status_t
 kaby_lake_gpu_init(intel_i915_device_info* devInfo)
 {
-	// TODO: Kaby Lake specific GPU initialization
+	for (int i = 0; i < I915_NUM_ENGINES; i++) {
+		struct intel_engine_cs* engine = &devInfo->engines[i];
+		if (engine->id == 0)
+			continue;
+
+		kaby_lake_init_ring_buffer(engine);
+	}
+
+	intel_i915_guc_select_communication(devInfo, true);
+
 	return B_OK;
 }
 

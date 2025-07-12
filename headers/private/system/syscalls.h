@@ -5,6 +5,7 @@
 #ifndef _SYSTEM_SYSCALLS_H
 #define _SYSTEM_SYSCALLS_H
 
+#define SCHEDULER_SYSCALLS
 
 #include <arch_config.h>
 #include <DiskDeviceDefs.h>

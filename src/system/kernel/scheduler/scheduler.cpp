@@ -75,7 +75,7 @@ static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight
 static const int32 kNewMaxWeightCap = 35000000;
 
 // The new weight table and its initialization function
-static int32 gHaikuContinuousWeights[B_REAL_TIME_PRIORITY + 1];
+int32 Scheduler::gHaikuContinuousWeights[B_REAL_TIME_PRIORITY + 1];
 
 // Prototype function to calculate weights (uses double for precision during generation)
 static int32
@@ -123,9 +123,9 @@ _init_continuous_weights()
 {
 	dprintf("Scheduler: Initializing continuous weights table...\n");
 	for (int32 i = 0; i <= B_REAL_TIME_PRIORITY; i++) { // Iterate up to and including B_REAL_TIME_PRIORITY
-		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
+		Scheduler::gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
 	}
-	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1; // Ensure idle is minimal after loop
+	Scheduler::gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1; // Ensure idle is minimal after loop
 	dprintf("Scheduler: Continuous weights table initialized.\n");
 }
 
@@ -735,7 +735,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				InterruptsSpinLocker teamLocker(tsd->lock);
 				bool isSourceExhausted = tsd->quota_exhausted;
 				bool isSourceBorrowing = false;
-				if (isSourceExhausted && gSchedulerElasticQuotaMode && victimCPUEntry != NULL && victimCPUEntry->GetCurrentActiveTeam() == tsd) {
+				if (isSourceExhausted && Scheduler::gSchedulerElasticQuotaMode && victimCPUEntry != NULL && victimCPUEntry->GetCurrentActiveTeam() == tsd) {
 					isSourceBorrowing = true;
 				}
 				teamLocker.Unlock();
@@ -747,7 +747,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 							candThread->id, unweightedNormWorkOwed, kMinUnweightedNormWorkToSteal * 2);
 						teamQuotaAllowsSteal = false;
 					} else {
-						if (!gSchedulerElasticQuotaMode || thiefCPU->Core()->Type() != CORE_TYPE_LITTLE) {
+						if (!Scheduler::gSchedulerElasticQuotaMode || thiefCPU->Core()->Type() != CORE_TYPE_LITTLE) {
 							TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from exhausted team, very starved, but thief CPU %" B_PRId32 " (type %d) not ideal for quota. DENY steal.\n",
 								candThread->id, thiefCPU->ID(), thiefCPU->Core()->Type());
 							teamQuotaAllowsSteal = false;
@@ -1065,7 +1065,7 @@ reschedule(int32 nextState)
 		selectedTeamForThisCpu = bestNominalTeam;
 	}
 
-	if (selectedTeamForThisCpu == NULL && gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
+	if (selectedTeamForThisCpu == NULL && Scheduler::gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
 		TRACE_SCHED_TEAM_VERBOSE("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
 		TeamSchedulerData* startNode = (sLastSelectedBorrowingTeam != NULL
 				&& gTeamSchedulerDataList.Contains(sLastSelectedBorrowingTeam))
@@ -2713,7 +2713,7 @@ scheduler_perform_load_balance()
 			InterruptsSpinLocker teamLocker(tsd->lock);
 			bool isSourceExhausted = tsd->quota_exhausted;
 			bool isSourceBorrowing = false;
-			if (isSourceExhausted && gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->GetCurrentActiveTeam() == tsd) {
+			if (isSourceExhausted && Scheduler::gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->GetCurrentActiveTeam() == tsd) {
 				isSourceBorrowing = true;
 			}
 			teamLocker.Unlock();
@@ -2725,7 +2725,7 @@ scheduler_perform_load_balance()
 			}
 
 			if (isSourceExhausted && !isSourceBorrowing) {
-				if (!gSchedulerElasticQuotaMode || (representativeTargetCPU != NULL && representativeTargetCPU->Core()->Type() != CORE_TYPE_LITTLE)) {
+				if (!Scheduler::gSchedulerElasticQuotaMode || (representativeTargetCPU != NULL && representativeTargetCPU->Core()->Type() != CORE_TYPE_LITTLE)) {
 					teamQuotaPenalty -= kTeamQuotaAwarenessPenaltyLB;
 					TRACE_SCHED_BL("LoadBalance: T %" B_PRId32 " from exhausted team, target non-ideal for quota, total penalty %" B_PRId64 "\n",
 						candidateThread->id, teamQuotaPenalty);
@@ -2878,12 +2878,3 @@ scheduler_perform_load_balance()
 // Syscall implementations (do_... functions) follow...
 // ... (rest of the file as previously read)
 // For brevity, the syscall implementations are not repeated here but are part of the full file content.
-
-
-
-
-
-
-
-
-

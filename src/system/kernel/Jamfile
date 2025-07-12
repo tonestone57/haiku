@@ -117,6 +117,7 @@ KernelLd kernel_$(TARGET_ARCH) :
 	kernel_os_arch_$(TARGET_ARCH).o
 	kernel_lib_posix.o
 	kernel_lib_posix_arch_$(TARGET_ARCH).o
+	kernel_lib_math.o
 	kernel_misc.o
 
 	: $(HAIKU_TOP)/src/system/ldscripts/$(TARGET_ARCH)/kernel.ld

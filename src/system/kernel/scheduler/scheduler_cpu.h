@@ -125,9 +125,10 @@ public:
 						// desirable (less loaded from an SMT perspective) CPU.
 						// outEffectiveSmtLoad returns the calculated effective load (0.0 to ~1.0+).
 						int32			_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const;
-private:
+public:
 						bool			IsActiveSMT() const;
 						void			_UpdateMinVirtualRuntime();
+private:
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
 
@@ -195,7 +196,7 @@ public:
 
 	inline				CPUPriorityHeap*	CPUHeap();
 
-						int32			ThreadCount() const;
+						int32			ThreadCount();
 
 	inline				bigtime_t		GetActiveTime() const;
 	inline				void			IncreaseActiveTime(
@@ -359,13 +360,15 @@ extern int32 gCoreCount;
 const int32 kNumCoreLoadHeapShards = 8;
 extern CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
 extern CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
-extern rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
+extern rw_lock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
 
 extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
 extern int64 gReportedCpuMinVR[SMP_MAX_CPUS];
+
+int32 scheduler_reset_team_quotas_event(timer*);
 
 
 inline void

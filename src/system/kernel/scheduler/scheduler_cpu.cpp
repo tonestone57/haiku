@@ -20,8 +20,22 @@
 #include "scheduler_team.h"
 #include "EevdfRunQueue.h" // Make sure this is included
 
+#include <util/OpenHashTable.h>
+
 
 namespace Scheduler {
+
+struct IntHashDefinition {
+	typedef int KeyType;
+	typedef thread_id ValueType;
+	size_t HashKey(int key) const { return (size_t)key; }
+	size_t Hash(thread_id* value) const { return (size_t)*value; }
+	bool Compare(int key, thread_id* value) const { return key == *value; }
+	bool CompareKeys(int key1, int key2) const { return key1 == key2; }
+	thread_id*& GetLink(thread_id* value) const { return *(thread_id**)((addr_t)value - sizeof(thread_id*)); }
+};
+BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap = NULL;
+spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 
 CPUEntry* gCPUEntries;
@@ -1146,7 +1160,7 @@ CoreEntry::UpdateInstantaneousLoad()
 
 
 int32
-CoreEntry::ThreadCount() const
+CoreEntry::ThreadCount()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
@@ -1861,7 +1875,7 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		if ((thid = sIrqTaskAffinityMap->Lookup(irqVector)) != NULL) {
 			affinityLocker.Unlock(); // Unlock early
 
-			Thread* task = thread_get_thread_struct_locked(*thid);
+			Thread* task = Thread::Get(*thid);
 			if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 				CPUEntry* taskCpuEntry = CPUEntry::GetCPU(task->cpu->cpu_num);
 				if (taskCpuEntry->Core() == targetCore) {

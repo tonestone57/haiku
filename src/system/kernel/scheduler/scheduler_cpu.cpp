@@ -6,6 +6,7 @@
 
 
 #include "scheduler_cpu.h"
+#include "scheduler_team.h"
 
 #include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
 #include <thread.h> // Explicitly include for thread_is_running
@@ -146,9 +147,9 @@ CPUEntry::SetCurrentActiveTeam(TeamSchedulerData* teamData)
 	// TODO: Review locking implications.
 	fCurrentActiveTeam = teamData;
 	if (teamData != NULL) {
-		TRACE_SCHED("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
+		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
 	} else {
-		TRACE_SCHED("CPU %" B_PRId32 ": Active team cleared.\n", ID());
+		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team cleared.\n", ID());
 	}
 }
 

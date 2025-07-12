@@ -148,8 +148,8 @@ private:
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
-	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 						bool			fUpdateLoadEvent;
+	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 
 						friend class DebugDumper;
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey

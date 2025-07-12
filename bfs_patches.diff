@@ -1,0 +1,52 @@
+ bfs_patches.diff                                   |   0
+ bfs_report.md                                      |  19 ++
+ cache_patches.diff                                 |   0
+ cache_report.md                                    |  71 +++++++
+ hashed_object_cache_patches.diff                   |   0
+ hashed_object_cache_report.md                      |   5 +
+ libroot_patches.diff                               |   0
+ libroot_report.md                                  |  34 ++++
+ network_patches.diff                               |   0
+ network_report.md                                  |  71 +++++++
+ patches.diff                                       |   2 +
+ report.md                                          |  35 ++++
+ scheduler_patches.diff                             |   0
+ scheduler_report.md                                |  35 ++++
+ security_patches.diff                              |   0
+ security_report.md                                 |  23 +++
+ src/tests/add-ons/kernel/bus_managers/Jamfile      |   1 +
+ src/tests/add-ons/kernel/bus_managers/usb/Jamfile  |   7 +
+ .../kernel/bus_managers/usb/UsbStressTest.cpp      |  84 ++++++++
+ .../kernel/bus_managers/usb/UsbStressTest.h        |  29 +++
+ src/tests/add-ons/kernel/bus_managers/usb/main.cpp |  15 ++
+ .../kernel/file_systems/bfs/BfsStressTest.cpp      |  44 +++++
+ .../kernel/file_systems/bfs/BfsStressTest.h        |  29 +++
+ src/tests/add-ons/kernel/file_systems/bfs/Jamfile  |   4 +
+ src/tests/system/kernel/Jamfile                    |   6 +
+ src/tests/system/kernel/SecurityStressTest.cpp     |  70 +++++++
+ src/tests/system/kernel/SecurityStressTest.h       |  30 +++
+ src/tests/system/kernel/TcpIpStressTest.cpp        | 194 ++++++++++++++++++
+ src/tests/system/kernel/TcpIpStressTest.h          |  36 ++++
+ src/tests/system/kernel/UserGroupStressTest.cpp    | 104 ++++++++++
+ src/tests/system/kernel/UserGroupStressTest.h      |  31 +++
+ src/tests/system/kernel/cache/CacheStressTest.cpp  | 218 +++++++++++++++++++++
+ src/tests/system/kernel/cache/CacheStressTest.h    |  36 ++++
+ src/tests/system/kernel/cache/Jamfile              |   4 +
+ src/tests/system/kernel/scheduler/Jamfile          |   5 +
+ .../kernel/scheduler/SchedulerStressTest.cpp       |  83 ++++++++
+ .../system/kernel/scheduler/SchedulerStressTest.h  |  29 +++
+ src/tests/system/kernel/scheduler/main.cpp         |  41 +---
+ .../system/kernel/slab/HashedObjectCacheTest.cpp   |  65 ++++++
+ .../system/kernel/slab/HashedObjectCacheTest.h     |  30 +++
+ src/tests/system/kernel/slab/Jamfile               |   4 +
+ src/tests/system/kernel/vm/Jamfile                 |   2 +
+ src/tests/system/kernel/vm/VMStressTest.cpp        | 139 +++++++++++++
+ src/tests/system/kernel/vm/VMStressTest.h          |  31 +++
+ src/tests/system/libroot/LibrootStressTest.cpp     | 121 ++++++++++++
+ src/tests/system/libroot/LibrootStressTest.h       |  31 +++
+ src/tests/system/libroot/posix/Jamfile             |   1 +
+ usb_patches.diff                                   |   0
+ usb_report.md                                      |  19 ++
+ usergroup_patches.diff                             |   0
+ usergroup_report.md                                |  34 ++++
+ 51 files changed, 1840 insertions(+), 32 deletions(-)

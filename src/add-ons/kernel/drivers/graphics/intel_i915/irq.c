@@ -11,6 +11,7 @@
 #include "intel_i915_priv.h"
 #include "pm.h"
 #include "gem_object.h" // For intel_i915_gem_object_put
+#include "kaby_lake/kaby_lake.h"
 
 #include <KernelExport.h>
 #include <OS.h>
@@ -84,9 +85,13 @@ intel_i915_irq_init(intel_i915_device_info* devInfo)
 
 	// Display Engine Interrupts: Mask all initially, then enable specific ones.
 	intel_i915_write32(devInfo, DEIMR, 0xFFFFFFFF); // Mask all DE interrupts
-	devInfo->cached_deier_val = DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | DE_PCH_EVENT_IVB;
-	if (PRIV_MAX_PIPES > 2) devInfo->cached_deier_val |= DE_PIPEC_VBLANK_IVB;
-	if (PRIV_MAX_PIPES > 3) devInfo->cached_deier_val |= DE_PIPED_VBLANK_IVB; // Enable Pipe D VBlank if supported
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		devInfo->cached_deier_val = DE_MASTER_IRQ_CONTROL | DE_PCH_EVENT_IVB;
+	} else {
+		devInfo->cached_deier_val = DE_MASTER_IRQ_CONTROL | DE_PIPEA_VBLANK_IVB | DE_PIPEB_VBLANK_IVB | DE_PCH_EVENT_IVB;
+		if (PRIV_MAX_PIPES > 2) devInfo->cached_deier_val |= DE_PIPEC_VBLANK_IVB;
+		if (PRIV_MAX_PIPES > 3) devInfo->cached_deier_val |= DE_PIPED_VBLANK_IVB; // Enable Pipe D VBlank if supported
+	}
 
 	// Enable HPD interrupts based on platform
 	// For IVB+, direct DDI HPD is DE_PORT_HOTPLUG_IVB
@@ -215,7 +220,11 @@ intel_i915_handle_pipe_vblank(intel_i915_device_info* devInfo, enum pipe_id_priv
 			status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER); // Or FW_DOMAIN_DISPLAY
 			if (fw_status == B_OK) {
 				// Program DSPADDR to initiate the flip. This is the core hardware action.
-				intel_i915_write32(devInfo, DSPADDR(pipe), targetBo->gtt_offset_pages * B_PAGE_SIZE);
+				if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+					kaby_lake_page_flip(devInfo, pipe, targetBo->gtt_offset_pages * B_PAGE_SIZE);
+				} else {
+					intel_i915_write32(devInfo, DSPADDR(pipe), targetBo->gtt_offset_pages * B_PAGE_SIZE);
+				}
 				// A readback from DSPADDR can be used to ensure the write has posted before releasing forcewake,
 				// though often the VBLANK itself provides sufficient timing.
 				// intel_i915_read32(devInfo, DSPADDR(pipe));

@@ -97,16 +97,20 @@ intel_engine_init(intel_i915_device_info* devInfo,
 		engine->tail_reg_offset  = GEN7_RCS_RING_TAIL_REG;
 	} else { status = B_BAD_VALUE; goto err_cleanup_seqno_gtt; }
 
-	intel_engine_reset_hw(devInfo, engine);
-	intel_i915_write32(devInfo, engine->start_reg_offset, engine->ring_gtt_offset_pages * B_PAGE_SIZE);
-	intel_i915_write32(devInfo, engine->head_reg_offset, 0);
-	intel_i915_write32(devInfo, engine->tail_reg_offset, 0);
-	engine->cpu_ring_head = 0; engine->cpu_ring_tail = 0;
-	uint32 ring_ctl = RING_CTL_SIZE(engine->ring_size_bytes / 1024) | RING_CTL_ENABLE;
-	intel_i915_write32(devInfo, engine->ctl_reg_offset, ring_ctl);
-	if (!(intel_i915_read32(devInfo, engine->ctl_reg_offset) & RING_CTL_ENABLE)) {
-		status = B_ERROR;
-		// Fall through to cleanup labels, which will also release forcewake
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		status = kaby_lake_init_ring_buffer(engine);
+	} else {
+		intel_engine_reset_hw(devInfo, engine);
+		intel_i915_write32(devInfo, engine->start_reg_offset, engine->ring_gtt_offset_pages * B_PAGE_SIZE);
+		intel_i915_write32(devInfo, engine->head_reg_offset, 0);
+		intel_i915_write32(devInfo, engine->tail_reg_offset, 0);
+		engine->cpu_ring_head = 0; engine->cpu_ring_tail = 0;
+		uint32 ring_ctl = RING_CTL_SIZE(engine->ring_size_bytes / 1024) | RING_CTL_ENABLE;
+		intel_i915_write32(devInfo, engine->ctl_reg_offset, ring_ctl);
+		if (!(intel_i915_read32(devInfo, engine->ctl_reg_offset) & RING_CTL_ENABLE)) {
+			status = B_ERROR;
+			// Fall through to cleanup labels, which will also release forcewake
+		}
 	}
 
 	if (status != B_OK) {
@@ -281,10 +285,14 @@ intel_engine_uninit(struct intel_engine_cs* engine)
 {
 	if (!engine || !engine->dev_priv) return;
 
-	if (engine->ctl_reg_offset != 0 && engine->dev_priv->mmio_regs_addr != NULL) {
-		intel_i915_forcewake_get(engine->dev_priv, FW_DOMAIN_RENDER);
-		intel_i915_write32(engine->dev_priv, engine->ctl_reg_offset, 0);
-		intel_i915_forcewake_put(engine->dev_priv, FW_DOMAIN_RENDER);
+	if (IS_KABYLAKE(engine->dev_priv->runtime_caps.device_id)) {
+		kaby_lake_uninit_ring_buffer(engine);
+	} else {
+		if (engine->ctl_reg_offset != 0 && engine->dev_priv->mmio_regs_addr != NULL) {
+			intel_i915_forcewake_get(engine->dev_priv, FW_DOMAIN_RENDER);
+			intel_i915_write32(engine->dev_priv, engine->ctl_reg_offset, 0);
+			intel_i915_forcewake_put(engine->dev_priv, FW_DOMAIN_RENDER);
+		}
 	}
 
 	if (engine->current_context) {
@@ -351,7 +359,11 @@ void intel_engine_advance_tail(struct intel_engine_cs* e, uint32_t n){
 
 	mutex_lock(&e->lock);
 	e->cpu_ring_tail=(e->cpu_ring_tail+n*4)&(e->ring_size_bytes-1);
-	intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);
+	if (IS_KABYLAKE(e->dev_priv->runtime_caps.device_id)) {
+		kaby_lake_update_tail(e, e->cpu_ring_tail);
+	} else {
+		intel_i915_write32(e->dev_priv,e->tail_reg_offset,e->cpu_ring_tail);
+	}
 	mutex_unlock(&e->lock);
 	// intel_i915_forcewake_put(e->dev_priv, FW_DOMAIN_RENDER);
 }

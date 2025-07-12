@@ -185,6 +185,42 @@
 #	define TRACE_SCHED_BL_STEAL(...) do { } while (false)
 #endif
 
+#ifdef TRACE_SCHEDULER_IRQ
+#	define TRACE_SCHED_IRQ(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_IRQ(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_SMT_STEAL
+#	define TRACE_SCHED_SMT_STEAL(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_SMT_STEAL(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_IRQ_DYNAMIC
+#	define TRACE_SCHED_IRQ_DYNAMIC(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_IRQ_DYNAMIC(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_LB
+#	define TRACE_SCHED_LB(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_LB(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_ADAPTIVE
+#	define TRACE_SCHED_ADAPTIVE(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_ADAPTIVE(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_SMT_TIEBREAK
+#	define TRACE_SCHED_SMT_TIEBREAK(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_SMT_TIEBREAK(...) do { } while (false)
+#endif
+
 #ifdef TRACE_SCHEDULER
 #	define TRACE_SCHED(...) dprintf_no_syslog(__VA_ARGS__)
 #else

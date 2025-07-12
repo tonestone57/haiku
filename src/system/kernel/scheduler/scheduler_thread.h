@@ -26,7 +26,7 @@
 #include <smp.h>
 #include <thread.h>
 #include <timer.h>
-#include <private/system/thread_defs.h> // For B_THREAD_ZOMBIE and other thread states
+#include <kernel.h> // For B_THREAD_ZOMBIE and other thread states
 
 // Haiku Utility Headers
 #include <shared/AutoDeleter.h> // Corrected path

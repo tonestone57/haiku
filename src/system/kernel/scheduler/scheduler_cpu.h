@@ -109,13 +109,13 @@ public:
 						bool			IsEffectivelyIdle() const; // Moved to .cpp
 
 	// Team Quota related
-	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler
 	void				SetCurrentActiveTeam(TeamSchedulerData* teamData); // TODO: implement
 
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
 
 private:
+	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 						// Calculates a heap key for this CPU that is SMT-aware.
 						// The key reflects the CPU's own instantaneous load plus a penalty
 						// derived from the load of its active SMT siblings, using
@@ -406,8 +406,6 @@ CPUEntry::GetCachedMinVirtualRuntime() const
 
 
 						bool			IsEffectivelyIdle() const;
-
-
 inline void
 CoreEntry::LockCPUHeap()
 {

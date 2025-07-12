@@ -14,6 +14,7 @@
 
 #include <smp.h>
 #include <thread.h>
+#include <boot/kernel_args.h>
 #include <util/AutoLock.h>
 #include <util/Heap.h>
 #include <util/MinMaxHeap.h>
@@ -365,7 +366,7 @@ extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
-extern int64 gReportedCpuMinVR[MAX_CPUS];
+extern int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
 
 inline void

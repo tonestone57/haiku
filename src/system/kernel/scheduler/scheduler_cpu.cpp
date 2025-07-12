@@ -295,7 +295,6 @@ CPUEntry::_UpdateMinVirtualRuntime()
 
 	// Proactively report this new local minimum to the global array.
 	// gReportedCpuMinVR is declared in scheduler.cpp
-	extern int64 gReportedCpuMinVR[MAX_CPUS]; // MAX_CPUS from smp.h
 	atomic_set64(&gReportedCpuMinVR[fCPUNumber], fMinVirtualRuntime);
 }
 

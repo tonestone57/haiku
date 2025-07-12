@@ -8,6 +8,7 @@
 
 
 #include <OS.h>
+#include <atomic>
 // #include <support/atomic.h> // For atomic_get64, etc. - Likely provided by OS.h or SupportDefs.h
 // If issues persist, consider <kernel/atomic.h> or arch-specific versions if available.
 
@@ -143,7 +144,7 @@ private:
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
 						int32			fTotalThreadCount;
-						volatile int32	fEevdfRunQueueTaskCount;
+						std::atomic<int32> fEevdfRunQueueTaskCount;
 
 
 						bigtime_t		fMeasureActiveTime;
@@ -155,7 +156,7 @@ private:
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 
 public:
-	inline				int32			GetEevdfRunQueueTaskCount() const { return atomic_get(const_cast<int32*>(&fEevdfRunQueueTaskCount)); }
+	inline				int32			GetEevdfRunQueueTaskCount() const { return fEevdfRunQueueTaskCount.load(std::memory_order_relaxed); }
 } CACHE_LINE_ALIGN;
 
 

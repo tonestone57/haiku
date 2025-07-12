@@ -11,8 +11,7 @@
 #include <smp.h>
 #include <thread.h> // Explicitly include for thread_is_running
 #include <util/AutoLock.h>
-#include <util/atomic.h> // For atomic_add
-
+#include <atomic>
 #include <algorithm>
 #include <stdlib.h> // For abs()
 
@@ -122,7 +121,7 @@ CPUEntry::CPUEntry()
 	// For safety, we will explicitly initialize in the member initializer list if possible,
 	// otherwise rely on Init() for atomic_store.
 	// atomic_init(&fEevdfRunQueueTaskCount, 0); // This is C11 style, might not be direct C++ init list
-	fEevdfRunQueueTaskCount(0), // Assuming atomic_int32 can be value-initialized like this
+	fEevdfRunQueueTaskCount(0),
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false),
@@ -210,7 +209,7 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
-	atomic_store(&fEevdfRunQueueTaskCount, 0);
+	fEevdfRunQueueTaskCount.store(0);
 
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
@@ -311,7 +310,7 @@ CPUEntry::AddThread(ThreadData* thread)
 	fEevdfRunQueue.Add(thread);
 	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
-	atomic_add(&fEevdfRunQueueTaskCount, 1);
+	fEevdfRunQueueTaskCount.fetch_add(1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
 	// fMlfqHighestNonEmptyLevel logic removed.
 }
@@ -329,8 +328,8 @@ CPUEntry::RemoveThread(ThreadData* thread)
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
 		ASSERT(atomic_load(&fTotalThreadCount) >= 0);
-		atomic_add(&fEevdfRunQueueTaskCount, -1);
-		ASSERT(atomic_load(&fEevdfRunQueueTaskCount) >= 0);
+		fEevdfRunQueueTaskCount.fetch_sub(1);
+		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
 	}
 	// fMlfqHighestNonEmptyLevel logic removed.
@@ -352,7 +351,7 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 // The queue lock (fQueueLock) MUST be held by the caller.
 static ThreadData*
 _PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
-	volatile int32* queueTaskCount)
+	std::atomic<int32>& queueTaskCount)
 {
 	if (activeTeam == NULL)
 		return NULL;
@@ -364,8 +363,8 @@ _PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam,
 	// Similar to PeekEligibleNextThread, but filters by team.
 	while (!queue.IsEmpty()) {
 		ThreadData* candidate = queue.PopMinimum();
-		atomic_add(queueTaskCount, -1);
-		ASSERT(atomic_load(queueTaskCount) >= 0);
+		queueTaskCount.fetch_sub(1);
+		ASSERT(queueTaskCount.load() >= 0);
 
 		if (candidate == NULL) break;
 
@@ -389,7 +388,7 @@ _PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam,
 
 	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
 		queue.Add(toReAdd);
-		atomic_add(queueTaskCount, 1);
+		queueTaskCount.fetch_add(1);
 	}
 
 	if (eligibleCandidate != NULL) {
@@ -408,7 +407,7 @@ _PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam,
 // The queue lock (fQueueLock) MUST be held by the caller.
 static ThreadData*
 _PeekEligibleRealtimeThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
-	volatile int32* queueTaskCount)
+	std::atomic<int32>& queueTaskCount)
 {
 	if (activeTeam == NULL)
 		return NULL;
@@ -419,8 +418,8 @@ _PeekEligibleRealtimeThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* act
 
 	while (!queue.IsEmpty()) {
 		ThreadData* candidate = queue.PopMinimum();
-		atomic_add(queueTaskCount, -1);
-		ASSERT(atomic_load(queueTaskCount) >= 0);
+		queueTaskCount.fetch_sub(1);
+		ASSERT(queueTaskCount.load() >= 0);
 
 		if (candidate == NULL) break;
 
@@ -438,7 +437,7 @@ _PeekEligibleRealtimeThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* act
 	// Re-add non-chosen threads
 	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
 		queue.Add(toReAdd);
-		atomic_add(queueTaskCount, 1);
+		queueTaskCount.fetch_add(1);
 	}
 
 	if (eligibleRTFound != NULL) {
@@ -473,8 +472,8 @@ CPUEntry::PeekEligibleNextThread()
 	// We are looking for the first eligible thread based on VirtualDeadline order.
 	while (!fEevdfRunQueue.IsEmpty()) {
 		ThreadData* candidate = fEevdfRunQueue.PopMinimum(); // Pop from actual queue
-		atomic_add(&fEevdfRunQueueTaskCount, -1);
-		ASSERT(atomic_load(&fEevdfRunQueueTaskCount) >= 0);
+		fEevdfRunQueueTaskCount.fetch_sub(1);
+		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
@@ -500,7 +499,7 @@ CPUEntry::PeekEligibleNextThread()
 	// correctly by deadline.
 	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
 		fEevdfRunQueue.Add(toReAdd);
-		atomic_add(&fEevdfRunQueueTaskCount, 1);
+		fEevdfRunQueueTaskCount.fetch_add(1);
 		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
 		// becomes the head or if the queue was empty.
 	}
@@ -535,7 +534,7 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
 		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
 		fEevdfRunQueue.Add(oldThread);
-		atomic_add(&fEevdfRunQueueTaskCount, 1); // Manually update count as Add doesn't do it here
+		fEevdfRunQueueTaskCount.fetch_add(1); // Manually update count as Add doesn't do it here
 		_UpdateMinVirtualRuntime();
 	}
 
@@ -544,7 +543,7 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	// Phase 1: Check Real-Time threads from fCurrentActiveTeam (Bypass Quota Exhaustion)
 	if (fCurrentActiveTeam != NULL) {
 		nextThreadData = _PeekEligibleRealtimeThreadFromTeam(fEevdfRunQueue,
-			fCurrentActiveTeam, ID(), &fEevdfRunQueueTaskCount);
+			fCurrentActiveTeam, ID(), fEevdfRunQueueTaskCount);
 		if (nextThreadData != NULL) {
 			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (bypassing quota check).\n",
 				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);
@@ -554,7 +553,7 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	// Phase 2: Check Non-Real-Time threads from fCurrentActiveTeam (Nominal Quota Check)
 	if (nextThreadData == NULL && fCurrentActiveTeam != NULL && !fCurrentActiveTeam->quota_exhausted) {
 		nextThreadData = _PeekEligibleThreadFromTeam(fEevdfRunQueue,
-			fCurrentActiveTeam, ID(), &fEevdfRunQueueTaskCount);
+			fCurrentActiveTeam, ID(), fEevdfRunQueueTaskCount);
 		if (nextThreadData != NULL) {
 			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected non-RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (within quota).\n",
 				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);

@@ -11,6 +11,7 @@
 
 #include <debug.h>
 #include <kscheduler.h>
+#include "scheduler_defs.h"
 #include <load_tracking.h>
 #include <smp.h>
 #include <thread.h>

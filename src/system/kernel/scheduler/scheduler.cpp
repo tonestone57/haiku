@@ -125,7 +125,8 @@ _init_continuous_weights()
 
 static const bool kUseContinuousWeights = true;
 
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpu) {
+static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
+	const CPUEntry* contextCpu = static_cast<const CPUEntry*>(contextCpuVoid);
 	if (thread == NULL) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}

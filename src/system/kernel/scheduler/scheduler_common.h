@@ -131,6 +131,18 @@
 #	define TRACE_SCHED_BL(...) do { } while (false)
 #endif
 
+#ifdef TRACE_SCHEDULER_SMT
+#	define TRACE_SCHED_SMT(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_SMT(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_CPU
+#	define TRACE_SCHED_CPU(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_CPU(...) do { } while (false)
+#endif
+
 
 namespace Scheduler {
 

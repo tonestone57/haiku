@@ -6,7 +6,6 @@
 
 
 #include "scheduler_cpu.h"
-#include "scheduler_team.h"
 
 #include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
 #include <thread.h> // Explicitly include for thread_is_running
@@ -147,9 +146,9 @@ CPUEntry::SetCurrentActiveTeam(TeamSchedulerData* teamData)
 	// TODO: Review locking implications.
 	fCurrentActiveTeam = teamData;
 	if (teamData != NULL) {
-		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
+		TRACE_SCHED("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
 	} else {
-		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team cleared.\n", ID());
+		TRACE_SCHED("CPU %" B_PRId32 ": Active team cleared.\n", ID());
 	}
 }
 
@@ -167,7 +166,7 @@ CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
 	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
 		return;
 
-	TRACE_SCHED_BL("CoreEntry %" B_PRId32 ": A CPU's instantaneous load changed. Updating SMT-aware heap keys for all %" B_PRId32 " CPUs on this core.\n",
+	TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": A CPU's instantaneous load changed. Updating SMT-aware heap keys for all %" B_PRId32 " CPUs on this core.\n",
 		ID(), fCPUCount);
 
 	// Iterate all CPUs belonging to this core.
@@ -187,7 +186,7 @@ CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
 				// This ensures the CPU's position in the heap reflects its current SMT-aware load.
 				cpuToUpdate->UpdatePriority(smtAwareKey);
 
-				TRACE_SCHED_BL("CoreEntry %" B_PRId32 ": Updated CPU %" B_PRId32 "'s SMT-aware heap key to %" B_PRId32 " (effective SMT load: %.2f)\n",
+				TRACE_SCHED_SMT("CoreEntry %" B_PRId32 ": Updated CPU %" B_PRId32 "'s SMT-aware heap key to %" B_PRId32 " (effective SMT load: %.2f)\n",
 					ID(), cpuToUpdate->ID(), smtAwareKey, effectiveSmtLoad);
 			}
 		}
@@ -210,7 +209,7 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
-	atomic_set(&fEevdfRunQueueTaskCount, 0);
+	atomic_store(&fEevdfRunQueueTaskCount, 0);
 
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
@@ -238,7 +237,7 @@ CPUEntry::IsActiveSMT() const
 {
 	// A CPU is considered active for SMT penalty purposes if it's running a real thread.
 	// The idle thread doesn't typically impose SMT contention.
-	return gCPU[fCPUNumber].running_thread != NULL && gCPU[fCPUNumber].running_thread != fIdleThread->GetThread();
+	return fRunningThread != NULL && fRunningThread != fIdleThread;
 }
 
 
@@ -290,7 +289,7 @@ CPUEntry::_UpdateMinVirtualRuntime()
 
 	fMinVirtualRuntime = max_c(localAnchorVR, currentGlobalMin);
 
-	TRACE_SCHED_BL("CPUEntry %" B_PRId32 ": _UpdateMinVirtualRuntime: new fMinVR %" B_PRId64
+	TRACE_SCHED_CPU("CPUEntry %" B_PRId32 ": _UpdateMinVirtualRuntime: new fMinVR %" B_PRId64
 		" (wasOldLocalMinVR %" B_PRId64 ", localAnchorVR %" B_PRId64 ", globalMin %" B_PRId64 ")\n",
 		ID(), fMinVirtualRuntime, oldLocalMinVR, localAnchorVR, currentGlobalMin);
 

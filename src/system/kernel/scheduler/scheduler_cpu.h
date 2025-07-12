@@ -115,7 +115,6 @@ public:
 	bigtime_t			fLastTimeTaskStolenFrom;
 
 private:
-	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 						// Calculates a heap key for this CPU that is SMT-aware.
 						// The key reflects the CPU's own instantaneous load plus a penalty
 						// derived from the load of its active SMT siblings, using
@@ -149,6 +148,7 @@ private:
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
+	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 						bool			fUpdateLoadEvent;
 
 						friend class DebugDumper;
@@ -405,7 +405,6 @@ CPUEntry::GetCachedMinVirtualRuntime() const
 }
 
 
-						bool			IsEffectivelyIdle() const;
 inline void
 CoreEntry::LockCPUHeap()
 {

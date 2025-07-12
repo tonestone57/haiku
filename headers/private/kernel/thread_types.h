@@ -31,8 +31,10 @@
 
 enum additional_thread_state {
 	THREAD_STATE_FREE_ON_RESCHED = 7, // free the thread structure upon reschedule
+	THREAD_STATE_ZOMBIE = 8,
 //	THREAD_STATE_BIRTH	// thread is being created
 };
+#define B_THREAD_ZOMBIE THREAD_STATE_ZOMBIE
 
 #define THREAD_MIN_SET_PRIORITY				B_LOWEST_ACTIVE_PRIORITY
 #define THREAD_MAX_SET_PRIORITY				B_REAL_TIME_PRIORITY

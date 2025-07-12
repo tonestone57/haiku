@@ -26,7 +26,7 @@
 #include <smp.h>
 #include <thread.h>
 #include <timer.h>
-#include <kernel.h> // For B_THREAD_ZOMBIE and other thread states
+#include <kernel/thread_types.h>
 
 // Haiku Utility Headers
 #include <shared/AutoDeleter.h> // Corrected path
@@ -365,7 +365,7 @@ inline void
 ThreadData::Dies()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED || fThread->state == B_THREAD_ZOMBIE);
+	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED || fThread->state == THREAD_STATE_ZOMBIE);
 
 	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
 		if (fReady) {

@@ -479,6 +479,10 @@ status_t intel_i915_gem_object_map_cpu(struct intel_i915_gem_object* obj, void**
 	// This depends on whether CPU map is for read after GPU write, or write before GPU read.
 	// For now, assume CPU mapping is for general purpose access and coherency is
 	// managed by userspace or around execbuffer calls.
+	if (obj->dirty) {
+		intel_i915_wait_for_vblank(obj->dev_priv, 0);
+		obj->dirty = false;
+	}
 	*vaddr_out = obj->kernel_virtual_address;
 	return B_OK;
 }
@@ -518,7 +522,7 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 	}
 	mutex_unlock(&obj->lock); // Unlock before calling GTT map which might sleep or take other locks
 
-	// TODO: Call intel_i915_gem_object_prepare_gpu_access(obj, ...);
+	intel_i915_gem_object_prepare_gpu_access(obj, false);
 	// This would handle CPU cache flushes if CPU wrote to WB memory before GPU reads.
 
 	status_t status = intel_i915_gtt_map_memory(devInfo,
@@ -710,6 +714,12 @@ intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj)
 
 // --- CPU/GPU Coherency Management Stubs ---
 
+void
+intel_i915_gem_object_put_pages(struct intel_i915_gem_object* obj)
+{
+	intel_i915_gem_object_finish_gpu_access(obj, true);
+}
+
 status_t
 intel_i915_gem_object_finish_gpu_access(struct intel_i915_gem_object* obj, bool gpu_was_writing)
 {
@@ -735,12 +745,7 @@ intel_i915_gem_object_finish_gpu_access(struct intel_i915_gem_object* obj, bool 
 	// TRACE("GEM: finish_gpu_access for obj %p, gpu_was_writing: %d (STUBBED)
 ", obj, gpu_was_writing); // Can be verbose
 	if (gpu_was_writing) {
-		// Example: if (obj->is_render_target_or_texture) {
-		//   status = emit_gpu_cache_flush_for_cpu_read(devInfo, obj);
-		// }
-		// For now, we assume userspace (e.g. Mesa) or command submission logic
-		// (e.g. PIPE_CONTROL in execbuffer) handles necessary GPU cache flushes
-		// before CPU access is expected.
+		obj->dirty = true;
 	}
 	return B_OK;
 }

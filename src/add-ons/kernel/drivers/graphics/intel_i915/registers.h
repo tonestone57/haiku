@@ -1148,6 +1148,15 @@
 #define HUC_CTL					0x63004
 #define HUC_CTL_ENABLE			(1 << 0)
 
+// --- Execlists Registers ---
+#define EL_CTL					0x2030
+#define EL_STATUS				0x2034
+#define EL_HEAD					0x2038
+#define EL_TAIL					0x203C
+
+#define PS_CTL					0x20A0
+#define PS_CTL_ENABLE			(1 << 0)
+
 // TODO: add more registers!
 
 

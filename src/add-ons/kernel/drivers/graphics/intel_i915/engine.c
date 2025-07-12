@@ -137,6 +137,20 @@ status_t
 intel_engine_execlists_submit(struct intel_engine_cs* engine,
 	struct intel_i915_gem_context* context)
 {
+	intel_i915_write32(devInfo, EL_CTL, 0);
+	return B_OK;
+}
+
+void
+intel_execlists_submission_uninit(intel_i915_device_info* devInfo)
+{
+	intel_i915_write32(devInfo, EL_CTL, 0);
+}
+
+status_t
+intel_execlists_submit(intel_i915_device_info* devInfo, struct intel_engine_cs* engine,
+	struct intel_i915_gem_object* batch_obj, uint32_t batch_len)
+{
 	// TODO: Implement execlists submission.
 	return B_OK;
 }

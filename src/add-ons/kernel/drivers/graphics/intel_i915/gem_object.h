@@ -43,6 +43,7 @@ struct intel_i915_gem_object {
 
 	struct list_node link;
 	mutex      lock;
+	bool       dirty;
 };
 
 
@@ -69,6 +70,7 @@ status_t intel_i915_gem_object_unmap_gtt(struct intel_i915_gem_object* obj);
 // Functions for managing CPU/GPU coherency
 status_t intel_i915_gem_object_finish_gpu_access(struct intel_i915_gem_object* obj, bool gpu_was_writing);
 status_t intel_i915_gem_object_prepare_gpu_access(struct intel_i915_gem_object* obj, bool gpu_will_write);
+void intel_i915_gem_object_put_pages(struct intel_i915_gem_object* obj);
 
 
 #ifdef __cplusplus

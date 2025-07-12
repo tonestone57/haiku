@@ -45,5 +45,7 @@ intel_fragment_shader_init(intel_i915_device_info* devInfo)
 void
 intel_fragment_shader_uninit(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement fragment shader uninitialization.
+	uint32 ps_ctl = intel_i915_read32(devInfo, PS_CTL);
+	ps_ctl &= ~PS_CTL_ENABLE;
+	intel_i915_write32(devInfo, PS_CTL, ps_ctl);
 }

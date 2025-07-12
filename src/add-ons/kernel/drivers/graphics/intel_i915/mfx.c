@@ -23,5 +23,8 @@ intel_mfx_uninit(intel_i915_device_info* devInfo)
 void
 intel_mfx_handle_response(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement MFX response handling.
+	uint32 mfx_status = intel_i915_read32(devInfo, MFX_STATUS);
+	if (mfx_status & MFX_STATUS_ERROR) {
+		// Handle error.
+	}
 }

@@ -49,4 +49,5 @@ intel_panel_power_down(intel_i915_device_info* devInfo)
 void
 intel_panel_uninit(intel_i915_device_info* devInfo)
 {
+	intel_panel_power_down(devInfo);
 }

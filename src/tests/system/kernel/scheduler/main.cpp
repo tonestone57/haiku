@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <cppunit/Test.h>
+#include <cppunit/TestSuite.h>
+
 #include <KernelExport.h>
 #include <List.h>
 #include <Locker.h>
@@ -14,6 +17,8 @@
 #include <cpu.h>
 #include <kscheduler.h>
 #include <timer.h>
+
+#include "SchedulerStressTest.h"
 
 
 const static option kOptions[] = {
@@ -353,38 +358,10 @@ delete_threads()
 int
 main(int argc, char** argv)
 {
-	bigtime_t runTime = 1000000;
-	uint32 cpuCount = 1;
+	BTestSuite* suite = new BTestSuite("Scheduler");
+	SchedulerStressTest::AddTests(*suite);
 
-	char option;
-	while ((option = getopt_long(argc, argv, "", kOptions, NULL)) != -1) {
-		switch (option) {
-			case 't':
-				runTime *= strtol(optarg, 0, NULL);
-				if (runTime <= 0) {
-					fprintf(stderr, "Invalid run time.\n");
-					exit(1);
-				}
-				break;
-			case 'c':
-				cpuCount = strtol(optarg, 0, NULL);
-				if (cpuCount <= 0 || cpuCount > 64) {
-					fprintf(stderr, "Invalid CPU count (allowed: 1-64).\n");
-					exit(1);
-				}
-				break;
-		}
-	}
-
-	start_cpus(cpuCount);
-
-	add_thread(new Thread("test 1", 5));
-	add_thread(new Thread("test 2", 10));
-	add_thread(new Thread("test 3", 15));
-
-	snooze(runTime);
-
-	stop_cpus();
-	delete_threads();
+	suite->Run();
+	delete suite;
 	return 0;
 }

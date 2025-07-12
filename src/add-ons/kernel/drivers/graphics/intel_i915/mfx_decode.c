@@ -9,12 +9,14 @@
 #include "mfx_decode.h"
 #include "intel_i915_priv.h"
 #include "mfx_avc.h"
+#include "mfx_vc1.h"
 
 status_t
 intel_mfx_decode_init(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement MFX decoding initialization.
-	return intel_mfx_avc_init(devInfo);
+	intel_mfx_avc_init(devInfo);
+	return intel_mfx_vc1_init(devInfo);
 }
 
 void

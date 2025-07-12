@@ -12,6 +12,9 @@
 #include "huc.h"
 #include "pipe_3d.h"
 #include "mfx.h"
+#include "dp.h"
+#include "panel.h"
+#include "hdcp.h"
 
 status_t
 intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info)
@@ -21,6 +24,9 @@ intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info)
 		intel_huc_init(devInfo);
 		intel_3d_init(devInfo);
 		intel_mfx_init(devInfo);
+		intel_dp_init(devInfo);
+		intel_panel_init(devInfo);
+		intel_hdcp_init(devInfo);
 		return kaby_lake_gpu_init(devInfo);
 	}
 

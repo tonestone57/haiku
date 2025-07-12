@@ -324,17 +324,13 @@ intel_enable_rc6(intel_i915_device_info* devInfo)
 	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
 		rc6_mask |= DE_RC6_ENABLE | DE_RC6p_ENABLE | DE_RC6pp_ENABLE;
 	}
-	intel_i915_write32(devInfo, DE_RC_STATE, intel_i915_read32(devInfo, DE_RC_STATE) | rc6_mask);
+	intel_set_rc_state(devInfo, rc6_mask);
 }
 
 void
 intel_disable_rc6(intel_i915_device_info* devInfo)
 {
-	uint32_t rc6_mask = DE_RC6_ENABLE;
-	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
-		rc6_mask |= DE_RC6_ENABLE | DE_RC6p_ENABLE | DE_RC6pp_ENABLE;
-	}
-	intel_i915_write32(devInfo, DE_RC_STATE, intel_i915_read32(devInfo, DE_RC_STATE) & ~rc6_mask);
+	intel_set_rc_state(devInfo, 0);
 }
 
 void
@@ -346,7 +342,10 @@ intel_set_rps(intel_i915_device_info* devInfo, uint8_t val)
 void
 intel_set_rc_state(intel_i915_device_info* devInfo, uint32_t state)
 {
-	intel_i915_write32(devInfo, DE_RC_STATE, state);
+	uint32_t rc_state = intel_i915_read32(devInfo, DE_RC_STATE);
+	rc_state &= ~DE_RC_STATE_MASK;
+	rc_state |= state;
+	intel_i915_write32(devInfo, DE_RC_STATE, rc_state);
 }
 
 void

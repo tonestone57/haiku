@@ -147,6 +147,9 @@ intel_engine_guc_submit(struct intel_engine_cs* engine,
 {
 	intel_i915_device_info* devInfo = engine->dev_priv;
 	uint32_t* cmd_queue = (uint32_t*)devInfo->guc_log_cpu_addr;
+	if (cmd_queue == NULL) {
+		return B_NO_INIT;
+	}
 	uint32_t head = cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4];
 	uint32_t tail = cmd_queue[GUC_CMD_QUEUE_TAIL_OFFSET / 4];
 	uint32_t size = cmd_queue[GUC_CMD_QUEUE_SIZE_OFFSET / 4];

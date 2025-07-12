@@ -16,6 +16,8 @@ struct huc_command {
 	uint32_t data[0];
 };
 
+#define HUC_CMD_HEVC_SLICE_DECODE	0x2001
+
 #ifdef __cplusplus
 extern "C" {
 #endif

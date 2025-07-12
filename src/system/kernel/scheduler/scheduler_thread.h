@@ -181,6 +181,7 @@ public:
 	inline bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA; }
 	inline uint32 VoluntarySleepTransitions() const { return fVoluntarySleepTransitions; }
 	inline bigtime_t TimeUsedInCurrentQuantum() const { return fTimeUsedInCurrentQuantum; }
+	bool IsLowIntensity() const;
 };
 
 class ThreadProcessing {

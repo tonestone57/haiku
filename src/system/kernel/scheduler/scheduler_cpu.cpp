@@ -1150,7 +1150,7 @@ CoreEntry::ThreadCount() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	SpinLocker lock(fCPULock);
+	InterruptsSpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1568,7 +1568,7 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
 				snprintf(affinityStr, sizeof(affinityStr), "CPU%d", t->pinned_to_cpu - 1);
 			} else if (!td->GetCPUMask().IsEmpty() && !td->GetCPUMask().IsFull()) {
 				// Just show first bit of mask for brevity in this table. Full mask in thread_sched_info.
-				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", td->GetCPUMask().Bits(0));
+				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", (uint64)td->GetCPUMask().Bits(0));
 			} else {
 				strcpy(affinityStr, "-");
 			}
@@ -1814,6 +1814,7 @@ scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFro
 	// Clamp to absolute minimum and a scaled version of the mode's base maximum.
 	dynamicTargetLoad = max_c(kDynamicIrqLoadAbsoluteMin, dynamicTargetLoad);
 	dynamicTargetLoad = min_c(dynamicTargetLoad, (int32)(baseMaxIrqLoadFromMode * kDynamicIrqLoadMaxFactor * 1.1f)); // Allow slightly above baseMax * maxFactor as a hard cap
+	extern int32 gHighAbsoluteIrqThreshold;
 	dynamicTargetLoad = min_c(dynamicTargetLoad, (int32)(gHighAbsoluteIrqThreshold * 2)); // Overall sanity cap
 
 	TRACE_SCHED_IRQ("GetDynamicMaxIrqTarget: CPU %" B_PRId32 ", instLoad %.2f, baseMode %" B_PRId32 ", effFactor %.2f -> dynamicTarget %" B_PRId32 "\n",
@@ -1824,11 +1825,7 @@ scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFro
 
 
 // These are defined in scheduler.cpp
-extern BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap;
-extern spinlock gIrqTaskAffinityLock;
-
-// These are defined in scheduler.cpp
-extern BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap;
+extern BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap;
 extern spinlock gIrqTaskAffinityLock;
 
 /*! Selects the best CPU on a given target core to receive an IRQ.
@@ -1860,17 +1857,17 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 	// Check if this IRQ has a task affinity and if that task is running on this targetCore
 	if (sIrqTaskAffinityMap != NULL) {
 		InterruptsSpinLocker affinityLocker(gIrqTaskAffinityLock);
-		thread_id thid;
-		if (sIrqTaskAffinityMap->Lookup(irqVector, &thid) == B_OK) {
+		thread_id* thid;
+		if ((thid = sIrqTaskAffinityMap->Lookup(irqVector)) != NULL) {
 			affinityLocker.Unlock(); // Unlock early
 
-			Thread* task = thread_get_thread_struct_locked(thid);
+			Thread* task = thread_get_thread_struct_locked(*thid);
 			if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 				CPUEntry* taskCpuEntry = CPUEntry::GetCPU(task->cpu->cpu_num);
 				if (taskCpuEntry->Core() == targetCore) {
 					affinitizedTaskRunningCPU = taskCpuEntry;
 					TRACE_SCHED_IRQ("SelectTargetCPUForIRQ: IRQ %d has affinity with T %" B_PRId32 " running on CPU %" B_PRId32 " (on targetCore %" B_PRId32 ")\n",
-						irqVector, thid, taskCpuEntry->ID(), targetCore->ID());
+						irqVector, *thid, taskCpuEntry->ID(), targetCore->ID());
 				}
 			}
 			// if (task != NULL) thread_put_kernel_thread(task); // Release ref if acquired by get_kernel_thread

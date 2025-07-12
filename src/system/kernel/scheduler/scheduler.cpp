@@ -48,6 +48,7 @@
 #include <kernel/thread.h>
 #include <syscall_numbers.h>
 #include <cstdint>
+#include <kernel/thread.h>
 
 
 /*! The thread scheduler */
@@ -368,7 +369,7 @@ struct IntHashDefinition {
 	bool Compare(int key, thread_id* value) const { return false; }
 	bool CompareKeys(int key1, int key2) const { return key1 == key2; }
 };
-static BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
+static BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap = NULL;
 static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
@@ -899,7 +900,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				if (allowStealByBLPolicy) {
 					stolenTask = victimQueue.PopMinimum();
 					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
-					atomic_add(&victimCPUEntry->GetTotalThreadCount(), -1);
+					atomic_add((int32*)&victimCPUEntry->GetTotalThreadCount(), -1);
 					ASSERT(victimCPUEntry->GetTotalThreadCount() >=0);
 					victimCPUEntry->MinVirtualRuntime();
 
@@ -1007,6 +1008,7 @@ reschedule(int32 nextState)
 
 	Thread* oldThread = thread_get_current_thread();
 
+	ThreadData* oldThreadData = oldThread->scheduler_data;
 	oldThreadData->StopCPUTime();
 
 	TRACE_SCHED("reschedule (EEVDF): cpu %" B_PRId32 ", oldT %" B_PRId32 " (VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 ", state %s), next_state %" B_PRId32 "\n",
@@ -1019,7 +1021,7 @@ reschedule(int32 nextState)
 	bigtime_t actualRuntime = oldThreadData->TimeUsedInCurrentQuantum();
 
 	if (!oldThreadData->IsIdle()) {
-		if (nextState == B_THREAD_WAITING || nextState == B_THREAD_SLEEPING) {
+				if (nextState == B_THREAD_WAITING || nextState == B_THREAD_ASLEEP) {
 			oldThreadData->RecordVoluntarySleepAndUpdateBurstTime(actualRuntime);
 		}
 
@@ -1307,6 +1309,7 @@ _find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, CPUEntry* current
 		if (candidateIsSensitive)
 			continue;
 
+				extern int32 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
 		int32 dynamicMaxLoad = scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
 		if (candidateCpu->CalculateTotalIrqLoad() + irqToMove->load >= dynamicMaxLoad)
 			continue;
@@ -1380,13 +1383,13 @@ scheduler_reschedule(int32 nextState)
 			cpu_ent* cpuSt = &gCPU[thisCPUId];
 			SpinLocker irqListLocker(cpuSt->irqs_lock);
 			irq_assignment* assignedIrq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
-			while (assignedIrq != NULL && moveCount < MAX_IRQS_PER_CPU) {
+			while (assignedIrq != NULL && moveCount < SMP_MAX_CPUS) {
 				if (assignedIrq->load >= IRQ_INTERFERENCE_LOAD_THRESHOLD) {
 					bool isExplicitlyColocated = false;
 					if (sIrqTaskAffinityMap != NULL) {
 						InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
-						thread_id mappedTid;
-						if (sIrqTaskAffinityMap->Lookup(assignedIrq->irq) != NULL && *(sIrqTaskAffinityMap->Lookup(assignedIrq->irq)) == nextThread->id) {
+						thread_id* mappedTid = sIrqTaskAffinityMap->Lookup(assignedIrq->irq);
+						if (mappedTid != NULL && *mappedTid == nextThread->id) {
 							isExplicitlyColocated = true;
 						}
 						affinityMapLocker.Unlock(); // Correctly unlock inside if
@@ -1485,11 +1488,9 @@ scheduler_on_thread_destroy(Thread* thread)
 			for (int8 i = 0; i < irqCount; ++i) {
 				int32 irq = localIrqList[i];
 				thread_id currentMappedTid = -1;
-				if (sIrqTaskAffinityMap->Lookup(irq, &currentMappedTid) == B_OK
-					&& currentMappedTid == thread->id) {
-					thread_id* value = sIrqTaskAffinityMap->Lookup(irq);
-					if (value != NULL)
-						sIrqTaskAffinityMap->Remove(value);
+				thread_id* value = sIrqTaskAffinityMap->Lookup(irq);
+				if (value != NULL && *value == thread->id) {
+					sIrqTaskAffinityMap->Remove(value);
 					TRACE_SCHED_IRQ("ThreadDestroy: T %" B_PRId32 " destroyed, removed its affinity for IRQ %" B_PRId32 " from global map.\n",
 						thread->id, irq);
 				} else {
@@ -1550,7 +1551,6 @@ scheduler_set_operation_mode(scheduler_mode mode)
 		}
 	}
 
-	lock.Unlock();
 	cpu_set_scheduler_mode(mode);
 	return B_OK;
 }
@@ -1683,7 +1683,7 @@ init()
 		int32 shardHeapSize = gCoreCount / Scheduler::kNumCoreLoadHeapShards + 4;
 		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
-		rw_spinlock_init(&Scheduler::gCoreHeapsShardLock[i], "core_heap_shard_lock");
+		rw_lock_init(&Scheduler::gCoreHeapsShardLock[i], "core_heap_shard_lock");
 	}
 	new(&gIdlePackageList) IdlePackageList;
 
@@ -1769,7 +1769,7 @@ scheduler_update_global_min_vruntime()
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!gCPUEnabled.GetBit(i))
 			continue;
-		bigtime_t cpuReportedMin = atomic_get64(&gReportedCpuMinVR[i]);
+		bigtime_t cpuReportedMin = atomic_get64(&Scheduler::gReportedCpuMinVR[i]);
 		if (calculatedNewGlobalMin == -1LL || cpuReportedMin < calculatedNewGlobalMin) {
 			calculatedNewGlobalMin = cpuReportedMin;
 		}

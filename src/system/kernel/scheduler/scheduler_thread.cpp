@@ -8,10 +8,6 @@
 #include "scheduler_defs.h" // For latency_nice constants and factors
 #include <util/Random.h> // For get_random<T>()
 
-// For scheduler_priority_to_weight, remove if moved to a common header
-#include <kernel.h>
-#include <kscheduler.h>
-// End temp include
 
 using namespace Scheduler;
 
@@ -154,6 +150,7 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 	if (contextCpu != NULL) {
 		reference_min_vruntime = contextCpu->GetCachedMinVirtualRuntime();
 	} else {
+		extern bigtime_t gGlobalMinVirtualRuntime;
 		reference_min_vruntime = atomic_get64((int64*)&gGlobalMinVirtualRuntime);
 	}
 
@@ -168,13 +165,13 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 		this->GetThread()->id, newSliceDuration, reference_min_vruntime, this->VirtualRuntime(), currentVRuntime);
 
 	// 4. Update Lag (fLag now represents normalized weighted work deficit/surplus)
-	int32 weight = scheduler_priority_to_weight(this->GetBasePriority());
+	int32 weight = scheduler_priority_to_weight(fThread, contextCpu);
 	if (weight <= 0) weight = 1;
 
 	uint32 contextCoreCapacity = SCHEDULER_NOMINAL_CAPACITY;
-	if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity > 0) {
-		contextCoreCapacity = contextCpu->Core()->fPerformanceCapacity;
-	} else if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->fPerformanceCapacity == 0) {
+	if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->PerformanceCapacity() > 0) {
+		contextCoreCapacity = contextCpu->Core()->PerformanceCapacity();
+	} else if (contextCpu != NULL && contextCpu->Core() != NULL && contextCpu->Core()->PerformanceCapacity() == 0) {
 		TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 ", contextCpu Core %" B_PRId32 " has 0 capacity! Using nominal %u for entitlement calc.\n",
 			this->GetThread()->id, contextCpu->Core()->ID(), SCHEDULER_NOMINAL_CAPACITY);
 	} else if (contextCpu == NULL) {
@@ -305,7 +302,6 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 			float smtPenalty = 0.0f;
 			if (core->CPUCount() > 1) { // SMT is possible
 				int32 prevCpuID = previousCPUEntry->ID();
-				int32 prevCoreID = core->ID(); // Should be same as previousCPUEntry->Core()->ID()
 				int32 prevSMTID = gCPU[prevCpuID].topology_id[CPU_TOPOLOGY_SMT];
 				if (prevSMTID != -1) {
 					for (int32 k = 0; k < smp_get_num_cpus(); k++) {
@@ -614,8 +610,8 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
 	// Apply dynamic floor if CPU contention is high
 	// This also should ideally not make RT slices shorter than RT_MIN_GUARANTEED_SLICE.
 	// The final clamp for RT threads will ensure this.
-	if (cpu != NULL) {
-		int32 num_contenders = cpu->GetEevdfRunQueue().Count();
+	if (contextCpu != NULL) {
+		int32 num_contenders = contextCpu->GetEevdfRunQueue().Count();
 		if (num_contenders == 0) // Should include current thread if it's to be run
 			num_contenders = 1;
 
@@ -623,7 +619,7 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
 			bigtime_t dynamic_floor_slice = (bigtime_t)(kMinSliceGranularity * HIGH_CONTENTION_MIN_SLICE_FACTOR);
 			if (finalSlice < dynamic_floor_slice) {
 				TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 " CPU %" B_PRId32 " high contention (%ld contenders). Slice %" B_PRId64 "us floored to %" B_PRId64 "us.\n",
-					fThread->id, cpu->ID(), num_contenders, finalSlice, dynamic_floor_slice);
+					fThread->id, contextCpu->ID(), num_contenders, finalSlice, dynamic_floor_slice);
 				finalSlice = dynamic_floor_slice;
 			}
 		}
@@ -763,53 +759,4 @@ ThreadData::IsLikelyIOBound() const
 	return isIOBound;
 }
 
-inline void
-ThreadData::UpdateActivity(bigtime_t active)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (IsIdle())
-		return;
 
-	fTimeUsedInCurrentQuantum += active;
-	fTimeUsedInCurrentQuantum -= fStolenTime;
-	fStolenTime = 0;
-
-	if (fTimeUsedInCurrentQuantum < 0)
-		fTimeUsedInCurrentQuantum = 0;
-
-
-	if (gTrackCoreLoad) {
-		fMeasureAvailableTime += active;
-
-		uint32 coreCapacityOfExecution = SCHEDULER_NOMINAL_CAPACITY;
-		if (fCore != NULL && fCore->fPerformanceCapacity > 0) {
-			coreCapacityOfExecution = fCore->fPerformanceCapacity;
-		} else if (fCore != NULL && fCore->fPerformanceCapacity == 0) {
-			TRACE_SCHED_WARNING("ThreadData::UpdateActivity: T %" B_PRId32 " ran on Core %" B_PRId32
-				" with 0 capacity! Using nominal %u for fNeededLoad active time calc.\n",
-				fThread->id, fCore->ID(), SCHEDULER_NOMINAL_CAPACITY);
-		} else if (fCore == NULL) {
-			TRACE_SCHED_WARNING("ThreadData::UpdateActivity: T %" B_PRId32
-				" has NULL fCore! Using nominal capacity %u for fNeededLoad active time calc.\n",
-				fThread->id, SCHEDULER_NOMINAL_CAPACITY);
-		}
-
-		if (active > 0) {
-			uint64 normalizedActiveNum = (uint64)active * coreCapacityOfExecution;
-			bigtime_t normalizedActiveContribution = normalizedActiveNum / SCHEDULER_NOMINAL_CAPACITY;
-			fMeasureAvailableActiveTime += normalizedActiveContribution;
-		}
-	}
-}
-
-inline bool
-ThreadData::IsLowIntensity() const
-{
-	if (IsIdle())
-		return false;
-
-	bool lowLoad = (fVoluntarySleepTransitions >= IO_BOUND_MIN_TRANSITIONS)
-		&& (fNeededLoad < LOW_INTENSITY_LOAD_THRESHOLD);
-
-	return IsLikelyIOBound() || lowLoad;
-}

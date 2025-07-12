@@ -414,7 +414,8 @@ scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
-static void scheduler_update_global_min_team_vruntime();
+static void scheduler_maybe_follow_task_irqs(thread_id thid, int32* irqList,
+	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU);
 static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
@@ -2502,7 +2503,7 @@ scheduler_perform_load_balance()
 					CoreEntry* core = &gCoreEntries[i];
 					if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
 					if (core->Type() == CORE_TYPE_LITTLE &&
-						(uint32)core->GetLoad() < (uint32)kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+						core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 						if (core->GetLoad() < minSpillLoad) {
 							minSpillLoad = core->GetLoad();
 							spillTarget = core;
@@ -2885,12 +2886,6 @@ scheduler_perform_load_balance()
 
 
 
-static void
-scheduler_maybe_follow_task_irqs(thread_id thid, int32* irqList,
-	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU)
-{
-	// not implemented
-}
 
 
 // Syscall implementations (do_... functions) follow...

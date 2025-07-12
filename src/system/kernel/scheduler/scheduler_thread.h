@@ -44,6 +44,8 @@
 
 namespace Scheduler {
 
+int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid);
+
 // Forward declarations already in scheduler_cpu.h and scheduler_common.h
 // class CoreEntry;
 // class CPUEntry;

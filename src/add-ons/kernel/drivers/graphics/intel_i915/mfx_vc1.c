@@ -23,6 +23,15 @@ intel_mfx_vc1_uninit(intel_i915_device_info* devInfo)
 status_t
 intel_mfx_vc1_decode_slice(intel_i915_device_info* devInfo, void* slice_data, size_t slice_size)
 {
-	// TODO: Implement VC-1 slice decoding.
+	uint32* data = (uint32*)slice_data;
+	size_t size_in_dwords = slice_size / 4;
+	size_t i;
+
+	for (i = 0; i < size_in_dwords; i++) {
+		intel_i915_write32(devInfo, MFX_VC1_SLICE_DATA, data[i]);
+	}
+
+	intel_i915_write32(devInfo, MFX_VC1_SLICE_CTL, 1);
+
 	return B_OK;
 }

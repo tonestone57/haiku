@@ -23,6 +23,15 @@ intel_mfx_avc_uninit(intel_i915_device_info* devInfo)
 status_t
 intel_mfx_avc_decode_slice(intel_i915_device_info* devInfo, void* slice_data, size_t slice_size)
 {
-	// TODO: Implement AVC slice decoding.
+	uint32* data = (uint32*)slice_data;
+	size_t size_in_dwords = slice_size / 4;
+	size_t i;
+
+	for (i = 0; i < size_in_dwords; i++) {
+		intel_i915_write32(devInfo, MFX_AVC_SLICE_DATA, data[i]);
+	}
+
+	intel_i915_write32(devInfo, MFX_AVC_SLICE_CTL, 1);
+
 	return B_OK;
 }

@@ -1130,6 +1130,24 @@
 #define HUC_HEVC_SLICE_CTL		0x3310
 #define HUC_HEVC_SLICE_DATA		0x3320
 
+// --- Panel Power Sequencing Registers ---
+#define PP_CONTROL				0x61200
+#define PP_STATUS				0x61204
+#define PP_ON_DELAYS			0x61208
+#define PP_OFF_DELAYS			0x6120C
+
+// --- HDCP Registers ---
+#define HDCP_CTL				0x62000
+#define HDCP_STATUS				0x62004
+#define HDCP_KEY_STATUS			0x62008
+#define HDCP_KEY_DATA			0x6200C
+
+// --- GuC/HuC Registers ---
+#define GUC_CTL					0x63000
+#define GUC_CTL_ENABLE			(1 << 0)
+#define HUC_CTL					0x63004
+#define HUC_CTL_ENABLE			(1 << 0)
+
 // TODO: add more registers!
 
 

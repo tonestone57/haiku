@@ -236,6 +236,7 @@ struct block_cache : DoublyLinkedListLinkImpl<block_cache> {
 	ConditionVariable busy_writing_condition;
 	uint32			busy_writing_count;
 	bool			busy_writing_waiters;
+	bool			no_more_busy_writing_waiters;
 
 	bigtime_t		last_block_write;
 	bigtime_t		last_block_write_duration;
@@ -1651,7 +1652,8 @@ block_cache::block_cache(int _fd, off_t numBlocks, size_t blockSize,
 	busy_reading_count(0),
 	busy_reading_waiters(false),
 	busy_writing_count(0),
-	busy_writing_waiters(0),
+	busy_writing_waiters(false),
+	no_more_busy_writing_waiters(false),
 	last_block_write(0),
 	last_block_write_duration(0),
 	num_dirty_blocks(0),
@@ -4015,4 +4017,3 @@ block_cache_prefetch(void* _cache, off_t blockNumber, size_t* _numBlocks)
 	*_numBlocks = 0;
 	return B_UNSUPPORTED;
 #endif // !BUILDING_USERLAND_FS_SERVER
-}

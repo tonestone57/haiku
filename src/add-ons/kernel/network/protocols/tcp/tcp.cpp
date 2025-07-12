@@ -102,7 +102,7 @@ add_options(tcp_segment_header &segment, uint8 *buffer, size_t bufferSize)
 	tcp_option *option = (tcp_option *)buffer;
 	size_t length = 0;
 
-	if (segment.max_segment_size > 0 && length + 8 <= bufferSize) {
+	if (segment.max_segment_size > 0 && length + 8 <= bufferSize && length + 8 > length) {
 		option->kind = TCP_OPTION_MAX_SEGMENT_SIZE;
 		option->length = 4;
 		option->max_segment_size = htons(segment.max_segment_size);
@@ -200,7 +200,8 @@ process_options(tcp_segment_header &segment, net_buffer *buffer, size_t size)
 		option = (tcp_option *)optionsBuffer;
 	}
 
-	while (size > 0) {
+	int maxOptions = 40;
+	while (size > 0 && maxOptions-- > 0) {
 		int32 length = -1;
 
 		switch (option->kind) {
@@ -734,7 +735,9 @@ tcp_receive_data(net_buffer* buffer)
 	TCPEndpoint* endpoint = endpointManager->FindConnection(
 		buffer->destination, buffer->source);
 	if (endpoint != NULL) {
+		endpoint->Lock();
 		segmentAction = endpoint->SegmentReceived(segment, buffer);
+		endpoint->Unlock();
 
 		// There are some states in which the socket could have been deleted
 		// while handling a segment. If this flag is set in segmentAction

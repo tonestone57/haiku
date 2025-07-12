@@ -10,10 +10,6 @@
 char *
 strcpy(char *dest, char const *src)
 {
-	char *tmp = dest;
-
-	while ((*dest++ = *src++) != '\0')
-		;
-	return tmp;
+	strlcpy(dest, src, strlen(src) + 1);
+	return dest;
 }
-

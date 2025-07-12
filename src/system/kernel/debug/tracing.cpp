@@ -1860,4 +1860,3 @@ _user_ktrace_output(const char *message)
 	new(nothrow) UserTraceEntry(message);
 #endif	// ENABLE_TRACING
 }
-

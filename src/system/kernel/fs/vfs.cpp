@@ -3991,6 +3991,9 @@ extern "C" status_t
 check_access_permissions(int accessMode, mode_t mode, gid_t nodeGroupID,
 	uid_t nodeUserID)
 {
+	// TODO: This is a very coarse-grained approach to privilege separation.
+	// A more fine-grained approach would be to use capabilities, which would
+	// allow for more precise control over the privileges of a process.
 	// get node permissions
 	int userPermissions = (mode & S_IRWXU) >> 6;
 	int groupPermissions = (mode & S_IRWXG) >> 3;

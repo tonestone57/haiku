@@ -1433,7 +1433,7 @@ BPlusTree::_SplitNode(bplustree_node* node, off_t nodeOffset,
 	bplustree_node* other, off_t otherOffset, uint16* _keyIndex, uint8* key,
 	uint16* _keyLength, off_t* _value)
 {
-	if (*_keyIndex > node->NumKeys() + 1)
+	if (*_keyIndex > node->NumKeys() + 1 || *_keyLength < 0)
 		return B_BAD_VALUE;
 
 	Unaligned<uint16>* inKeyLengths = node->KeyLengths();

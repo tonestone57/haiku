@@ -322,6 +322,7 @@ reschedule(int32 nextState)
 
 	int32 thisCPU = smp_get_current_cpu();
 	gCPU[thisCPU].invoke_scheduler = false;
+	mutex_lock(&gScheduler->lock);
 
 	CPUEntry* cpu = CPUEntry::GetCPU(thisCPU);
 	CoreEntry* core = CoreEntry::GetCore(thisCPU);
@@ -473,6 +474,7 @@ reschedule(int32 nextState)
 		if (nextThread != oldThread)
 			switch_thread(oldThread, nextThread);
 	}
+	mutex_unlock(&gScheduler->lock);
 }
 
 
@@ -735,6 +737,9 @@ init()
 void
 scheduler_init()
 {
+	if (gScheduler != NULL)
+		return;
+
 	int32 cpuCount = smp_get_num_cpus();
 	dprintf("scheduler_init: found %" B_PRId32 " logical cpu%s and %" B_PRId32
 		" cache level%s\n", cpuCount, cpuCount != 1 ? "s" : "",

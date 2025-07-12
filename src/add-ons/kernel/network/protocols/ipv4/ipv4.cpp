@@ -554,6 +554,8 @@ reassemble_fragments(const ipv4_header &header, net_buffer** _buffer)
 	FragmentPacket* packet = sFragmentHash.Lookup(key);
 	if (packet == NULL) {
 		// New fragment packet
+		if (sFragmentHash.CountElements() >= MAX_HASH_FRAGMENTS)
+			return B_NO_MEMORY;
 		packet = new (std::nothrow) FragmentPacket(key);
 		if (packet == NULL)
 			return B_NO_MEMORY;
@@ -615,6 +617,8 @@ send_fragments(ipv4_protocol* protocol, struct net_route* route,
 		return originalHeader.Status();
 
 	uint16 headerLength = originalHeader->HeaderLength();
+	if (buffer->size < headerLength)
+		return B_BAD_VALUE;
 	uint32 bytesLeft = buffer->size - headerLength;
 	uint32 fragmentOffset = 0;
 	status_t status = B_OK;
@@ -733,7 +737,7 @@ deliver_multicast(net_protocol_module_info* module, net_buffer* buffer,
 					protocol = protocol->next;
 			}
 
-			if (protocol != NULL) {
+			if (protocol != NULL && protocol->socket->state != SS_UNCONNECTED) {
 				module->deliver_data(protocol, buffer);
 				count++;
 			}

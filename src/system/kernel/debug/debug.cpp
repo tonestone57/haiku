@@ -580,7 +580,7 @@ read_line(char* buffer, int32 maxLength,
 						if (position > 0)
 							kprintf("\x1b[%" B_PRId32 "D", position); // move to beginning of line
 
-						strcpy(buffer, sLineBuffer[historyLine]);
+		strlcpy(buffer, sLineBuffer[historyLine], maxLength);
 						length = position = strlen(buffer);
 						kprintf("%s\x1b[K", buffer); // print the line and clear the rest
 						currentHistoryLine = historyLine;
@@ -616,7 +616,7 @@ read_line(char* buffer, int32 maxLength,
 
 						// found a suitable line -- replace the current buffer
 						// content with it
-						strcpy(buffer, sLineBuffer[historyLine]);
+						strlcpy(buffer, sLineBuffer[historyLine], maxLength);
 						length = strlen(buffer);
 						kprintf("%s\x1b[K", buffer + position);
 							// print the line and clear the rest
@@ -665,7 +665,7 @@ read_line(char* buffer, int32 maxLength,
 					 * we assume we are talking with GDB
 					 */
 					if (position == 0) {
-						strcpy(buffer, "gdb");
+						strlcpy(buffer, "gdb", maxLength);
 						position = 4;
 						done = true;
 						break;
@@ -2286,7 +2286,7 @@ _user_kernel_debugger(const char* userMessage)
 		return B_NOT_ALLOWED;
 
 	char message[512];
-	strcpy(message, "USER: ");
+	strlcpy(message, "USER: ", sizeof(message));
 	size_t length = strlen(message);
 
 	if (userMessage == NULL || !IS_USER_ADDRESS(userMessage) || user_strlcpy(

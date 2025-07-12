@@ -31,6 +31,9 @@
 static bool
 is_privileged(Team* team)
 {
+	// TODO: This is a very coarse-grained approach to privilege separation.
+	// A more fine-grained approach would be to use capabilities, which would
+	// allow for more precise control over the privileges of a process.
 	// currently only the root user is privileged
 	return team->effective_uid == 0;
 }
@@ -212,6 +215,9 @@ common_setgroups(int groupCount, const gid_t* groupList, bool kernel)
 	if (groupCount < 0 || groupCount > NGROUPS_MAX)
 		return B_BAD_VALUE;
 
+	if (groupCount > NGROUPS_MAX)
+		return B_BAD_VALUE;
+
 	BKernel::GroupsArray* newGroups = NULL;
 	if (groupCount > 0) {
 		newGroups = (BKernel::GroupsArray*)malloc(sizeof(BKernel::GroupsArray)
@@ -265,10 +271,14 @@ inherit_parent_user_and_group(Team* team, Team* parent)
 
 
 status_t
-update_set_id_user_and_group(Team* team, const char* file)
+update_set_id_user_and_group(Team* team, int fd)
 {
+	// TODO: This function is vulnerable to a TOCTOU attack. The file
+	// permissions are checked before the user and group IDs are updated.
+	// This leaves a window of time where the file could be replaced with
+	// another file with different permissions.
 	struct stat st;
-	status_t status = vfs_read_stat(-1, file, true, &st, false);
+	status_t status = vfs_read_stat(fd, NULL, true, &st, false);
 	if (status != B_OK)
 		return status;
 

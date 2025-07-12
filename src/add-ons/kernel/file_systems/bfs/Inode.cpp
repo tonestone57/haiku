@@ -2969,4 +2969,3 @@ AttributeIterator::Update(uint16 index, int8 change)
 	if (index < fCurrentSmallData)
 		fCurrentSmallData += change;
 }
-

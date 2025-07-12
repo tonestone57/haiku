@@ -449,6 +449,9 @@ Device::GetDescriptor(uint8 descriptorType, uint8 index, uint16 languageID,
 	if (!fAvailable)
 		return B_ERROR;
 
+	if (dataLength > 255)
+		dataLength = 255;
+
 	return fDefaultPipe->SendRequest(
 		USB_REQTYPE_DEVICE_IN | USB_REQTYPE_STANDARD,
 		USB_REQUEST_GET_DESCRIPTOR, (descriptorType << 8) | index,

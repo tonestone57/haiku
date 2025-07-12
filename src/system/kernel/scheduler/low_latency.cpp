@@ -30,7 +30,6 @@ static void
 low_latency_switch_to_mode()
 {
 	// gKernelKDistFactor = 0.3f; // REMOVED - Unused by EEVDF
-	gSchedulerBaseQuantumMultiplier = 1.0f; // Affects SliceDuration via GetBaseQuantumForLevel
 	// gSchedulerAgingThresholdMultiplier = 1.0f; // Aging is obsolete with EEVDF
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 
@@ -47,8 +46,8 @@ low_latency_switch_to_mode()
 	gModeIrqTargetFactor = 0.4f;
 	gModeMaxTargetCpuIrqLoad = 600;
 
-	dprintf("scheduler: Low Latency mode activated. BaseQuantumMult: %.2f, LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
-		gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
+	dprintf("scheduler: Low Latency mode activated. LB Policy: SPREAD, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
+		gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 

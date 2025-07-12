@@ -458,8 +458,8 @@ power_saving_switch_to_mode()
 	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
 	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
-	dprintf("scheduler: Power Saving mode activated. BaseQuantumMult: %.2f, LB Policy: CONSOLIDATE, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
-		gSchedulerBaseQuantumMultiplier, gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
+	dprintf("scheduler: Power Saving mode activated. LB Policy: CONSOLIDATE, SMTFactor: %.2f, IRQTargetFactor: %.2f, MaxCPUIrqLoad: %" B_PRId32 "\n",
+		gSchedulerSMTConflictFactor, gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad);
 }
 
 
@@ -731,7 +731,6 @@ power_saving_choose_core(const ThreadData* threadData)
 				bestCore->ID(), bestCore->Type());
 
 			CoreEntry* alternativeCore = NULL;
-			int32 alternativeHighestScore = -0x7fffffff;
 
 			// Try STC if it's active and suitable (and wasn't the bestCore we can't wake)
 			if (stcCandidate != NULL && stcCandidate != bestCore && (stcCandidate->GetActiveTime() > 0 || stcCandidate->GetLoad() > 0)) {
@@ -844,7 +843,7 @@ power_saving_rebalance_irqs(bool idle)
 			nextIRQ = (irq_assignment*)list_get_next_item(&current_cpu_struct->irqs, irq);
 
 			CPUEntry* specificTargetCPU = SelectTargetCPUForIRQ(consolidationCore,
-				irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor,
+				irq->irq, irq->load, gModeIrqTargetFactor, gSchedulerSMTConflictFactor,
 				gModeMaxTargetCpuIrqLoad);
 
 			if (specificTargetCPU != NULL) {
@@ -911,7 +910,7 @@ power_saving_rebalance_irqs(bool idle)
 	if (targetCoreForIRQs->GetLoad() + kLoadDifference >= currentCore->GetLoad()) return;
 
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs,
-		candidateIRQs[0]->load,
+		candidateIRQs[0]->irq, candidateIRQs[0]->load,
 		gModeIrqTargetFactor,
 		gSchedulerSMTConflictFactor,
 		gModeMaxTargetCpuIrqLoad);
@@ -925,7 +924,7 @@ power_saving_rebalance_irqs(bool idle)
 		if (chosenIRQ == NULL) continue;
 
 		if (i > 0) {
-			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->load,
+			targetCPU = SelectTargetCPUForIRQ(targetCoreForIRQs, chosenIRQ->irq, chosenIRQ->load,
 				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
 				TRACE("PS IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);

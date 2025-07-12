@@ -34,6 +34,7 @@ extern "C" {
 
 status_t intel_guc_init(intel_i915_device_info* devInfo);
 void intel_guc_uninit(intel_i915_device_info* devInfo);
+void intel_guc_handle_response(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }

@@ -22,3 +22,9 @@ intel_mfx_uninit(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement MFX uninitialization.
 }
+
+void
+intel_mfx_handle_response(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement MFX response handling.
+}

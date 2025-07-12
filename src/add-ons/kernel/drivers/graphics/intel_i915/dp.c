@@ -26,6 +26,15 @@ intel_dp_link_train(intel_i915_device_info* devInfo,
 	return B_OK;
 }
 
+status_t
+intel_dp_read_dpcd(intel_i915_device_info* devInfo,
+	struct intel_output_port_state* port_state,
+	uint16_t address, uint8_t* buffer, uint16_t size)
+{
+	// TODO: Implement DPCD read.
+	return B_OK;
+}
+
 void
 intel_dp_uninit(intel_i915_device_info* devInfo)
 {

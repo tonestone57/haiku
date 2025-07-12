@@ -18,6 +18,7 @@ status_t intel_hdcp_init(intel_i915_device_info* devInfo);
 void intel_hdcp_uninit(intel_i915_device_info* devInfo);
 void intel_hdcp_enable(intel_i915_device_info* devInfo);
 void intel_hdcp_disable(intel_i915_device_info* devInfo);
+status_t intel_hdcp_read_keys(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }

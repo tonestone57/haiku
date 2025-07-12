@@ -28,6 +28,13 @@ intel_panel_power_down(intel_i915_device_info* devInfo)
 	// TODO: Implement panel power down.
 }
 
+status_t
+intel_panel_read_vbt(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement VBT reading.
+	return B_OK;
+}
+
 void
 intel_panel_uninit(intel_i915_device_info* devInfo)
 {

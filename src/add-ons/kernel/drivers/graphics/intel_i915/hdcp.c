@@ -28,6 +28,13 @@ intel_hdcp_disable(intel_i915_device_info* devInfo)
 	// TODO: Implement HDCP disable.
 }
 
+status_t
+intel_hdcp_read_keys(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement HDCP key reading.
+	return B_OK;
+}
+
 void
 intel_hdcp_uninit(intel_i915_device_info* devInfo)
 {

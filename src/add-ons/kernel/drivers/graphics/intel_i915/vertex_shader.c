@@ -11,13 +11,17 @@
 
 #include "gem_object.h"
 
+#include "string.h"
+
 status_t
 intel_vertex_shader_init(intel_i915_device_info* devInfo)
 {
 	const char* shader_code =
 		"vs.1.1\n"
 		"dcl_position v0\n"
-		"mov oPos, v0\n";
+		"dcl_color v1\n"
+		"mov oPos, v0\n"
+		"mov oD0, v1\n";
 
 	struct intel_i915_gem_object* obj;
 	status_t status = intel_i915_gem_object_create(devInfo, strlen(shader_code), 0, 0, 0, 0, &obj);

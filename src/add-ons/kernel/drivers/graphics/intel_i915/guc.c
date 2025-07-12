@@ -78,3 +78,9 @@ intel_guc_uninit(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement GuC uninitialization.
 }
+
+void
+intel_guc_handle_response(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement GuC response handling.
+}

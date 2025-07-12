@@ -12,6 +12,9 @@
 #include "pm.h"
 #include "gem_object.h" // For intel_i915_gem_object_put
 #include "kaby_lake/kaby_lake.h"
+#include "guc.h"
+#include "huc.h"
+#include "mfx.h"
 
 #include <KernelExport.h>
 #include <OS.h>
@@ -466,6 +469,18 @@ intel_i915_interrupt_handler(void* data)
 	if (active_gt_irqs & ~GT_IIR_PM_INTERRUPT_GEN7) {
 		intel_i915_write32(devInfo, GT_IIR, active_gt_irqs & ~GT_IIR_PM_INTERRUPT_GEN7);
 		handledStatus = B_HANDLED_INTERRUPT;
+	}
+
+	if (devInfo->static_caps.has_gt_uc) {
+		intel_guc_handle_response(devInfo);
+	}
+
+	if (devInfo->static_caps.has_gt_uc) {
+		intel_huc_handle_response(devInfo);
+	}
+
+	if (active_gt_irqs & (1 << 18)) {
+		intel_mfx_handle_response(devInfo);
 	}
 
 	return handledStatus;

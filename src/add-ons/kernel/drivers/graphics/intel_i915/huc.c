@@ -78,3 +78,9 @@ intel_huc_uninit(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement HuC uninitialization.
 }
+
+void
+intel_huc_handle_response(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement HuC response handling.
+}

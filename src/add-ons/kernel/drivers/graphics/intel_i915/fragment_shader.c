@@ -11,12 +11,15 @@
 
 #include "gem_object.h"
 
+#include "string.h"
+
 status_t
 intel_fragment_shader_init(intel_i915_device_info* devInfo)
 {
 	const char* shader_code =
 		"ps.1.1\n"
-		"mov oC0, c0\n";
+		"dcl v0\n"
+		"mov oC0, v0\n";
 
 	struct intel_i915_gem_object* obj;
 	status_t status = intel_i915_gem_object_create(devInfo, strlen(shader_code), 0, 0, 0, 0, &obj);

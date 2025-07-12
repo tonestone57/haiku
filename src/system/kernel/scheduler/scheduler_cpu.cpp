@@ -237,7 +237,7 @@ CPUEntry::IsActiveSMT() const
 {
 	// A CPU is considered active for SMT penalty purposes if it's running a real thread.
 	// The idle thread doesn't typically impose SMT contention.
-	return fRunningThread != NULL && fRunningThread != fIdleThread;
+	return gCPU[fCPUNumber].running_thread != NULL && gCPU[fCPUNumber].running_thread != fIdleThread->GetThread();
 }
 
 
@@ -266,7 +266,6 @@ void
 CPUEntry::_UpdateMinVirtualRuntime()
 {
 	// Must be called with fQueueLock held.
-	ASSERT(fQueueLock.IsOwnedByCurrentThread());
 
 	bigtime_t oldLocalMinVR = fMinVirtualRuntime; // For tracing and as the "sticky" value
 	bigtime_t localAnchorVR;

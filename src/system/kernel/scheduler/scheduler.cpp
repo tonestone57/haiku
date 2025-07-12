@@ -207,9 +207,9 @@ scheduler_update_global_min_team_vruntime()
 	listLocker.Unlock();
 
 	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
+		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -408,8 +408,6 @@ static BOpenHashTable<IntHashDefinition>* sIrqTaskAffinityMap = NULL;
 static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
-static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
-
 static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
 void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
@@ -653,7 +651,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 
 	if (cpuContextForUpdate != NULL && oldWeight != newWeight && newWeight > 0) {
-		InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
+		cpuContextForUpdate->LockRunQueue();
 		bigtime_t min_v = cpuContextForUpdate->MinVirtualRuntime();
 		bigtime_t currentVRuntime = threadData->VirtualRuntime();
 		if (currentVRuntime > min_v) {
@@ -663,10 +661,11 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			TRACE_SCHED("set_prio: T %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 "->%" B_PRId32 ") rel_to_min_v %" B_PRId64 "\n",
 				thread->id, currentVRuntime, newAdjustedVRuntime, oldWeight, newWeight, min_v);
 		}
+		cpuContextForUpdate->UnlockRunQueue();
 	}
 
 	if (wasRunning && oldWeight != newWeight && oldWeight > 0 && newWeight > 0) {
-		bigtime_t actualRuntimeInSlice = threadData->fTimeUsedInCurrentQuantum;
+		bigtime_t actualRuntimeInSlice = threadData->TimeUsedInCurrentQuantum();
 		if (actualRuntimeInSlice > 0) {
 			bigtime_t weightedRuntimeOld = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / oldWeight;
 			bigtime_t weightedRuntimeNew = (actualRuntimeInSlice * SCHEDULER_WEIGHT_SCALE) / newWeight;
@@ -805,7 +804,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool basicChecksPass = true;
-			struct thread* candThread = candidateTask->GetThread();
+			struct thread* candThread = (struct thread*)candidateTask->GetThread();
 
 			if (candThread->pinned_to_cpu != 0) {
 				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {

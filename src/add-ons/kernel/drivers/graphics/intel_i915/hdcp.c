@@ -19,6 +19,10 @@ intel_hdcp_init(intel_i915_device_info* devInfo)
 void
 intel_hdcp_enable(intel_i915_device_info* devInfo)
 {
+	if (intel_hdcp_read_keys(devInfo) != B_OK) {
+		return;
+	}
+
 	// TODO: Implement HDCP enable.
 }
 
@@ -27,6 +31,8 @@ intel_hdcp_disable(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement HDCP disable.
 }
+
+#include "gmbus.h"
 
 status_t
 intel_hdcp_read_keys(intel_i915_device_info* devInfo)

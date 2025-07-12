@@ -682,6 +682,7 @@ typedef struct intel_i915_device_info {
 	uint32_t framebuffer_user_handle[PRIV_MAX_PIPES]; // User-space handle for current scanout BO
 
 	void* guc_log_cpu_addr;
+	void* huc_log_cpu_addr;
 } intel_i915_device_info;
 
 

@@ -19,19 +19,34 @@ intel_panel_init(intel_i915_device_info* devInfo)
 void
 intel_panel_power_up(intel_i915_device_info* devInfo)
 {
+	if (devInfo->vbt == NULL) {
+		return;
+	}
+
 	// TODO: Implement panel power up.
 }
 
 void
 intel_panel_power_down(intel_i915_device_info* devInfo)
 {
+	if (devInfo->vbt == NULL) {
+		return;
+	}
+
 	// TODO: Implement panel power down.
 }
+
+#include "vbt.h"
 
 status_t
 intel_panel_read_vbt(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement VBT reading.
+	if (devInfo->vbt == NULL) {
+		return B_NO_INIT;
+	}
+
+	// TODO: Parse the VBT to get the panel power sequencing parameters.
+
 	return B_OK;
 }
 

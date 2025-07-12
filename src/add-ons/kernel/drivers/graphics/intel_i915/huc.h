@@ -25,6 +25,7 @@ extern "C" {
 status_t intel_huc_init(intel_i915_device_info* devInfo);
 void intel_huc_uninit(intel_i915_device_info* devInfo);
 void intel_huc_handle_response(intel_i915_device_info* devInfo);
+status_t intel_huc_get_response(intel_i915_device_info* devInfo, uint32_t* response);
 
 #ifdef __cplusplus
 }

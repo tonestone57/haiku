@@ -82,5 +82,30 @@ intel_huc_uninit(intel_i915_device_info* devInfo)
 void
 intel_huc_handle_response(intel_i915_device_info* devInfo)
 {
-	// TODO: Implement HuC response handling.
+	uint32_t response;
+	while (intel_huc_get_response(devInfo, &response) == B_OK) {
+		// TODO: Handle the response.
+	}
+}
+
+status_t
+intel_huc_get_response(intel_i915_device_info* devInfo, uint32_t* response)
+{
+	uint32_t* cmd_queue = (uint32_t*)devInfo->huc_log_cpu_addr;
+	if (cmd_queue == NULL) {
+		return B_NO_INIT;
+	}
+	uint32_t head = cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4];
+	uint32_t tail = cmd_queue[GUC_CMD_QUEUE_TAIL_OFFSET / 4];
+	uint32_t size = cmd_queue[GUC_CMD_QUEUE_SIZE_OFFSET / 4];
+
+	if (head == tail) {
+		return B_NO_MEMORY;
+	}
+
+	*response = cmd_queue[head];
+	head = (head + 1) % size;
+	cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4] = head;
+
+	return B_OK;
 }

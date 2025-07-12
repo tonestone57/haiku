@@ -128,63 +128,6 @@ _init_continuous_weights()
 
 static const bool kUseContinuousWeights = true;
 
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
-    const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);
-	if (thread == NULL) {
-		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-	}
-
-	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
-			thread->id, thread->team ? thread->team->id : -1, thread->priority);
-	}
-	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		bool isTeamExhausted;
-		bool isBorrowing = false;
-
-		InterruptsSpinLocker locker(tsd->lock);
-		isTeamExhausted = tsd->quota_exhausted;
-		locker.Unlock();
-
-		if (isTeamExhausted) {
-			if (Scheduler::gSchedulerElasticQuotaMode && contextCpu != NULL) {
-				if (contextCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-				}
-			} else if (Scheduler::gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
-				Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-				if (threadActualCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
-				}
-			}
-
-			if (!isBorrowing) {
-				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-				} else if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-				}
-			} else {
-				TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") is exhausted but actively borrowing on ContextCPU %" B_PRId32 ". Using normal weight.\n",
-					thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-			}
-		}
-	}
-
-    int32 priority = thread->priority;
-    if (priority < 0) {
-        priority = 0;
-    } else if (priority > B_REAL_TIME_PRIORITY) { // Ensure we don't go out of bounds
-        priority = B_REAL_TIME_PRIORITY;
-    }
-    // Array is indexed 0 to B_REAL_TIME_PRIORITY, so direct use is fine now.
-    return gHaikuContinuousWeights[priority];
-}
 
 
 
@@ -414,8 +357,6 @@ scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
-static void scheduler_maybe_follow_task_irqs(thread_id thid, int32* irqList,
-	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU);
 static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
@@ -1785,7 +1726,6 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore) {
 		scheduler_update_global_min_vruntime();
-		scheduler_update_global_min_team_vruntime();
 
 		bool migrationOccurred = scheduler_perform_load_balance();
 
@@ -2514,7 +2454,7 @@ scheduler_perform_load_balance()
 					for (int32 i = 0; i < gCoreCount; ++i) {
 						CoreEntry* core = &gCoreEntries[i];
 						if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
-						if (core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+						if (core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 							if (core->GetLoad() < minSpillLoad) {
 								minSpillLoad = core->GetLoad();
 								spillTarget = core;

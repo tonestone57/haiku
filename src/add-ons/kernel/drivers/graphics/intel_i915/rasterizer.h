@@ -16,6 +16,9 @@ extern "C" {
 
 status_t intel_rasterizer_init(intel_i915_device_info* devInfo);
 void intel_rasterizer_uninit(intel_i915_device_info* devInfo);
+void intel_rasterizer_draw_triangles(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* vertex_buffer,
+	uint32_t vertex_count);
 
 #ifdef __cplusplus
 }

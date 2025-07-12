@@ -17,6 +17,18 @@ intel_hdcp_init(intel_i915_device_info* devInfo)
 }
 
 void
+intel_hdcp_enable(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement HDCP enable.
+}
+
+void
+intel_hdcp_disable(intel_i915_device_info* devInfo)
+{
+	// TODO: Implement HDCP disable.
+}
+
+void
 intel_hdcp_uninit(intel_i915_device_info* devInfo)
 {
 	// TODO: Implement HDCP uninitialization.

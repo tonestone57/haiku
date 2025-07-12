@@ -29,6 +29,11 @@ intel_huc_hevc_decode_slice(intel_i915_device_info* devInfo,
 	struct intel_i915_gem_object* slice_data,
 	struct intel_i915_gem_object* slice_params)
 {
-	// TODO: Implement HEVC slice decoding.
+	struct huc_command cmd;
+	cmd.command = HUC_CMD_HEVC_SLICE_DECODE;
+	cmd.length = slice_data->size + slice_params->size;
+
+	// TODO: Write the command to the HuC's command queue.
+
 	return B_OK;
 }

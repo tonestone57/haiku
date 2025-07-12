@@ -16,6 +16,8 @@ extern "C" {
 
 status_t intel_panel_init(intel_i915_device_info* devInfo);
 void intel_panel_uninit(intel_i915_device_info* devInfo);
+void intel_panel_power_up(intel_i915_device_info* devInfo);
+void intel_panel_power_down(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }

@@ -16,6 +16,8 @@ extern "C" {
 
 status_t intel_dp_init(intel_i915_device_info* devInfo);
 void intel_dp_uninit(intel_i915_device_info* devInfo);
+status_t intel_dp_link_train(intel_i915_device_info* devInfo,
+	struct intel_output_port_state* port_state);
 
 #ifdef __cplusplus
 }

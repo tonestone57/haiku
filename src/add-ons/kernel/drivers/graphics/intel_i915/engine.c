@@ -155,7 +155,8 @@ intel_engine_guc_submit(struct intel_engine_cs* engine,
 	uint32_t size = cmd_queue[GUC_CMD_QUEUE_SIZE_OFFSET / 4];
 	uint32_t space = (head - tail - 1 + size) % size;
 
-	if (space < 2) {
+	uint32_t cmd_size = (sizeof(struct guc_command) + sizeof(struct guc_context_desc) + 3) / 4;
+	if (space < cmd_size) {
 		return B_NO_MEMORY;
 	}
 
@@ -174,10 +175,15 @@ intel_engine_guc_submit(struct intel_engine_cs* engine,
 	cmd_addr += sizeof(cmd) / 4;
 	memcpy(cmd_addr, &desc, sizeof(desc));
 
-	tail = (tail + (sizeof(cmd) + sizeof(desc)) / 4) % size;
+	tail = (tail + cmd_size) % size;
 	cmd_queue[GUC_CMD_QUEUE_TAIL_OFFSET / 4] = tail;
 
 	intel_i915_write32(devInfo, 0xc030, 1); // DOORBELL_TO_GUC
+
+	// Wait for the GuC to process the command.
+	while (cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4] != tail) {
+		spin(100);
+	}
 
 	return B_OK;
 }

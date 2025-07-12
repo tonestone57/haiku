@@ -218,16 +218,74 @@ intel_i915_draw_line_arbitrary(engine_token *et,
 
 
 void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count,
-    //    - Scissor should be set based on clip_rects if num_clip_rects > 0.
-    //      If multiple clip_rects, this implies multiple draw calls or complex stencil.
-    //      For simplicity, assume for now only the first clip_rect is used if num_clip_rects > 0.
-    // 4. Emit 3DPRIMITIVE to draw the quad.
-    // 5. Emit PIPE_CONTROL for sync.
-    // 6. Submit Batch Buffer.
-    // 7. Release Engine.
+	bool enable_hw_clip) { // Added enable_hw_clip
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
+	_log_tiling_generalization_status();
+	uint8_t gen = gInfo->shared_info->graphics_generation;
 
-    // No software fallback implemented here for angled lines.
-    return;
+	const size_t max_ops_per_batch = 160;
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
+
+	for (size_t batch = 0; batch < num_batches; batch++) {
+		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
+		size_t cmd_dwords_per_rect = 5; // XY_COLOR_BLT command length
+		size_t pipe_control_dwords = 4;
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_rect) + pipe_control_dwords + 1;
+		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
+
+		uint32 cmd_handle; area_id k_area, c_area = -1; uint32* cpu_buf;
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area, (void**)&cpu_buf) != B_OK) return;
+		c_area = area_for(cpu_buf);
+
+		uint32 cur_dw_idx = 0;
+		for (size_t i = 0; i < current_batch_count; i++) {
+			fill_rect_params *rect = &list[batch * max_ops_per_batch + i];
+			if (rect->right < rect->left || rect->bottom < rect->top) continue;
+
+			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping
+			// PRM Verification (Gen8+): Confirm XY_COLOR_BLT_CMD_OPCODE (0x50<<22) and XY_COLOR_BLT_LENGTH (5-2).
+			// Confirm ROP_PATCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, and clipping bit positions.
+			uint32 cmd_dw0 = XY_COLOR_BLT_CMD_OPCODE | XY_COLOR_BLT_LENGTH | BLT_ROP_PATCOPY;
+			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
+			cmd_dw0 |= depth_flags;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				// For PATCOPY, the pattern color (uint32 color) is used.
+				// If its alpha component should be written, BLT_WRITE_ALPHA would be needed.
+				// Current assumption is that 'color' is effectively XRGB for fills.
+			}
+			if (enable_hw_clip) {
+				// Assumes DW0 Bit 10 for clipping.
+				// PRM Verification (Gen8+): Confirm bit position.
+				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
+			}
+
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (gen == 7 || gen == 8 || gen == 9) {
+					// Assumes DW0 Bit 11 for Dest Tiled.
+					// PRM Verification (Gen8, Gen9): Confirm bit and sufficiency.
+					cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+				}
+			}
+			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			// DW1: Destination Pitch
+			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			// DW2: Destination X1 (left), Y1 (top)
+			cpu_buf[cur_dw_idx++] = (rect->left & 0xFFFF) | ((rect->top & 0xFFFF) << 16);
+			// DW3: Destination X2 (right+1), Y2 (bottom+1)
+			cpu_buf[cur_dw_idx++] = ((rect->right + 1) & 0xFFFF) | (((rect->bottom + 1) & 0xFFFF) << 16);
+			// DW4: Color
+			cpu_buf[cur_dw_idx++] = color;
+		}
+		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
+
+		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) TRACE("fill_rectangle: EXECBUFFER failed.\n");
+		destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
+	}
 }
 
 
@@ -348,7 +406,7 @@ _log_tiling_generalization_status()
 // New function to handle drawing horizontal/vertical lines as thin rectangles
 void
 intel_i915_draw_hv_lines(engine_token *et, uint32 color,
-	uint16 *line_coords, uint32 num_lines, bool enable_hw_clip) // Added enable_hw_clip
+	uint16 *line_coords, uint32 num_lines, bool enable_hw_clip)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || num_lines == 0 || line_coords == NULL)
 		return;
@@ -382,7 +440,6 @@ intel_i915_draw_hv_lines(engine_token *et, uint32 color,
 	}
 
 	if (num_rects > 0) {
-		// Pass enable_hw_clip to the underlying fill_rectangle
 		intel_i915_fill_rectangle(et, color, rect_list, num_rects, enable_hw_clip);
 	}
 
@@ -563,7 +620,7 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 
 	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY, &ck_args, sizeof(ck_args)) != 0) {
 		TRACE("s2s_transparent_blit: Failed to set chroma key via IOCTL. Falling back to normal blit.\n");
-		intel_i915_screen_to_screen_blit(et, list, count, enable_hw_clip); // Pass enable_hw_clip
+		intel_i915_screen_to_screen_blit(et, list, count, enable_hw_clip);
 		return;
 	}
 
@@ -742,7 +799,8 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 	}
 }
 
-void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count, bool enable_hw_clip) {
+void intel_i915_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count, bool enable_hw_clip)
+{
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;
@@ -879,7 +937,8 @@ void intel_i915_fill_rectangle_patxor(engine_token *et, uint32 color, fill_rect_
 }
 
 
-void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count, bool enable_hw_clip) {
+void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count, bool enable_hw_clip)
+{
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;

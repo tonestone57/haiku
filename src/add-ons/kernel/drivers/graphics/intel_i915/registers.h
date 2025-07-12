@@ -1157,6 +1157,37 @@
 #define PS_CTL					0x20A0
 #define PS_CTL_ENABLE			(1 << 0)
 
+#define TEXTURE_CTL				0x2100
+#define TEXTURE_CTL_ENABLE		(1 << 0)
+#define TEXTURE_BASE			0x2104
+#define TEXTURE_FORMAT			0x2108
+
+// --- DisplayPort Registers ---
+#define DP_CTL					0x64000
+#define DP_STATUS				0x64004
+#define DP_LINK_CTL				0x64008
+#define DP_LINK_STATUS			0x6400C
+
+// --- Skylake DDI Buffer Translation Registers ---
+#define SKL_DDI_BUF_TRANS_LO(port, i)	(0x66408 + (port) * 0x100 + (i) * 8)
+#define SKL_DDI_BUF_TRANS_HI(port, i)	(0x6640C + (port) * 0x100 + (i) * 8)
+
+// --- DisplayPort MSA Registers ---
+#define DP_MSA_MISC				0x64010
+#define DP_MSA_VBID				0x64014
+#define DP_MSA_H_TOTAL			0x64018
+#define DP_MSA_V_TOTAL			0x6401C
+#define DP_MSA_H_START			0x64020
+#define DP_MSA_V_START			0x64024
+#define DP_MSA_H_WIDTH			0x64028
+#define DP_MSA_V_HEIGHT			0x6402C
+
+// --- HDMI InfoFrame Registers ---
+#define HDMI_INFOFRAME_A		0x64100
+#define HDMI_INFOFRAME_B		0x64120
+#define HDMI_INFOFRAME_C		0x64140
+#define HDMI_INFOFRAME_D		0x64160
+
 // TODO: add more registers!
 
 

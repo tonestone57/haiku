@@ -151,7 +151,9 @@ status_t
 intel_execlists_submit(intel_i915_device_info* devInfo, struct intel_engine_cs* engine,
 	struct intel_i915_gem_object* batch_obj, uint32_t batch_len)
 {
-	// TODO: Implement execlists submission.
+	uint32 head = intel_i915_read32(devInfo, EL_HEAD(engine->id));
+	intel_i915_write32(devInfo, EL_HEAD(engine->id), batch_obj->gtt_offset_pages * B_PAGE_SIZE);
+	intel_i915_write32(devInfo, EL_TAIL(engine->id), head + batch_len);
 	return B_OK;
 }
 

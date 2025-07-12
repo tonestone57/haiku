@@ -24,3 +24,6 @@ SimpleTest pages_io_test :
 	pages_io_test.cpp
 ;
 
+SimpleTest CacheStressTest :
+	CacheStressTest.cpp
+;

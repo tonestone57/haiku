@@ -143,6 +143,54 @@
 #	define TRACE_SCHED_CPU(...) do { } while (false)
 #endif
 
+#ifdef TRACE_SCHEDULER_TEAM
+#	define TRACE_SCHED_TEAM(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_TEAM(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_TEAM_VERBOSE
+#	define TRACE_SCHED_TEAM_VERBOSE(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_TEAM_VERBOSE(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_TEAM_WARNING
+#	define TRACE_SCHED_TEAM_WARNING(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_TEAM_WARNING(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_IRQ_ERR
+#	define TRACE_SCHED_IRQ_ERR(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_IRQ_ERR(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_WARNING
+#	define TRACE_SCHED_WARNING(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_WARNING(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_EEVDF_PARAM
+#	define TRACE_SCHED_EEVDF_PARAM(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_EEVDF_PARAM(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER_BL_STEAL
+#	define TRACE_SCHED_BL_STEAL(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_BL_STEAL(...) do { } while (false)
+#endif
+
+#ifdef TRACE_SCHEDULER
+#	define TRACE_SCHED(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED(...) do { } while (false)
+#endif
+
 
 namespace Scheduler {
 

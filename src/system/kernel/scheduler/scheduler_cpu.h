@@ -14,7 +14,6 @@
 
 #include <smp.h>
 #include <thread.h>
-#include <smp.h>
 #include <util/AutoLock.h>
 #include <util/Heap.h>
 #include <util/MinMaxHeap.h>
@@ -117,7 +116,7 @@ public:
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
 
-private:
+public:
 						// Calculates a heap key for this CPU that is SMT-aware.
 						// The key reflects the CPU's own instantaneous load plus a penalty
 						// derived from the load of its active SMT siblings, using
@@ -125,6 +124,7 @@ private:
 						// desirable (less loaded from an SMT perspective) CPU.
 						// outEffectiveSmtLoad returns the calculated effective load (0.0 to ~1.0+).
 						int32			_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const;
+private:
 						bool			IsActiveSMT() const;
 						void			_UpdateMinVirtualRuntime();
 						void			_RequestPerformanceLevel(
@@ -266,9 +266,8 @@ public:
 						uint32			fLoadMeasurementEpoch;
 						bool			fHighLoad;
 						bigtime_t		fLastLoadUpdate;
-						rw_spinlock		fLoadLock;
-
 						bool			fDefunct;
+						rw_spinlock		fLoadLock;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;

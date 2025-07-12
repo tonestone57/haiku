@@ -282,46 +282,6 @@ cmd_dump_eevdf_weights(int argc, char** argv)
 }
 
 
-static void
-scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
-	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU)
-{
-	if (irqCount == 0 || sIrqTaskAffinityMap == NULL)
-		return;
-
-	for (int i = 0; i < irqCount; ++i) {
-		int32 irq = irqList[i];
-		InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
-		thread_id* mappedThId = sIrqTaskAffinityMap->Lookup(irq);
-		if (mappedThId == NULL || *mappedThId != thId) {
-			affinityMapLocker.Unlock();
-			continue;
-		}
-		affinityMapLocker.Unlock();
-
-		cpu_ent* currentOwnerCpuSt = get_cpu_for_interrupt(irq);
-		if (currentOwnerCpuSt == NULL
-			|| CPUEntry::GetCPU(currentOwnerCpuSt->cpu_num)->Core()
-				== targetCore) {
-			continue;
-		}
-
-		irq_assignment* assignment = find_irq_assignment(irq);
-		if (assignment == NULL)
-			continue;
-
-		bigtime_t now = system_time();
-		if (now < atomic_get64(&gIrqLastFollowMoveTime[irq])
-				+ kIrqFollowTaskCooldownPeriod) {
-			continue;
-		}
-
-		assign_io_interrupt_to_cpu(irq, targetCPU->ID());
-		atomic_set64(&gIrqLastFollowMoveTime[irq], now);
-	}
-}
-
-
 class ThreadEnqueuer : public ThreadProcessing {
 public:
 	void		operator()(ThreadData* thread);
@@ -344,9 +304,6 @@ int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
 int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
 int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-
-static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
-static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
 void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 {
@@ -401,8 +358,11 @@ static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
 static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
-static void scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList, int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU);
+static void scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList, int8 irqCount, Scheduler::CoreEntry* targetCore, Scheduler::CPUEntry* targetCPU);
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
+
+extern cpu_ent* get_cpu_for_interrupt(int32 irq);
+extern irq_assignment* find_irq_assignment(int32 irq);
 
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
@@ -1989,6 +1949,51 @@ cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
 		Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW ? "starvation" : "hardstop");
 	return 0;
 }
+
+
+static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
+static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
+
+
+static void
+scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
+	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU)
+{
+	if (irqCount == 0 || sIrqTaskAffinityMap == NULL)
+		return;
+
+	for (int i = 0; i < irqCount; ++i) {
+		int32 irq = irqList[i];
+		InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
+		thread_id* mappedThId = sIrqTaskAffinityMap->Lookup(irq);
+		if (mappedThId == NULL || *mappedThId != thId) {
+			affinityMapLocker.Unlock();
+			continue;
+		}
+		affinityMapLocker.Unlock();
+
+		cpu_ent* currentOwnerCpuSt = get_cpu_for_interrupt(irq);
+		if (currentOwnerCpuSt == NULL
+			|| CPUEntry::GetCPU(currentOwnerCpuSt->cpu_num)->Core()
+				== targetCore) {
+			continue;
+		}
+
+		irq_assignment* assignment = find_irq_assignment(irq);
+		if (assignment == NULL)
+			continue;
+
+		bigtime_t now = system_time();
+		if (now < atomic_get64(&gIrqLastFollowMoveTime[irq])
+				+ kIrqFollowTaskCooldownPeriod) {
+			continue;
+		}
+
+		assign_io_interrupt_to_cpu(irq, targetCPU->ID());
+		atomic_set64(&gIrqLastFollowMoveTime[irq], now);
+	}
+}
+
 
 static CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad)

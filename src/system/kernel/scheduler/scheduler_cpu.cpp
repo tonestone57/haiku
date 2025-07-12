@@ -20,20 +20,11 @@
 #include "scheduler_team.h"
 #include "EevdfRunQueue.h" // Make sure this is included
 
-#include <util/OpenHashTable.h>
+#include <util/MultiHashTable.h>
 
 
 namespace Scheduler {
 
-struct IntHashDefinition {
-	typedef int KeyType;
-	typedef thread_id ValueType;
-	size_t HashKey(int key) const { return (size_t)key; }
-	size_t Hash(thread_id* value) const { return (size_t)*value; }
-	bool Compare(int key, thread_id* value) const { return key == *value; }
-	bool CompareKeys(int key1, int key2) const { return key1 == key2; }
-	thread_id*& GetLink(thread_id* value) const { return *(thread_id**)((addr_t)value - sizeof(thread_id*)); }
-};
 BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap = NULL;
 spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 

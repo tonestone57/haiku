@@ -47,7 +47,7 @@
 
 #include <util/MultiHashTable.h>
 #include <kernel/thread.h>
-#include <syscall_numbers.h>
+#include <syscalls.h>
 #include <cstdint>
 #include <kernel/thread.h>
 
@@ -414,6 +414,7 @@ scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
+static void scheduler_update_global_min_team_vruntime();
 static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
@@ -427,6 +428,10 @@ static int cmd_scheduler(int argc, char** argv);
 // static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
+static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
+static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
+static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
+static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 static CPUEntry*
 _find_idle_cpu_on_core(CoreEntry* core)

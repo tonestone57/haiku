@@ -13,11 +13,12 @@
 #include <kscheduler.h>
 #include "scheduler_defs.h"
 #include <load_tracking.h>
+#include "scheduler_defs.h"
 #include <smp.h>
 #include <thread.h>
 #include <user_debugger.h>
 #include <util/MinMaxHeap.h>
-#include <util/OpenHashTable.h>
+#include <util/MultiHashTable.h>
 
 // #include "RunQueue.h"
 // This file seems to be obsolete or replaced by EevdfRunQueue.h,
@@ -369,6 +370,7 @@ extern CoreEntry* sSmallTaskCore;
 
 
 void init_debug_commands();
+int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid);
 
 
 }	// namespace Scheduler

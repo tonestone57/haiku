@@ -759,7 +759,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool basicChecksPass = true;
-			struct thread* candThread = (struct thread*)candidateTask->GetThread();
+			Thread* candThread = candidateTask->GetThread();
 
 			if (candThread->pinned_to_cpu != 0) {
 				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {

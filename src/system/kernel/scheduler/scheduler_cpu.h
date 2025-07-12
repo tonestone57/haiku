@@ -360,7 +360,7 @@ extern int32 gCoreCount;
 const int32 kNumCoreLoadHeapShards = 8;
 extern CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
 extern CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
-extern rw_lock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
+extern rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
 
 extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;

@@ -7,8 +7,8 @@
 
 #include "scheduler_cpu.h"
 
-#include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
 #include <smp.h>
+#include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
 #include <thread.h> // Explicitly include for thread_is_running
 #include <util/AutoLock.h>
 #include <atomic>
@@ -17,6 +17,7 @@
 
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_thread.h"
+#include "scheduler_team.h"
 #include "EevdfRunQueue.h" // Make sure this is included
 
 
@@ -326,7 +327,7 @@ CPUEntry::RemoveThread(ThreadData* thread)
 		fEevdfRunQueue.Remove(thread);
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
-		ASSERT(atomic_load(&fTotalThreadCount) >= 0);
+		ASSERT(atomic_get(&fTotalThreadCount) >= 0);
 		fEevdfRunQueueTaskCount.fetch_sub(1);
 		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
@@ -639,29 +640,26 @@ CPUEntry::UpdatePriority(int32 newSmtAwareKey) // Parameter renamed for clarity
 	// The fCore->fCPULock is assumed to be held by the caller.
 
 	if (fCore == NULL || fCore->IsDefunct()) {
-		this->fHeapValue = newSmtAwareKey; // Update local value anyway.
+		GetHeapLink()->fKey = newSmtAwareKey; // Update local value anyway.
 		return;
 	}
 
-	int32 oldKey = this->fHeapValue; // Directly use fHeapValue from HeapLinkImpl.
+	int32 oldKey = GetHeapLink()->fKey; // Directly use fKey from HeapLink.
 
-	if (oldKey == newSmtAwareKey && fCore->CPUHeap()->Contains(this)) {
+	if (oldKey == newSmtAwareKey && GetHeapLink()->fIndex != -1) {
 		return; // Key is the same and it's in the heap.
 	}
 
-	this->fHeapValue = newSmtAwareKey; // Always update the internal key value.
-
 	if (gCPUEnabled.GetBit(fCPUNumber)) {
-		if (fCore->CPUHeap()->Contains(this)) {
+		if (GetHeapLink()->fIndex != -1) {
 			fCore->CPUHeap()->ModifyKey(this, newSmtAwareKey);
 		} else {
 			// CPU is enabled but not in heap, insert it.
-			// Insert uses the fHeapValue which we just set.
-			fCore->CPUHeap()->Insert(this);
+			fCore->CPUHeap()->Insert(this, newSmtAwareKey);
 		}
 	} else {
 		// CPU is disabled. If it's in the heap, remove it.
-		if (fCore->CPUHeap()->Contains(this)) {
+		if (GetHeapLink()->fIndex != -1) {
 			fCore->CPUHeap()->Remove(this);
 		}
 	}

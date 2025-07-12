@@ -365,6 +365,7 @@ extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
+extern int64 gReportedCpuMinVR[MAX_CPUS];
 
 
 inline void

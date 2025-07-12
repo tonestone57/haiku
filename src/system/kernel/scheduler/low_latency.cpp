@@ -335,24 +335,26 @@ low_latency_rebalance_irqs(bool idle)
 		return;
 
 	CoreEntry* targetCore = NULL;
-	ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
-	CoreEntry* candidate = NULL;
-	for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-		if (!candidate->IsDefunct() && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
-			targetCore = candidate;
-			break;
+	for (int32 i = 0; i < kNumCoreLoadHeapShards; i++) {
+		ReadSpinLocker coreHeapsLocker(gCoreHeapsShardLock[i]);
+		CoreEntry* candidate = gCoreLoadHeapShards[i].PeekMinimum();
+		if (candidate != NULL && !candidate->IsDefunct()
+			&& candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+			if (targetCore == NULL || candidate->GetLoad() < targetCore->GetLoad())
+				targetCore = candidate;
 		}
 	}
 	if (targetCore == NULL) {
-		for (int32 i = 0; (candidate = gCoreHighLoadHeap.PeekMinimum(i)) != NULL; i++) {
-			if (!candidate->IsDefunct() && candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
-				// Only consider from high load heap if it's not the current core's group
-				targetCore = candidate;
-				break;
+		for (int32 i = 0; i < kNumCoreLoadHeapShards; i++) {
+			ReadSpinLocker coreHeapsLocker(gCoreHeapsShardLock[i]);
+			CoreEntry* candidate = gCoreHighLoadHeapShards[i].PeekMinimum();
+			if (candidate != NULL && !candidate->IsDefunct()
+				&& candidate != CoreEntry::GetCore(current_cpu_struct->cpu_num)) {
+				if (targetCore == NULL || candidate->GetLoad() < targetCore->GetLoad())
+					targetCore = candidate;
 			}
 		}
 	}
-	coreHeapsLocker.Unlock();
 
 	CoreEntry* currentCore = CoreEntry::GetCore(current_cpu_struct->cpu_num);
 	if (targetCore == NULL || targetCore->IsDefunct() || targetCore == currentCore)
@@ -365,7 +367,7 @@ low_latency_rebalance_irqs(bool idle)
 	// Pass mode-specific gModeIrqTargetFactor, gModeMaxTargetCpuIrqLoad,
 	// and gSchedulerSMTConflictFactor (already mode-specific for LL).
 	CPUEntry* targetCPU = SelectTargetCPUForIRQ(targetCore,
-		candidateIRQs[0]->load, /* load of the heaviest IRQ to move */
+		candidateIRQs[0]->irq, candidateIRQs[0]->load, /* load of the heaviest IRQ to move */
 		gModeIrqTargetFactor,
 		gSchedulerSMTConflictFactor,
 		gModeMaxTargetCpuIrqLoad);
@@ -380,7 +382,7 @@ low_latency_rebalance_irqs(bool idle)
 
 		// Re-select target CPU for each IRQ for better precision if moving multiple.
 		if (i > 0) {
-			targetCPU = SelectTargetCPUForIRQ(targetCore, chosenIRQ->load,
+			targetCPU = SelectTargetCPUForIRQ(targetCore, chosenIRQ->irq, chosenIRQ->load,
 				gModeIrqTargetFactor, gSchedulerSMTConflictFactor, gModeMaxTargetCpuIrqLoad);
 			if (targetCPU == NULL || targetCPU->ID() == current_cpu_struct->cpu_num) {
 				TRACE("LL IRQ Rebalance: No suitable target CPU for subsequent IRQ %d. Stopping batch.\n", chosenIRQ->irq);

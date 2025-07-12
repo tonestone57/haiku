@@ -62,6 +62,9 @@
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
 
+static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
+static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
+
 // EEVDF Specific Defines (Initial values, require tuning)
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
@@ -1951,8 +1954,6 @@ cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
 }
 
 
-static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
-static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
 
 static void

@@ -141,6 +141,14 @@ intel_engine_execlists_submit(struct intel_engine_cs* engine,
 }
 
 status_t
+intel_engine_guc_submit(struct intel_engine_cs* engine,
+	struct intel_i915_gem_context* context)
+{
+	// TODO: Implement GuC submission.
+	return B_OK;
+}
+
+status_t
 intel_engine_switch_context(struct intel_engine_cs* engine, struct intel_i915_gem_context* new_ctx)
 {
 	uint32_t offset_in_dwords;

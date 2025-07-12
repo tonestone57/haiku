@@ -80,6 +80,8 @@ status_t intel_wait_for_seqno(struct intel_engine_cs* engine, uint32_t target_se
 	bigtime_t timeout_micros);
 status_t intel_engine_execlists_submit(struct intel_engine_cs* engine,
 	struct intel_i915_gem_context* context);
+status_t intel_engine_guc_submit(struct intel_engine_cs* engine,
+	struct intel_i915_gem_context* context);
 
 
 #ifdef __cplusplus

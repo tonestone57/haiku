@@ -310,7 +310,11 @@ intel_i915_gem_execbuffer_ioctl(intel_i915_device_info* devInfo, void* buffer, s
 	uint32_t num_dwords = args.cmd_buffer_length / sizeof(uint32_t);
 
 	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
-		status = intel_engine_execlists_submit(engine, engine->current_context);
+		if (devInfo->static_caps.has_gt_uc) {
+			status = intel_engine_guc_submit(engine, engine->current_context);
+		} else {
+			status = intel_engine_execlists_submit(engine, engine->current_context);
+		}
 	} else {
 		status = intel_engine_get_space(engine, num_dwords, &ring_dword_offset);
 		if (status != B_OK) goto exec_cleanup_ctx_rels; // Use the new label

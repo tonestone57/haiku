@@ -9,12 +9,18 @@
 #include "intel_i915_priv.h"
 #include "kaby_lake/kaby_lake.h"
 #include "guc.h"
+#include "huc.h"
+#include "pipe_3d.h"
+#include "mfx.h"
 
 status_t
 intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info)
 {
 	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
 		intel_guc_init(devInfo);
+		intel_huc_init(devInfo);
+		intel_3d_init(devInfo);
+		intel_mfx_init(devInfo);
 		return kaby_lake_gpu_init(devInfo);
 	}
 

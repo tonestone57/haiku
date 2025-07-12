@@ -4709,6 +4709,9 @@ vfs_write_pages(struct vnode* vnode, void* cookie, off_t pos,
 extern "C" status_t
 vfs_get_vnode_cache(struct vnode* vnode, VMCache** _cache, bool allocate)
 {
+	if (_cache == NULL)
+		return B_BAD_VALUE;
+
 	if (vnode->cache != NULL) {
 		vnode->cache->AcquireRef();
 		*_cache = vnode->cache;

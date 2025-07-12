@@ -912,6 +912,8 @@ Inode::FindSmallData(const bfs_inode* node, const char* name) const
 	small_data* smallData = NULL;
 	while (_GetNextSmallData(const_cast<bfs_inode*>(node), &smallData)
 			== B_OK) {
+		if (smallData->NameLength() > B_FILE_NAME_LENGTH)
+			return NULL;
 		if (!strcmp(smallData->Name(), name))
 			return smallData;
 	}

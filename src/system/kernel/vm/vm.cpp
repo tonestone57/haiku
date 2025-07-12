@@ -4201,6 +4201,12 @@ vm_page_fault(addr_t address, addr_t faultAddress, bool isWrite, bool isExecute,
 					EFAULT, thread->team->id);
 				signal.SetAddress((void*)address);
 				send_signal_to_thread(thread, signal, 0);
+			} else if (status == B_BAD_ADDRESS && isUser) {
+				// The user has tried to access an address that is not mapped
+				// and has not installed a signal handler for SIGSEGV.
+				// This would normally cause an infinite loop of page faults,
+				// so we kill the thread instead.
+				kill_thread(thread->id);
 			}
 		}
 	}
@@ -4521,6 +4527,7 @@ vm_soft_fault(VMAddressSpace* addressSpace, addr_t originalAddress,
 			// Note, since the page fault is resolved with interrupts enabled,
 			// the fault handler could be called more than once for the same
 			// reason -- the store must take this into account.
+			VMCacheLocker locker(context.topCache);
 			status = context.topCache->Fault(addressSpace, context.cacheOffset);
 			if (status != B_BAD_HANDLER)
 				break;
@@ -5185,7 +5192,7 @@ user_strlcpy(char* to, const char* from, size_t size)
 
 	// If we hit the address overflow boundary, fail.
 	if ((size_t)result >= maxSize && maxSize < size)
-		return B_BAD_ADDRESS;
+		return B_NAME_TOO_LONG;
 
 	return result;
 }

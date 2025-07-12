@@ -182,30 +182,30 @@ vesa_propose_display_mode(display_mode* target, const display_mode* low,
 	// gInfo->mode_list is sorted by create_display_modes: typically by width, then height,
 	// then color_space, then refresh rate. We're looking for an exact match on
 	// width, height, and space.
-	int low = 0;
-	int high = gInfo->shared_info->mode_count - 1;
+	int searchLow = 0;
+	int searchHigh = gInfo->shared_info->mode_count - 1;
 	bool found = false;
 
-	while (low <= high) {
-		int mid = low + (high - low) / 2;
+	while (searchLow <= searchHigh) {
+		int mid = searchLow + (searchHigh - searchLow) / 2;
 		display_mode* current = &gInfo->mode_list[mid];
 
 		if (current->virtual_width < target->virtual_width) {
-			low = mid + 1;
+			searchLow = mid + 1;
 		} else if (current->virtual_width > target->virtual_width) {
-			high = mid - 1;
+			searchHigh = mid - 1;
 		} else {
 			// Widths match, check height
 			if (current->virtual_height < target->virtual_height) {
-				low = mid + 1;
+				searchLow = mid + 1;
 			} else if (current->virtual_height > target->virtual_height) {
-				high = mid - 1;
+				searchHigh = mid - 1;
 			} else {
 				// Widths and heights match, check space
 				if (current->space < target->space) {
-					low = mid + 1;
+					searchLow = mid + 1;
 				} else if (current->space > target->space) {
-					high = mid - 1;
+					searchHigh = mid - 1;
 				} else {
 					// Exact match found for width, height, and space.
 					// Propose_display_mode can pick any refresh rate, so this is sufficient.

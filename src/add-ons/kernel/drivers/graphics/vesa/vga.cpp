@@ -5,8 +5,6 @@
 
 
 #include "vga.h"
-#include <string.h> // For memset
-
 #include "vga.h"
 #include "driver.h"
 
@@ -98,7 +96,8 @@ vga_planar_blit(vesa_shared_info *info, uint8 *src, int32 srcBPR,
 
 		for (int32 plane = 0; plane < 4; plane++) {
 			// Prepare the data for the current plane for the entire row segment
-			memset(planeBuffer, 0, numBytesForRow);
+			for (int32 i = 0; i < numBytesForRow; i++)
+				planeBuffer[i] = 0;
 			uint8* srcPixelForPlane = currentSrcPixel;
 
 			for (int32 x = left; x <= right; x++) {

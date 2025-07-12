@@ -6,3 +6,7 @@ UseHeaders $(TARGET_PRIVATE_KERNEL_HEADERS) : true ;
 Application test_slab
 	: Slab.cpp
 	;
+
+Application test_hashed_object_cache
+	: HashedObjectCacheTest.cpp
+	;

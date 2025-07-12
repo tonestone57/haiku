@@ -110,7 +110,8 @@ public:
 						bool			IsEffectivelyIdle() const; // Moved to .cpp
 
 	// Team Quota related
-	void				SetCurrentActiveTeam(TeamSchedulerData* teamData); // TODO: implement
+	void				SetCurrentActiveTeam(TeamSchedulerData* teamData);
+	inline TeamSchedulerData* GetCurrentActiveTeam() const { return fCurrentActiveTeam; }
 
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;

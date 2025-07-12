@@ -59,6 +59,9 @@ public:
 	inline	CPUSet		And(const CPUSet& mask) const;
 
 	inline	bool		IsEmpty() const;
+	inline	bool		IsFull() const;
+
+	inline	uint32		CountSetBits() const;
 
 	inline uint32		Bits(uint32 index) const { return fBitmap[index];}
 private:
@@ -198,6 +201,29 @@ CPUSet::IsEmpty() const
 	}
 
 	return true;
+}
+
+
+inline bool
+CPUSet::IsFull() const
+{
+	int32 numCPUs = smp_get_num_cpus();
+	for (int32 i = 0; i < numCPUs; i++) {
+		if (!GetBit(i))
+			return false;
+	}
+	return true;
+}
+
+
+inline uint32
+CPUSet::CountSetBits() const
+{
+	uint32 count = 0;
+	for (int i = 0; i < kArraySize; i++) {
+		count += __builtin_popcount(fBitmap[i]);
+	}
+	return count;
 }
 
 

@@ -125,6 +125,7 @@ _init_continuous_weights()
 static const bool kUseContinuousWeights = true;
 
 static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
+    const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);
 	if (thread == NULL) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
@@ -144,12 +145,12 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 
 		if (isTeamExhausted) {
 			if (Scheduler::gSchedulerElasticQuotaMode && contextCpu != NULL) {
-				if (contextCpu->fCurrentActiveTeam == tsd) {
+				if (contextCpu->GetCurrentActiveTeam() == tsd) {
 					isBorrowing = true;
 				}
 			} else if (Scheduler::gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
 				Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-				if (threadActualCpu->fCurrentActiveTeam == tsd) {
+				if (threadActualCpu->GetCurrentActiveTeam() == tsd) {
 					isBorrowing = true;
 					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
 				}
@@ -206,9 +207,9 @@ scheduler_update_global_min_team_vruntime()
 	listLocker.Unlock();
 
 	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
+		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -244,7 +245,7 @@ cmd_thread_sched_info(int argc, char** argv)
 	kprintf("Base Priority:      %" B_PRId32 "\n", thread->priority);
 
 	if (thread->scheduler_data != NULL) {
-		ThreadData* td = thread->scheduler_data;
+		Scheduler::ThreadData* td = thread->scheduler_data;
 		kprintf("Scheduler Data (ThreadData*) at: %p\n", td);
 		td->Dump();
 
@@ -257,14 +258,15 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsFull(true)) {
+		if (affinityMask.IsEmpty() || affinityMask.IsFull()) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
-			const uint64* bits = affinityMask.Bits();
-			kprintf("0x%016" B_PRIx64, bits[0]);
-			if (CPUSet::CountBits() > 64)
-				kprintf("%016" B_PRIx64, bits[1]);
-			kprintf("\n");
+			kprintf("0x");
+			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
+				if (affinityMask.Bits(i) != 0)
+					kprintf("%x", affinityMask.Bits(i));
+			}
+			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.CountSetBits());
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");

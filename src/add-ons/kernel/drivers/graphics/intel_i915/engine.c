@@ -10,6 +10,7 @@
 #include "registers.h"
 #include "gtt.h"
 #include "gem_context.h" // For struct intel_i915_gem_context
+#include "guc.h"
 
 #include <KernelExport.h>
 #include <stdlib.h>
@@ -144,7 +145,20 @@ status_t
 intel_engine_guc_submit(struct intel_engine_cs* engine,
 	struct intel_i915_gem_context* context)
 {
-	// TODO: Implement GuC submission.
+	intel_i915_device_info* devInfo = engine->dev_priv;
+	struct guc_context_desc desc;
+	struct guc_command cmd;
+
+	desc.context_id = context->id;
+	desc.priority = 0;
+	desc.padding = 0;
+	desc.wg_context_address = context->hw_image_obj->gtt_offset_pages * B_PAGE_SIZE;
+
+	cmd.command = 0x1001; // GUC_CMD_SUBMIT_CONTEXT
+	cmd.length = sizeof(desc);
+
+	// TODO: Write the command to the GuC's command queue.
+
 	return B_OK;
 }
 

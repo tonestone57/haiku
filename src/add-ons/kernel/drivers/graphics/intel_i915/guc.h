@@ -10,6 +10,19 @@
 
 #include "intel_i915_priv.h"
 
+struct guc_context_desc {
+	uint32_t context_id;
+	uint32_t priority;
+	uint32_t padding;
+	uint64_t wg_context_address;
+};
+
+struct guc_command {
+	uint32_t command;
+	uint32_t length;
+	uint32_t data[0];
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

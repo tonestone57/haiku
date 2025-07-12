@@ -318,6 +318,26 @@ intel_i915_pm_uninit(intel_i915_device_info* devInfo)
 }
 
 void
+intel_enable_rc6(intel_i915_device_info* devInfo)
+{
+	uint32_t rc6_mask = DE_RC6_ENABLE;
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		rc6_mask |= DE_RC6_ENABLE | DE_RC6p_ENABLE | DE_RC6pp_ENABLE;
+	}
+	intel_i915_write32(devInfo, DE_RC_STATE, intel_i915_read32(devInfo, DE_RC_STATE) | rc6_mask);
+}
+
+void
+intel_disable_rc6(intel_i915_device_info* devInfo)
+{
+	uint32_t rc6_mask = DE_RC6_ENABLE;
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		rc6_mask |= DE_RC6_ENABLE | DE_RC6p_ENABLE | DE_RC6pp_ENABLE;
+	}
+	intel_i915_write32(devInfo, DE_RC_STATE, intel_i915_read32(devInfo, DE_RC_STATE) & ~rc6_mask);
+}
+
+void
 intel_i915_pm_enable_rc6(intel_i915_device_info* devInfo)
 {
 	if (!devInfo || !devInfo->rps_state || !devInfo->rps_state->rc6_supported || !devInfo->mmio_regs_addr) {

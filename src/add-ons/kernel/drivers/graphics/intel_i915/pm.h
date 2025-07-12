@@ -63,6 +63,8 @@ void intel_i915_pm_disable_rc6(intel_i915_device_info* devInfo);
 void intel_i915_rc6_work_handler(void* data);
 void intel_i915_pm_suspend(intel_i915_device_info* devInfo);
 void intel_i915_pm_resume(intel_i915_device_info* devInfo);
+void intel_enable_rc6(intel_i915_device_info* devInfo);
+void intel_disable_rc6(intel_i915_device_info* devInfo);
 
 #ifdef __cplusplus
 }

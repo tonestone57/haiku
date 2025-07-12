@@ -207,9 +207,9 @@ scheduler_update_global_min_team_vruntime()
 	listLocker.Unlock();
 
 	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
+		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -270,8 +270,8 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
-		kprintf("    Avg Run Burst (us): %" B_PRId64 "\n", td->fAverageRunBurstTimeEWMA);
-		kprintf("    Voluntary Sleeps:   %" B_PRIu32 "\n", td->fVoluntarySleepTransitions);
+		kprintf("    Avg Run Burst (us): %" B_PRId64 "\n", td->AverageRunBurstTime());
+		kprintf("    Voluntary Sleeps:   %" B_PRIu32 "\n", td->VoluntarySleepTransitions());
 		kprintf("    Is Likely I/O Bound: %s\n", td->IsLikelyIOBound() ? "yes" : "no");
 
 		kprintf("  Affinitized IRQs:\n");
@@ -348,9 +348,9 @@ cmd_dump_eevdf_weights(int argc, char** argv)
 		if (prio == B_IDLE_PRIORITY && currentWeight == 1) {
 		} else if (prio > B_IDLE_PRIORITY && prio < B_LOWEST_ACTIVE_PRIORITY && currentWeight == (2 + (prio - 1) * 2)) {
 		} else if (prio >= B_LOWEST_ACTIVE_PRIORITY && currentWeight == kNewMinActiveWeight) {
-			snprintf(notes, sizeof(notes), "At kNewMinActiveWeight (%ld)", kNewMinActiveWeight);
+			snprintf(notes, sizeof(notes), "At kNewMinActiveWeight (%d)", kNewMinActiveWeight);
 		} else if (currentWeight == kNewMaxWeightCap) {
-			snprintf(notes, sizeof(notes), "At kNewMaxWeightCap (%ld)", kNewMaxWeightCap);
+			snprintf(notes, sizeof(notes), "At kNewMaxWeightCap (%d)", kNewMaxWeightCap);
 		}
 
 		if (prio > 0 && previousWeight > 0) {

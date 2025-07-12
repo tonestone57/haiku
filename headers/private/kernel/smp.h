@@ -64,9 +64,10 @@ public:
 	inline	uint32		CountSetBits() const;
 
 	inline uint32		Bits(uint32 index) const { return fBitmap[index];}
-private:
+public:
 	static	const int	kArrayBits = 32;
 	static	const int	kArraySize = ROUNDUP(SMP_MAX_CPUS, kArrayBits) / kArrayBits;
+private:
 
 			uint32		fBitmap[kArraySize];
 };

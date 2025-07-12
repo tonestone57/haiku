@@ -177,6 +177,9 @@ public:
 
 	bool IsLikelyIOBound() const;
 	void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
+
+	inline bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA; }
+	inline uint32 VoluntarySleepTransitions() const { return fVoluntarySleepTransitions; }
 };
 
 class ThreadProcessing {

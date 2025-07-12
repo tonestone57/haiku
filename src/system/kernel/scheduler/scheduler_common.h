@@ -295,6 +295,7 @@ extern int32 gModeMaxTargetCpuIrqLoad;
 //   - Power consumption (especially for Power Saving mode).
 // - Methodology: Vary factor in small increments for each mode and observe metrics.
 extern float gSchedulerSMTConflictFactor; // Value set by current scheduler mode.
+extern bool gSchedulerElasticQuotaMode;
 
 // --- End Mode-Settable Global Parameters ---
 

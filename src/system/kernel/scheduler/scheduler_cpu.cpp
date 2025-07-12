@@ -8,6 +8,7 @@
 #include "scheduler_cpu.h"
 
 #include <cpu.h> // For cpu_ent, gCPU, irq_assignment, list_get_first_item etc.
+#include <smp.h>
 #include <thread.h> // Explicitly include for thread_is_running
 #include <util/AutoLock.h>
 #include <util/atomic.h> // For atomic_add

@@ -325,7 +325,6 @@ bigtime_t gGlobalMinTeamVRuntime = 0;
 static int32 scheduler_reset_team_quotas_event(timer* unused);
 static void scheduler_update_global_min_team_vruntime();
 
-bool gSchedulerElasticQuotaMode = false;
 TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 
 static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);

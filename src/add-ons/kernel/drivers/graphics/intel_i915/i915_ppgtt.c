@@ -380,33 +380,5 @@ intel_i915_ppgtt_do_tlb_invalidate(struct i915_ppgtt* ppgtt)
 		return;
 
 	intel_i915_device_info* devInfo = ppgtt->dev_priv;
-	uint8_t gen = INTEL_GRAPHICS_GEN(devInfo->runtime_caps.device_id);
-
-	// TRACE("PPGTT: Performing TLB Invalidation for ppgtt %p (Gen %u)
-", ppgtt, gen); // Verbose
-
-	// This is a placeholder / simplification.
-	// Proper TLB invalidation is complex and highly generation-specific.
-	// It might involve:
-	// - Specific MI commands (like MI_FLUSH_DW with TLB invalidate bits) on relevant engines.
-	// - Context-specific invalidation (e.g. if a context ID is associated with TLB entries).
-	// - Invalidating specific TLB levels (e.g., render TLB, VF TLB).
-	// - For Gen8+, specific PIPE_CONTROL post-sync ops or dedicated TLB inv registers.
-
-	// As a broad (and potentially performance-impacting or not fully sufficient) measure,
-	// we can try a global GTT flush, which rewrites PGTBL_CTL.
-	// This is known to flush GGTT TLBs; its effect on PPGTT TLBs needs PRM verification per-gen.
-	// This should only be done if changes were made to *this* PPGTT that might affect current HW state.
-	// A context switch (MI_SET_CONTEXT) often implies TLB invalidation for the new context's AS.
-	status_t fw_status = intel_i915_forcewake_get(devInfo, FW_DOMAIN_RENDER);
-	if (fw_status == B_OK) {
-		intel_i915_gtt_flush(devInfo); // This rewrites PGTBL_CTL
-		intel_i915_forcewake_put(devInfo, FW_DOMAIN_RENDER);
-		// TRACE("PPGTT: Performed global GTT flush as a placeholder for PPGTT TLB invalidation.
-");
-	} else {
-		TRACE("PPGTT: Failed to acquire forcewake for TLB invalidation.
-");
-	}
-	// TODO: Replace with generation-specific, context-aware TLB invalidation.
+	intel_i915_write32(devInfo, GFX_TLB_INV_CR, GFX_TLB_INV_CR_INV);
 }

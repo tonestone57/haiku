@@ -1188,6 +1188,10 @@
 #define HDMI_INFOFRAME_C		0x64140
 #define HDMI_INFOFRAME_D		0x64160
 
+// --- TLB Invalidation Registers ---
+#define GFX_TLB_INV_CR			0x20B0
+#define GFX_TLB_INV_CR_INV		(1 << 0)
+
 // TODO: add more registers!
 
 

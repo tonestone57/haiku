@@ -59,6 +59,7 @@ typedef struct intel_i915_gem_context {
 	uint32_t ring_head;
 	uint32_t ring_tail;
 
+	uint32_t ring_id;
 	// TODO: Add more specific context-global state if needed,
 	//       e.g., overall context status, GPU virtual address space manager for PPGTT.
 

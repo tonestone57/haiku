@@ -31,7 +31,18 @@ struct intel_i915_device_info;
 #define PPGTT_PDE_ADDR_MASK         GEN7_PDE_ADDR_MASK
 
 // TODO: Define PDPT (Page Directory Pointer Table) entry formats for 48-bit PPGTT (Gen8+)
+#define GEN8_PDPT_PWT			(1U << 3)
+#define GEN8_PDPT_PCD			(1U << 4)
+#define GEN8_PDPT_AD_RESTORE_RH	(1U << 5)
+#define GEN8_PDPT_AD_ENABLE		(1U << 6)
+#define GEN8_PDPT_LVL_4_5		(1U << 7)
+
 // TODO: Define PML4 (Page Map Level 4) entry formats if going beyond 48-bit (not for Gen7-9)
+#define GEN8_PML4_PWT			(1U << 3)
+#define GEN8_PML4_PCD			(1U << 4)
+#define GEN8_PML4_AD_RESTORE_RH	(1U << 5)
+#define GEN8_PML4_AD_ENABLE		(1U << 6)
+#define GEN8_PML4_LVL_5_6		(1U << 7)
 
 
 /**

@@ -58,8 +58,6 @@
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
 
 // EEVDF Specific Defines (Initial values, require tuning)
-#define SCHEDULER_TARGET_LATENCY		20000		// Target latency for a scheduling period (e.g., 20ms)
-#define SCHEDULER_MIN_GRANULARITY		1000		// Minimum time a thread runs (e.g., 1ms)
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
 // --- New Continuous Weight Calculation Logic ---
@@ -1965,7 +1963,7 @@ scheduler_init()
 		sIrqTaskAffinityMap = NULL;
 	}
 
-	for (int i = 0; i < MAX_IRQS; ++i) {
+	for (int i = 0; i < NUM_IO_VECTORS; ++i) {
 		atomic_store_64(&gIrqLastFollowMoveTime[i], 0);
 	}
 

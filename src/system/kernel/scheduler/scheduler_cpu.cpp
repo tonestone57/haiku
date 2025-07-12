@@ -808,45 +808,6 @@ CPUEntry::_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const
 }
 
 
-ThreadData*
-CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(are_interrupts_enabled() == false); // Caller must hold the run queue lock.
-
-	// If the old thread (that was just running) is still ready and belongs to
-	// this CPU's core, its EEVDF parameters should be updated, and it should be
-	// re-inserted into the EEVDF run queue.
-	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
-		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
-		// The actual update of oldThread's EEVDF parameters (vruntime, lag, deadline)
-		// happens in reschedule() before this function is called if oldThread is re-queued.
-		// Here, we just add it back.
-		fEevdfRunQueue.Add(oldThread);
-		_UpdateMinVirtualRuntime(); // Update min_vruntime as queue changed
-		// oldThread->MarkEnqueued() was called by AddThread.
-	}
-
-	// Peek the next eligible thread from the EEVDF run queue.
-	ThreadData* nextThreadData = PeekEligibleNextThread(); // This is now non-const
-
-	if (nextThreadData != NULL) {
-		// nextThreadData is already removed from the queue by PeekEligibleNextThread
-		// and needs to be marked as dequeued.
-		nextThreadData->MarkDequeued();
-	} else {
-		// No eligible, non-idle thread found. Choose this CPU's idle thread.
-		nextThreadData = fIdleThread;
-		if (nextThreadData == NULL) { // Should have been set during init
-			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());
-		}
-		// Idle thread is not "dequeued" from the EEVDF queue in the same way.
-		// Its fEnqueued state should reflect its special status.
-	}
-
-	ASSERT(nextThreadData != NULL);
-	return nextThreadData;
-}
 
 
 void
@@ -877,9 +838,9 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 		// Update this CPUEntry's measurement of active time for its fLoad calculation.
 		// fMeasureActiveTime now accumulates capacity-normalized work.
 		uint32 coreCapacity = SCHEDULER_NOMINAL_CAPACITY;
-		if (fCore != NULL && fCore->fPerformanceCapacity > 0) {
-			coreCapacity = fCore->fPerformanceCapacity;
-		} else if (fCore != NULL && fCore->fPerformanceCapacity == 0) {
+		if (fCore != NULL && fCore->PerformanceCapacity() > 0) {
+			coreCapacity = fCore->PerformanceCapacity();
+		} else if (fCore != NULL && fCore->PerformanceCapacity() == 0) {
 			TRACE_SCHED_WARNING("TrackActivity: CPU %" B_PRId32 ", Core %" B_PRId32 " has 0 capacity! Using nominal %u for fMeasureActiveTime.\n",
 				fCPUNumber, fCore->ID(), SCHEDULER_NOMINAL_CAPACITY);
 		} else if (fCore == NULL) {
@@ -1251,24 +1212,6 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	ASSERT(fCPUCount > 0);
 
 	if (cpu->GetHeapLink()->fIndex != -1) {
-#if KDEBUG
-		if (fCPUHeap.Count() == 0) {
-			panic("CoreEntry::RemoveCPU: CPU %" B_PRId32 " on core %" B_PRId32
-				" has heap link index %d but fCPUHeap is empty.",
-				cpu->ID(), this->ID(), cpu->GetHeapLink()->fIndex);
-		}
-		if (fCPUHeap.PeekRoot() != cpu && CPUPriorityHeap::GetKey(cpu) == B_IDLE_PRIORITY) {
-			// If it's an idle CPU being removed, it should be at the root if heap is correct
-			// This might indicate an issue if it's not the root but is idle.
-			// However, another CPU on the same core could also be idle.
-			// The primary check is that it's in the heap.
-			// If it's not root, Heap::Remove(element) is needed, which isn't standard.
-			// The current Heap.h only has RemoveRoot().
-			// This implies UpdatePriority must have been called to make it the root (e.g. by setting its key to a very low value).
-		}
-#endif
-		// Use the direct Remove(element) method from SchedulerHeap (via CPUPriorityHeap).
-		// This removes the need for the CPU to be the root and avoids the panic.
 		fCPUHeap.Remove(cpu);
 	}
 

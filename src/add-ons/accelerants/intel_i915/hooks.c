@@ -121,11 +121,40 @@ accel_ensure_framebuffer_for_pipe(enum i915_pipe_id_user pipe_id_user, const dis
 }
 
 
-static void accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void* list, void* clip_info_ptr) {}
+static void
+accel_s2s_scaled_filtered_blit_unclipped(engine_token* et, void* s, void* d, uint32 nr, void* l)
+{
+	intel_i915_screen_to_screen_scaled_filtered_blit(et, (scaled_blit_params*)l, nr, false);
+}
+
 static void accel_draw_line_array(engine_token* et, uint32 count, uint8 *raw_list, uint32 color) {}
-static void accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern) {}
-static void accel_fill_triangle(engine_token *et, uint32 color, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint16 x3, uint16 y3, const general_rect *clip_rects, uint32 num_clip_rects) {}
-static void accel_fill_polygon(engine_token *et, uint32 poly_count, const uint32 *vertex_counts, const int16 *poly_points_raw, uint32 color, const general_rect *clip_rects, uint32 num_clip_rects) {}
+static void
+accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
+{
+	line_params lp = {x1, y1, x2, y2};
+	intel_i915_draw_line_arbitrary(et, &lp, color, NULL, 0);
+}
+
+static void
+accel_fill_polygon(engine_token *et, uint32 poly_count, const uint32 *vertex_counts, const int16 *poly_points_raw, uint32 color, const general_rect *clip_rects, uint32 num_clip_rects)
+{
+	if (poly_points_raw == NULL || vertex_counts == NULL || poly_count == 0)
+		return;
+
+	const int16* vertices = poly_points_raw;
+	for (uint32 i = 0; i < poly_count; i++) {
+		intel_i915_fill_convex_polygon(et, vertices, vertex_counts[i], color, clip_rects, num_clip_rects);
+		vertices += vertex_counts[i] * 2;
+	}
+}
+
+static void
+accel_fill_triangle(engine_token *et, uint32 color, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint16 x3, uint16 y3, const general_rect *clip_rects, uint32 num_clip_rects)
+{
+	fill_triangle_params ftp = {x1, y1, x2, y2, x3, y3};
+	intel_i915_fill_triangle_list(et, &ftp, 1, color, clip_rects, num_clip_rects);
+}
+
 static status_t intel_i915_set_display_configuration(uint32, const accelerant_display_config[], uint32, uint32);
 static status_t intel_i915_get_display_configuration_hook(accelerant_get_display_configuration_args* args);
 
@@ -369,9 +398,37 @@ static void accel_invert_rect_clipped(engine_token* et, uint32 num_rects, void* 
 static void accel_fill_span_unclipped(engine_token* et, uint32 color, uint32 num_spans, void* list) {}
 static void accel_s2s_transparent_blit_unclipped(engine_token* et, uint32 tc, uint32 nr, void* l) {}
 static void accel_s2s_scaled_filtered_blit_unclipped(engine_token* et, void* s, void* d, uint32 nr, void* l) {}
-static void accel_draw_line_array(engine_token* et, uint32 count, uint8 *raw_list, uint32 color) {}
-static void accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void* list, void* clip_info_ptr) {}
-static void accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern) {}
+static void
+accel_draw_line_array_unclipped(engine_token* et, uint32 count, void* list, uint32 color)
+{
+	if (list == NULL || count == 0)
+		return;
+
+	for (uint32 i = 0; i < count; i++) {
+		line_params* lp = &((line_params*)list)[i];
+		intel_i915_draw_line_arbitrary(et, lp, color, NULL, 0);
+	}
+}
+
+static void
+accel_draw_line_array_clipped(engine_token* et, uint32 color, uint32 count, void* list, void* clip_info_ptr)
+{
+	if (list == NULL || count == 0)
+		return;
+
+	for (uint32 i = 0; i < count; i++) {
+		line_params* lp = &((line_params*)list)[i];
+		intel_i915_draw_line_arbitrary(et, lp, color, (general_rect*)clip_info_ptr, 1);
+	}
+}
+
+static void
+accel_draw_line(engine_token* et, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint32 color, uint8 pattern)
+{
+	line_params lp = {x1, y1, x2, y2};
+	intel_i915_draw_line_arbitrary(et, &lp, color, NULL, 0);
+}
+
 static void accel_fill_polygon(engine_token *et, uint32 poly_count, const uint32 *vertex_counts, const int16 *poly_points_raw, uint32 color, const general_rect *clip_rects, uint32 num_clip_rects) {}
 static void accel_fill_triangle(engine_token *et, uint32 color, uint16 x1, uint16 y1, uint16 x2, uint16 y2, uint16 x3, uint16 y3, const general_rect *clip_rects, uint32 num_clip_rects) {}
 
@@ -568,7 +625,7 @@ get_accelerant_hook(uint32 feature, void *data)
 		case B_FILL_SPAN: return (void*)accel_fill_span_unclipped;
 		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)accel_s2s_transparent_blit_unclipped;
 		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
-		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array;
+		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array_unclipped;
 		case B_DRAW_LINE_ARRAY_CLIPPED: return (void*)accel_draw_line_array_clipped;
 		case B_DRAW_LINE: return (void*)accel_draw_line;
 		case B_FILL_POLYGON: return (void*)accel_fill_polygon;

@@ -47,6 +47,7 @@ static status_t intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t l
 static status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo);
 static status_t i915_get_connector_info_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_get_connector_info_args* user_args_ptr);
 static status_t i915_get_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i915_get_display_config_args* user_args_ptr);
+static status_t i915_set_blitter_hw_clip_rect_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_hw_clip_rect_args* user_args_ptr);
 static status_t i915_wait_for_display_change_ioctl(intel_i915_device_info* devInfo, struct i915_display_change_event_ioctl_data* user_args_ptr);
 extern status_t intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info);
 extern void intel_i915_device_uninit(intel_i915_device_info* devInfo);
@@ -160,6 +161,88 @@ static status_t intel_i915_free(void* cookie) {
 	}
 	return B_OK;
 }
+
+static status_t
+intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
+{
+	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
+	if (devInfo == NULL)
+		return B_BAD_VALUE;
+
+	switch (op) {
+		case B_GET_ACCELERANT_SIGNATURE:
+			if (user_strlcpy((char*)buffer, "intel_i915.accelerant", B_FILE_NAME_LENGTH) < B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
+
+		case INTEL_I915_GET_SHARED_INFO:
+			return intel_i915_get_shared_info_ioctl(devInfo, (intel_i915_get_shared_area_info_args*)buffer);
+
+		case INTEL_I915_IOCTL_GEM_CREATE:
+			return intel_i915_gem_create_ioctl(devInfo, (intel_i915_gem_create_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_MMAP_AREA:
+			return intel_i915_gem_mmap_area_ioctl(devInfo, (intel_i915_gem_mmap_area_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_CLOSE:
+			return intel_i915_gem_close_ioctl(devInfo, (intel_i915_gem_close_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_EXECBUFFER:
+			return intel_i915_gem_execbuffer_ioctl(devInfo, (intel_i915_gem_execbuffer_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_WAIT:
+			return intel_i915_gem_wait_ioctl(devInfo, (intel_i915_gem_wait_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_CONTEXT_CREATE:
+			return intel_i915_gem_context_create_ioctl(devInfo, (intel_i915_gem_context_create_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_CONTEXT_DESTROY:
+			return intel_i915_gem_context_destroy_ioctl(devInfo, (intel_i915_gem_context_destroy_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_FLUSH_AND_GET_SEQNO:
+			return intel_i915_gem_flush_and_get_seqno_ioctl(devInfo, (intel_i915_gem_flush_and_get_seqno_args*)buffer);
+		case INTEL_I915_IOCTL_GEM_GET_INFO:
+			return intel_i915_gem_get_info_ioctl(devInfo, (intel_i915_gem_info_args*)buffer);
+
+		case INTEL_I915_IOCTL_SET_CURSOR_STATE:
+			return intel_display_set_cursor_state_ioctl(devInfo, (intel_i915_set_cursor_state_args*)buffer);
+		case INTEL_I915_IOCTL_SET_CURSOR_BITMAP:
+			return intel_display_set_cursor_bitmap_ioctl(devInfo, (intel_i915_set_cursor_bitmap_args*)buffer);
+
+		case INTEL_I915_GET_DPMS_MODE:
+			return intel_display_get_dpms_mode_ioctl(devInfo, (intel_i915_get_dpms_mode_args*)buffer);
+		case INTEL_I915_SET_DPMS_MODE:
+			return intel_display_set_dpms_mode_ioctl(devInfo, (intel_i915_set_dpms_mode_args*)buffer);
+
+		case INTEL_I915_MOVE_DISPLAY_OFFSET:
+			return intel_display_move_offset_ioctl(devInfo, (intel_i915_move_display_args*)buffer);
+		case INTEL_I915_SET_INDEXED_COLORS:
+			return intel_display_set_indexed_colors_ioctl(devInfo, (intel_i915_set_indexed_colors_args*)buffer);
+
+		case INTEL_I915_IOCTL_MODE_PAGE_FLIP:
+			return intel_display_page_flip_ioctl(devInfo, (intel_i915_page_flip_args*)buffer);
+
+		case INTEL_I915_GET_CONNECTOR_INFO:
+			return i915_get_connector_info_ioctl_handler(devInfo, (intel_i915_get_connector_info_args*)buffer);
+		case INTEL_I915_GET_DISPLAY_CONFIG:
+			return i915_get_display_config_ioctl_handler(devInfo, (struct i915_get_display_config_args*)buffer);
+		case INTEL_I915_SET_DISPLAY_CONFIG:
+			return i915_set_display_config_ioctl_handler(devInfo, (struct i915_set_display_config_args*)buffer);
+		case INTEL_I915_WAIT_FOR_DISPLAY_CHANGE:
+			return i915_wait_for_display_change_ioctl(devInfo, (struct i915_display_change_event_ioctl_data*)buffer);
+
+		case INTEL_I915_PROPOSE_SPECIFIC_MODE:
+			return intel_display_propose_mode_ioctl(devInfo, (intel_i915_propose_specific_mode_args*)buffer);
+		case INTEL_I915_GET_PIPE_DISPLAY_MODE:
+			return intel_display_get_mode_ioctl(devInfo, (intel_i915_get_pipe_display_mode_args*)buffer);
+		case INTEL_I915_GET_RETRACE_SEMAPHORE_FOR_PIPE:
+			return intel_display_get_retrace_sem_ioctl(devInfo, (intel_i915_get_retrace_semaphore_args*)buffer);
+
+		case INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY:
+			return intel_i915_set_blitter_chroma_key_ioctl(devInfo, (intel_i915_set_blitter_chroma_key_args*)buffer);
+		case INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT:
+			return i915_set_blitter_hw_clip_rect_ioctl_handler(devInfo, (intel_i915_set_blitter_hw_clip_rect_args*)buffer);
+
+		default:
+			TRACE("intel_i915_ioctl: Unknown opcode %lu\n", op);
+			return B_DEV_INVALID_IOCTL;
+	}
+	return B_OK;
+}
+
 status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) { return B_OK;}
 status_t i915_apply_staged_display_config(intel_i915_device_info* devInfo, const struct i915_set_display_config_args* config_args) { return B_UNSUPPORTED; }
 static inline uint32 PipeEnumToArrayIndex(enum pipe_id_priv pipe) { if (pipe >= PRIV_PIPE_A && pipe < PRIV_MAX_PIPES) return (uint32)pipe; return MAX_PIPES_I915; }
@@ -615,6 +698,36 @@ i915_wait_for_display_change_ioctl(intel_i915_device_info* devInfo, struct i915_
 	return status;
 }
 
+static status_t
+i915_set_blitter_hw_clip_rect_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_hw_clip_rect_args* user_args_ptr)
+{
+	if (devInfo == NULL || user_args_ptr == NULL) {
+		return B_BAD_VALUE;
+	}
+
+	intel_i915_set_blitter_hw_clip_rect_args args;
+	if (copy_from_user(&args, user_args_ptr, sizeof(args)) != B_OK) {
+		return B_BAD_ADDRESS;
+	}
+
+	// It's assumed that the blitter engine is idle or that synchronization is handled
+	// by the userspace accelerant (e.g., by flushing the batch buffer before this call).
+	// This IOCTL just programs the registers. Forcewake is not typically needed for
+	// these blitter registers on Gen7+, but would be good practice to wrap if issues arise.
+
+	if (args.enable) {
+		intel_i915_write32(devInfo, BCS_CLIPRECT_TL, (args.y1 << 16) | args.x1);
+		intel_i915_write32(devInfo, BCS_CLIPRECT_BR, (args.y2 << 16) | args.x2);
+	} else {
+		// Disable clipping by setting the rect to max bounds.
+		// The blitter command itself will have clipping disabled via a bit in its command dword,
+		// so this is just for safety.
+		intel_i915_write32(devInfo, BCS_CLIPRECT_TL, 0);
+		intel_i915_write32(devInfo, BCS_CLIPRECT_BR, (0xFFFF << 16) | 0xFFFF);
+	}
+
+	return B_OK;
+}
 
 static status_t
 i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i915_set_display_config_args* args)
@@ -1034,4 +1147,24 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 
 
 	if (status == B_OK) { // Update Shared Info only if all commits were successful
->>>>>>> REPLACE
+		update_shared_info_from_commit(devInfo, planned_configs);
+	}
+
+commit_failed_entire_transaction:
+	intel_i915_forcewake_put(devInfo, FW_DOMAIN_ALL);
+	mutex_unlock(&devInfo->display_commit_lock);
+	TRACE("IOCTL: SET_DISPLAY_CONFIG: --- Commit Phase End (Status: %s) ---\n", strerror(status));
+
+check_done_release_all_resources:
+check_done_release_resources:
+check_done_release_gem_objects:
+	for (uint32 i = 0; i < PRIV_MAX_PIPES; i++) {
+		if (planned_configs[i].fb_gem_obj) {
+			intel_i915_gem_object_put(planned_configs[i].fb_gem_obj);
+		}
+	}
+	if (pipe_configs_kernel_copy) {
+		free(pipe_configs_kernel_copy);
+	}
+	return status;
+}

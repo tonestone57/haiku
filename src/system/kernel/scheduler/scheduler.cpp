@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <math.h> // For roundf, pow
 #include <thread.h>
+#include <kernel/thread.h>
 
 #include <stdlib.h> // For strtoul
 #include <stdio.h>  // For kprintf, snprintf (though kprintf is kernel specific)
@@ -46,7 +47,7 @@
 
 #include <util/MultiHashTable.h>
 #include <kernel/thread.h>
-#include <syscall_numbers.h>
+#include <syscalls.h>
 #include <cstdint>
 #include <kernel/thread.h>
 
@@ -127,63 +128,6 @@ _init_continuous_weights()
 
 static const bool kUseContinuousWeights = true;
 
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
-    const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);
-	if (thread == NULL) {
-		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-	}
-
-	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
-			thread->id, thread->team ? thread->team->id : -1, thread->priority);
-	}
-	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		bool isTeamExhausted;
-		bool isBorrowing = false;
-
-		InterruptsSpinLocker locker(tsd->lock);
-		isTeamExhausted = tsd->quota_exhausted;
-		locker.Unlock();
-
-		if (isTeamExhausted) {
-			if (Scheduler::gSchedulerElasticQuotaMode && contextCpu != NULL) {
-				if (contextCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-				}
-			} else if (Scheduler::gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
-				Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-				if (threadActualCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
-				}
-			}
-
-			if (!isBorrowing) {
-				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-				} else if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-				}
-			} else {
-				TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") is exhausted but actively borrowing on ContextCPU %" B_PRId32 ". Using normal weight.\n",
-					thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-			}
-		}
-	}
-
-    int32 priority = thread->priority;
-    if (priority < 0) {
-        priority = 0;
-    } else if (priority > B_REAL_TIME_PRIORITY) { // Ensure we don't go out of bounds
-        priority = B_REAL_TIME_PRIORITY;
-    }
-    // Array is indexed 0 to B_REAL_TIME_PRIORITY, so direct use is fine now.
-    return gHaikuContinuousWeights[priority];
-}
 
 
 
@@ -338,6 +282,46 @@ cmd_dump_eevdf_weights(int argc, char** argv)
 }
 
 
+static void
+scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
+	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU)
+{
+	if (irqCount == 0 || sIrqTaskAffinityMap == NULL)
+		return;
+
+	for (int i = 0; i < irqCount; ++i) {
+		int32 irq = irqList[i];
+		InterruptsSpinLocker affinityMapLocker(gIrqTaskAffinityLock);
+		thread_id* mappedThId = sIrqTaskAffinityMap->Lookup(irq);
+		if (mappedThId == NULL || *mappedThId != thId) {
+			affinityMapLocker.Unlock();
+			continue;
+		}
+		affinityMapLocker.Unlock();
+
+		cpu_ent* currentOwnerCpuSt = get_cpu_for_interrupt(irq);
+		if (currentOwnerCpuSt == NULL
+			|| CPUEntry::GetCPU(currentOwnerCpuSt->cpu_num)->Core()
+				== targetCore) {
+			continue;
+		}
+
+		irq_assignment* assignment = find_irq_assignment(irq);
+		if (assignment == NULL)
+			continue;
+
+		bigtime_t now = system_time();
+		if (now < atomic_get64(&gIrqLastFollowMoveTime[irq])
+				+ kIrqFollowTaskCooldownPeriod) {
+			continue;
+		}
+
+		assign_io_interrupt_to_cpu(irq, targetCPU->ID());
+		atomic_set64(&gIrqLastFollowMoveTime[irq], now);
+	}
+}
+
+
 class ThreadEnqueuer : public ThreadProcessing {
 public:
 	void		operator()(ThreadData* thread);
@@ -360,17 +344,6 @@ int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
 int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
 int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-
-struct IntHashDefinition {
-	typedef int KeyType;
-	typedef thread_id ValueType;
-	size_t HashKey(int key) const { return (size_t)key; }
-	size_t Hash(thread_id* value) const { return (size_t)*value; }
-	bool Compare(int key, thread_id* value) const { return false; }
-	bool CompareKeys(int key1, int key2) const { return key1 == key2; }
-};
-static BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap = NULL;
-static spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
 static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
@@ -428,6 +401,7 @@ static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
 static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
+static void scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList, int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU);
 static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
 
 #if SCHEDULER_TRACING
@@ -437,6 +411,10 @@ static int cmd_scheduler(int argc, char** argv);
 // static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
+static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
+static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
+static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
+static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 static CPUEntry*
 _find_idle_cpu_on_core(CoreEntry* core)
@@ -769,7 +747,7 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool basicChecksPass = true;
-			struct thread* candThread = (struct thread*)candidateTask->GetThread();
+			Thread* candThread = candidateTask->GetThread();
 
 			if (candThread->pinned_to_cpu != 0) {
 				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
@@ -900,7 +878,8 @@ _attempt_one_steal(CPUEntry* thiefCPU, int32 victimCpuID)
 				if (allowStealByBLPolicy) {
 					stolenTask = victimQueue.PopMinimum();
 					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
-					atomic_add((int32*)&victimCPUEntry->GetTotalThreadCount(), -1);
+					int32 threadCount = victimCPUEntry->GetTotalThreadCount();
+					atomic_add(&threadCount, -1);
 					ASSERT(victimCPUEntry->GetTotalThreadCount() >=0);
 					victimCPUEntry->MinVirtualRuntime();
 
@@ -1216,7 +1195,8 @@ reschedule(int32 nextState)
 						actuallyStolenThreadData->MarkEnqueued(cpu->Core());
 						lock.Unlock();
 					}
-					atomic_add(&cpu->GetTotalThreadCount(), 1);
+					int32 threadCount = cpu->GetTotalThreadCount();
+					atomic_add(&threadCount, 1);
 				} else {
 					cpu->fNextStealAttemptTime = system_time() + kStealFailureBackoffInterval;
 				}
@@ -1355,8 +1335,6 @@ scheduler_reschedule(int32 nextState)
 
 	int32 thisCPUId = smp_get_current_cpu();
 	CPUEntry* cpu = CPUEntry::GetCPU(thisCPUId);
-	Thread* oldThread = thread_get_current_thread();
-	ThreadData* oldThreadData = oldThread->scheduler_data;
 
 	// Original reschedule logic up to choosing nextThread (condensed)
 	// This part needs to be exactly as it was, only the Mechanism A part is added
@@ -1487,7 +1465,6 @@ scheduler_on_thread_destroy(Thread* thread)
 			InterruptsSpinLocker mapLocker(gIrqTaskAffinityLock);
 			for (int8 i = 0; i < irqCount; ++i) {
 				int32 irq = localIrqList[i];
-				thread_id currentMappedTid = -1;
 				thread_id* value = sIrqTaskAffinityMap->Lookup(irq);
 				if (value != NULL && *value == thread->id) {
 					sIrqTaskAffinityMap->Remove(value);
@@ -1496,8 +1473,8 @@ scheduler_on_thread_destroy(Thread* thread)
 				} else {
 					TRACE_SCHED_IRQ_ERR("ThreadDestroy: T %" B_PRId32 " noted IRQ %" B_PRId32
 						" in its (now cleared) list, but global map did not point to this thread "
-						"(or IRQ not in map). Current map tid for IRQ %" B_PRId32 ": %" B_PRId32 ".\n",
-						thread->id, irq, irq, currentMappedTid);
+						"(or IRQ not in map).\n",
+						thread->id, irq);
 				}
 			}
 			mapLocker.Unlock();
@@ -1683,7 +1660,7 @@ init()
 		int32 shardHeapSize = gCoreCount / Scheduler::kNumCoreLoadHeapShards + 4;
 		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
-		rw_lock_init(&Scheduler::gCoreHeapsShardLock[i], "core_heap_shard_lock");
+		B_INITIALIZE_RW_SPINLOCK(&gCoreHeapsShardLock[i]);
 	}
 	new(&gIdlePackageList) IdlePackageList;
 
@@ -1790,7 +1767,6 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore) {
 		scheduler_update_global_min_vruntime();
-		scheduler_update_global_min_team_vruntime();
 
 		bool migrationOccurred = scheduler_perform_load_balance();
 
@@ -1890,37 +1866,11 @@ scheduler_init()
 	}
 
 	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
-	add_timer(&gQuotaResetTimer, &Scheduler::scheduler_reset_team_quotas_event, gQuotaPeriod, B_PERIODIC_TIMER);
+	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod, B_PERIODIC_TIMER);
 	_init_continuous_weights();
 }
 
 
-static int32
-Scheduler::scheduler_reset_team_quotas_event(timer* /*unused*/)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	TRACE_SCHED("Scheduler: Resetting team CPU quotas for new period (%" B_PRId64 " us).\n", gQuotaPeriod);
-
-	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
-	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
-	while (tsd != NULL) {
-		InterruptsSpinLocker tsdLocker(tsd->lock);
-		tsd->quota_period_usage = 0;
-		if (tsd->cpu_quota_percent > 0 && tsd->cpu_quota_percent <= 100) {
-			tsd->current_quota_allowance = (gQuotaPeriod * tsd->cpu_quota_percent) / 100;
-		} else if (tsd->cpu_quota_percent > 100) {
-			tsd->current_quota_allowance = gQuotaPeriod;
-		}
-		else {
-			tsd->current_quota_allowance = 0;
-		}
-		tsd->quota_exhausted = false;
-		tsdLocker.Unlock();
-		tsd = gTeamSchedulerDataList.GetNext(tsd);
-	}
-	listLocker.Unlock();
-	return B_HANDLED_INTERRUPT;
-}
 
 // static const double KDF_DEBUG_MIN_FACTOR = 0.0; // REMOVED
 // static const double KDF_DEBUG_MAX_FACTOR = 2.0; // REMOVED
@@ -1968,6 +1918,75 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 {
 	if (argc != 1) { kprintf("Usage: scheduler_get_smt_factor\n"); return B_KDEBUG_ERROR; }
 	kprintf("Current scheduler gSchedulerSMTConflictFactor: %f\n", Scheduler::gSchedulerSMTConflictFactor);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n");
+		return B_KDEBUG_ERROR;
+	}
+
+	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
+		Scheduler::gSchedulerElasticQuotaMode = true;
+		kprintf("Scheduler elastic team quota mode enabled.\n");
+	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
+		Scheduler::gSchedulerElasticQuotaMode = false;
+		kprintf("Scheduler elastic team quota mode disabled.\n");
+	} else {
+		kprintf("Invalid argument. Use 'on' or 'off'.\n");
+		return B_KDEBUG_ERROR;
+	}
+
+	return 0;
+}
+
+static int
+cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_elastic_mode\n");
+		return B_KDEBUG_ERROR;
+	}
+	kprintf("Current scheduler elastic team quota mode: %s\n",
+		Scheduler::gSchedulerElasticQuotaMode ? "on" : "off");
+	return 0;
+}
+
+static int
+cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
+{
+	if (argc != 2) {
+		kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n");
+		return B_KDEBUG_ERROR;
+	}
+
+	if (strcmp(argv[1], "starvation") == 0) {
+		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
+		kprintf("Scheduler team quota exhaustion policy set to: starvation\n");
+	} else if (strcmp(argv[1], "hardstop") == 0) {
+		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP;
+		kprintf("Scheduler team quota exhaustion policy set to: hardstop\n");
+	} else {
+		kprintf("Invalid argument. Use 'starvation' or 'hardstop'.\n");
+		return B_KDEBUG_ERROR;
+	}
+
+	return 0;
+}
+
+static int
+cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
+{
+	if (argc != 1) {
+		kprintf("Usage: scheduler_get_exhaustion_policy\n");
+		return B_KDEBUG_ERROR;
+	}
+	kprintf("Current scheduler team quota exhaustion policy: %s\n",
+		Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW ? "starvation" : "hardstop");
 	return 0;
 }
 
@@ -2108,7 +2127,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 					hasAffinity = true;
 					affinityLocker.Unlock();
 
-					Thread* task = thread_get_thread_struct_locked(affinitized_thid);
+					Thread* task = Thread::Get(affinitized_thid);
 					if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 						CPUEntry* taskCpu = CPUEntry::GetCPU(task->cpu->cpu_num);
 
@@ -2132,7 +2151,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 						}
 					} else {
 						affinityLocker.Lock();
-						sIrqTaskAffinityMap->Remove(irqToMove->irq);
+						sIrqTaskAffinityMap->Remove(sIrqTaskAffinityMap->Lookup(irqToMove->irq));
 						affinityLocker.Unlock();
 						hasAffinity = false;
 						TRACE_SCHED_IRQ("IRQBalance: IRQ %d had stale affinity for T %" B_PRId32 ". Cleared.\n",
@@ -2375,7 +2394,7 @@ scheduler_perform_load_balance()
 	int32 minLoadFound = 0x7fffffff;
 
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
-		ReadSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]);
+		ReadSpinLocker shardLocker(gCoreHeapsShardLock[shardIdx]);
 		CoreEntry* shardBestSource = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum();
 		if (shardBestSource != NULL && !shardBestSource->IsDefunct() && shardBestSource->GetLoad() > maxLoadFound) {
 			maxLoadFound = shardBestSource->GetLoad();
@@ -2458,7 +2477,7 @@ scheduler_perform_load_balance()
 				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
 					finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
 			} else if (sourceCoreCandidate == consolidationCore &&
-					   sourceCoreCandidate->GetLoad() > kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+					   sourceCoreCandidate->GetLoad() > (int32)(kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 				CoreEntry* spillTarget = NULL;
 				int32 minSpillLoad = 0x7fffffff;
 				for (int32 i = 0; i < gCoreCount; ++i) {
@@ -2476,7 +2495,7 @@ scheduler_perform_load_balance()
 					for (int32 i = 0; i < gCoreCount; ++i) {
 						CoreEntry* core = &gCoreEntries[i];
 						if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
-						if (core->GetLoad() < kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY) {
+						if (core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
 							if (core->GetLoad() < minSpillLoad) {
 								minSpillLoad = core->GetLoad();
 								spillTarget = core;
@@ -2571,7 +2590,6 @@ scheduler_perform_load_balance()
 			continue;
 		}
 
-		bigtime_t currentLagOnSource = candidate->Lag();
 		CPUEntry* representativeTargetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, candidate);
 		if (representativeTargetCPU == NULL) representativeTargetCPU = sourceCPU;
 
@@ -2777,7 +2795,8 @@ scheduler_perform_load_balance()
 		return migrationPerformed;
 	}
 
-		atomic_add(&sourceCPU->GetTotalThreadCount(), -1);
+		int32 threadCount = sourceCPU->GetTotalThreadCount();
+		atomic_add(&threadCount, -1);
 		ASSERT(sourceCPU->GetTotalThreadCount() >=0);
 	sourceCPU->_UpdateMinVirtualRuntime();
 
@@ -2848,119 +2867,14 @@ scheduler_perform_load_balance()
 
 
 
+
+
 // Syscall implementations (do_... functions) follow...
 // ... (rest of the file as previously read)
 // For brevity, the syscall implementations are not repeated here but are part of the full file content.
-static status_t
-do_get_thread_nice_value(thread_id thid, int* outNiceValue)
-{
-	if (outNiceValue == NULL || !IS_USER_ADDRESS(outNiceValue))
-		return B_BAD_ADDRESS;
-
-	if (thid <= 0 && thid != B_CURRENT_THREAD)
-		return B_BAD_THREAD_ID;
-
-	Thread* targetThread;
-	if (thid == B_CURRENT_THREAD) {
-		targetThread = thread_get_current_thread();
-		targetThread->AcquireReference();
-	} else {
-		targetThread = Thread::Get(thid);
-		if (targetThread == NULL)
-			return B_BAD_THREAD_ID;
-	}
-	BReference<Thread> threadReference(targetThread, true);
-
-	int32 haikuPriority = targetThread->priority;
-	int niceValue;
-
-	if (haikuPriority == B_NORMAL_PRIORITY) {
-		niceValue = 0;
-	} else if (haikuPriority < B_NORMAL_PRIORITY) {
-		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-19.0f / 9.0f);
-		niceValue = (int)roundf(n);
-		if (haikuPriority == B_LOWEST_ACTIVE_PRIORITY && niceValue < 19) niceValue = 19;
-		if (niceValue > 19) niceValue = 19;
-		if (niceValue < 0) niceValue = 0;
-	} else {
-		float n = 0.0f + (float)(haikuPriority - B_NORMAL_PRIORITY) * (-20.0f / 89.0f);
-		niceValue = (int)roundf(n);
-		if (haikuPriority >= (B_URGENT_PRIORITY -1) && niceValue > -20) niceValue = -20;
-		if (niceValue < -20) niceValue = -20;
-		if (niceValue > 0) niceValue = 0;
-	}
-
-	niceValue = max_c(-20, min_c(niceValue, 19));
-
-	if (user_memcpy(outNiceValue, &niceValue, sizeof(int)) != B_OK)
-		return B_BAD_ADDRESS;
-
-	return B_OK;
-}
-
-static status_t
-do_set_thread_nice_value(thread_id thid, int niceValue)
-{
-	if (niceValue < -20 || niceValue > 19)
-		return B_BAD_VALUE;
-
-	if (thid <= 0 && thid != B_CURRENT_THREAD)
-		return B_BAD_THREAD_ID;
-
-	Thread* currentThread = thread_get_current_thread();
-	Thread* targetThread;
-
-	if (thid == B_CURRENT_THREAD || thid == currentThread->id) {
-		targetThread = currentThread;
-		targetThread->AcquireReference();
-	} else {
-		targetThread = Thread::Get(thid);
-		if (targetThread == NULL)
-			return B_BAD_THREAD_ID;
-	}
-	BReference<Thread> threadReference(targetThread, true);
-
-	if (targetThread->team != currentThread->team
-		&& currentThread->team->effective_uid != 0) {
-		return B_NOT_ALLOWED;
-	}
-
-	int32 haikuPriority;
-
-	if (niceValue == 0) {
-		haikuPriority = B_NORMAL_PRIORITY;
-	} else if (niceValue > 0) {
-		float p = (float)B_NORMAL_PRIORITY + (float)niceValue * (-9.0f / 19.0f);
-		haikuPriority = (int32)roundf(p);
-		if (haikuPriority < B_LOWEST_ACTIVE_PRIORITY)
-			haikuPriority = B_LOWEST_ACTIVE_PRIORITY;
-	} else {
-		float p = (float)B_NORMAL_PRIORITY + (float)niceValue * (89.0f / -20.0f);
-		haikuPriority = (int32)roundf(p);
-		if (haikuPriority > (B_URGENT_PRIORITY - 1))
-			haikuPriority = (B_URGENT_PRIORITY - 1);
-	}
-
-	haikuPriority = max_c((int32)THREAD_MIN_SET_PRIORITY, min_c(haikuPriority, (int32)THREAD_MAX_SET_PRIORITY));
-
-	TRACE_SCHED("set_nice_value: T %" B_PRId32 ", nice %d -> haiku_prio %" B_PRId32 "\n",
-		thid, niceValue, haikuPriority);
-
-	return scheduler_set_thread_priority(targetThread, haikuPriority);
-}
 
 
 
-static status_t
-do_set_scheduler_mode(int32 mode)
-{
-	scheduler_mode schedulerMode = static_cast<scheduler_mode>(mode);
-	status_t error = scheduler_set_operation_mode(schedulerMode);
-	if (error == B_OK) {
-		cpu_set_scheduler_mode(schedulerMode);
-	}
-	return error;
-}
 
 
 

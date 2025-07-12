@@ -20,8 +20,13 @@
 #include "scheduler_team.h"
 #include "EevdfRunQueue.h" // Make sure this is included
 
+#include <util/MultiHashTable.h>
+
 
 namespace Scheduler {
+
+BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap = NULL;
+spinlock gIrqTaskAffinityLock = B_SPINLOCK_INITIALIZER;
 
 
 CPUEntry* gCPUEntries;
@@ -1146,7 +1151,7 @@ CoreEntry::UpdateInstantaneousLoad()
 
 
 int32
-CoreEntry::ThreadCount() const
+CoreEntry::ThreadCount()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
@@ -1861,7 +1866,7 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		if ((thid = sIrqTaskAffinityMap->Lookup(irqVector)) != NULL) {
 			affinityLocker.Unlock(); // Unlock early
 
-			Thread* task = thread_get_thread_struct_locked(*thid);
+			Thread* task = Thread::Get(*thid);
 			if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
 				CPUEntry* taskCpuEntry = CPUEntry::GetCPU(task->cpu->cpu_num);
 				if (taskCpuEntry->Core() == targetCore) {

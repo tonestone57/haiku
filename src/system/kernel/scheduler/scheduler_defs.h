@@ -81,6 +81,22 @@ const float kLoadBalanceIntervalDecreaseFactor = 0.75f;
 // Teams with lower quota percentages will have their vruntime advance faster.
 #define TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT 100
 
+
+namespace Scheduler {
+	struct IntHashDefinition {
+		typedef int KeyType;
+		typedef thread_id ValueType;
+		size_t HashKey(int key) const { return (size_t)key; }
+		size_t Hash(thread_id* value) const { return (size_t)*value; }
+		bool Compare(int key, thread_id* value) const { return key == *value; }
+		bool CompareKeys(int key1, int key2) const { return key1 == key2; }
+		thread_id*& GetLink(thread_id* value) const {
+			return *(thread_id**)((addr_t)value - sizeof(thread_id*));
+		}
+	};
+} // namespace Scheduler
+
+
 /*! \enum TeamQuotaExhaustionPolicy
     \brief Defines how threads from a team are treated when its CPU quota is exhausted.
     This policy is tunable via the KDL command `team_quota_policy`.

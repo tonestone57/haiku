@@ -13,10 +13,12 @@
 #include <kscheduler.h>
 #include "scheduler_defs.h"
 #include <load_tracking.h>
+#include "scheduler_defs.h"
 #include <smp.h>
 #include <thread.h>
 #include <user_debugger.h>
 #include <util/MinMaxHeap.h>
+#include <util/MultiHashTable.h>
 
 // #include "RunQueue.h"
 // This file seems to be obsolete or replaced by EevdfRunQueue.h,
@@ -358,6 +360,9 @@ const int32 kMaxLoadForWarmCorePreference = kHighLoad;
 extern bool gSingleCore;
 extern bool gTrackCoreLoad;
 extern bool gTrackCPULoad;
+
+extern BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap;
+extern spinlock gIrqTaskAffinityLock;
 // extern float gKernelKDistFactor; // REMOVED - Unused by EEVDF
 
 // Defined in power_saving.cpp, used by scheduler_thread.cpp for DTQ refinement

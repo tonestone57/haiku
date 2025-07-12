@@ -895,15 +895,14 @@ power_saving_rebalance_irqs(bool idle)
 		consolidationCore->GetLoad() < currentCore->GetLoad() - kLoadDifference) {
 		targetCoreForIRQs = consolidationCore;
 	} else {
-		ReadSpinLocker coreHeapsLocker(gCoreHeapsLock);
-		CoreEntry* candidate = NULL;
-		for (int32 i = 0; (candidate = gCoreLoadHeap.PeekMinimum(i)) != NULL; i++) {
-			if (!candidate->IsDefunct() && candidate != currentCore) { // Use getter
-				targetCoreForIRQs = candidate;
-				break;
+		for (int32 i = 0; i < kNumCoreLoadHeapShards; i++) {
+			ReadSpinLocker coreHeapsLocker(gCoreHeapsShardLock[i]);
+			CoreEntry* candidate = gCoreLoadHeapShards[i].PeekMinimum();
+			if (candidate != NULL && !candidate->IsDefunct() && candidate != currentCore) {
+				if (targetCoreForIRQs == NULL || candidate->GetLoad() < targetCoreForIRQs->GetLoad())
+					targetCoreForIRQs = candidate;
 			}
 		}
-		coreHeapsLocker.Unlock();
 	}
 
 	if (targetCoreForIRQs == NULL || targetCoreForIRQs->IsDefunct() || targetCoreForIRQs == currentCore) return; // Use getter

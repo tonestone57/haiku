@@ -14,6 +14,7 @@
 
 #include <smp.h>
 #include <thread.h>
+#include <smp.h>
 #include <util/AutoLock.h>
 #include <util/Heap.h>
 #include <util/MinMaxHeap.h>

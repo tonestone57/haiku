@@ -25,6 +25,7 @@
 #include <util/DoublyLinkedList.h>
 #include <algorithm>
 #include <math.h> // For roundf, pow
+#include <thread.h>
 
 #include <stdlib.h> // For strtoul
 #include <stdio.h>  // For kprintf, snprintf (though kprintf is kernel specific)
@@ -690,9 +691,9 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 		}
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (cpuContextForUpdate != NULL) {
-			InterruptsSpinLocker queueLocker(cpuContextForUpdate->fQueueLock);
+			cpuContextForUpdate->LockRunQueue();
 			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
-			queueLocker.Unlock();
+			cpuContextForUpdate->UnlockRunQueue();
 			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
 			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
 				|| (system_time() >= threadData->EligibleTime()

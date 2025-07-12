@@ -208,9 +208,9 @@ scheduler_update_global_min_team_vruntime()
 	listLocker.Unlock();
 
 	if (foundAny) {
-		bigtime_t currentGlobalVal = atomic_get64(&gGlobalMinTeamVRuntime);
+		bigtime_t currentGlobalVal = atomic_get64(&Scheduler::gGlobalMinTeamVRuntime);
 		if (calculatedNewGlobalMin > currentGlobalVal) {
-			atomic_set64(&gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
+			atomic_set64(&Scheduler::gGlobalMinTeamVRuntime, calculatedNewGlobalMin);
 			TRACE_SCHED_TEAM("GlobalMinTeamVRuntime updated to %" B_PRId64 "\n", calculatedNewGlobalMin);
 		}
 	}
@@ -1433,7 +1433,7 @@ scheduler_reschedule(int32 nextState)
 						affinityMapLocker.Unlock(); // Correctly unlock inside if
 					}
 
-					if (!isExplicitlyColocated && now >= atomic_load_64(&gIrqLastFollowMoveTime[assignedIrq->irq]) + DYNAMIC_IRQ_MOVE_COOLDOWN) {
+					if (!isExplicitlyColocated && now >= atomic_get64(&gIrqLastFollowMoveTime[assignedIrq->irq]) + DYNAMIC_IRQ_MOVE_COOLDOWN) {
 						irqsToPotentiallyMove[moveCount++] = assignedIrq;
 					}
 				}
@@ -1445,9 +1445,9 @@ scheduler_reschedule(int32 nextState)
 				irq_assignment* irqToMove = irqsToPotentiallyMove[i];
 				CPUEntry* altCPU = _find_quiet_alternative_cpu_for_irq(irqToMove, currentCpuEntry);
 				if (altCPU != NULL) {
-					bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqToMove->irq]);
+					bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
 					if (now >= lastRecordedMoveTime + DYNAMIC_IRQ_MOVE_COOLDOWN) {
-						if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], lastRecordedMoveTime, now)) {
+						if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
 							TRACE_SCHED_IRQ_DYNAMIC("Resched (wrapper): Moving IRQ %d (load %d) from CPU %d to altCPU %d for T%" B_PRId32 "\n",
 								irqToMove->irq, irqToMove->load, thisCPUId, altCPU->ID(), nextThread->id);
 							assign_io_interrupt_to_cpu(irqToMove->irq, altCPU->ID());
@@ -2228,10 +2228,10 @@ scheduler_irq_balance_event(timer* /* unused */)
 				bigtime_t now = system_time();
 				bigtime_t cooldownToRespect = kIrqFollowTaskCooldownPeriod;
 				bool proceedWithMove = false;
-				bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqToMove->irq]);
+				bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
 
 				if (now >= lastRecordedMoveTime + cooldownToRespect) {
-					if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], lastRecordedMoveTime, now)) {
+					if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
 						proceedWithMove = true;
 					} else {
 						TRACE_SCHED_IRQ("Periodic IRQ Balance: CAS failed for IRQ %d, move deferred due to concurrent update.\n", irqToMove->irq);
@@ -2985,10 +2985,10 @@ scheduler_maybe_follow_task_irqs(thread_id migratedThreadId,
 
 		bigtime_t now = system_time();
 		bool proceedWithMove = false;
-		bigtime_t lastRecordedMoveTime = atomic_load_64(&gIrqLastFollowMoveTime[irqVector]);
+		bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqVector]);
 
 		if (now >= lastRecordedMoveTime + kIrqFollowTaskCooldownPeriod) {
-			if (atomic_compare_and_swap64((volatile int64*)&gIrqLastFollowMoveTime[irqVector], lastRecordedMoveTime, now)) {
+			if (atomic_test_and_set64((volatile int64*)&gIrqLastFollowMoveTime[irqVector], now, lastRecordedMoveTime)) {
 				proceedWithMove = true;
 				TRACE_SCHED_IRQ("FollowTask: IRQ %" B_PRId32 " for T %" B_PRId32
 					" - Cooldown passed, CAS successful (old_ts %" B_PRId64 ", new_ts %" B_PRId64 "). Allowing move from CPU %" B_PRId32 " to %" B_PRId32 ".\n",

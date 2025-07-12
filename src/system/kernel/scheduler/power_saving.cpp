@@ -119,7 +119,7 @@ calculate_adaptive_hysteresis_margin(CoreEntry* currentSTC, CoreEntry* candidate
 #define PS_STC_SCORE_BONUS_LITTLE (kMaxLoad * 1)    // Prefer LITTLE cores
 #define PS_STC_SCORE_PENALTY_BIG (kMaxLoad / 2)     // Penalize BIG cores
 
-static CoreEntry*
+CoreEntry*
 power_saving_designate_consolidation_core(const CPUSet* affinityMaskPtr)
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -446,7 +446,7 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 }
 
 
-static void
+void
 power_saving_switch_to_mode()
 {
 	// gKernelKDistFactor = 0.5f; // REMOVED - Unused by EEVDF
@@ -463,7 +463,7 @@ power_saving_switch_to_mode()
 }
 
 
-static void
+void
 power_saving_set_cpu_enabled(int32 cpuID, bool enabled)
 {
 	CoreEntry* stcBeforeCheck = Scheduler::sSmallTaskCore;
@@ -493,7 +493,7 @@ power_saving_set_cpu_enabled(int32 cpuID, bool enabled)
 }
 
 
-static bool
+bool
 power_saving_has_cache_expired(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -568,6 +568,11 @@ power_saving_has_cache_expired(const ThreadData* threadData)
 #define PS_SCORE_CACHE_AFFINITY_BONUS (200) // Cache less critical than STC/type
 #define PS_SCORE_STC_BONUS (5000)       // Very strong bonus for STC
 
+static CoreEntry* power_saving_attempt_proactive_stc_designation()
+{
+	return NULL;
+}
+
 // Define weights for Power Saving mode
 #define W_M1_PS (1.0f)  // Core Type Match
 #define W_M2_PS (0.8f)  // Capacity Adequacy (packing)
@@ -575,7 +580,7 @@ power_saving_has_cache_expired(const ThreadData* threadData)
 #define W_M4_PS (0.5f)  // Cache Affinity
 #define W_M5_PS (1.0f)  // STC Preference
 
-static CoreEntry*
+CoreEntry*
 power_saving_choose_core(const ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -823,7 +828,7 @@ power_saving_choose_core(const ThreadData* threadData)
 
 
 
-static void
+void
 power_saving_rebalance_irqs(bool idle)
 {
 	SCHEDULER_ENTER_FUNCTION();

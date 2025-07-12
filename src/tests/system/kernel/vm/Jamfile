@@ -17,3 +17,5 @@ SimpleTest resize_area_tests : resize_area_tests.cpp ;
 SimpleTest transfer_area_test : transfer_area_test.cpp ;
 
 SimpleTest set_area_protection_test1 : set_area_protection_test1.cpp ;
+
+SimpleTest VMStressTest : VMStressTest.cpp ;

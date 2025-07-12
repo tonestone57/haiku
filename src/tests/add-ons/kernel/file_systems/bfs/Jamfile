@@ -15,3 +15,7 @@ SubInclude HAIKU_TOP src tests add-ons kernel file_systems bfs dump_log ;
 SubInclude HAIKU_TOP src tests add-ons kernel file_systems bfs fragmenter ;
 SubInclude HAIKU_TOP src tests add-ons kernel file_systems bfs queries ;
 SubInclude HAIKU_TOP src tests add-ons kernel file_systems bfs structureSizes ;
+
+SimpleTest BfsStressTest : BfsStressTest.cpp ;
+
+SimpleTest BfsStressTest : BfsStressTest.cpp ;

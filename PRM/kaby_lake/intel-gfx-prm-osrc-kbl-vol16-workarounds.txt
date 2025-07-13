@@ -1,0 +1,1266 @@
+Intel® Open Source HD Graphics and Intel Iris™ Plus Graphics
+
+
+Programmer's Reference Manual
+
+
+For the 2016 - 2017 Intel Core™ Processors, Celeron™ Processors,
+and Pentium™ Processors based on the "Kaby Lake" Platform
+
+Volume 16: Workarounds
+
+January 2017, Revision 1.0
+Creative Commons License
+You are free to Share - to copy, distribute, display, and perform the work under the following
+conditions:
+
+      Attribution. You must attribute the work in the manner specified by the author or licensor (but
+       not in any way that suggests that they endorse you or your use of the work).
+      No Derivative Works. You may not alter, transform, or build upon this work.
+
+Notices and Disclaimers
+INFORMATION IN THIS DOCUMENT IS PROVIDED IN CONNECTION WITH INTEL® PRODUCTS. NO
+LICENSE, EXPRESS OR IMPLIED, BY ESTOPPEL OR OTHERWISE, TO ANY INTELLECTUAL PROPERTY RIGHTS
+IS GRANTED BY THIS DOCUMENT. EXCEPT AS PROVIDED IN INTEL'S TERMS AND CONDITIONS OF SALE
+FOR SUCH PRODUCTS, INTEL ASSUMES NO LIABILITY WHATSOEVER AND INTEL DISCLAIMS ANY
+EXPRESS OR IMPLIED WARRANTY, RELATING TO SALE AND/OR USE OF INTEL PRODUCTS INCLUDING
+LIABILITY OR WARRANTIES RELATING TO FITNESS FOR A PARTICULAR PURPOSE, MERCHANTABILITY, OR
+INFRINGEMENT OF ANY PATENT, COPYRIGHT OR OTHER INTELLECTUAL PROPERTY RIGHT.
+A "Mission Critical Application" is any application in which failure of the Intel Product could result,
+directly or indirectly, in personal injury or death. SHOULD YOU PURCHASE OR USE INTEL'S PRODUCTS
+FOR ANY SUCH MISSION CRITICAL APPLICATION, YOU SHALL INDEMNIFY AND HOLD INTEL AND ITS
+SUBSIDIARIES, SUBCONTRACTORS AND AFFILIATES, AND THE DIRECTORS, OFFICERS, AND EMPLOYEES
+OF EACH, HARMLESS AGAINST ALL CLAIMS COSTS, DAMAGES, AND EXPENSES AND REASONABLE
+ATTORNEYS' FEES ARISING OUT OF, DIRECTLY OR INDIRECTLY, ANY CLAIM OF PRODUCT LIABILITY,
+PERSONAL INJURY, OR DEATH ARISING IN ANY WAY OUT OF SUCH MISSION CRITICAL APPLICATION,
+WHETHER OR NOT INTEL OR ITS SUBCONTRACTOR WAS NEGLIGENT IN THE DESIGN, MANUFACTURE,
+OR WARNING OF THE INTEL PRODUCT OR ANY OF ITS PARTS.
+Intel may make changes to specifications and product descriptions at any time, without notice. Designers
+must not rely on the absence or characteristics of any features or instructions marked "reserved" or
+"undefined". Intel reserves these for future definition and shall have no responsibility whatsoever for
+conflicts or incompatibilities arising from future changes to them. The information here is subject to
+change without notice. Do not finalize a design with this information.
+The products described in this document may contain design defects or errors known as errata which
+may cause the product to deviate from published specifications. Current characterized errata are
+available on request.
+Implementations of the I2C bus/protocol may require licenses from various entities, including Philips
+Electronics N.V. and North American Philips Corporation.
+Intel and the Intel logo are trademarks of Intel Corporation in the U.S. and other countries.
+* Other names and brands may be claimed as the property of others.
+Copyright © 2017, Intel Corporation. All rights reserved.
+
+
+
+ii                                                                       Doc Ref # IHD-OS-KBL-Vol 16-1.17
+ Workarounds
+
+
+
+
+Table of Contents
+Workarounds ................................................................................................................................... 1
+Display Workarounds ...................................................................................................................19
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                                                                                    iii
+Workarounds
+
+
+
+Workarounds
+This page lists all BSpec narrative workarounds for Gen9 (SKL/BXT/GLK/GLV). Note that the functional area for each item is listed
+below, so you can search on this value or other content on this page. Also note that a "BSpec ID" has been assigned to make it easier
+to reference these items.
+               Functional                                                                                                         Valid
+BSpec ID    Area/Component                         Workaround Name                         Workaround Description               Steppings
+0538       KMD                     WaSkipStolenMemoryFirstPage                        WA to skip the first page of stolen
+                                                                                                                          KBL:
+                                                                                      memory due to sporadic HW write on
+                                                                                                                          SIWA_UNTIL_B0
+                                                                                      *CS Idle
+0550       KMD                     WaForceEnableNonCoherent                           Must Force Non-Coherent whenever        KBL: UNTIL_D0
+                                                                                      executing a 3D context. This is a
+                                                                                      workaround for a possible hang in
+                                                                                      the unlikely event a TLB invalidation
+                                                                                      occurs during a PSD flush. Set
+                                                                                      masked bit 4 in 0x7300 during boot.
+0551       KMD                     WaDisableMidThreadPreempt                          Disable GPGPU thread-level (a.k.a.
+                                                                                                                              KBL:
+                                                                                      mid-thread) preemption on parts
+                                                                                                                              SIWA_FOREVER
+                                                                                      (until B0) since validation was minimal
+                                                                                      on those parts.
+0556       KMD                     Wa4x4STCOptimizationDisable                        HIZ/STC hang in hawx frames.            SIWA_FOREVER
+                                                                                       W/A: Disable 4x4 RCPFE-STC
+                                                                                      optimization and therefore only send
+                                                                                      one valid 4x4 to STC on 4x4 interface.
+                                                                                      This will require setting bit 6 of reg.
+                                                                                      0x7004. Must be done at boot and all
+                                                                                      save/restore paths.
+0566       KMD                     WaModifyVFEStateAfterGPGPUPreemption               GPGPU preemption hang or
+                                                                                                                              KBL:
+                                                                                      corruption issue. This WA must be
+                                                                                                                              SIWA_UNTIL_D
+                                                                                      applied before re-submitting a
+                                                                                                                              0
+                                                                                      GPGPU preempted workload. SW
+                                                                                      needs to do two things.
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                                      1
+                                                               Workarounds
+
+
+
+              Functional                                                                                 Valid
+BSpec ID   Area/Component   Workaround Name                          Workaround Description            Steppings
+
+                                                                1.   SW should detect if VFE unit in
+                                                                     the context image have LRI
+                                                                     commands to 0x54AC and
+                                                                     0x54B0. SW does that by
+                                                                     checking if the LRI header at
+                                                                     context image offste (0x0E90)
+                                                                     <in VFE> is 0x11001003 and
+                                                                     the two MMIO offsets in this
+                                                                     LRI is 0x54AC and 0x54B0. If
+                                                                     so, do this-
+                                                                      D0 (LRI header): 0x1100_1003
+                                                                     -> 0x1100_ 1001
+                                                                      D1 (1st MMIO offset):
+                                                                     0x0000_54AC -> Leave this
+                                                                     dword untouched
+                                                                      D2 (1st MMIO offset value):
+                                                                     54AC_DATA -> Leave this
+                                                                     dword untouched
+                                                                      D3 (2nd MMIO offset):
+                                                                     0x0000_54B0 -> Overwrite to
+                                                                     0x0
+                                                                      D4 (2nd MMIO offset value):
+                                                                     54B0_DATA -> Overwrite to
+                                                                     0x0
+                                                                2.   Apart from it SW must also
+                                                                     increment the Batch Buffer
+                                                                     Address by Walker Command
+                                                                     Length so that CS moves to
+                                                                     the command following it. Size
+                                                                     of Walker should be 0xF *
+
+
+2                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                                                      Valid
+BSpec ID    Area/Component                         Workaround Name                    Workaround Description                 Steppings
+                                                                                       sizeof(DWORD) = 0x3C Bytes
+
+           KMD    RTL              WaFlushCoherentL3CacheLinesAtContextSwitch   Coherent L3 cache lines are not       SIWA_FOREVER
+0572
+                                                                                getting flushed during context switch
+                                                                                which is causing issues like
+                                                                                corruption. Need to set bit 21 of
+                                                                                MMIO b118, then send PC with DC
+                                                                                flush and then reset bit 21 of b118.
+                                                                                This programming sequence needs to
+                                                                                be part of the indirect context WA BB
+0574       KMD                     WaDisableSDEUnitClockGating                  WA for GPGPU workload hang for             KBL:
+                                                                                which requirement is to disable SDE        SIWA_UNTIL_B0
+                                                                                Unit clock gating. This is done by
+                                                                                setting bit 14 of MMIO 9430.
+0581       KMD                     WaSetVfGuardbandPreemptionVertexCount        Workaround for potential 3d              KBL:
+                                                                                preemption bug that can cause data SIWA_UNTIL_B0
+                                                                                corruption. Driver should write to
+                                                                                register 0x83A4 (preemption vertex
+                                                                                count) and set a value of 0x20. At
+                                                                                boot, write 0xffff0020 to 0x83a4 (it’s a
+                                                                                masked register).
+0590       KMD                     WaSkipInvalidSubmitsFromOS                   For Invalid submits from OS - simply       SIWA_FOREVER
+                                                                                report fence completion without
+                                                                                submitting the DMA buffer to GPU.
+0592       3D                      SKL_Z_16X_ALIGNMENT                          TileY cannot be used for MSAA 8x or
+                                                                                16x with multiple MIP levels. The
+                                                                                fallback is to use TileYF. Tile YS would
+                                                                                also be suitable.
+0673       3D                      WaStallBeforePostSyncOpOnGPGPU                                                          SIWA_FOREVER
+                                                                                Preemption mid-thread focused test
+                                                                                failures.
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                                 3
+                                                               Workarounds
+
+
+
+              Functional                                                                            Valid
+BSpec ID   Area/Component   Workaround Name                        Workaround Description         Steppings
+                                                             WA:
+                                                             PIPECONTROL command with
+                                                             “Command Streamer Stall
+                                                             Enable”must be programmed prior to
+                                                             programming
+                                                             MI_SEMAPHORE_SIGNAL command
+                                                             with Post-Sync Operation set in
+                                                             GPGPU mode of operation (i.e when
+                                                             PIPELINE_SELECT command is set to
+                                                             GPGPU mode of operation).
+                                                             PIPECONTROL command with
+                                                             “Command Streamer Stall
+                                                             Enable”must be programmed prior to
+                                                             programming MI_ATOMIC command
+                                                             with Post-Sync Operation set in
+                                                             GPGPU mode of operation (i.e when
+                                                             PIPELINE_SELECT command is set to
+                                                             GPGPU mode of operation).
+                                                             PIPECONTROL command with
+                                                             “Command Streamer Stall
+                                                             Enable”must be programmed prior to
+                                                             programming a PIPECONTROL
+                                                             command with Post Sync Op in
+                                                             GPGPU mode of operation (i.e when
+                                                             PIPELINE_SELECT command is set to
+                                                             GPGPU mode of operation).
+
+
+
+
+4                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                                                        Valid
+BSpec ID    Area/Component                         Workaround Name                          Workaround Description             Steppings
+0675       3D                      WaFlushBefore3DSTATEGS                              GS_SIMD8_OTHANDLE_RELAX test          SIWA_FOREVER
+                                                                                       hanging due to an issue in gs_trg
+                                                                                       clock gating logic.
+                                                                                        WA: Add state_osb_statedv into
+                                                                                       trg_cg equation.
+0677       3D                      WaDisableLosslessCompressionForSampleL              Sampler Throughput drop with          SIWA_FOREVER
+                                                                                       lossless enabled for 0% & 50%,
+                                                                                       compression tests with 100%bypass.
+                                                                                        WA: Disabe double-fetch.
+0680       3D                      WaDisableSamplerL2BypassForTextureCompressedForma RTL DM producing Xs for SC output.      SIWA_FOREVER
+                                   ts                                                 WA: Disable Bypass on some of the
+                                                                                     compressed formats.
+0681       3D                      WaCompressedResourceSamplerPbeMediaNewHashMod BXT GFXDRV: Hot spotting issue with         KBL:SIWA_FORE
+                                   e                                             render target compression.                  VER
+                                                                                  WA: Align lossless compressed
+                                                                                 resource allocations to 2MB or have
+                                                                                 fixed virtual addresses. This WA is
+                                                                                 specifically for steppings where HW
+                                                                                 will not fix.
+0683       3D                      WaCompressedResourceDisplayNewHashMode              BXT GFXDRV: Hot spotting issue with   KBL:SIWA_FORE
+                                                                                       render target compression.            VER
+                                                                                        WA: Align lossless compressed
+                                                                                       resource allocations to 2MB or have
+                                                                                       fixed virtual addresses. This WA is
+                                                                                       specifically for steppings where HW
+                                                                                       will not fix.
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                                       5
+                                                                                       Workarounds
+
+
+
+               Functional                                                                                                        Valid
+BSpec ID    Area/Component                    Workaround Name                             Workaround Description               Steppings
+0689       3D                WaPipeControlBeforeVFCacheInvalidationEnable            Vf randomly decodes nullprim            SIWA_FOREVER
+                                                                                     packets as state packets causing
+                                                                                     illegal internal states in it.
+                                                                                      WA: B2B control packets to be sent
+                                                                                     when VS_cache_enable is
+                                                                                     programmed to be enabled. First
+                                                                                     control packet with bit11 as '0' and
+                                                                                     the next control packet with bit11 as
+                                                                                     '1'.
+0693       3D                WaEnableTiledResourceTranslationTables                  Support for Sparse Tiled Resources      KBL:SIWA_FORE
+                                                                                     under SVM                               VER
+0695       3D                WaIndependentAlphaBlend                                 GFX SV: optHizClear test                KBL:SIWA_FORE
+                                                                                     miscompares in B0 silicon.              VER
+                                                                                      WA: Fixed optimization case for
+                                                                                     independent alpha to look at src
+                                                                                     values for RGB and Alpha values
+                                                                                     separately. Fixed the src0dest1 case
+                                                                                     for alpha component to look at
+                                                                                     src_alpha_is_zero instead of
+                                                                                     src_is_zero.
+0696       3D                WaBindlessSurfaceStateModifyEnable                      Missing "Size Modify Enable" Bit For SIWA_FOREVER
+                                                                                     Bindless Sizes in
+                                                                                     STATE_BASE_ADDRESS.
+                                                                                      WA: The suggested WA is that when
+                                                                                     NOT setting the modify enable bit for
+                                                                                     Bindless Surface State Base Address,
+                                                                                     program the dword length to
+                                                                                     “Eh”instead of “11h”and zero out the
+                                                                                     last 3 DW or not send them.
+
+
+
+
+6                                                                     Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                                              Valid
+BSpec ID    Area/Component                          Workaround Name             Workaround Description               Steppings
+0699       3D                      WaAtomicFlushOnInterfaceDescriptor      GPGPU Preemption - Hang on Barrier
+                                                                                                                 KBL:SIWA_FORE
+                                                                            WA: VFE need to make sure that all
+                                                                                                                 VER
+                                                                           previous indirect prefetches are done
+                                                                           after VFE state command.
+                                                                           MI_ATOMIC_FLUSH need to be
+                                                                           programmed between ID load
+                                                                           commands or curbe load commands
+                                                                           if it back to back.
+0701       3D                      WaStructuredBufferAsRawBufferOverride   BSpec restricts Data Port access using KBL:SIWA_FORE
+                                                                           Untyped Surface Read/Write to RAW VER
+                                                                           surface format only.
+                                                                            WA: Raw format support added in
+                                                                           svsmunit.
+0702       3D                                                              False Inexact IEEE flag set by SP to UQ
+                                                                           mov.
+                                                                            WA: Cannot use flags with float2int
+                                                                           convertion with non-RTZ rounding
+                                                                           mode.
+0714       Media VTQ                                                       Trellis quantization performance        KBL A0
+                                                                           improvements introduced a bug. The
+                                                                           bug results in Hang condition when
+                                                                           Chroma Trellis is disabled and Trellis
+                                                                           is enabled. The bug is fixed in KBL B0.
+0744       3D                      WaDisableRTReadsfor1DSurfaces           Failing to implement the following
+                                                                                                                 KBL:SIWA_A0
+                                                                           WA will lead to pixel corruptions due
+                                                                           to accesses to
+                                                                            WA :
+                                                                            If RenderSurfaceState::Surface Type
+                                                                           == SURFTYPE_1D, SW must ensure
+                                                                           that Pixel Shaders do not generate RT
+                                                                           reads.
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                            7
+                                                                                 Workarounds
+
+
+
+               Functional                                                                                                   Valid
+BSpec ID    Area/Component                  Workaround Name                         Workaround Description                Steppings
+0752       3D                WaSamplerResponseLengthMustBeGreaterThan1         Dcs_pwc_rc signal is not set when    KBL:SIWA_FRO
+                                                                               notify clear comes out of phase      M_A0
+                                                                                WA: disable MMIO reads from GW &
+                                                                               all sampler sends in GPGPU
+                                                                               workloads with response length of 1.
+0756       Media HEVC                                                          VP9 Decoder 8Kx8K SV test failing        KBL:SIWA_FRO
+                                                                               with miscompare at 2nd frame.            M:A0
+                                                                                WA: Frame size supported in BXT is
+                                                                               4Kx4K.
+0827                                                                           Moved to Display Workaround page
+0828                                                                           Moved to Display Workaround page
+0831       KMD               WaDisableSamplerPowerBypassForSOPingPong                                                KBL:
+                                                                               SI can get stuck ping ponging rows in
+                                                                                                                     SIWA_FOREVER
+                                                                               a 2-2-2 fashion instead of 1-1-1
+                                                                               leading to a ~3% performance
+                                                                               reduction.
+                                                                               WA: Disable sampler power bypass to
+                                                                               avoid negatively impacting SO 'ping-
+                                                                               pong' performance.
+
+0837       GAM               WaSpuriousIOMMUFaults                                                                      KBL:ALL
+                                                                               GT GAM HW prefetches context (or
+                                                                               extended context) entry when a
+                                                                               context is loaded, root pointer is
+                                                                               updated or when there is a context
+                                                                               cache flush. This prefetch happens
+                                                                               without a memory transaction from
+                                                                               the context. On this prefetch, if the
+                                                                               context entry is a NULL (P=0), HW will
+                                                                               generate a fault – invalid context
+                                                                               entry. However, it is legal to have a
+                                                                               NULL context entry, as long as no
+
+8                                                               Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                        Valid
+BSpec ID    Area/Component         Workaround Name         Workaround Description              Steppings
+                                                     memory references are done via that
+                                                     context entry.
+                                                     WA: To avoid these spurious DMA
+                                                     faults, SW should mark the context
+                                                     entry as present (not a NULL entry),
+                                                     and mark the page tables as not
+                                                     present.
+
+0838       GTI                                                                               KBL:ALL
+                                                     MGSR hang when MsgCh cycle
+                                                     arrives a couple clocks after IOSF SB
+                                                     shadow request.
+                                                     This is being brought up into the SW
+                                                     WA section for completeness.
+                                                     0xD00[3:1] already indicate that bits
+                                                     should be set by SW.
+                                                     WA: Enable 0x0D00[3:1] fixes in SW
+                                                     for all Gen9 products.
+
+0851                                                 Moved to Display Workaround page
+0852                                                 Moved to Display Workaround page
+0856                                                 Moved to Display Workaround page
+0857                                                 Moved to Display Workaround page
+0858       3D     Sampler                            CSS AUX surfaces must not be on         KBL:SIWA_UNTI
+                                                     pages that can fault.                   L_D1
+0859                                                 Moved to Display Workaround page
+0860       GTI    GAM                                                                        KBL:A0,B0
+                                                     When only the coherent flush FSM
+                                                     and HDC invalidation FSMs are active,
+                                                     GAM can turn off the clocks after
+                                                     receiving COH flush done even if HDC
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                      9
+                                                                Workarounds
+
+
+
+               Functional                                                                                   Valid
+BSpec ID    Area/Component   Workaround Name                        Workaround Description                Steppings
+                                                              FSM is active. This can cause
+                                                              invalidation end to not be sent to
+                                                              HDC after HDC FSM completes.
+                                                              WA: Turn off GAM clock gating by
+                                                              setting
+                                                               0x9400[22] to '1
+
+0864       GTI   GAM                                                                                    KBL:A0/B0
+                                                              When only the coherent flush FSM
+                                                              and HDC invalidation FSMs are active,
+                                                              GAM can turn off the clocks after
+                                                              receiving COH flush done even if HDC
+                                                              FSM is active. This can cause
+                                                              invalidation end to not be sent to
+                                                              HDC after HDC FSM completes.
+                                                              WA: Turn off GAM clock gating by
+                                                              setting
+                                                               0x9400[22] to '1
+0865       GTI   GAM                                                                                    KBL:A0/B0
+                                                              The dynamic credit sharing between
+                                                              engines has an issue which can cause
+                                                              the credits to be lost. When sufficient
+                                                              credits are lost the BW through GAM
+                                                              can get severely limited and can
+                                                              eventually block all the transactions
+                                                              and hang.
+                                                              WA: Turn off dynamic credit sharing
+                                                              by setting
+                                                              0x4AB8[28] to '1
+
+
+
+10                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                          Valid
+BSpec ID    Area/Component         Workaround Name         Workaround Description                Steppings
+0866       GTI    GAM                                Issue here is with QBI and GFXIDLE -      KBL:A0/B0
+                                                     If QBI is in progress and we get
+                                                     GFXIDLE, it will be ACKED and it will
+                                                     make CTX inactive. Once CTX will go
+                                                     inactive it will make all pasid/ctxid
+                                                     match flags zero which is one of the
+                                                     condition for generating hdc_end for
+                                                     QBI. QBI will end but HD will not see
+                                                     end due to this Flag.
+                                                     WA:
+                                                     CS to send invalidation to GAM
+                                                     before indicating IDLE, GAM can
+                                                     handle future QBI’s without involving
+                                                     HDC and this bug wont be exposed.
+                                                     Insert Pipecontrol with invalidation
+                                                     flag set at the end of the ring, batch.
+                                                     Same is required while pre-empting
+                                                     the existing WL.
+
+
+
+
+0867       GTI    GAM                                                                          KBL:ALL
+                                                     When HDC/EUs are set to Faul&Halt
+                                                     mode, the commit interface between
+                                                     HDC and EUs are disabled. If
+                                                     coherency is enabled, we can have
+                                                     coherent cycles in the fabric when an
+                                                     external invalidation arrives, and can
+                                                     lead into the GAM coherent deadlock
+                                                     scenario if GAM resources are full.
+                                                     GAM deadlock coherent_flush will
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                     11
+                                                                Workarounds
+
+
+
+               Functional                                                                                    Valid
+BSpec ID    Area/Component   Workaround Name                        Workaround Description                 Steppings
+                                                              kick in to resolve the deadlock.
+                                                              However, this requires EUs to re-
+                                                              dispatch the coherent cycles that
+                                                              were killed. If HDC/EU are in
+                                                              Fault&Halt mode, this re-start is not
+                                                              possible from the EUs.
+                                                              Do not use Fault&Halt as the fault
+                                                              mode in HDC/EU
+
+0868                                                          Moved to Display Workaround page
+0870                                                          Moved to Display Workaround page
+0871                                                          Moved to Display Workaround page
+0872       3D    CS                                                                                      KBL:ALL (except
+                                                              Global Workaround Batch Buffer will
+                                                                                                         GT4)
+                                                              not execute when enabled and
+                                                              Execution List mode is enabled.
+                                                              WA: Do not enable Global WABB
+                                                              when in Execution List mode.
+
+0873                                                          Moved to Display Workaround page
+0875       GTI   GAM                                          When there is a TLB invalidation with      KBL:A0/B0
+                                                              a Fence,
+                                                              GAM blocks the arbiters to drain the
+                                                              fabric for the Fence. Once the fabric is
+                                                              drained, the TLBs are invalidated, as
+                                                              well as a HDC TLB invalidation
+                                                              request is sent to the HDC. GAM
+                                                              expects an ack for this from HDC. If
+                                                              there are cycles in HDC that has
+                                                              already used the address translations,
+                                                              they need to be drained from HDC
+
+12                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                        Valid
+BSpec ID    Area/Component         Workaround Name          Workaround Description             Steppings
+                                                     before it can send the Ack. GAM is
+                                                     supposed to unblock the arbiters at
+                                                     this stage to allow for these cycles to
+                                                     drain. However, when TRTT is
+                                                     enabled, the arbiter is GATR does not
+                                                     get unblocked until the HDC inval
+                                                     Ack is completed. This causes a
+                                                     deadlock where HDC cannot send the
+                                                     Ack as there are cycles that needs to
+                                                     drain.
+                                                     In general when CS issues a Fence
+                                                     Inval, there should not be any
+                                                     pending cycles in HDC if a CS stall is
+                                                     put in before and after the fence
+                                                     inval. However, in the case of lite
+                                                     restore, Fence Inval can happen
+                                                     asynchronously, potentially leaving
+                                                     pending cycles.
+                                                     The WAs for this issue are:
+                                                       1.   Disable TRTT – so the fabric
+                                                            does not continue to get
+                                                            blocked in GATR after the
+                                                            fence
+                                                       2.   Disable lite restore – so we do
+                                                            not have asynchronous fence
+                                                            inval events. Also need to have
+                                                            a CS stall before and after CS
+                                                            fence inval.
+
+                                                     SW is planning on having both Was
+                                                     available, and #1 as the default.
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                     13
+                                                                                 Workarounds
+
+
+
+               Functional                                                                                                 Valid
+BSpec ID    Area/Component                  Workaround Name                         Workaround Description              Steppings
+0876       GTI   CS          WaForceCsStallOnTimestampQueryOrDepthCount
+                                                                               Due to known HW issue specific to      KBL:GT4 (all
+                                                                               GT4; on a specific incident (few HW    GT4 SKU's)
+                                                                               events must happens on the same
+                                                                               clock under certain programming
+                                                                               conditions) address, data and control
+                                                                               fields corresponding to a
+                                                                               PIPECONTROL command will get
+                                                                               registered wrongly in hardware.
+                                                                               Following this incident Fence Reports,
+                                                                               Depth Statistic Report (Occlusion
+                                                                               Query) and time_stamp reports will
+                                                                               get corrupted leading to
+                                                                               OS/KMD/UMD hangs.
+                                                                               Workaround (option-1):
+                                                                               PIEPCONTROL command
+                                                                               programmed with “Post Sync
+                                                                               Operation” set to “Write Timestamp”
+                                                                               or “Write Depth Query” must also set
+                                                                               “Command Streamer stall Enable” to
+                                                                               ‘1’.
+                                                                               Workaround (option-2):
+                                                                               Software must memorize the event of
+                                                                               programming “Post Sync Operation”
+                                                                               set to “Write Timestamp” or “Write
+                                                                               Depth Query” and must set
+                                                                               “Pipecontrol Flush Enable” on next
+                                                                               PIPECONTROL programmed.
+                                                                               Note: Since the passing on the
+                                                                               memorized event between UMD and
+
+
+14                                                              Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                                      Valid
+BSpec ID    Area/Component                       Workaround Name        Workaround Description               Steppings
+                                                                   KMD (ring buffer and batch buffer) is
+                                                                   difficult, one way it could be
+                                                                   addressed in following way.
+                                                                   KMD must always program the first
+                                                                   PIPECONTROL being programmed in
+                                                                   the ringbuffer following the
+                                                                   MI_BATCH_BUFFER_START with
+                                                                   “Pipecontrol Flush Enable” set. KMD
+                                                                   must always program PIPECONTROL
+                                                                   with “Pipecontrol Flush Enable” set
+                                                                   prior to programming
+                                                                   MI_BATCH_BUFFER_START in the ring
+                                                                   buffer. OR
+                                                                   UMD must always program the first
+                                                                   PIPECONTROL in the batch buffer
+                                                                   with “Pipecontrol Flush Enable” set
+                                                                   and must always program the last
+                                                                   command in every dispatch of the
+                                                                   batch buffer to a PIPECONTROL with
+                                                                   “Pipecontrol Flush Enable” set.
+
+0877       3D     Pixel Shader     WaSendDummyConstantsForPS                                               KBL:ALL
+                                                                   Hang possible when pixel shader
+                                                                   dispatched with only header phases
+                                                                   (R0-R2)
+                                                                   WA: Enable a non-header phase (e.g.
+                                                                   push constant) when dispatch would
+                                                                   have been header-only.
+
+0880                                                               Moved to Display Workaround page
+0881                                                               Moved to Display Workaround page
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                  15
+                                                                                       Workarounds
+
+
+
+                Functional                                                                                                       Valid
+BSpec ID     Area/Component                         Workaround Name                        Workaround Description              Steppings
+0883                                                                                 Moved to Display Workaround page
+0884                                                                                 Moved to Display Workaround page
+0889                                                                                 Moved to Display Workaround page
+0890                                                                                 Moved to Display Workaround page
+0893                                                                                 Moved to Display Workaround page
+0898       Media                                                                     WA: In encoder mode, create tiles       KBL:ALL
+                                                                                     either in horizontal or vertical
+                                                                                     direction but not in both directions.
+0908       SFC     SFC Crop         WaDisableSFCSrcCrop
+                                                                                     Below are the cases to switch from      KBL A0
+                   Limitation for
+                                                                                     SFC to Render for VEBOX+SFC mode
+                   VEBOX+SFC
+                   Mode                                                              Case 1. ((SurfaceHeight > 1120) &&
+                                                                                     (Top > 1120))
+                                                                                     Case 2. ((SurfaceHeight > 1120) &&
+                                                                                     (Bottom < SurfaceHeight))
+                                                                                     Case 3. ((SurfaceHeight > 1120) &&
+                                                                                     (Left > 0))
+                                                                                      Case 4. ((SurfaceHeight > 1120) &&
+                                                                                     (Right < SurfaceWidth))
+0909       GS      Peter Doyle                                                       GS Clock gating must be disabled
+                                                                                                                             KBL: ALL
+           PrimID                                                                    under the following conditions:
+           bug                                                                       Tessellation enabled, GS enabled, GS
+           with                                                                      PrimitiveID enabled.
+           Tessell
+           ation
+
+
+
+
+16                                                                    Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+               Functional                                                                           Valid
+BSpec ID    Area/Component         Workaround Name         Workaround Description                 Steppings
+0910       GAM    Niran Cooray
+                                                     When DINVE=0 in the ext context            KBL:UNTIL_GT2:
+                                                     entry PASID state table is not used.       A0-C0
+                                                     But, HW reads the PASIDSTPTR from
+                                                                                                KBL:UNTIL_GT3:
+                                                     the context entry and goes through
+                                                                                                D0
+                                                     SL translations, if NESTE is enabled. If
+                                                     the SL translation returns invalid, all    KBL:UNTIL_GT4:
+                                                     transactions from that engine is           E0
+                                                     considered invalid.
+                                                     WA: Have a valid GPA for the
+                                                     PASIDSTPTR which has a valid GPA-
+                                                     >HPA mapping in the SL tables. This
+                                                     SL translation need to have R=W=1
+                                                     permissions
+
+0915       HDC    Atomic
+                                                     Hang occurs with Atomic Counter            KBL:ALL
+                  Counter
+                                                     message with binary operations (i.e.
+                                                     have a separate data operand), in
+                                                     some dynamic load situations.
+                                                     WA: Replace use of hidden counter
+                                                     with an explicit counter location, and
+                                                     then use a typed or untyped Dword
+                                                     Atomic operation message instead.
+
+0917       GTI    GAM                                                                           KBL: UNTIL_F0
+                                                     Reset of an engine (non render) does
+                                                     not complete when there is a
+                                                     continuous stream of traffic comes
+                                                     from another engine. Another flavor
+                                                     of this issue is with VEBox, where
+                                                     VEBox reset does not complete when
+                                                     there's continuous polling happening
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                     17
+                                                               Workarounds
+
+
+
+              Functional                                                                                 Valid
+BSpec ID   Area/Component   Workaround Name                        Workaround Description              Steppings
+                                                             from VECS. The second flavor is seen
+                                                             with MI_SEMAPHORE_WAIT.
+                                                             WA:
+                                                              1. for the first case (reset of A
+                                                             blocked due to traffic from B), the
+                                                             only workaround is to stall/stop
+                                                             engine B that is continuously
+                                                             generating traffic.
+                                                             2. for the second case, the polling
+                                                             period need to be increased to let
+                                                             HW identify the fabric idleness and
+                                                             complete the Go=0 Ack for reset.
+                                                             Increase the poll interval in
+                                                             VECS_SEMA_WAIT_POLL (0x1A24C).
+                                                             Setting this to ius resolves the issue.
+
+
+
+
+18                                            Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+
+Display Workarounds
+This page lists all BSpec workarounds for Display. Note that the functional area for each item is listed below, so you can search on this
+value or other content on this page. Also note that a "BSpec ID" has been assigned to make it easier to reference these items.
+BSpec        Functional
+ ID       Area/Component                Workaround Name                          Workaround Description                       Valid Steppings
+0342    Display DisplayPort                                                                                                 All
+                                                                     Not a workaround, this is required programming
+                                                                     for all projects.
+                                                                     DP MST requires certain VC payload size values.
+                                                                      VC payload must be multiple of 4 in x1 lane config,
+                                                                     2 in x2, 1 in x4. See transcoder M/N Values.
+0346    Display DisplayPort                                          Aux channel transactions get intermittent NAK          All
+                                                                     errors with some receivers.
+                                                                     WA: Do not use the 400us Aux timeout. Increase
+                                                                     DDI_AUX_CTL bits 27:26 Time out timer value to at
+                                                                     least 600us 01b when doing DDI aux transactions.
+                                                                     Merged with #0347
+                                                                     This becomes standard required programming for
+                                                                     all subsequent projects.
+
+0371    Display Panel fitter   WaPanelFitterDownscale                                                                       All
+                                                                     Not a workaround, this is required programming
+                                                                     for all projects.
+                                                                     When using panel fitter downscaling (pipe source
+                                                                     size is larger than panel fitter window size) the
+                                                                     maximum supported pixel rate will be reduced by
+                                                                     the downscale amount, and watermarks must be
+                                                                     adjusted. Use panel fitter scale amount when
+                                                                     calculating maximum pixel rate and watermarks.
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                                         19
+                                                                              Workarounds
+
+
+
+BSpec       Functional
+ ID      Area/Component               Workaround Name               Workaround Description                      Valid Steppings
+0373    Display Panel power   WaVDDOverrideT4Power                                                            All
+                                                        Not a workaround, this is required programming
+                sequencing
+                                                        for all projects.
+                                                        When software clears the panel power sequencing
+                                                        VDD override bit from 1 to 0 (disable VDD override)
+                                                        it must ensure that T4 power cycle delay is met
+                                                        before setting the bit to 1 again.
+                                                        Use software timers to ensure T4 delay is met or
+                                                        use full panel power enable and not the VDD
+                                                        override.
+386     Display PSR                                                                                           All
+                                                        PSR single frame update - When single frame
+                                                        update is enabled, the PSR CRC must be disabled
+                                                        for panel compatibility.
+
+0387    Display PSR                                                                                           All
+                                                        PSR single frame update - Mask register write
+                                                        events when using single frame update.
+                                                        This becomes standard required programming for
+                                                        all subsequent projects.
+
+0388    Display PSR                                                                                           All
+                                                        PSR power saving - Mask PSR max timeout when
+                                                        PSR CRC is enabled.
+                                                        This becomes standard required programming for
+                                                        all subsequent projects.
+
+0471    Power   FBC                                     First line of FBC getting corrupted when FBC      All
+                                                        compressed frame buffer offset is programmed to
+                                                        zero. Command streamers are doing flush writes to
+                                                        base of stolen.
+                                                        WA: New restriction to program FBC compressed
+                                                        frame buffer offset to at least 4KB. See
+
+20                                                         Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec       Functional
+ ID      Area/Component            Workaround Name                Workaround Description                      Valid Steppings
+                                                     FBC_CFB_BASE in North Display Registers.
+                                                     Additionally software must not use this first 4KB of
+                                                     graphics data stolen memory for anything else.
+                                                     This becomes standard required programming for
+                                                     all subsequent projects.
+
+0477    Power   IPC                                  IPC (Isoch Priority Control) may cause underflows.     All
+
+                                                     WA: Do not enable IPC in register ARB_CTL2
+0482    Power   PSR                                  The following sequence is needed when disabling      All
+                                                     PSR Single Frame Update to workaround cases
+                                                     where the remote frame buffer update indicator
+                                                     becomes stuck if there is a single frame update exit
+                                                     event (pipe register write) around the time that
+                                                     single frame update is being disabled.
+
+                                                     1. Set 0x420B0 bit 11 to mask off flips.
+
+                                                     2. Set PIPE_MISC bit 21 to mask off pipe register
+                                                     writes.
+
+                                                     3. Clear SRD_CTL bit 31 to 0 to disable PSR.
+
+                                                     4. Wait for 2 vertical blanks for PSR to completely
+                                                     disable.
+
+                                                     5. Clear SRD_CTL bit 30 to 0 disable Single Frame
+                                                     Update.
+
+                                                     6. Restore PIPE_MISC bit 21.
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                           21
+                                                                      Workarounds
+
+
+
+BSpec       Functional
+ ID      Area/Component      Workaround Name                Workaround Description                      Valid Steppings
+                                               7. Restore 0x420B0 bit 11.
+
+                                               PSR can now be re-enabled if needed.
+0484    Power   Watermarks                     Watermark memory latency data retrieved from GT        All
+                                               driver mailbox data may not account for memory
+                                               read latency.
+                                               Depending on mailbox response, add 2
+                                               microseconds to the result for each level to
+                                               compensate.
+                                               This becomes standard required programming for
+                                               all subsequent projects.
+
+0485    Power   Watermarks                     Notable Bspec correction. Not a workaround.            All
+
+                                               Watermark memory latency data retrieved from GT
+                                               driver mailbox data had incorrect dword ordering in
+                                               earlier versions of the BSpec. BSpec is now
+                                               corrected to show the first set of data has latency
+                                               levels 0-3 and second set has levels 4-7.
+
+                                               This becomes standard required programming for
+                                               all subsequent projects.
+0529    Display FBC                            Corruption in some cases when FBC is enabled and All
+                                               the plane surface format is in linear, tile Y legacy, or
+                                               tile Yf
+
+                                               WA: Display register 4208Ch bit 13 must be set to
+                                               1b and bits 12:0 must be programmed with the
+                                               compressed buffer stride value. The compressed
+                                               buffer stride must be calculated using the following
+
+
+22                                                Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec        Functional
+ ID       Area/Component           Workaround Name                Workaround Description                         Valid Steppings
+                                                     equation:
+
+                                                     Compressed buffer stride = ceiling [(at least plane
+                                                     width in pixels) / (32 * compression limit factor)] * 8
+
+                                                     At least plane width = a value greater than or equal
+                                                     to the width of the plane. Software may choose to
+                                                     use a greater value in order to handle cases where
+                                                     the plane width is changing from frame to frame,
+                                                     especially because 4208C is not double-buffered
+                                                     and can't be changed on the fly while FBC is
+                                                     enabled. Compression limit factor is either 1, 2 or 4
+                                                     based on the FBC_CTL Compression Limit field.
+0531    Display Render                               Render decompression is broken when plane                 All
+                Compression                          widths greater than 3840 are used with horizontal
+                                                     panning.
+
+                                                     WA: When the render compression is enabled with
+                                                     plane width greater than 3840 and horizontal
+                                                     panning (Start X Position in the PLANE_OFFSET
+                                                     register is not 0), the stride programmed in the
+                                                     PLANE_STRIDE register must be multiple of 4.
+0562    Power   FBC                                  FBC sometimes causes screen corruption with               All
+                                                     package C states.
+
+                                                     WA: 'FBC Watermark Disable' bit in ARB_CTL
+                                                     register must be set to 1b.
+0827    Display Planes                               Switching the plane format from NV12 to RGB and           All
+                                                     leaving system idle results in display underrun and
+                                                     corruption.
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                           23
+                                                                              Workarounds
+
+
+
+BSpec       Functional
+ ID      Area/Component              Workaround Name               Workaround Description                    Valid Steppings
+                                                       WA: Set the bit 15 & bit 19 to 1b in the
+                                                       CLKGATE_DIS_PSL register for the pipe in which
+                                                       NV12 plane is enabled.
+0828    Display PSR2                                   PSR2 screen corruptions when multiple regions are   All
+                                                       updated in a single frame.
+
+                                                       WA: Set 0x42080 bit 3 = 1 before enabling PSR2.
+                                                       The register can safely remain set when PSR2 is
+                                                       disabled.
+0840    Display Watermarks                             Programming needed for SAGV to prevent             All
+                SAGV                                   underflows in multi-display scenarios. See Display
+                                                       Watermark Programming - Watermark Calculations
+                                                       section.
+
+                                                       This becomes standard required programming for
+                                                       subsequent core projects.
+0851    Display FBC          WaFbcNukeOn3DBlt          To prevent missed invalidations around the time    All
+                                                       FBC is being enabled, FBC render tracking must use
+                                                       the "Render Tracking With Nuke" method. See
+                                                       Frame Buffer Compression page.
+0856    Display Memory
+                                                       Display underflow with high resolutions and         All
+                Bandwidth
+                                                       multiple displays.
+                                                       WA: Restrict display configurations to fit within
+                                                       system memory bandwidth threshold specifed in
+                                                       the Display Mode Set -> Display Resolution
+                                                       Support page.
+                                                       Increase watermarks at some system memory
+                                                       bandwidth thresholds. See Display Watermark
+                                                       Calculations.
+
+
+24                                                        Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec        Functional
+ ID       Area/Component            Workaround Name                Workaround Description                    Valid Steppings
+                                                      The restriction to fit within memory bandwidth
+                                                      threshold is required programming for all
+                                                      subsequent projects. The threshold can change
+                                                      from project to project and will be listed on the
+                                                      Display Resolution Support page.
+
+0857    Display Planes
+                                                      Display underrun issues with Y & Yf Tiling.        All
+                                                      WA: Set the bit 13 of MMIO register 0x46430 to 1b.
+
+0859    Display FBC          WaFbcWakeMemOn           This workaround helps to achieve better idle power
+                                                                                                         All
+                                                      savings when FBC is enabled.
+
+                                                      WA: Set ARB_CTL FBC Memory Wake to 1'b1.
+0868    Display GMBUS                                 4 block EDID failures.
+                                                                                                           All
+
+                                                      WA:
+
+                                                      Set 0x4653C[14] = 0x1 to disable clock gating when
+                                                      the north display GMBUS function is used.
+
+                                                      Set 0xC2020[31]=0x1 to disable clock gating when
+                                                      the south display GMBUS function is used.
+0873    Display FBC                                   Screen corruption observed with FBC when the
+                                                                                                           All
+                                                      front buffer is updated by host modify.
+
+                                                      WA: To prevent missed host invalidations around
+                                                      the time FBC is being enabled, enable Nuke on
+                                                      modify. Set bit 23 of MMIO register 0x43224 to
+                                                      1'b1.
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                           25
+                                                                                      Workarounds
+
+
+
+BSpec        Functional
+ ID       Area/Component            Workaround Name                         Workaround Description                     Valid Steppings
+0880    Display Clocks                                                                                               ALL
+                                                                Timeout for display cdclk mailbox programming
+                                                                increased from 1ms to 3ms to account for some
+                                                                corner cases that can exceed 1ms.
+                                                                This becomes standard required programming for
+                                                                all subsequent projects.
+
+0881    Display Clocks                                                                                               All
+                                                                Display PLL workaround for signal integrity when
+                                                                using the 2.16 or 4.32 GHz eDP link rate together
+                                                                with spread spectrum clocking. The GT driver pcode
+                                                                mailbox has to be programmed to override some
+                                                                DPLL internal values. See Display -> North Display
+                                                                Engine Registers -> Clocks -> Port Clock
+                                                                Programming.
+
+0883    Display FBC         WaFbcHighMemBwCorruptionAvoidance When FBC is enabled sometimes screen                   KBL:*:A
+                                                              corruptions/system hangs observed under high           KBL:*:B
+                                                              memory bandwidth conditions.
+
+                                                                WA: Set the bit 8 of MMIO register 0x43224 to 1b.
+
+                                                                Set ARB_CTL FBC Memory Wake to 1b (from
+                                                                #0859). This memory wake setting is also preferred
+                                                                for better power savings with FBC.
+0893    Display Memory                                          Display underflow with high resolutions and          All
+                Bandwidth                                       multiple displays when using dual channel single
+                                                                rank memory.
+
+                                                                WA: Increase watermarks at some system memory
+                                                                bandwidth thresholds. See Display Watermark
+                                                                Calculations.
+
+
+26                                                                 Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec        Functional
+ ID       Area/Component           Workaround Name                Workaround Description                       Valid Steppings
+1106    Display NV12,                                Display corruption/color shift observed when using      All
+                Rotation,                            NV12 with 270 rotation or 90 rotation + horizontal
+                Horizontal flip                      flip.
+
+                                                     WA: NV12 with 270 rotation or 90 rotation +
+                                                     horizontal flip requires the programmed plane
+                                                     height to be a multiple of 4.
+1107    Display Transition                           Transition watermarks must not be enabled.              All
+                Watermark
+1110    Display FBC +                                Missing flips when FBC is enabled with PSR link         KBL:*:A
+                PSR/PSR2                             off/PSR2 deep sleep scenarios.                          KBL:*:B
+
+                                                     WA: When FBC is enabled with PSR/PSR2, set bit 30
+                                                     of MMIO register 0x420CC to 1b.
+1125    Display Watermarks,                          Render compression watermark adjustment.                All
+                render
+                compression                          This was a late addition to the Bspec, but not
+                                                     previously tracked as a workaround. See the
+                                                     Watermark Calculations page for details.
+
+                                                     WA: If Render Decompression enabled and latency
+                                                     level 0: Result Blocks = Result Blocks + Y tile
+                                                     minimum. Then ensure that the result blocks for
+                                                     higher latency levels are all at least as high as the
+                                                     new level 0.
+1126    Display Watermarks                           Watermark adjustment.                                   All
+
+                                                     This was a late addition to the Bspec, but not
+                                                     previously tracked as a workaround. See the
+                                                     Watermark Calculations page for details.
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                          27
+                                                                    Workarounds
+
+
+
+BSpec       Functional
+ ID      Area/Component   Workaround Name                Workaround Description                      Valid Steppings
+                                            WA: If latency level 1 through 7 and Y tile: Result
+                                            Blocks = Result Blocks + Y tile minimum; Result
+                                            Lines = Result Lines + Minimum Scanlines for Y tile
+
+                                            If latency level 1 through 7 and not Y tile: Result
+                                            Blocks = Result Blocks + 1
+1131    Display VTd                         Display underflow and flicker when VTd is enabled      All
+                                            with a frame buffer having a mix of VTd 4K, 2MB
+                                            and 1GB pages.
+
+                                            WA: When VTd is enabled, all the extra dummy PTE
+                                            entries must be mapped to pages of same size (4K,
+                                            1GB or 2MB).
+
+                                            All the extra entries shall map to the same dummy
+                                            page. This dummy page padding is required
+                                            immediately after the display active fetch area. If
+                                            any of the display features (like panning, clipping,
+                                            collage displays, planar YUV surfaces) can't meet
+                                            the above requirement it must not be enabled.
+
+                                            See PLANE_SURF restrictions for Extra Page Table
+                                            Entries allocation requirements.
+1132    Display 64bpp                       Bandwidth limitations in the display data buffer       All
+                                            output can cause underflow with 64bpp pixel
+                                            formats when multiple planes are enabled at high
+                                            resolutions.
+
+                                            The 64 bits per pixel source pixel format can only
+                                            be used on a single plane and when only a single
+                                            pipe is enabled.
+
+
+28                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec        Functional
+ ID       Area/Component           Workaround Name               Workaround Description                      Valid Steppings
+1134    Display GMBUS                                GMBUS bit bashing failures because GPIO pin is        All
+                                                     unexpectedly in busy state.
+
+                                                     WA: When starting bit bashing, first write GPIO_CTL
+                                                     = 0x00000404.
+1136    Display PSR                                  Display underrun with PSR single frame update and KBL:*:A
+                                                     planes with less than watermark level 7.          KBL:*:B
+
+                                                     WA: When using PSR single frame update, all
+                                                     enabled planes must have enabled up to watermark
+                                                     level 7. If any plane cannot support level 7, then
+                                                     single frame update cannot be enabled.
+1141    Power     IPC                                IPC (Isoch Priority Control) may cause underflows.    All
+
+                                                     WA: When IPC is enabled, watermark latency values
+                                                     must be increased by 4us across all levels. This
+                                                     brings level 0 up to 6us..
+1142    Display                                      Underruns found with FBC, but also could impact       KBL:SIWA_FROM_C0
+                                                     cases without FBC.
+
+                                                     WA: Before enabling display planes or cursor,
+                                                     program 0x42084 bits 14:13=10b and 0x42080 bit
+                                                     22=1b. Keep this value while planes or cursor are
+                                                     enabled. The value is ignored while planes and
+                                                     cursor are all disabled. The same programming is
+                                                     used with and without FBC.
+1143    HDMI                                         For HDMI the voltage swing programming for a          All
+                                                     port is locked at the value used when the port is
+                                                     first enabled after boot or package C10. Override
+                                                     programming is needed to allow the swing to
+                                                     change after that point, such as for DP++ ports or
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                         29
+                                                                     Workarounds
+
+
+
+BSpec       Functional
+ ID      Area/Component   Workaround Name                 Workaround Description                    Valid Steppings
+                                            electrical validation.
+
+                                                1.    Just before enabling DDI_BUF_CTL for
+                                                      HDMI in the port enable sequence.
+                                                2.    Set override for this DDI.
+                                                          o DDIB: 0x420C0 19:18 = 11b
+                                                          o DDIC: 0x420C4 19:18 = 11b
+                                                          o DDID: 0x420C8 19:18 = 11b
+                                                          o DDIA: 0x420CC 19:18 = 11b
+                                                3.    Wait 1us for DDI to pick up the swing
+                                                      value.
+                                                4.    Clear override for this DDI to 00b.
+                                                5.    Continue with enabling DDI_BUF_CTL.
+
+
+1144    Audio                               DisplayPort audio corruption or video underflow       All
+                                            with some clock frequencies and audio
+                                            configurations.
+
+                                            WA:
+
+                                            If (DP port width x4 AND link rate HBR2 AND
+                                            CDCLK frequency < 432 MHz) {
+
+                                                     If (audio clock frequency >96 KHz OR 8
+                                                     audio channels used OR audio configuration
+                                                     unknown) {
+
+                                                           DisplayPort audio cannot be enabled
+                                                           at this CDCLK frequency.
+
+
+
+
+30                                             Doc Ref # IHD-OS-KBL-Vol 16-1.17
+Workarounds
+
+
+BSpec       Functional
+ ID      Area/Component            Workaround Name                Workaround Description                   Valid Steppings
+                                                         }
+
+                                                         Else {
+
+                                                                  Set register (0x420C0 for audio on
+                                                                  transcoder A, 0x420C4 for transcoder
+                                                                  B, 0x420C8 for transcoder C) bit 13 to
+                                                                  1 before enabling DisplayPort audio.
+
+                                                         }
+
+                                                     }
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 16-1.17                                                        31

@@ -1,0 +1,1834 @@
+Intel® Open Source HD Graphics and Intel Iris™ Plus Graphics
+
+
+Programmer's Reference Manual
+
+
+For the 2016 - 2017 Intel Core™ Processors, Celeron™ Processors,
+and Pentium™ Processors based on the "Kaby Lake" Platform
+
+Volume 2b: Command Reference: Enumerations
+
+January 2017, Revision 1.0
+                                                                      Command Reference: Enumerations
+
+
+
+Creative Commons License
+You are free to Share - to copy, distribute, display, and perform the work under the following
+conditions:
+
+      Attribution. You must attribute the work in the manner specified by the author or licensor (but
+       not in any way that suggests that they endorse you or your use of the work).
+      No Derivative Works. You may not alter, transform, or build upon this work.
+
+Notices and Disclaimers
+INFORMATION IN THIS DOCUMENT IS PROVIDED IN CONNECTION WITH INTEL® PRODUCTS. NO
+LICENSE, EXPRESS OR IMPLIED, BY ESTOPPEL OR OTHERWISE, TO ANY INTELLECTUAL PROPERTY RIGHTS
+IS GRANTED BY THIS DOCUMENT. EXCEPT AS PROVIDED IN INTEL'S TERMS AND CONDITIONS OF SALE
+FOR SUCH PRODUCTS, INTEL ASSUMES NO LIABILITY WHATSOEVER AND INTEL DISCLAIMS ANY
+EXPRESS OR IMPLIED WARRANTY, RELATING TO SALE AND/OR USE OF INTEL PRODUCTS INCLUDING
+LIABILITY OR WARRANTIES RELATING TO FITNESS FOR A PARTICULAR PURPOSE, MERCHANTABILITY, OR
+INFRINGEMENT OF ANY PATENT, COPYRIGHT OR OTHER INTELLECTUAL PROPERTY RIGHT.
+A "Mission Critical Application" is any application in which failure of the Intel Product could result,
+directly or indirectly, in personal injury or death. SHOULD YOU PURCHASE OR USE INTEL'S PRODUCTS
+FOR ANY SUCH MISSION CRITICAL APPLICATION, YOU SHALL INDEMNIFY AND HOLD INTEL AND ITS
+SUBSIDIARIES, SUBCONTRACTORS AND AFFILIATES, AND THE DIRECTORS, OFFICERS, AND EMPLOYEES
+OF EACH, HARMLESS AGAINST ALL CLAIMS COSTS, DAMAGES, AND EXPENSES AND REASONABLE
+ATTORNEYS' FEES ARISING OUT OF, DIRECTLY OR INDIRECTLY, ANY CLAIM OF PRODUCT LIABILITY,
+PERSONAL INJURY, OR DEATH ARISING IN ANY WAY OUT OF SUCH MISSION CRITICAL APPLICATION,
+WHETHER OR NOT INTEL OR ITS SUBCONTRACTOR WAS NEGLIGENT IN THE DESIGN, MANUFACTURE,
+OR WARNING OF THE INTEL PRODUCT OR ANY OF ITS PARTS.
+Intel may make changes to specifications and product descriptions at any time, without notice. Designers
+must not rely on the absence or characteristics of any features or instructions marked "reserved" or
+"undefined". Intel reserves these for future definition and shall have no responsibility whatsoever for
+conflicts or incompatibilities arising from future changes to them. The information here is subject to
+change without notice. Do not finalize a design with this information.
+The products described in this document may contain design defects or errors known as errata which
+may cause the product to deviate from published specifications. Current characterized errata are
+available on request.
+Implementations of the I2C bus/protocol may require licenses from various entities, including Philips
+Electronics N.V. and North American Philips Corporation.
+Intel and the Intel logo are trademarks of Intel Corporation in the U.S. and other countries.
+* Other names and brands may be claimed as the property of others.
+Copyright © 2017, Intel Corporation. All rights reserved.
+
+
+
+ii                                                                       Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+
+Table of Contents
+3D_Color_Buffer_Blend_Factor ...................................................................................................... 1
+3D_Color_Buffer_Blend_Function ................................................................................................. 2
+3D_Compare_Function ................................................................................................................... 3
+3D_Logic_Op_Function ................................................................................................................... 4
+3D_Prim_Topo_Type ....................................................................................................................... 5
+3D_Stencil_Operation ..................................................................................................................... 7
+3D_Vertex_Component_Control ................................................................................................... 8
+AddrMode ........................................................................................................................................ 9
+Attribute_Component_Format ....................................................................................................10
+ChanEn ............................................................................................................................................11
+ChanSel ...........................................................................................................................................12
+COMPONENT_ENABLES ...............................................................................................................13
+CondModifier ................................................................................................................................14
+DepCtrl ...........................................................................................................................................15
+DstType ..........................................................................................................................................16
+EU_OPCODE ...................................................................................................................................17
+ExecSize ..........................................................................................................................................20
+FC .....................................................................................................................................................21
+Fixed Function ID ..........................................................................................................................22
+HorzStride ......................................................................................................................................23
+Performance Counter Report Formats ......................................................................................24
+PredCtrl ..........................................................................................................................................25
+QtrCtrl .............................................................................................................................................26
+RegFile ............................................................................................................................................28
+RepCtrl ............................................................................................................................................29
+SFID .................................................................................................................................................30
+Shader Channel Select ..................................................................................................................32
+Shared Function ID .......................................................................................................................33
+SIMD Mode ....................................................................................................................................34
+SrcImmType ...................................................................................................................................35
+SrcIndex ..........................................................................................................................................36
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                                                             iii
+                                                                                                                      Command Reference: Enumerations
+
+
+
+SrcMod ...........................................................................................................................................38
+SrcType ...........................................................................................................................................39
+SURFACE_FORMAT .......................................................................................................................40
+Texture Coordinate Mode ...........................................................................................................47
+ThreadCtrl ......................................................................................................................................48
+VertStride .......................................................................................................................................49
+Width ..............................................................................................................................................50
+WRAP_SHORTEST_ENABLE ..........................................................................................................51
+
+
+
+
+iv                                                                                                                         Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+3D_Color_Buffer_Blend_Factor
+
+                            3D_Color_Buffer_Blend_Factor
+Source:             BSpec
+Size (in bits):     5
+
+          Value                                       Name
+           00h       Reserved
+ 01h                 BLENDFACTOR_ONE
+ 02h                 BLENDFACTOR_SRC_COLOR
+ 03h                 BLENDFACTOR_SRC_ALPHA
+ 04h                 BLENDFACTOR_DST_ALPHA
+ 05h                 BLENDFACTOR_DST_COLOR
+ 06h                 BLENDFACTOR_SRC_ALPHA_SATURATE
+ 07h                 BLENDFACTOR_CONST_COLOR
+ 08h                 BLENDFACTOR_CONST_ALPHA
+ 09h                 BLENDFACTOR_SRC1_COLOR
+ 0Ah                 BLENDFACTOR_SRC1_ALPHA
+        0Bh-10h      Reserved
+ 11h                 BLENDFACTOR_ZERO
+ 12h                 BLENDFACTOR_INV_SRC_COLOR
+ 13h                 BLENDFACTOR_INV_SRC_ALPHA
+ 14h                 BLENDFACTOR_INV_DST_ALPHA
+ 15h                 BLENDFACTOR_INV_DST_COLOR
+           16h       Reserved
+ 17h                 BLENDFACTOR_INV_CONST_COLOR
+ 18h                 BLENDFACTOR_INV_CONST_ALPHA
+ 19h                 BLENDFACTOR_INV_SRC1_COLOR
+ 1Ah                 BLENDFACTOR_INV_SRC1_ALPHA
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                             1
+                                                         Command Reference: Enumerations
+
+
+
+
+3D_Color_Buffer_Blend_Function
+
+                               3D_Color_Buffer_Blend_Function
+Source:                BSpec
+Size (in bits):        3
+
+    Value                       Name                          Description
+    0       BLENDFUNCTION_ADD                   BLENDFUNCTION_ADD
+    1       BLENDFUNCTION_SUBTRACT              BLENDFUNCTION_SUBTRACT
+    2       BLENDFUNCTION_REVERSE_SUBTRACT      BLENDFUNCTION_REVERSE_SUBTRACT
+    3       BLENDFUNCTION_MIN                   BLENDFUNCTION_MIN
+    4       BLENDFUNCTION_MAX                   BLENDFUNCTION_MAX
+    5-7     Reserved
+
+
+
+
+2                                                          Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+3D_Compare_Function
+
+                                   3D_Compare_Function
+Source:             BSpec
+Size (in bits):     3
+
+ Value                  Name                                       Description
+ 0h       COMPAREFUNCTION_ALWAYS        Always pass
+ 1h       COMPAREFUNCTION_NEVER         Never pass
+ 2h       COMPAREFUNCTION_LESS          Pass if the value is less than the reference
+ 3h       COMPAREFUNCTION_EQUAL         Pass if the value is equal to the reference
+ 4h       COMPAREFUNCTION_LEQUAL        Pass if the value is less than or equal to the reference
+ 5h       COMPAREFUNCTION_GREATER       Pass if the value is greater than the reference
+ 6h       COMPAREFUNCTION_NOTEQUAL      Pass if the value is not equal to the reference
+ 7h       COMPAREFUNCTION_GEQUAL        Pass if the value is greater than or equal to the reference
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                      3
+                                                                    Command Reference: Enumerations
+
+
+
+
+3D_Logic_Op_Function
+
+                                        3D_Logic_Op_Function
+Source:                  BSpec
+Size (in bits):          4
+
+         Value                     Name                                 Description
+    0h            LOGICOP_CLEAR                    BLACK; all 0's
+    1h            LOGICOP_NOR                      NOTMERGEPEN; NOT (S OR D)
+    2h            LOGICOP_AND_INVERTED             MASKNOTPEN; (NOT S) AND D
+    3h            LOGICOP_COPY_INVERTED            NOTCOPYPEN; NOT S
+    4h            LOGICOP_AND_REVERSE              MASKPENNOT; S AND NOT D
+    5h            LOGICOP_INVERT                   NOT; NOT D
+    6h            LOGICOP_XOR                      XORPEN; S XOR D
+    7h            LOGICOP_NAND                     NOTMASKPEN; NOT (S AND D)
+    8h            LOGICOP_AND                      MASKPEN; S AND D
+    9h            LOGICOP_EQUIV                    NOTXORPEN; NOT (S XOR D)
+    Ah            LOGICOP_NOOP                     NOP; D
+    Bh            LOGICOP_OR_INVERTED              MERGENOTPEN; (NOT S) OR D
+    Ch            LOGICOP_COPY                     COPYPEN; S
+    Dh            LOGICOP_OR_REVERSE               MERGEPENNOT; S OR NOT D
+    Eh            LOGICOP_OR                       MERGEPEN; S OR D
+    Fh            LOGICOP_SET                      WHITE; all 1's
+
+
+
+
+4                                                                     Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+3D_Prim_Topo_Type
+
+                                       3D_Prim_Topo_Type
+Source:               RenderCS
+Size (in bits):       6
+The following table defines the encoding of the Primitive Topology Type field. See 3D Pipeline for details,
+programming restrictions, diagrams and a discussion of the basic primitive types.
+ Value                Name                                             Description
+ 00h       Reserved
+ 01h       3DPRIM_POINTLIST
+ 02h       3DPRIM_LINELIST
+ 03h       3DPRIM_LINESTRIP
+ 04h       3DPRIM_TRILIST
+ 05h       3DPRIM_TRISTRIP
+ 06h       3DPRIM_TRIFAN
+ 07h       3DPRIM_QUADLIST               The QUADLIST topology is converted to POLYGON topology at the
+                                         beginning of the 3D pipeline.
+ 08h       3DPRIM_QUADSTRIP              The QUADSTRIP topology is converted to POLYGON topology at the
+                                         beginning of the 3D pipeline.
+ 09h       3DPRIM_LINELIST_ADJ
+ 0Ah       3DPRIM_LINESTRIP_ADJ
+ 0Bh       3DPRIM_TRILIST_ADJ
+ 0Ch       3DPRIM_TRISTRIP_ADJ
+ 0Dh       3DPRIM_TRISTRIP_REVERSE
+ 0Eh       3DPRIM_POLYGON
+ 0Fh       3DPRIM_RECTLIST
+ 10h       3DPRIM_LINELOOP               The LINELOOP topology is converted to LINESTRIP topology at the
+                                         beginning of the 3D pipeline.
+ 11h       3DPRIM_POINTLIST _BF
+ 12h       3DPRIM_LINESTRIP_CONT
+ 13h       3DPRIM_LINESTRIP_BF
+ 14h       3DPRIM_LINESTRIP_CONT_BF
+ 15h       Reserved                      Reserved for HW use as TRISTRIP_ADJ_REV
+ 16h       3DPRIM_TRIFAN_NOSTIPPLE
+ 17h       Reserved                      Reserved for HW use as POLYGON_CONT
+ 18h       Reserved                      Reserved for HW use as LINESTRIP_ADJ_CONT
+ 19h       Reserved
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                              5
+                                                             Command Reference: Enumerations
+
+
+
+
+                                 3D_Prim_Topo_Type
+    1Ah-   Reserved
+    1Fh
+    20h    3DPRIM_PATCHLIST_1    List of 1-vertex patches
+    21h    3DPRIM_PATCHLIST_2
+    22h    3DPRIM_PATCHLIST_3
+    23h    3DPRIM_PATCHLIST_4
+    24h    3DPRIM_PATCHLIST_5
+    25h    3DPRIM_PATCHLIST_6
+    26h    3DPRIM_PATCHLIST_7
+    27h    3DPRIM_PATCHLIST_8
+    28h    3DPRIM_PATCHLIST_9
+    29h    3DPRIM_PATCHLIST_10
+    2ah    3DPRIM_PATCHLIST_11
+    2bh    3DPRIM_PATCHLIST_12
+    2ch    3DPRIM_PATCHLIST_13
+    2dh    3DPRIM_PATCHLIST_14
+    2eh    3DPRIM_PATCHLIST_15
+    2fh    3DPRIM_PATCHLIST_16
+    30h    3DPRIM_PATCHLIST_17
+    31h    3DPRIM_PATCHLIST_18
+    32h    3DPRIM_PATCHLIST_19
+    33h    3DPRIM_PATCHLIST_20
+    34h    3DPRIM_PATCHLIST_21
+    35h    3DPRIM_PATCHLIST_22
+    36h    3DPRIM_PATCHLIST_23
+    37h    3DPRIM_PATCHLIST_24
+    38h    3DPRIM_PATCHLIST_25
+    39h    3DPRIM_PATCHLIST_26
+    3ah    3DPRIM_PATCHLIST_27
+    3bh    3DPRIM_PATCHLIST_28
+    3ch    3DPRIM_PATCHLIST_29
+    3dh    3DPRIM_PATCHLIST_30
+    3eh    3DPRIM_PATCHLIST_31
+    3Fh    3DPRIM_PATCHLIST_32   List of 32-vertex patches
+
+
+
+
+6                                                              Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+3D_Stencil_Operation
+
+                                   3D_Stencil_Operation
+Source:             RenderCS
+Size (in bits):     3
+
+            Value                                 Name
+ 0                        STENCILOP_KEEP
+ 1                        STENCILOP_ZERO
+ 2                        STENCILOP_REPLACE
+ 3                        STENCILOP_INCRSAT
+ 4                        STENCILOP_DECRSAT
+ 5                        STENCILOP_INCR
+ 6                        STENCILOP_DECR
+ 7                        STENCILOP_INVERT
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                          7
+                                                                              Command Reference: Enumerations
+
+
+
+
+3D_Vertex_Component_Control
+
+                               3D_Vertex_Component_Control
+Source:                RenderCS
+Size (in bits):        3
+
+    Value         Name                                                Description
+    0       VFCOMP_NOSTORE        Don't store this component. (Not valid for Component 0, but can be used for
+                                  Component 1-3). Once this setting is used for a component, all higher-
+                                  numbered components (if any) MUST also use this setting. (I.e., no holes within
+                                  any particular vertex element). VFCOMP_NOSTORE will not store a component
+                                  if the SourceElementFormat is R64_PASSTHRU or R64G64_PASSTHRU and it is
+                                  used on component 2 and 3 else 0 will be stored.
+    1       VFCOMP_STORE_SRC      Store corresponding component from format-converted source element.
+                                  Storing a component that is not included in the Source Element Format results
+                                  in an UNPREDICTABLE value being stored.
+                                  VF will process Component Control fields within a VERTEX_ELEMENT_STATE
+                                  structure sequentially, starting with Component 0 Control. For each Component
+                                  Control field in this sequence, when VF detects (a) the Component Control field
+                                  is set to STORE_SRC and (b) the component is not overwritten by an SGV, VF
+                                  will store a component of the source vertex data into the destination
+                                  component. The first such Component Control field satisfying this criteria will
+                                  use Component 0 of the source vertex data, the second such Component
+                                  Control field will use Component 1 of the source vertex data, and so on.
+                                  Therefore, when a lower-numbered Component Control field (a) is set to
+                                  something other than STORE_SRC (e.g., STORE_0) or (b) the component is
+                                  overwritten with an SGV, the source vertex component used when a higher-
+                                  numbered Component Control fields is set to STORE_SRC will be impacted.
+    2       VFCOMP_STORE_0        Store 0 (interpreted as 0.0f if accessed as a float value)
+    3       VFCOMP_STORE_1_FP     Store 1.0f
+    4       VFCOMP_STORE_1_INT Store 0x1
+    5-6     -                     Reserved
+    7       VFCOMP_STORE_PID      Store Primitive ID (as U32)
+                                  Software can no longer use this encoding as PrimitiveID is passed down the FF
+                                  pipeline - see explanation above.
+
+
+
+
+8                                                                                Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+AddrMode
+
+                                                     AddrMode
+Source:                EuIsa
+Size (in bits):        1
+ Addressing Mode
+ This field determines the addressing method of the operand. Normally the destination operand and each source
+operand each have a distinct addressing mode field.
+ When it is cleared, the register address of the operand is directly provided by bits in the instruction word. It is
+called a direct register addressing mode. When it is set, the register address of the operand is computed based
+on the address register value and an address immediate field in the instruction word. This is referred to as a
+register-indirect register addressing mode.
+ This field applies to the destination operand and the first source operand, src0. Support for src1 is device
+dependent. See Table XX (Indirect source addressing support available in device hardware) in ISA Execution
+Environment for details.
+                                                 Programming Notes
+ Instructions with 3 source operands use Direct Addressing.
+
+ Value       Name                                                Description
+ 0         Direct     'Direct' register addressing
+ 1         Indirect   'Register-Indirect' (or in short 'Indirect'). Register-indirect register addressing
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                  9
+                                                                     Command Reference: Enumerations
+
+
+
+
+Attribute_Component_Format
+
+                                   Attribute_Component_Format
+Source:                RenderCS
+Size (in bits):        2
+
+     Value                 Name                                    Description
+ 00b          disabled [Default]         All components disabled
+ 01b          .xy                        2D attribute, z and w components disabled
+ 10b          .xyz                       3D attribute, w components disabled
+ 11b          .xyzw                      4D attribute, no disabled components
+
+
+
+
+10                                                                       Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+ChanEn
+
+                                                  ChanEn
+Source:               EuIsa
+Size (in bits):       1
+
+                                                    Description
+ Channel Enables
+  Dst.ChanEn, used only for the destination operand and only in the Align16 Access Mode.
+  Provides four channel enable bits applied modulo four to all ExecSize channels. For example, 0xF enables all
+ channels, 0 disables all channels, 0xA enables odd-numbered channels, and so on.
+  The assembler mnemonics are x, y, z, and w for channels 0, 1, 2, and 3 respectively.
+  If MaskCtrl is 1 (mnemonic NoMask) then all channels are enabled regardless of the ChanEn value, equivalent
+ to ChanEn of 0xF (xyzw). Predication and execution masking, in addition to ChanEn and MaskCtrl, determine
+ what channels are actually written.
+
+           Value                                                  Name
+ 0                        Write Disabled
+ 1                        Write Enabled [Default]
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                             11
+                                                                              Command Reference: Enumerations
+
+
+
+
+ChanSel
+
+                                                    ChanSel
+Source:                  EuIsa
+Size (in bits):          2
+ Channel Select
+ This field controls the channel swizzle for a source operand. The normally sequential channel assignment can be
+altered by explicitly identifying neighboring data elements for each channel. Out of the 8-bit field, 2 bits are
+assigned for each channel within the group of 4. ChanSel[1:0], [3.2], [5.4] and [7,6] are for channel 0 (?x?), 1 (?y?),
+2 (?z?), and 3 (?w?) in the group, respectively.
+ For example with an execution size of 8, r0.0<4>.zywz:f would assign the channels as follows: Chan0 = Data2,
+Chan1 = Data1, Chan2 = Data3, Chan3 = Data2; Chan4 = Data6, Chan5 = Data5, Chan6 = Data7, Chan7 = Data6.
+ This field only applies to source operand.
+ This field is only present in Align16 mode. It is not present for an immediate source operand.
+ The 2-bit Channel Selection field for each channel within the group of 4 is defined as the following.
+                                                Programming Notes
+ Note: When using channel select for 64-bit operands, the valid selects are .xy and .zw. This is required to pick a
+ pair of DWords.
+
+     Value        Name                                          Description
+ 00b         x           Channel 0 is selected for the corresponding execution channel
+ 01b         y           Channel 1 is selected for the corresponding execution channel
+ 10b         z           Channel 2 is selected for the corresponding execution channel
+ 11b         w           Channel 3 is selected for the corresponding execution channel
+
+
+
+
+12                                                                               Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+COMPONENT_ENABLES
+
+                                    COMPONENT_ENABLES
+Source:               RenderCS
+Size (in bits):       4
+ If enabled, the component will be stored in the URB.
+                          Value                                Name
+ 0000b                                                  NONE
+ 0001b                                                  X
+ 0010b                                                  Y
+ 0011b                                                  XY
+ 0100b                                                  Z
+ 0101b                                                  XZ
+ 0110b                                                  YZ
+ 0111b                                                  XYZ
+ 1000b                                                  W
+ 1001b                                                  XW
+ 1010b                                                  YW
+ 1011b                                                  XYW
+ 1100b                                                  ZW
+ 1101b                                                  XZW
+ 1110b                                                  YZW
+ 1111b                                                  XYZW
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                      13
+                                                                              Command Reference: Enumerations
+
+
+
+
+CondModifier
+
+                                               CondModifier
+Source:                EuIsa
+Size (in bits):        4
+ Conditional Modifier - This field sets the flag register based on the internal conditional signals output from the
+execution pipe such as sign, zero, overflow and NaNs, etc. If this field is set to 0000, no flag registers are
+updated. Flag registers are not updated for instructions with embedded compares. This field may also be
+referred to as the flag destination control field. This field applies to all instructions except send, sendc, and math.
+           Value                       Name                                       Description
+ 0000b                     None [Default]                  Do Not modify Flag Register.
+ 0001b                     .z                              Zero
+ 0001b                     .e                              Equal
+ 0010b                     .nz                             NotZero
+ 0010b                     .ne                             NotEqual
+ 0011b                     .g                              Greater-than
+ 0100b                     .ge                             Greater-than-or-equal
+ 0101b                     .l                              Less-than
+ 0110b                     .le                             Less-than-or-equal
+ 0111b                     Reserved
+ 1000b                     .o                              Overflow
+ 1001b                     .u                              Unordered with Computed NaN
+ 1110b-1111b               Reserved
+
+
+
+
+14                                                                               Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+DepCtrl
+
+                                                   DepCtrl
+Source:               EuIsa
+Size (in bits):       2
+Destination Dependency Control
+ This field selectively disables destination dependency check and clear for this instruction. When it is set to 00,
+normal destination dependency control is performed for the instruction - hardware checks for destination
+hazards to ensure data integrity. Specifically, destination register dependency check is conducted before the
+instruction is made ready for execution. After the instruction is executed, the destination register scoreboard will
+be cleared when the destination operands retire. When bit 10 is set (NoDDClr), the destination register
+scoreboard will NOT be cleared when the destination operands retire. When bit 11 is set (NoDDChk), hardware
+does not check for destination register dependency before the instruction is made ready for execution. NoDDClr
+and NoDDChk are not mutual exclusive. When this field is not all-zero, hardware does not protect against
+destination hazards for the instruction. This is typically used to assemble data in a fine grained fashion (e.g.
+matrix-vector compute with dot-product instructions), where the data integrity is guaranteed by software based
+on the intended usage of instruction sequences.
+  Value               Name                                              Description
+ 00b        None [Default]              Destination dependency checked and cleared (normal)
+ 01b        NoDDClr                     Destination dependency checked but not cleared
+ 10b        NoDDChk                     Destination dependency not checked but cleared
+ 11b        NoDDClr, NoDDChk            Destination dependency not checked and not cleared
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                 15
+                                                                              Command Reference: Enumerations
+
+
+
+
+DstType
+
+                                                   DstType
+Source:               EuIsa
+Size (in bits):       4
+ Destination Type
+ Numeric data type of the destination operand dst. The bits of the destination operand are interpreted as the
+identified numeric data type, rather than coerced into a type implied by the operator. For a send or sendc
+instruction, this field applies to CurrDst, the current destination operand. Three source instructions use a 3-bit
+encoding that allows fewer data types.
+           Value                 Name                                       Description
+ 0000b                     :ud                Unsigned Doubleword (32-bit) Integer
+ 0001b                     :d                 Signed Doubleword (32-bit) Integer
+ 0010b                     :uw                Unsigned Word (16-bit) Integer
+ 0011b                     :w                 Signed Word (16-bit) Integer
+ 0100b                     :ub                Unsigned Byte (8-bit) Integer
+ 0101b                     :b                 Signed Byte (8-bit) Integer
+ 0110b                     :df                Double-Precision (64-bit) Float
+ 0111b                     :f                 Single-Precision (32-bit) Float
+ 1000b                     :uq                Unsigned Quadword (64-bit) Integer
+ 1001b                     :q                 Signed Quadword (64-bit) Integer
+ 1010b                     :hf                Half (16-bit) Float
+ 1011b-1111b               Reserved
+
+
+
+
+16                                                                              Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+EU_OPCODE
+
+                                   EU_OPCODE
+Source:             EuIsa
+Size (in bits):     7
+
+                        Value                  Name
+ 40h                                  add
+ 4Eh                                  addc
+ 5h                                   and
+ 0Ch                                  asr
+ 42h                                  avg
+ 18h                                  bfe
+ 19h                                  bfi1
+ 1Ah                                  bfi2
+ 17h                                  bfrev
+ 23h                                  brc
+ 21h                                  brd
+ 28h                                  break
+ 2Ch                                  call
+ 2Bh                                  calla
+ 4Dh                                  cbit
+ 10h                                  cmp
+ 11h                                  cmpn
+ 29h                                  cont
+ 12h                                  csel
+ 57h                                  dp2
+ 56h                                  dp3
+ 54h                                  dp4
+ 55h                                  dph
+ 24h                                  else
+ 25h                                  endif
+ 4Bh                                  fbh
+ 4Ch                                  fbl
+ 43h                                  frc
+ 2Eh                                  goto
+ 2Ah                                  halt
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                      17
+                    Command Reference: Enumerations
+
+
+
+
+       EU_OPCODE
+ 22h      if
+ 0h       illegal
+ 20h      jmpi
+ 2Fh      join
+ 59h      line
+ 5Ch      lrp
+ 4Ah      lzd
+ 48h      mac
+ 49h      mach
+ 5Bh      mad
+ 5Dh      madm
+ 38h      math
+ 1h       mov
+ 3h       movi
+ 41h      mul
+ 7Eh      nop
+ 4h       not
+ 6h       or
+ 5Ah      pln
+ 2Dh      ret
+ 45h      rndd
+ 46h      rnde
+ 44h      rndu
+ 47h      rndz
+ 50h      sad2
+ 51h      sada2
+ 2h       sel
+ 31h      send
+ 32h      sendc
+ 33h      sends
+ 34h      sendsc
+ 9h       shl
+ 8h       shr
+ 0Ah      smov
+ 4Fh      subb
+
+
+
+18                    Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                   EU_OPCODE
+ 30h                                  wait
+ 27h                                  while
+ 7h                                   xor
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17               19
+                                                                           Command Reference: Enumerations
+
+
+
+
+ExecSize
+
+                                                ExecSize
+Source:                  EuIsa
+Size (in bits):          3
+ Execution Size
+ This field determines the number of channels operating in parallel for this instruction.
+ The size cannot exceed the maximum number of channels allowed for the given data type.
+                                                  Restriction
+ Restriction : An operand's Width must be less-than-or-equal to ExecSize
+
+     Value                   Name                                   Programming Notes
+ 000b         1 Channel (Scalar operation)
+              [Default]
+ 001b         2 Channels
+ 010b         4 Channels
+ 011b         8 Channels
+ 100b         16 Channels                    Restriction : 4-byte or smaller data types. Excludes DF, Q, and UQ
+                                             types.
+ 101b         32 Channels                    Restriction : 2-byte or 1-byte data types. Excludes D, DF, F, Q, UD,
+                                             and UQ types.
+ 110b-        Reserved
+ 111b
+
+
+
+
+20                                                                           Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+FC
+
+                                            FC
+Source:                  EuIsa
+Size (in bits):          4
+ Math Function Control
+     Value                           Name                          Description
+ 0000b            Reserved
+ 0001b            INV (reciprocal)
+ 0010b            LOG
+ 0011b            EXP
+ 0100b            SQRT
+ 0101b            RSQ
+ 0110b            SIN
+ 0111b            COS
+ 1000b            Reserved
+ 1001b            FDIV
+ 1010b            POW
+ 1011b            INT DIV BOTH              Return Quotient and Remainder
+ 1100b            INT DIV QUOTIENT          Return Quotient Only
+ 1101b            INT DIV REMAINDER         Return Remainder
+ 1110b            INVM
+ 1111b            RSQRTM
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                 21
+                                                                           Command Reference: Enumerations
+
+
+
+
+Fixed Function ID
+
+                                          FFID - Fixed Function ID
+Source:                    BSpec
+Size (in bits):            4
+ Fixed functions are hardware units that execute complex graphics or media command on behalf of application
+software. Some fixed functions send work down a pipeline through a series of fixed functions. Multiple fixed
+functions can be running at the same time. The GPU tracks activity from the fixed function with its FFID.
+                                               Programming Notes
+ Software does not specify the FFID, and does not normally use the FFID value. The FFID value is available to a
+ EU thread in an ARF.
+
+     Value                         Name                                       Description
+ 00h         Null
+ 04h         Hull Shader
+ 05h         Domain Shader
+ 07h         General Purpose Thread Spawner             GPGPU command queue thread dispatcher
+ 09h         Vertex Shader
+ 0Ah         Command Stream
+ 0Bh         Vertex Fetch
+ 0Ch         Geometry Shader
+
+
+
+
+22                                                                            Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+HorzStride
+
+                                                HorzStride
+Source:               EuIsa
+Size (in bits):       2
+
+                                                   Description
+ Horizontal Stride
+  This field provides the distance in unit of data elements between two adjacent data elements within a row
+ (horizontal) in the register region for the operand.
+  This field applies to both destination and source operands.
+  This field is not present for an immediate source operand.
+ A horizontal stride of 0 is used for a row that is one-element wide, useful when an instruction repeats a column
+ value or repeats a scalar value. For example, adding a single column to every column in a 2D array or adding a
+ scalar to every element in a 2D array uses HorzStride of 0.
+  A horizontal stride of 1 indicates that elements are adjacent within a row.
+  References to HorzStride in this volume normally reference the value not the encoding, so there are references
+ to HorzStride of 4, which is encoded as 11b.
+
+                  Value                                                    Name
+ 00b                                       0 elements
+ 01b                                       1 elements
+ 10b                                       2 elements
+ 11b                                       4 elements
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                               23
+                                                Command Reference: Enumerations
+
+
+
+
+Performance Counter Report Formats
+
+                      Performance Counter Report Formats
+Source:           BSpec
+Size (in bits):   3
+
+                      Value                          Name
+ 001b
+ 010b
+ 011b
+ 100b
+ 110b
+ 111b
+
+
+
+
+24                                                Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+PredCtrl
+                                                     PredCtrl
+Source:                  EuIsa
+Size (in bits):          4
+
+   Value                     Name                                        Exists If
+ 0000b        No Predication (normal)
+              [Default]
+ 0001b        Sequential Flag Channel
+              Mapping
+ 0010b        Replication swizzle .x           (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align16')
+ 0010b        .anyv (any from f0.0-f1.0 on     (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              the same channel)
+ 0011b        Replication swizzle .y           (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align16')
+ 0011b        .allv (all of f0.0-f1.0 on the   (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              same channel)
+ 0100b        Replication swizzle .z           (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align16')
+ 0100b        .any2h (any in group of 2        (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 0101b        Replication swizzle .w           (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align16')
+ 0101b        .all2h (all in group of 2        (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 0110b        .any4h
+ 0111b        .all4h
+ 1000b-       Reserved                         (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align16')
+ 1111b
+ 1000b        .any8h (any in group of 8        (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1001b        .all8h (all in group of 8        (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1010b        .any16h (any in group of 16      (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1011b        .all16h (all in group of 16      (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1100b        .any32h (any in group of 32      (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1101b        .all32h (all in group of 32      (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+              channels)
+ 1110b-       Reserved                         (Structure[EU_INSTRUCTION_CONTROLS_A][AccessMode]=='Align1')
+ 1111b
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                          25
+                                                                           Command Reference: Enumerations
+
+
+
+
+QtrCtrl
+                                                    QtrCtrl
+Source:                EuIsa
+Size (in bits):        2
+ Quarter Control
+ This field provides explicit control for ARF selection.
+ This field combined with ExecSize determines which channels are used for the ARF registers.
+ Along with NibCtrl, 1/8 DMask/VMask and ARF can be selected.
+                                               Programming Notes
+ NibCtrl is only allowed for SIMD4 instructions with a DF (Double Float) source or destination type.
+
+ Value      Name                Description                  Programming Notes                    Exists If
+ 00b      1Q          Use first quarter for                                              ([ExecSize]=='8') AND
+          [Default]   DMask/VMask. Use first half for                                    ([NibCtrl]=='0')
+                      everything else.
+ 01b      2Q          Use second quarter for                                             ([ExecSize]=='8') AND
+                      DMask/VMask. Use second half                                       ([NibCtrl]=='0')
+                      for everything else.
+ 10b      3Q          Use third quarter for                                              ([ExecSize]=='8') AND
+                      DMask/VMask. Use first half for                                    ([NibCtrl]=='0')
+                      everything else.
+ 11b      4Q          Use fourth quarter for                                             ([ExecSize]=='8') AND
+                      DMask/VMask. Use second half                                       ([NibCtrl]=='0')
+                      for everything else.
+ 0        1H          Use first half for DMask/VMask.                                    ([ExecSize]=='16') AND
+                      Use all channels for everything                                    ([NibCtrl]=='0')
+                      else.
+ 2        2H          Use second half for               Only allowed for SIMD16          ([ExecSize]=='16') AND
+                      DMask/VMask. Use all channels     instruction in Single Program    ([NibCtrl]=='0')
+                      for everything else.              Flow mode (SPF=1)
+ 0        1N          Use first 1/8th for DMask/VMask                                    ([ExecSize]=='4') AND
+                      and ARF.                                                           ([NibCtrl]=='0')
+ 0        2N          Use second 1/8th for                                               ([ExecSize]=='4') AND
+                      DMask/VMask and ARF.                                               ([NibCtrl]=='1')
+ 1        3N          Use third 1/8th for                                                ([ExecSize]=='4') AND
+                      DMask/VMask and ARF.                                               ([NibCtrl]=='0')
+ 1        4N          Use fourth 1/8th for                                               ([ExecSize]=='4') AND
+                      DMask/VMask and ARF.                                               ([NibCtrl]=='1')
+ 2        5N          Use fifth 1/8th for                                                ([ExecSize]=='4') AND
+                      DMask/VMask and ARF.                                               ([NibCtrl]=='0')
+
+
+
+
+26                                                                             Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                          QtrCtrl
+ 2     6N         Use sixth 1/8th for               ([ExecSize]=='4') AND
+                  DMask/VMask and ARF.              ([NibCtrl]=='1')
+ 3     7N         Use seventh 1/8th for             ([ExecSize]=='4') AND
+                  DMask/VMask and ARF.              ([NibCtrl]=='0')
+ 3     8N         Use eighth 1/8th for              ([ExecSize]=='4') AND
+                  DMask/VMask and ARF.              ([NibCtrl]=='1')
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                        27
+                                                                               Command Reference: Enumerations
+
+
+
+
+RegFile
+
+                                                      RegFile
+Source:                 EuIsa
+Size (in bits):         2
+
+ Value     Name             Description                               Programming Notes
+ 00b      ARF        Architecture Register   Restriction : Only allowed for src0 or destination
+                     File
+ 01b      GRF        General Register File
+                     - allowed for any
+                     source or destination
+ 10b      Reserved
+ 11b      IMM        Immediate operand       Restriction : Only allowed for the last source operand. Not allowed for
+                                             the destination operand or for any other source operand. Note that
+                                             for flow control instructions requiring two offsets, regfile of source0 is
+                                             required to be immediate since the 64b for immediates occupy the
+                                             DW2 and DW3
+
+
+
+
+28                                                                                Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+RepCtrl
+
+                                                     RepCtrl
+Source:               EuIsa
+Size (in bits):       1
+Replicate Control. This field is only present in three-source instructions, for each of the three source operands.
+It controls replication of the starting channel to all channels in the execution size. This is applicable to 32b
+datatypes. 16b and 64b datatypes cannot use the replicate control.
+          Value                                                   Name
+ 0                        No replication
+ 1                        Replicate across all channels
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                29
+                                                                            Command Reference: Enumerations
+
+
+
+
+SFID
+                                                        SFID
+Source:                  EuIsa
+Size (in bits):          4
+ The following table lists the assignments (encodings) of the Shared Function and Fixed Function IDs used within
+the GPE. A Shared Function is a valid target of a message initiated via a 'send' instruction. A Fixed Function is an
+identifiable unit of the 3D or Media pipeline. Note that the Thread Spawner is both a Shared Function and Fixed
+Function.
+ Note: The initial intention was to combine these two ID namespaces, so that (theoretically) an agent (such as the
+Thread Spawner) that served both as a Shared Function and Fixed Function would have a single, unique 4-bit ID
+encoding. However, this combination is not a requirement of the architecture.
+                                                  Programming Notes
+ SFID_DP_DC1 is an extension of SFID_DP_DC0 to allow for more message types. They act as a single logical
+ entity.
+ SFID_DP_DC1, SFID_DP_DC2, SFID_DP_DC3 are extensions of SFID_DP_DC0 to allow for more message types.
+ They act as a single logical entity.
+
+     Value        Name                  Description                      Programming Notes
+ 0000b        SFID_NULL          Null
+ 0001b        Reserved           Reserved
+ 0010b        SFID_SAMPLER Sampler
+ 0011b        SFID_GATEWAY Message Gateway
+ 0100b        SFID_DP_DC2        Data Cache Data Port
+                                 2
+ 0101b        SFID_DP_RC         Render Cache Data
+                                 Port
+ 0110b        SFID_URB           URB
+ 0111b        SFID_SPAWNER Thread Spawner
+ 1000b        SFID_VME           Video Motion
+                                 Estimation
+ 1001b        SFID_DP_DCRO Data Cache Read
+                           Only Data Port
+ 1010b        SFID_DP_DC0        Data Cache Data Port
+ 1011b        SFID_PI            Pixel Interpolator
+ 1100b        SFID_DP_DC1        Data Cache Data Port SFID_DP_DC1 is an extension of SFID_DP_DC0 to allow for
+                                 1                    more message types. They act as a single logical entity.
+ 1101b        SFID_CRE           Check and
+                                 Refinement Engine
+
+
+
+
+30                                                                             Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                   SFID
+ 1110b-    Reserved
+ 1111b
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17          31
+                                                                             Command Reference: Enumerations
+
+
+
+
+Shader Channel Select
+
+                                         Shader Channel Select
+Source:                    BSpec
+Size (in bits):            3
+
+     Value               Name                                        Description
+ 0                ZERO
+ 1                ONE
+ 2                Reserved
+ 3                Reserved
+ 4                RED              Shader channel is set to surface red channel
+ 5                GREEN            Shader channel is set to surface green channel
+ 6                BLUE             Shader channel is set to surface blue channel
+ 7                ALPHA            Shader channel is set to surface alpha channel
+
+
+
+
+32                                                                                 Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+Shared Function ID
+
+                                   SFID - Shared Function ID
+Source:              BSpec
+Size (in bits):      4
+The Shared Function ID is specified in the extended descriptor of the SEND instruction. The use of an unknown
+SFID is illegal programming and will have undefined results.
+        Value                                                 Name
+ 00h                Null
+ 02h                Sampler
+ 03h                Message Gateway
+ 4h                 Data Cache Data Port 2
+ 05h                Render Cache Data Port
+ 06h                URB
+ 07h                Thread Spawner
+ 08h                Video Motion Estimation
+ 09h                Data Cache Read Only Data Port
+ 0Ah                Data Cache Data Port 0
+ 0Bh                Pixel Interpolator
+ 0Ch                Data Cache Data Port 1
+ 0Dh                Check and Refinement Engine
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                            33
+                                                          Command Reference: Enumerations
+
+
+
+
+SIMD Mode
+
+                                           SIMD Mode
+Source:               BSpec
+Size (in bits):       2
+
+              Value                                    Name
+ 0                            SIMD8D / SIMD4x2
+ 1                            SIMD8
+ 2                            SIMD16
+ 3                            SIMD32/64
+
+
+
+
+34                                                            Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+SrcImmType
+
+                                                  SrcImmType
+Source:                  EuIsa
+Size (in bits):          4
+ Specifies the numeric data type of a source operand. In a two-source instruction, each source operand has its
+own source type field. In a three-source instruction, one source type is used for all three source operands.
+ The bits of a source operand are interpreted as the identified numeric data type, rather than coerced into a type
+implied by the operator.
+ Depending on the RegFile field for the source, this field uses one of two encodings. For a non-immediate source
+(from a register file), use the Source Register Type Encoding, which is identical to the Destination Type encoding.
+For an immediate source, use the Source Immediate Type Encoding, which does not support signed or unsigned
+byte immediate values and does support the three packed vector types, V, UV, and VF.
+ Note that three-source instructions do not support immediate operands, that only the second source (src1) of a
+two-source instruction can be immediate, and that 64-bit immediate values (DF, Q, or UQ) can only be used with
+one-source instructions.
+ In a two-source instruction with a V (Packed Signed Half-Byte Integer Vector) or UV (Packed Unsigned Half-Byte
+Integer Vector) immediate operand, the other source operand must have a type compatible with packed word
+execution mode, one of B, UB, W, or UW.
+ Note that DF (Double Float) and HF (Half Float) have different encodings in the Source Regster Type Encoding
+and the Source Immediate Type Encoding.
+ The Source Register Type Encoding and Source Immediate Type Encoding lists apply to instructions with one or
+two source operands.
+     Value             Name                                       Description
+ 0000b            :ud         Unsigned Doubleword Integer
+ 0001b            :d          Signed Doubleword Integer
+ 0010b            :uw         Unsigned Word Integer
+ 0011b            :w          Signed Word Integer
+ 0100b            :uv         Packed Unsigned Half-Byte Integer Vector, 8 x 4-Bit Unsigned Integer.
+ 0101b            :vf         Packed Restricted Float Vector, 4 x 8-Bit Restricted Precision Floating-Point Number
+ 0110b            :v          Packed Signed Half-Byte Integer Vector, 8 x 4-Bit Signed Integer
+ 0111b            :f          Single-Precision (32-bit) Float
+ 1000b            :uq         Unsigned Quadword Integer
+ 1001b            :q          Signed Quadword Integer
+ 1010b            :df         Double-Precision Float (64-bit)
+ 1011b            :hf         Half-Precision Float (16-bit)
+ 1100b-1111b Reserved
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                 35
+                                                              Command Reference: Enumerations
+
+
+
+
+SrcIndex
+
+                                     SrcIndex
+Source:               EuIsa
+Size (in bits):       5
+
+      Value                   Name                             Description
+ 0                000000000000        dir | <0;1,0>
+ 1                000000000010        (-) | dir | <0;1,0>
+ 2                000000010000        dir | <0;>.zx
+ 3                000000010010        (-) | dir | <0;>.zx
+ 4                000000011000        dir | <0;>.wx
+ 5                000000100000        dir | <0;>.xy
+ 6                000000101000        dir | <0;>.yy
+ 7                000001001000        dir | <0;4,1>
+ 8                000001010000        dir | <0;>.zz
+ 9                000001110000        dir | <0;>.zw
+ 10               000001111000        dir | <0;8,4> / dir | <0;>.ww
+ 11               001100000000        dir | <4;>.xx
+ 12               001100000010        (-) | dir | <4;>.xx
+ 13               001100001000        dir | <4;>.yx
+ 14               001100010000        dir | <4;>.zx
+ 15               001100010010        (-) | dir | <4;>.zx
+ 16               001100100000        dir | <4;>.xy
+ 17               001100101000        dir | <4;>.yy
+ 18               001100111000        dir | <4;>.wy
+ 19               001101000000        dir | <4;4,0>
+ 20               001101000010        (-) | dir | <4;4,0>
+ 21               001101001000        dir | <4;>.yz
+ 22               001101010000        dir | <4;>.zz
+ 23               001101100000        dir | <4;>.xw
+ 24               001101101000        dir | <4;>.yw
+ 25               001101110000        dir | <4;>.zw
+ 26               001101110001        (abs) | dir | <4;>.zw
+ 27               001101111000        dir | <4;>.ww
+ 28               010001101000        dir | <8;8,1>
+ 29               010001101001        (abs) | dir | <8;8,1>
+
+
+36                                                               Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                   SrcIndex
+ 30            010001101010         (-) | dir | <8;8,1>
+ 31            010110001000         dir | <16;16,1>
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                          37
+                                                                                 Command Reference: Enumerations
+
+
+
+
+SrcMod
+
+                                                        SrcMod
+Source:                   EuIsa
+Size (in bits):           2
+
+                                                        Description
+ Source Modifier
+  This field specifies the numeric modification of a source operand. The value of each data element of a source
+ operand can optionally have its absolute value taken and/or its sign inverted prior to delivery to the execution
+ pipe. The absolute value is prior to negate such that a guaranteed negative value can be produced.
+  This field only applies to source operand. It does not apply to destination.
+  This field is not present for an immediate source operand.
+ When used with logic instructions (and, not, or, xor), this field indicates whether the source bits are inverted
+ (bitwise NOT) before delivery to the execution pipe, regardless of the source type.
+
+ Value          Name                                                 Description
+ 00b      No
+          modification
+ 01b      abs                 Absolute value
+                              Logic instructions: No modification (This encoding cannot be selected in the assembler
+                              syntax)
+ 10b      negate              Negate
+                              Logic instructions: Bitwise NOT, inverting the source bits
+ 11b      negate of abs       Negate of the absolute (forced negative value)
+
+
+
+                                           Logic instructions: No modification (This encoding cannot be
+                                                          selected in the assembler syntax)
+
+
+
+
+38                                                                                  Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+SrcType
+
+                                                  SrcType
+Source:               EuIsa
+Size (in bits):       4
+ Specifies the numeric data type of a source operand. In a two-source instruction, each source operand has its
+own source type field. In a three-source instruction, one source type is used for all three source operands.
+ The bits of a source operand are interpreted as the identified numeric data type, rather than coerced into a type
+implied by the operator.
+ Depending on the RegFile field for the source, this field uses one of two encodings. For a non-immediate source
+(from a register file), use the Source Register Type Encoding, which is identical to the Destination Type encoding.
+For an immediate source, use the Source Immediate Type Encoding, which does not support signed or unsigned
+byte immediate values and does support the three packed vector types, V, UV, and VF.
+ Note that three-source instructions do not support immediate operands, that only the second source (src1) of a
+two-source instruction can be immediate, and that 64-bit immediate values (DF, Q, or UQ) can only be used with
+one-source instructions.
+ In a two-source instruction with a V (Packed Signed Half-Byte Integer Vector) or UV (Packed Unsigned Half-Byte
+Integer Vector) immediate operand, the other source operand must have a type compatible with packed word
+execution mode, one of B, UB, W, or UW.
+ Note that DF (Double Float) and HF (Half Float) have different encodings in the Source Regster Type Encoding
+and the Source Immediate Type Encoding.
+ The Source Register Type Encoding and Source Immediate Type Encoding lists apply to instructions with one or
+two source operands.
+           Value                Name                                       Description
+ 0000b                    :ud                Unsigned Doubleword (32-bit) Integer
+ 0001b                    :d                 Signed Doubleword (32-bit) Integer
+ 0010b                    :uw                Unsigned Word (16-bit) Integer
+ 0011b                    :w                 Signed Word (16-bit) Integer
+ 0100b                    :ub                Unsigned Byte (8-bit) Integer
+ 0101b                    :b                 Signed Byte (8-bit) Integer
+ 0110b                    :df                Double-Precision (64-bit) Float
+ 0111b                    :f                 Single-Precision (32-bit) Float
+ 1000b                    :uq                Unsigned Quadword (64-bit) Integer
+ 1001b                    :q                 Signed Quadword (64-bit) Integer
+ 1010b                    :hf                Half (16-bit) Float
+ 1011b-1111b              Reserved
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                39
+                                                                          Command Reference: Enumerations
+
+
+
+
+SURFACE_FORMAT
+
+                                        SURFACE_FORMAT
+Source:              BSpec
+Size (in bits):      9
+ The following table indicates the supported surface formats and the 9-bit encoding for each. Note that some of
+these formats are used not only by the Sampling Engine, but also by the Data Port and the Vertex Fetch unit.
+                                                                   Bits Per Element
+     Value                       Name                                    (BPE)                Description
+ 000h        R32G32B32A32_FLOAT                              128
+ 001h        R32G32B32A32_SINT                               128
+ 002h        R32G32B32A32_UINT                               128
+ 003h        R32G32B32A32_UNORM                              128
+ 004h        R32G32B32A32_SNORM                              128
+ 005h        R64G64_FLOAT                                    128
+ 006h        R32G32B32X32_FLOAT                              128
+ 007h        R32G32B32A32_SSCALED                            128
+ 008h        R32G32B32A32_USCALED                            128
+ 020h        R32G32B32A32_SFIXED                             128
+ 021h        R64G64_PASSTHRU                                 128
+ 040h        R32G32B32_FLOAT                                 96
+ 041h        R32G32B32_SINT                                  96
+ 042h        R32G32B32_UINT                                  96
+ 043h        R32G32B32_UNORM                                 96
+ 044h        R32G32B32_SNORM                                 96
+ 045h        R32G32B32_SSCALED                               96
+ 046h        R32G32B32_USCALED                               96
+ 050h        R32G32B32_SFIXED                                96
+ 080h        R16G16B16A16_UNORM                              64
+ 081h        R16G16B16A16_SNORM                              64
+ 082h        R16G16B16A16_SINT                               64
+ 083h        R16G16B16A16_UINT                               64
+ 084h        R16G16B16A16_FLOAT                              64
+ 085h        R32G32_FLOAT                                    64
+ 086h        R32G32_SINT                                     64
+ 087h        R32G32_UINT                                     64
+
+
+
+40                                                                           Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                     SURFACE_FORMAT
+ 088h      R32_FLOAT_X8X24_TYPELESS           64
+ 089h      X32_TYPELESS_G8X24_UINT            64
+ 08Ah      L32A32_FLOAT                       64
+ 08Bh      R32G32_UNORM                       64
+ 08Ch      R32G32_SNORM                       64
+ 08Dh      R64_FLOAT                          64
+ 08Eh      R16G16B16X16_UNORM                 64
+ 08Fh      R16G16B16X16_FLOAT                 64
+ 090h      A32X32_FLOAT                       64
+ 091h      L32X32_FLOAT                       64
+ 092h      I32X32_FLOAT                       64
+ 093h      R16G16B16A16_SSCALED               64
+ 094h      R16G16B16A16_USCALED               64
+ 095h      R32G32_SSCALED                     64
+ 096h      R32G32_USCALED                     64
+ 0A0h      R32G32_SFIXED                      64
+ 0A1h      R64_PASSTHRU                       64
+ 0C0h      B8G8R8A8_UNORM                     32
+ 0C1h      B8G8R8A8_UNORM_SRGB                32
+ 0C2h      R10G10B10A2_UNORM                  32
+ 0C3h      R10G10B10A2_UNORM_SRGB             32
+ 0C4h      R10G10B10A2_UINT                   32
+ 0C5h      R10G10B10_SNORM_A2_UNORM           32
+ 0C7h      R8G8B8A8_UNORM                     32
+ 0C8h      R8G8B8A8_UNORM_SRGB                32
+ 0C9h      R8G8B8A8_SNORM                     32
+ 0CAh      R8G8B8A8_SINT                      32
+ 0CBh      R8G8B8A8_UINT                      32
+ 0CCh      R16G16_UNORM                       32
+ 0CDh      R16G16_SNORM                       32
+ 0CEh      R16G16_SINT                        32
+ 0CFh      R16G16_UINT                        32
+ 0D0h      R16G16_FLOAT                       32
+ 0D1h      B10G10R10A2_UNORM                  32
+ 0D2h      B10G10R10A2_UNORM_SRGB             32
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                      41
+                                                 Command Reference: Enumerations
+
+
+
+
+                                SURFACE_FORMAT
+ 0D3h   R11G11B10_FLOAT                  32
+ 0D6h   R32_SINT                         32
+ 0D7h   R32_UINT                         32
+ 0D8h   R32_FLOAT                        32
+ 0D9h   R24_UNORM_X8_TYPELESS            32
+ 0DAh   X24_TYPELESS_G8_UINT             32
+ 0DDh   L32_UNORM                        32
+ 0DEh   A32_UNORM                        32
+ 0DFh   L16A16_UNORM                     32
+ 0E0h   I24X8_UNORM                      32
+ 0E1h   L24X8_UNORM                      32
+ 0E2h   A24X8_UNORM                      32
+ 0E3h   I32_FLOAT                        32
+ 0E4h   L32_FLOAT                        32
+ 0E5h   A32_FLOAT                        32
+ 0E6h   X8B8_UNORM_G8R8_SNORM            32
+ 0E7h   A8X8_UNORM_G8R8_SNORM            32
+ 0E8h   B8X8_UNORM_G8R8_SNORM            32
+ 0E9h   B8G8R8X8_UNORM                   32
+ 0EAh   B8G8R8X8_UNORM_SRGB              32
+ 0EBh   R8G8B8X8_UNORM                   32
+ 0ECh   R8G8B8X8_UNORM_SRGB              32
+ 0EDh   R9G9B9E5_SHAREDEXP               32
+ 0EEh   B10G10R10X2_UNORM                32
+ 0F0h   L16A16_FLOAT                     32
+ 0F1h   R32_UNORM                        32
+ 0F2h   R32_SNORM                        32
+ 0F3h   R10G10B10X2_USCALED              32
+ 0F4h   R8G8B8A8_SSCALED                 32
+ 0F5h   R8G8B8A8_USCALED                 32
+ 0F6h   R16G16_SSCALED                   32
+ 0F7h   R16G16_USCALED                   32
+ 0F8h   R32_SSCALED                      32
+ 0F9h   R32_USCALED                      32
+ 100h   B5G6R5_UNORM                     16
+
+
+
+42                                                 Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                   SURFACE_FORMAT
+ 101h      B5G6R5_UNORM_SRGB                16
+ 102h      B5G5R5A1_UNORM                   16
+ 103h      B5G5R5A1_UNORM_SRGB              16
+ 104h      B4G4R4A4_UNORM                   16
+ 105h      B4G4R4A4_UNORM_SRGB              16
+ 106h      R8G8_UNORM                       16
+ 107h      R8G8_SNORM                       16
+ 108h      R8G8_SINT                        16
+ 109h      R8G8_UINT                        16
+ 10Ah      R16_UNORM                        16
+ 10Bh      R16_SNORM                        16
+ 10Ch      R16_SINT                         16
+ 10Dh      R16_UINT                         16
+ 10Eh      R16_FLOAT                        16
+ 10Fh      A8P8_UNORM_PALETTE0              16
+ 110h      A8P8_UNORM_PALETTE1              16
+ 111h      I16_UNORM                        16
+ 112h      L16_UNORM                        16
+ 113h      A16_UNORM                        16
+ 114h      L8A8_UNORM                       16
+ 115h      I16_FLOAT                        16
+ 116h      L16_FLOAT                        16
+ 117h      A16_FLOAT                        16
+ 118h      L8A8_UNORM_SRGB                  16
+ 119h      R5G5_SNORM_B6_UNORM              16
+ 11Ah      B5G5R5X1_UNORM                   16
+ 11Bh      B5G5R5X1_UNORM_SRGB              16
+ 11Ch      R8G8_SSCALED                     16
+ 11Dh      R8G8_USCALED                     16
+ 11Eh      R16_SSCALED                      16
+ 11Fh      R16_USCALED                      16
+ 122h      P8A8_UNORM_PALETTE0              16
+ 123h      P8A8_UNORM_PALETTE1              16
+ 124h      A1B5G5R5_UNORM                   16
+ 125h      A4B4G4R4_UNORM                   16
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                    43
+                                               Command Reference: Enumerations
+
+
+
+
+                              SURFACE_FORMAT
+ 126h   L8A8_UINT                      16
+ 127h   L8A8_SINT                      16
+ 140h   R8_UNORM                       8
+ 141h   R8_SNORM                       8
+ 142h   R8_SINT                        8
+ 143h   R8_UINT                        8
+ 144h   A8_UNORM                       8
+ 145h   I8_UNORM                       8
+ 146h   L8_UNORM                       8
+ 147h   P4A4_UNORM_PALETTE0            8
+ 148h   A4P4_UNORM_PALETTE0            8
+ 149h   R8_SSCALED                     8
+ 14Ah   R8_USCALED                     8
+ 14Bh   P8_UNORM_PALETTE0              8
+ 14Ch   L8_UNORM_SRGB                  8
+ 14Dh   P8_UNORM_PALETTE1              8
+ 14Eh   P4A4_UNORM_PALETTE1            8
+ 14Fh   A4P4_UNORM_PALETTE1            8
+ 150h   Y8_UNORM                       8
+ 152h   L8_UINT                        8
+ 153h   L8_SINT                        8
+ 154h   I8_UINT                        8
+ 155h   I8_SINT                        8
+ 180h   DXT1_RGB_SRGB                  0
+ 181h   R1_UNORM                       1
+ 182h   YCRCB_NORMAL                   0
+ 183h   YCRCB_SWAPUVY                  0
+ 184h   P2_UNORM_PALETTE0              2
+ 185h   P2_UNORM_PALETTE1              2
+ 186h   BC1_UNORM                      0                    (DXT1)
+ 187h   BC2_UNORM                      0                    (DXT2/3)
+ 188h   BC3_UNORM                      0                    (DXT4/5)
+ 189h   BC4_UNORM                      0
+ 18Ah   BC5_UNORM                      0
+ 18Bh   BC1_UNORM_SRGB                 0                    (DXT1_SRGB)
+
+
+
+44                                               Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+                                   SURFACE_FORMAT
+ 18Ch      BC2_UNORM_SRGB                   0       (DXT2/3_SRGB)
+ 18Dh      BC3_UNORM_SRGB                   0       (DXT4/5_SRGB)
+ 18Eh      MONO8                            1
+ 18Fh      YCRCB_SWAPUV                     0
+ 190h      YCRCB_SWAPY                      0
+ 191h      DXT1_RGB                         0
+ 192h      FXT1                             0
+ 193h      R8G8B8_UNORM                     24
+ 194h      R8G8B8_SNORM                     24
+ 195h      R8G8B8_SSCALED                   24
+ 196h      R8G8B8_USCALED                   24
+ 197h      R64G64B64A64_FLOAT               256
+ 198h      R64G64B64_FLOAT                  192
+ 199h      BC4_SNORM                        0
+ 19Ah      BC5_SNORM                        0
+ 19Bh      R16G16B16_FLOAT                  48
+ 19Ch      R16G16B16_UNORM                  48
+ 19Dh      R16G16B16_SNORM                  48
+ 19Eh      R16G16B16_SSCALED                48
+ 19Fh      R16G16B16_USCALED                48
+ 1A1h      BC6H_SF16                        0
+ 1A2h      BC7_UNORM                        0
+ 1A3h      BC7_UNORM_SRGB                   0
+ 1A4h      BC6H_UF16                        0
+ 1A5h      PLANAR_420_8                     0
+ 1A8h      R8G8B8_UNORM_SRGB                24
+ 1A9h      ETC1_RGB8                        0
+ 1AAh      ETC2_RGB8                        0
+ 1ABh      EAC_R11                          0
+ 1ACh      EAC_RG11                         0
+ 1ADh      EAC_SIGNED_R11                   0
+ 1AEh      EAC_SIGNED_RG11                  0
+ 1AFh      ETC2_SRGB8                       0
+ 1B0h      R16G16B16_UINT                   48
+ 1B1h      R16G16B16_SINT                   48
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                    45
+                                                 Command Reference: Enumerations
+
+
+
+
+                                SURFACE_FORMAT
+ 1B2h   R32_SFIXED                       32
+ 1B3h   R10G10B10A2_SNORM                32
+ 1B4h   R10G10B10A2_USCALED              32
+ 1B5h   R10G10B10A2_SSCALED              32
+ 1B6h   R10G10B10A2_SINT                 32
+ 1B7h   B10G10R10A2_SNORM                32
+ 1B8h   B10G10R10A2_USCALED              32
+ 1B9h   B10G10R10A2_SSCALED              32
+ 1BAh   B10G10R10A2_UINT                 32
+ 1BBh   B10G10R10A2_SINT                 32
+ 1BCh   R64G64B64A64_PASSTHRU            256
+ 1BDh   R64G64B64_PASSTHRU               192
+ 1C0h   ETC2_RGB8_PTA                    0
+ 1C1h   ETC2_SRGB8_PTA                   0
+ 1C2h   ETC2_EAC_RGBA8                   0
+ 1C3h   ETC2_EAC_SRGB8_A8                0
+ 1C8h   R8G8B8_UINT                      24
+ 1C9h   R8G8B8_SINT                      24
+ 1FFh   RAW                              0
+
+
+
+
+46                                                 Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+Texture Coordinate Mode
+
+                                     Texture Coordinate Mode
+Source:                  BSpec
+Size (in bits):          3
+
+ Value            Name                                            Description
+ 0h       WRAP               Map is repeated in the U direction
+ 1h       MIRROR             Map is mirrored in the U direction
+ 2h       CLAMP              Map is clamped to the edges of the accessed map
+ 3h       CUBE               For cube-mapping, filtering in edges access adjacent map faces
+ 4h       CLAMP_BORDER Map is infinitely extended with the border color
+ 5h       MIRROR_ONCE        Map is mirrored once about origin, then clamped
+ 6h       HALF_BORDER        Map is infinitely extended with the average of the nearest edge texel and the border
+                             color
+ 7h       Reserved
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                47
+                                                                               Command Reference: Enumerations
+
+
+
+
+ThreadCtrl
+
+                                                   ThreadCtrl
+Source:                 EuIsa
+Size (in bits):         2
+ Thread Control
+ This field provides explicit control for thread switching.
+ Value     Name                                                Description
+ 00b      Normal     Up to the GEN execution units to manage thread switching. This is the normal (and unnamed)
+                     mode. In this mode, for example, if the current instruction cannot proceed due to operand
+                     dependencies, the EU switches to the next available thread to fill the compute pipe. In
+                     another example, if the current instruction is ready to go, however, there is another thread
+                     with higher priority that also has an instruction ready, the EU switches to that thread.
+                      Execution may or may not be preempted by another thread following this instruction.
+ 01b      Atomic     Prevent any thread switch immediately following this instruction. Always execute the next
+                     instruction (which may not be next sequentially if the current instruction branches).
+                      The next instruction gets highest priority in the thread arbitration for the execution pipelines.
+ 10b      Switch     A forced thread switch occurs after the current instruction is executed and before the next
+                     instruction. In addition, a long delay (longer than the execution pipe latency) is introduced for
+                     the current thread. Particularly, the instruction queue of the current thread is flushed after the
+                     current instruction is dispatched for execution.
+                      Switch is designed primarily as a safety feature in case there are race conditions for certain
+                     instructions.
+                      Force a switch to another thread after this instruction and before the next instruction.
+ 11b      Reserved
+
+
+
+
+48                                                                                Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+VertStride
+
+                                                  VertStride
+Source:                EuIsa
+Size (in bits):        4
+ Vertical Stride
+ The field provides the vertical stride of the register region in unit of data elements for an operand.
+ Encoding of this field provides values of 0 or powers of 2, ranging from 1 to 32 elements. Larger values are not
+supported due to the restriction that a source operand must reside within two adjacent 256-bit registers (64
+bytes total).
+ Special encoding 1111b (0xF) is only valid when the operand is in register-indirect addressing mode (AddrMode
+= 1). If this field is set to 0xF, one or more sub-registers of the address registers may be used to compute the
+addresses. Each address sub-register provides the origin for a row of data element. The number of address sub-
+registers used is determined by the division of ExecSize of the instruction by the Width fields of the operand.
+ This field only applies to source operand. It does not apply to destination.
+ This field is not present for an immediate source operand.
+                                               Programming Notes
+ Note 1: Vertical Stride larger than 32 is not allowed due to the restriction that a source operand must reside
+ within two adjacent 256-bit registers (64 bytes total).
+ Note 2: In Align16 access mode, as encoding 0xF is reserved, only single-index indirect addressing is supported.
+ Note 3: If indirect address is supported for src1, encoding 0xF is reserved for src1 - only single-index indirect
+ addressing is supported.
+ Note 4: Encoding 0010 applies for QWord-size operands.
+
+     Value              Name                                      Programming Notes
+ 0000b            0 elements
+ 0001b            1 element           Restriction : Align1 mode only.
+ 0010b            2 elements
+ 0011b            4 elements
+ 0100b            8 elements          Restriction : Align1 mode only.
+ 0101b            16 elements         Restriction : Applies to byte or word operand only. Align1 mode only.
+ 0110b            32 elements         Restriction : Applies to byte operand only. Align1 mode only.
+ 0111b-1110b      Reserved
+ 1111b            VxH or Vx1 mode     Restriction : Only valid for register-indirect addressing in Align1 mode.
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                     49
+                                                                           Command Reference: Enumerations
+
+
+
+
+Width
+
+                                                   Width
+Source:               EuIsa
+Size (in bits):       3
+ This field specifies the number of elements in the horizontal dimension of the region for a source operand. This
+field cannot exceed the ExecSize field of the instruction.
+ This field only applies to source operand. It does not apply to destination.
+ This field is not present for an immediate source operand.
+                                              Programming Notes
+ Note that with ExecSize of 32, because the maximum Width is 16, there are at least two rows in a source region.
+
+                          Value                                                  Name
+ 000b                                                  1 elements
+ 001b                                                  2 elements
+ 010b                                                  4 elements
+ 011b                                                  8 elements
+ 100b                                                  16 elements
+                     101b-111b                         Reserved
+
+
+
+
+50                                                                            Doc Ref # IHD-OS-KBL-Vol 2b-1.17
+Command Reference: Enumerations
+
+
+
+WRAP_SHORTEST_ENABLE
+
+                                   WRAP_SHORTEST_ENABLE
+Source:                 RenderCS
+Size (in bits):         4
+ This state selects which components (if any) of Attribute [n] are to be interpolated in a "wrap shortest" fashion.
+Operation is UNDEFINED if any of these bits are set and the Constant Interpolation Enable bit associated with
+this attribute is set. Note that wrap-shortest interpolation is only supported for Attributes 0-15.
+      Value             Name                                         Description
+ 0001b            X                Wrap Shortest X Component
+ 0010b            Y                Wrap Shortest Y Component
+ 0011b            XY               Wrap Shortest XY Components
+ 0100b            Z                Wrap Shortest Z Component
+ 0101b            XZ               Wrap Shortest XZ Components
+ 0110b            YZ               Wrap Shortest YZ Components
+ 0111b            XYZ              Wrap Shortest XYZ Components
+ 1000b            W                Wrap Shortest W Component
+ 1001b            XW               Wrap Shortest XW Components
+ 1010b            YW               Wrap Shortest YW Components
+ 1011b            XYW              Wrap Shortest XYW Components
+ 1100b            ZW               Wrap Shortest ZW Components
+ 1101b            XZW              Wrap Shortest XZW Components
+ 1110b            YZW              Wrap Shortest YZW Components
+ 1111b            XYZW             Wrap Shortest XYZW Components
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 2b-1.17                                                                                  51

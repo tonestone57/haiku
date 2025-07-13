@@ -1,0 +1,109 @@
+Intel® Open Source HD Graphics and Intel Iris™ Plus Graphics
+
+
+Programmer's Reference Manual
+
+
+For the 2016 - 2017 Intel Core™ Processors, Celeron™ Processors,
+and Pentium™ Processors based on the "Kaby Lake" Platform
+
+Volume 13: Memory-mapped Input/Output (MMIO)
+
+January 2017, Revision 1.0
+                                                                                                   MMIO
+
+
+
+
+Creative Commons License
+You are free to Share - to copy, distribute, display, and perform the work under the following
+conditions:
+
+      Attribution. You must attribute the work in the manner specified by the author or licensor (but
+       not in any way that suggests that they endorse you or your use of the work).
+      No Derivative Works. You may not alter, transform, or build upon this work.
+
+Notices and Disclaimers
+INFORMATION IN THIS DOCUMENT IS PROVIDED IN CONNECTION WITH INTEL® PRODUCTS. NO
+LICENSE, EXPRESS OR IMPLIED, BY ESTOPPEL OR OTHERWISE, TO ANY INTELLECTUAL PROPERTY RIGHTS
+IS GRANTED BY THIS DOCUMENT. EXCEPT AS PROVIDED IN INTEL'S TERMS AND CONDITIONS OF SALE
+FOR SUCH PRODUCTS, INTEL ASSUMES NO LIABILITY WHATSOEVER AND INTEL DISCLAIMS ANY
+EXPRESS OR IMPLIED WARRANTY, RELATING TO SALE AND/OR USE OF INTEL PRODUCTS INCLUDING
+LIABILITY OR WARRANTIES RELATING TO FITNESS FOR A PARTICULAR PURPOSE, MERCHANTABILITY, OR
+INFRINGEMENT OF ANY PATENT, COPYRIGHT OR OTHER INTELLECTUAL PROPERTY RIGHT.
+A "Mission Critical Application" is any application in which failure of the Intel Product could result,
+directly or indirectly, in personal injury or death. SHOULD YOU PURCHASE OR USE INTEL'S PRODUCTS
+FOR ANY SUCH MISSION CRITICAL APPLICATION, YOU SHALL INDEMNIFY AND HOLD INTEL AND ITS
+SUBSIDIARIES, SUBCONTRACTORS AND AFFILIATES, AND THE DIRECTORS, OFFICERS, AND EMPLOYEES
+OF EACH, HARMLESS AGAINST ALL CLAIMS COSTS, DAMAGES, AND EXPENSES AND REASONABLE
+ATTORNEYS' FEES ARISING OUT OF, DIRECTLY OR INDIRECTLY, ANY CLAIM OF PRODUCT LIABILITY,
+PERSONAL INJURY, OR DEATH ARISING IN ANY WAY OUT OF SUCH MISSION CRITICAL APPLICATION,
+WHETHER OR NOT INTEL OR ITS SUBCONTRACTOR WAS NEGLIGENT IN THE DESIGN, MANUFACTURE,
+OR WARNING OF THE INTEL PRODUCT OR ANY OF ITS PARTS.
+Intel may make changes to specifications and product descriptions at any time, without notice. Designers
+must not rely on the absence or characteristics of any features or instructions marked "reserved" or
+"undefined". Intel reserves these for future definition and shall have no responsibility whatsoever for
+conflicts or incompatibilities arising from future changes to them. The information here is subject to
+change without notice. Do not finalize a design with this information.
+The products described in this document may contain design defects or errors known as errata which
+may cause the product to deviate from published specifications. Current characterized errata are
+available on request.
+Implementations of the I2C bus/protocol may require licenses from various entities, including Philips
+Electronics N.V. and North American Philips Corporation.
+Intel and the Intel logo are trademarks of Intel Corporation in the U.S. and other countries.
+* Other names and brands may be claimed as the property of others.
+Copyright © 2017, Intel Corporation. All rights reserved.
+
+
+
+ii                                                                       Doc Ref # IHD-OS-KBL-Vol 13-1.17
+ MMIO
+
+
+
+
+Table of Contents
+Slice Registers and Die Recovery.................................................................................................. 1
+SW Virtualization Reserved MMIO range ................................................................................... 1
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 13-1.17                                                                                                       iii
+MMIO
+
+
+
+Slice Registers and Die Recovery
+When slice 0 is disabled (for example, GT3 fused to GT2 with a slice 0 fault), any read to a slice-located
+MMIO register must be directed to slice 1, otherwise data of '0' will be returned. This applies to SRM
+cycles from any command streamer.
+MMIO Range Start MMIO Range End                            Unit Description
+00005500            00005FFF           WMBE
+00007000            00007FFF           SVL
+00009400            000097FF           CP unit reg. file - Copy in Slice Common (in all slices)
+0000B000            0000B0FF           L3 unique status registers for each slice (unicast per GT).
+0000B100            0000B3FF           L3 bank config space (multicast copy per bank and slice)
+0000E000            0000E0FF           DM
+0000E100            0000E1FF           SC
+0000E200            0000E3FF           GWL (inst. 0)
+0000E200            0000E3FF           GWL (inst. 1)
+0000E200            0000E3FF           GWL (inst. 2)
+0000E400            0000E7FF           TDL
+
+
+SW Virtualization Reserved MMIO range
+The MMIO address range from 0x178000 thru 0x178FFF is reserved for communication between a VMM
+and the GPU Driver executing on a Virtual Machine.
+HW does not actually implement anything within this range. Instead, in a SW Virtualized environment, if
+a VM driver issues a read to this MMIO address range, the VMM will trap that access, and provide
+whatever data it wishes to pass to the VM driver. In a non-SW-Virtualizated environment (including an
+SR-IOV Virtualized environment), reads will return zeros, like any other unimplemented MMIO address.
+Writes to this range are always ignored.
+It is important that no "real" HW MMIO register be defined within this range, as it would be inaccessable
+in a SW-virtualized environment.
+
+
+
+
+Doc Ref # IHD-OS-KBL-Vol 13-1.17                                                                         1

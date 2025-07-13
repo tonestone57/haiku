@@ -37,9 +37,14 @@ intel_video_destroy_decoder(intel_video_decoder decoder)
 static status_t
 intel_video_decode_h264_frame(intel_video_decoder_instance* decoder,
     const void* data, size_t size,
+    intel_video_frame* frame);
+
+static status_t
+intel_video_decode_hevc_frame(intel_video_decoder_instance* decoder,
+    const void* data, size_t size,
     intel_video_frame* frame)
 {
-    // This is a stub. A real implementation would parse the H.264 stream,
+    // This is a stub. A real implementation would parse the HEVC stream,
     // manage reference frames, and use the hardware to decode the frame.
     return B_UNSUPPORTED;
 }
@@ -53,6 +58,8 @@ intel_video_decode_frame(intel_video_decoder decoder,
     switch (instance->codec) {
         case INTEL_VIDEO_CODEC_H264_AVC:
             return intel_video_decode_h264_frame(instance, data, size, frame);
+        case INTEL_VIDEO_CODEC_HEVC_H265:
+            return intel_video_decode_hevc_frame(instance, data, size, frame);
         default:
             return B_UNSUPPORTED;
     }

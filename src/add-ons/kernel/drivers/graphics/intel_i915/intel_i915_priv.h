@@ -906,6 +906,7 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_3D_COLOR_SPACE_CONVERSION (B_DEVICE_OP_CODES_END + 105)
 #define INTEL_I915_IOCTL_3D_ROTATED_BLIT (B_DEVICE_OP_CODES_END + 106)
 #define INTEL_I915_IOCTL_3D_FONT_SMOOTHING (B_DEVICE_OP_CODES_END + 107)
+#define INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME (B_DEVICE_OP_CODES_END + 108)
 
 #define I915_DISPLAY_CONFIG_ENABLE 1
 #define I915_DISPLAY_CONFIG_CLONE 2
@@ -987,6 +988,13 @@ struct i915_video_decode_frame_ioctl_data {
 	uint64 data; // Pointer to compressed frame data
 	uint32 size;
 	uint64 frame; // Pointer to intel_video_frame
+};
+
+struct i915_video_encode_frame_ioctl_data {
+	uint32 encoder_handle;
+	uint64 data;
+	uint32 size;
+	uint64 frame;
 };
 
 

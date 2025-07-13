@@ -72,10 +72,65 @@ struct intel_hevc_decoder {
 	intel_hevc_slice_parameters slice_params;
 };
 
+struct intel_mpeg2_picture_parameters {
+	uint32 width;
+	uint32 height;
+};
+
+struct intel_mpeg2_slice_parameters {
+	uint32 slice_data_size;
+	uint32 slice_data_offset;
+};
+
+struct intel_vc1_picture_parameters {
+	uint32 width;
+	uint32 height;
+};
+
+struct intel_vc1_slice_parameters {
+	uint32 slice_data_size;
+	uint32 slice_data_offset;
+};
+
+struct intel_jpeg_picture_parameters {
+	uint32 width;
+	uint32 height;
+};
+
+struct intel_jpeg_slice_parameters {
+	uint32 slice_data_size;
+	uint32 slice_data_offset;
+};
+
 struct intel_vp9_decoder {
 	video_decoder base;
 	intel_vp9_picture_parameters pic_params;
 	intel_vp9_slice_parameters slice_params;
+};
+
+struct intel_mpeg2_decoder {
+	video_decoder base;
+	intel_mpeg2_picture_parameters pic_params;
+	intel_mpeg2_slice_parameters slice_params;
+};
+
+struct intel_vc1_decoder {
+	video_decoder base;
+	intel_vc1_picture_parameters pic_params;
+	intel_vc1_slice_parameters slice_params;
+};
+
+struct i915_video_encode_frame_ioctl_data {
+	uint32 encoder_handle;
+	uint64 data;
+	uint32 size;
+	uint64 frame;
+};
+
+struct intel_jpeg_decoder {
+	video_decoder base;
+	intel_jpeg_picture_parameters pic_params;
+	intel_jpeg_slice_parameters slice_params;
 };
 
 
@@ -92,6 +147,8 @@ status_t intel_video_destroy_decoder(intel_i915_device_info* devInfo,
 	i915_video_destroy_decoder_ioctl_data* args);
 status_t intel_video_decode_frame(intel_i915_device_info* devInfo,
 	i915_video_decode_frame_ioctl_data* args);
+status_t intel_video_encode_frame(intel_i915_device_info* devInfo,
+	i915_video_encode_frame_ioctl_data* args);
 
 #ifdef __cplusplus
 }

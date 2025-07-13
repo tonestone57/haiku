@@ -75,6 +75,36 @@ intel_video_create_decoder(intel_i915_device_info* devInfo,
 			decoder = &vp9Decoder->base;
 			break;
 		}
+		case INTEL_VIDEO_CODEC_MPEG2:
+		{
+			intel_mpeg2_decoder* mpeg2Decoder = new(std::nothrow) intel_mpeg2_decoder;
+			if (mpeg2Decoder == NULL) {
+				mutex_unlock(&sDecoderListLock);
+				return B_NO_MEMORY;
+			}
+			decoder = &mpeg2Decoder->base;
+			break;
+		}
+		case INTEL_VIDEO_CODEC_VC1:
+		{
+			intel_vc1_decoder* vc1Decoder = new(std::nothrow) intel_vc1_decoder;
+			if (vc1Decoder == NULL) {
+				mutex_unlock(&sDecoderListLock);
+				return B_NO_MEMORY;
+			}
+			decoder = &vc1Decoder->base;
+			break;
+		}
+		case INTEL_VIDEO_CODEC_JPEG:
+		{
+			intel_jpeg_decoder* jpegDecoder = new(std::nothrow) intel_jpeg_decoder;
+			if (jpegDecoder == NULL) {
+				mutex_unlock(&sDecoderListLock);
+				return B_NO_MEMORY;
+			}
+			decoder = &jpegDecoder->base;
+			break;
+		}
 		default:
 			mutex_unlock(&sDecoderListLock);
 			return B_BAD_VALUE;
@@ -230,6 +260,15 @@ intel_video_decode_frame(intel_i915_device_info* devInfo,
 		case INTEL_VIDEO_CODEC_VP9:
 			return vp9_decode_slice((intel_vp9_decoder*)decoder,
 				(const uint8*)args->data, args->size);
+		case INTEL_VIDEO_CODEC_MPEG2:
+			return mpeg2_decode_slice((intel_mpeg2_decoder*)decoder,
+				(const uint8*)args->data, args->size);
+		case INTEL_VIDEO_CODEC_VC1:
+			return vc1_decode_slice((intel_vc1_decoder*)decoder,
+				(const uint8*)args->data, args->size);
+		case INTEL_VIDEO_CODEC_JPEG:
+			return jpeg_decode_slice((intel_jpeg_decoder*)decoder,
+				(const uint8*)args->data, args->size);
 		default:
 			return B_BAD_VALUE;
 	}
@@ -253,6 +292,39 @@ hevc_decode_slice(intel_hevc_decoder* decoder, const uint8* data, uint32 size)
 
 	hevc_parse_slice_header(decoder, data, size);
 
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
+intel_video_encode_frame(intel_i915_device_info* devInfo,
+	i915_video_encode_frame_ioctl_data* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+static status_t
+mpeg2_decode_slice(intel_mpeg2_decoder* decoder, const uint8* data, uint32 size)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+static status_t
+vc1_decode_slice(intel_vc1_decoder* decoder, const uint8* data, uint32 size)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+static status_t
+jpeg_decode_slice(intel_jpeg_decoder* decoder, const uint8* data, uint32 size)
+{
 	// TODO: implement
 	return B_ERROR;
 }

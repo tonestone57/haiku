@@ -639,6 +639,30 @@ get_accelerant_hook(uint32 feature, void *data)
 		case INTEL_I915_ACCELERANT_SET_CURSOR_TARGET_PIPE:
 			return (void*)intel_i915_set_cursor_target_pipe; // Already in accelerant.c
 
+		// Stubs for new features
+		case B_ALPHA_BLEND:
+			return (void *)intel_i915_alpha_blend;
+		case B_DRAW_STRING:
+			return (void *)intel_i915_draw_string;
+		case B_OVERLAY_COUNT:
+			return (void *)intel_i915_overlay_count;
+		case B_ALLOCATE_OVERLAY_BUFFER:
+			return (void *)intel_i915_allocate_overlay_buffer;
+		case B_RELEASE_OVERLAY_BUFFER:
+			return (void *)intel_i915_release_overlay_buffer;
+		case B_CONFIGURE_OVERLAY:
+			return (void *)intel_i915_configure_overlay;
+		case B_SET_HARDWARE_CURSOR:
+			return (void *)intel_i915_set_hardware_cursor;
+		case B_ROTATED_BLIT:
+			return (void *)intel_i915_rotated_blit;
+		case B_COLOR_SPACE_CONVERT:
+			return (void *)intel_i915_color_space_convert;
+		case B_COMPOSE_LAYERS:
+			return (void *)intel_i915_compose_layers;
+		case B_SET_FONT_SMOOTHING:
+			return (void *)intel_i915_set_font_smoothing;
+
 		default:
 			TRACE("get_accelerant_hook: Unknown feature 0x%lx requested.\n", feature);
 			return NULL;

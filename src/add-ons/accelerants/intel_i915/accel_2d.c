@@ -289,6 +289,95 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 	}
 }
 
+// --- Alpha Blending Stub ---
+void intel_i915_alpha_blend(engine_token* et,
+    alpha_blend_params* list, uint32 count, bool enable_hw_clip)
+{
+    TRACE("intel_i915_alpha_blend: STUB - %lu operations, clipping %s.\n",
+        count, enable_hw_clip ? "enabled" : "disabled");
+    // This is a stub. A full implementation would use the 3D pipeline
+    // or a dedicated blend unit if available.
+}
+
+// --- Font Rendering Stubs ---
+void intel_i915_draw_string(engine_token* et,
+    font_rendering_params* list, uint32 count, bool enable_hw_clip)
+{
+    TRACE("intel_i915_draw_string: STUB - %lu strings, clipping %s.\n",
+        count, enable_hw_clip ? "enabled" : "disabled");
+    // This is a stub. A full implementation would likely involve blitting
+    // pre-rendered glyphs from a font atlas.
+}
+
+// --- Overlay Stubs ---
+uint32 intel_i915_overlay_count(const display_mode* mode)
+{
+    TRACE("intel_i915_overlay_count: STUB - Reporting 0 overlays.\n");
+    return 0; // No overlays supported by this stub
+}
+
+overlay_buffer* intel_i915_allocate_overlay_buffer(uint16 width, uint16 height)
+{
+    TRACE("intel_i915_allocate_overlay_buffer: STUB - Allocation failed.\n");
+    return NULL; // Allocation failed
+}
+
+status_t intel_i915_release_overlay_buffer(overlay_buffer* buffer)
+{
+    TRACE("intel_i915_release_overlay_buffer: STUB - Release failed.\n");
+    return B_ERROR;
+}
+
+status_t intel_i915_configure_overlay(overlay_buffer* buffer,
+    const overlay_window* window, const overlay_viewport* view)
+{
+    TRACE("intel_i915_configure_overlay: STUB - Configuration failed.\n");
+    return B_ERROR;
+}
+
+// --- Hardware Cursor Composition Stub ---
+void intel_i915_set_hardware_cursor(engine_token* et, const hardware_cursor* cursor)
+{
+    TRACE("intel_i915_set_hardware_cursor: STUB - Not implemented.\n");
+    // This would typically involve programming cursor plane registers with
+    // the cursor image data and position.
+}
+
+// --- Rotation Stub ---
+void intel_i915_rotated_blit(engine_token* et,
+    const rotated_blit_params* params, bool enable_hw_clip)
+{
+    TRACE("intel_i915_rotated_blit: STUB - Rotation not implemented, clipping %s.\n",
+        enable_hw_clip ? "enabled" : "disabled");
+    // This is a stub. A full implementation would use the 3D pipeline.
+}
+
+// --- Color Space Conversion Stub ---
+void intel_i915_color_space_convert(engine_token* et,
+    const color_space_conversion_params* params)
+{
+    TRACE("intel_i915_color_space_convert: STUB - Not implemented.\n");
+    // This could be handled by a dedicated hardware unit or the 3D pipeline.
+}
+
+// --- Multi-layer Composition Stub ---
+void intel_i915_compose_layers(engine_token* et,
+    const composition_layer* layers, uint32 num_layers)
+{
+    TRACE("intel_i915_compose_layers: STUB - %lu layers, not implemented.\n", num_layers);
+    // This would involve blending multiple source surfaces onto a destination,
+    // likely using the 3D pipeline or dedicated composition hardware.
+}
+
+// --- Font Smoothing Stub ---
+void intel_i915_set_font_smoothing(bool enabled)
+{
+    TRACE("intel_i915_set_font_smoothing: STUB - Font smoothing %s.\n",
+        enabled ? "enabled" : "disabled");
+    // This would typically affect how font rendering is done, possibly by
+    // enabling anti-aliasing in the 3D pipeline for glyph rendering.
+}
+
 
 // Intel Blitter Command Definitions
 // PRM Ref: Search for "XY_COLOR_BLT" or "XY_SRC_COPY_BLT" in the relevant GEN's PRM volume for Blitter.

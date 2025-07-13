@@ -35,6 +35,19 @@ sem_id ACCELERANT_RETRACE_SEMAPHORE(void);
 extern void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *list, uint32 count, bool enable_hw_clip);
 extern void intel_i915_screen_to_screen_blit(engine_token *et, blit_params *list, uint32 count, bool enable_hw_clip);
 extern void intel_i915_invert_rectangle(engine_token* et, fill_rect_params* list, uint32 count, bool enable_hw_clip);
+
+// Stubs for missing features
+void intel_i915_alpha_blend(engine_token* et, alpha_blend_params* list, uint32 count, bool enable_hw_clip);
+void intel_i915_draw_string(engine_token* et, font_rendering_params* list, uint32 count, bool enable_hw_clip);
+uint32 intel_i915_overlay_count(const display_mode* mode);
+overlay_buffer* intel_i915_allocate_overlay_buffer(uint16 width, uint16 height);
+status_t intel_i915_release_overlay_buffer(overlay_buffer* buffer);
+status_t intel_i915_configure_overlay(overlay_buffer* buffer, const overlay_window* window, const overlay_viewport* view);
+void intel_i915_set_hardware_cursor(engine_token* et, const hardware_cursor* cursor);
+void intel_i915_rotated_blit(engine_token* et, const rotated_blit_params* params, bool enable_hw_clip);
+void intel_i915_color_space_convert(engine_token* et, const color_space_conversion_params* params);
+void intel_i915_compose_layers(engine_token* et, const composition_layer* layers, uint32 num_layers);
+void intel_i915_set_font_smoothing(bool enabled);
 extern void intel_i915_fill_span(engine_token* et, uint32 color, uint16* list, uint32 count, bool enable_hw_clip);
 extern void intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color, blit_params *list, uint32 count, bool enable_hw_clip);
 extern void intel_i915_screen_to_screen_scaled_filtered_blit(engine_token *et, scaled_blit_params *list, uint32 count, bool enable_hw_clip);

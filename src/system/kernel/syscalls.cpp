@@ -194,25 +194,13 @@ _user_get_team_cpu_usage(team_id tmid, bigtime_t* usage, bigtime_t* allowance)
 }
 
 status_t
-_user_get_team_cpu_quota(team_id tmid, bigtime_t* period, bigtime_t* quota)
+_user_get_team_cpu_quota(team_id tmid, uint32* _percent_quota)
 {
 	return B_OK;
 }
 
 status_t
-_user_set_team_cpu_quota(team_id tmid, bigtime_t period, bigtime_t quota)
-{
-	return B_OK;
-}
-
-int32
-_user_get_scheduler_mode(void)
-{
-	return 0;
-}
-
-status_t
-_user_set_scheduler_mode(int32 mode)
+_user_set_team_cpu_quota(team_id tmid, uint32 percent_quota)
 {
 	return B_OK;
 }

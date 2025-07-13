@@ -22,6 +22,7 @@ typedef enum {
     INTEL_VIDEO_CODEC_AV1,
 	INTEL_VIDEO_CODEC_H264_AVC,
 	INTEL_VIDEO_CODEC_HEVC_H265,
+	INTEL_VIDEO_CODEC_VP9_PROFILE0,
 } intel_video_codec;
 
 // Video frame format

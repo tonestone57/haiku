@@ -766,6 +766,46 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 	}
 
 	if (args->num_pipe_configs > 0) {
+		// We need to re-calculate the framebuffer size and re-allocate the framebuffer if the
+		// display configuration has changed.
+		size_t new_fb_size = 0;
+		if (args->flags & I915_DISPLAY_CONFIG_EXTENDED) {
+			uint32_t max_height = 0;
+			uint32_t total_width = 0;
+			for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+				if (pipe_configs_kernel_copy[i].mode.virtual_height > max_height)
+					max_height = pipe_configs_kernel_copy[i].mode.virtual_height;
+				total_width += pipe_configs_kernel_copy[i].mode.virtual_width;
+			}
+			new_fb_size = total_width * max_height * 4;
+		} else {
+			new_fb_size = pipe_configs_kernel_copy[0].mode.virtual_width
+				* pipe_configs_kernel_copy[0].mode.virtual_height * 4;
+		}
+
+		if (new_fb_size != devInfo->framebuffer_alloc_size) {
+			if (devInfo->framebuffer_area >= 0)
+				delete_area(devInfo->framebuffer_area);
+
+			devInfo->framebuffer_area = create_area("i915_framebuffer",
+				&devInfo->framebuffer_addr, B_ANY_KERNEL_ADDRESS,
+				new_fb_size, B_CONTIGUOUS, B_READ_AREA | B_WRITE_AREA);
+			if (devInfo->framebuffer_area < B_OK)
+				return devInfo->framebuffer_area;
+
+			devInfo->framebuffer_alloc_size = new_fb_size;
+			get_memory_map(devInfo->framebuffer_addr, new_fb_size,
+				(physical_entry*)devInfo->framebuffer_phys_addr, 1);
+		}
+
+		// Update the framebuffer GEM object
+		if (devInfo->framebuffer_bo[0]) {
+			intel_i915_gem_object_put(devInfo->framebuffer_bo[0]);
+			devInfo->framebuffer_bo[0] = NULL;
+		}
+		intel_i915_gem_object_create_for_framebuffer(devInfo,
+			devInfo->framebuffer_phys_addr, new_fb_size, &devInfo->framebuffer_bo[0]);
+	}
 		pipe_configs_array_size = sizeof(struct i915_display_pipe_config) * args->num_pipe_configs;
 		pipe_configs_kernel_copy = (struct i915_display_pipe_config*)malloc(pipe_configs_array_size);
 		if (pipe_configs_kernel_copy == NULL) { TRACE("    Error: Failed to allocate memory for pipe_configs_kernel_copy\n"); return B_NO_MEMORY; }

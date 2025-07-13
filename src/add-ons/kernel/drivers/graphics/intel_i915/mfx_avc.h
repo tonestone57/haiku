@@ -34,6 +34,36 @@ struct mfx_avc_slice_state {
 	uint32_t dword3;
 };
 
+struct mfx_avc_slice_params {
+	uint32_t slice_data_size;
+	uint32_t slice_data_offset;
+	uint32_t slice_data_bit_offset;
+	uint32_t first_mb_in_slice;
+	uint32_t slice_type;
+	uint32_t direct_prediction_type;
+	uint32_t num_ref_idx_l0_active_minus1;
+	uint32_t num_ref_idx_l1_active_minus1;
+	uint32_t cabac_init_idc;
+	uint32_t slice_qp_delta;
+	uint32_t disable_deblocking_filter_idc;
+	uint32_t slice_alpha_c0_offset_div2;
+	uint32_t slice_beta_offset_div2;
+	uint32_t luma_log2_weight_denom;
+	uint32_t chroma_log2_weight_denom;
+	uint32_t luma_weight_l0_flag;
+	uint32_t luma_weight_l0[32];
+	uint32_t luma_offset_l0[32];
+	uint32_t chroma_weight_l0_flag;
+	uint32_t chroma_weight_l0[32][2];
+	uint32_t chroma_offset_l0[32][2];
+	uint32_t luma_weight_l1_flag;
+	uint32_t luma_weight_l1[32];
+	uint32_t luma_offset_l1[32];
+	uint32_t chroma_weight_l1_flag;
+	uint32_t chroma_weight_l1[32][2];
+	uint32_t chroma_offset_l1[32][2];
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -59,51 +59,51 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 		return status;
 	}
 
+	struct mfx_avc_slice_params params;
+	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
+	if (status != B_OK) {
+		intel_i915_gem_object_unmap_cpu(cmd_buffer);
+		intel_i915_gem_object_put(cmd_buffer);
+		return status;
+	}
+
+	if (params.slice_data_size == 0) {
+		intel_i915_gem_object_unmap_cpu(slice_params);
+		intel_i915_gem_object_unmap_cpu(cmd_buffer);
+		intel_i915_gem_object_put(cmd_buffer);
+		return B_BAD_VALUE;
+	}
+
 	uint32_t* cmd_start = cmd;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_PIPE_MODE_SELECT);
-	*cmd++ = 0; // TODO: fill in actual values
+	*cmd++ = (1 << 16) | (1 << 8) | 1; // H.264, short format, stream out disabled
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_SURFACE_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
-	*cmd++ = 0;
-	*cmd++ = 0;
+	*cmd++ = 0; // Surface ID 0
+	*cmd++ = (1920 << 16) | 1080; // Width, height
+	*cmd++ = (0 << 16) | 0; // Y offset, X offset
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_PIPE_BUF_ADDR_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
+	// TODO: fill in actual addresses
+	for (int i = 0; i < 18; i++)
+		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_IMG_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
+	*cmd++ = (1920 / 16 - 1) << 16 | (1080 / 16 - 1);
 	*cmd++ = 0;
 	*cmd++ = 0;
 	*cmd++ = 0;
 	*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_REF_IDX_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
+	*cmd++ = 0;
 	*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_SLICE_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
-	*cmd++ = 0;
-	*cmd++ = 0;
+	*cmd++ = params.slice_data_size;
+	*cmd++ = params.slice_data_offset;
+	*cmd++ = (params.first_mb_in_slice << 16) | params.slice_type;
 
 	*cmd++ = (MI_COMMAND_TYPE_MI | MI_FLUSH_DW);
 	*cmd++ = 0;
@@ -116,6 +116,7 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 
 	cmd_buffer->size = (cmd - cmd_start) * 4;
 
+	intel_i915_gem_object_unmap_cpu(slice_params);
 	intel_i915_gem_object_unmap_cpu(cmd_buffer);
 
 	*cmd_buffer_out = cmd_buffer;

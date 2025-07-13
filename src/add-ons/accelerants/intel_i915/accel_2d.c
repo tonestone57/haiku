@@ -155,9 +155,44 @@ intel_i915_fill_triangle_list(engine_token *et,
 	TRACE("fill_triangle_list: %lu triangles, color 0x%lx.\n",
 		num_triangles, color);
 
-	// For now, this is a stub. A full implementation would use the 3D pipeline
-	// to draw the triangles. This is a complex task that will be implemented
-	// in a later step.
+    for (uint32 i = 0; i < num_triangles; i++) {
+        const fill_triangle_params* triangle = &triangle_list[i];
+        int16 x1 = triangle->x1;
+        int16 y1 = triangle->y1;
+        int16 x2 = triangle->x2;
+        int16 y2 = triangle->y2;
+        int16 x3 = triangle->x3;
+        int16 y3 = triangle->y3;
+
+        // Sort vertices by y-coordinate
+        if (y1 > y2) { swap(y1, y2); swap(x1, x2); }
+        if (y1 > y3) { swap(y1, y3); swap(x1, x3); }
+        if (y2 > y3) { swap(y2, y3); swap(x2, x3); }
+
+        if (y1 == y3) { // Triangle is a horizontal line
+            fill_rect_params rect = {min(x1, min(x2, x3)), y1, max(x1, max(x2, x3)), y1};
+            intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
+            continue;
+        }
+
+        for (int16 y = y1; y <= y3; y++) {
+            if (y < y2) {
+                // Top part of the triangle
+                int16 start_x = x1 + (x2 - x1) * (y - y1) / (y2 - y1);
+                int16 end_x = x1 + (x3 - x1) * (y - y1) / (y3 - y1);
+                if (start_x > end_x) swap(start_x, end_x);
+                fill_rect_params rect = {start_x, y, end_x, y};
+                intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
+            } else {
+                // Bottom part of the triangle
+                int16 start_x = x2 + (x3 - x2) * (y - y2) / (y3 - y2);
+                int16 end_x = x1 + (x3 - x1) * (y - y1) / (y3 - y1);
+                if (start_x > end_x) swap(start_x, end_x);
+                fill_rect_params rect = {start_x, y, end_x, y};
+                intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
+            }
+        }
+    }
 }
 
 void
@@ -173,9 +208,20 @@ intel_i915_fill_convex_polygon(engine_token *et,
 	TRACE("fill_convex_polygon: %lu vertices, color 0x%lx.\n",
 		num_vertices, color);
 
-	// For now, this is a stub. A full implementation would use the 3D pipeline
-	// to draw the polygon. This is a complex task that will be implemented
-	// in a later step.
+    if (num_vertices < 3) {
+        return;
+    }
+
+    for (uint32 i = 1; i < num_vertices - 1; i++) {
+        fill_triangle_params triangle;
+        triangle.x1 = coords[0];
+        triangle.y1 = coords[1];
+        triangle.x2 = coords[i * 2];
+        triangle.y2 = coords[i * 2 + 1];
+        triangle.x3 = coords[(i + 1) * 2];
+        triangle.y3 = coords[(i + 1) * 2 + 1];
+        intel_i915_fill_triangle_list(et, &triangle, 1, color, clip_rects, num_clip_rects);
+    }
 }
 
 
@@ -208,13 +254,36 @@ intel_i915_draw_line_arbitrary(engine_token *et,
         return;
     }
 
-    // Angled line: requires 3D pipeline
-    TRACE("draw_line_arbitrary: Angled line (%d,%d)-(%d,%d) color 0x%lx.\n",
-        line->x1, line->y1, line->x2, line->y2, color);
+    // Angled line: Use Bresenham's algorithm to draw the line as a series of points.
+    int16 x1 = line->x1;
+    int16 y1 = line->y1;
+    int16 x2 = line->x2;
+    int16 y2 = line->y2;
 
-	// For now, this is a stub. A full implementation would use the 3D pipeline
-	// to draw a quad for the line. This is a complex task that will be implemented
-	// in a later step.
+    int16 dx = abs(x2 - x1);
+    int16 dy = abs(y2 - y1);
+    int16 sx = (x1 < x2) ? 1 : -1;
+    int16 sy = (y1 < y2) ? 1 : -1;
+    int16 err = dx - dy;
+
+    while (true) {
+        fill_rect_params point_rect = {x1, y1, x1, y1};
+        intel_i915_fill_rectangle(et, color, &point_rect, 1, (num_clip_rects > 0));
+
+        if (x1 == x2 && y1 == y2) {
+            break;
+        }
+
+        int16 e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x1 += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y1 += sy;
+        }
+    }
 }
 
 
@@ -293,10 +362,40 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 void intel_i915_alpha_blend(engine_token* et,
     alpha_blend_params* list, uint32 count, bool enable_hw_clip)
 {
-    TRACE("intel_i915_alpha_blend: STUB - %lu operations, clipping %s.\n",
-        count, enable_hw_clip ? "enabled" : "disabled");
-    // This is a stub. A full implementation would use the 3D pipeline
-    // or a dedicated blend unit if available.
+    for (uint32 i = 0; i < count; i++) {
+        const alpha_blend_params* blend = &list[i];
+        // This is a very slow software fallback.
+        // A real implementation would use the 3D pipeline.
+        for (uint16 y = 0; y < blend->dest_height; y++) {
+            for (uint16 x = 0; x < blend->dest_width; x++) {
+                uint32* src_pixel = (uint32*)(gInfo->framebuffer_base + (blend->src_top + y) * gInfo->shared_info->bytes_per_row + (blend->src_left + x) * 4);
+                uint32* dest_pixel = (uint32*)(gInfo->framebuffer_base + (blend->dest_top + y) * gInfo->shared_info->bytes_per_row + (blend->dest_left + x) * 4);
+
+                uint8_t src_alpha = (*src_pixel >> 24) & 0xff;
+                if (src_alpha == 0) {
+                    continue;
+                }
+                if (src_alpha == 0xff) {
+                    *dest_pixel = *src_pixel;
+                    continue;
+                }
+
+                uint8_t src_r = (*src_pixel >> 16) & 0xff;
+                uint8_t src_g = (*src_pixel >> 8) & 0xff;
+                uint8_t src_b = *src_pixel & 0xff;
+
+                uint8_t dest_r = (*dest_pixel >> 16) & 0xff;
+                uint8_t dest_g = (*dest_pixel >> 8) & 0xff;
+                uint8_t dest_b = *dest_pixel & 0xff;
+
+                uint8_t r = (src_r * src_alpha + dest_r * (255 - src_alpha)) / 255;
+                uint8_t g = (src_g * src_alpha + dest_g * (255 - src_alpha)) / 255;
+                uint8_t b = (src_b * src_alpha + dest_b * (255 - src_alpha)) / 255;
+
+                *dest_pixel = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
 }
 
 // --- Font Rendering Stubs ---
@@ -812,9 +911,22 @@ intel_i915_screen_to_screen_scaled_filtered_blit(engine_token* et,
 
 	TRACE("s2s_scaled_filtered_blit: %lu ops. HW Accel for this is COMPLEX and NOT fully implemented.\n", count);
 
-	// For now, this is a stub. A full implementation would use the 3D pipeline
-	// to perform the scaled and filtered blit. This is a complex task that will be
-	// implemented in a later step.
+    for (uint32 i = 0; i < count; i++) {
+        const scaled_blit_params* blit = &list[i];
+        for (uint16 y = 0; y < blit->dest_height; y++) {
+            for (uint16 x = 0; x < blit->dest_width; x++) {
+                uint16 src_x = blit->src_left + (x * blit->src_width / blit->dest_width);
+                uint16 src_y = blit->src_top + (y * blit->src_height / blit->dest_height);
+
+                blit_params single_pixel_blit = {
+                    src_x, src_y,
+                    blit->dest_left + x, blit->dest_top + y,
+                    1, 1
+                };
+                intel_i915_screen_to_screen_blit(et, &single_pixel_blit, 1, enable_hw_clip);
+            }
+        }
+    }
 }
 
 

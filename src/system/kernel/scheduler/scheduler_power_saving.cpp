@@ -145,6 +145,30 @@ power_saving_designate_consolidation_core(const CPUSet* affinity_mask_or_null)
 }
 
 
+static bool
+power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estimate)
+{
+	// In power saving, be reluctant to wake cores.
+	// Only wake if the thread_load_estimate is significant AND
+	// there isn't already an active core (like STC) that could take it,
+	// or if all active cores are genuinely overloaded.
+	SmallTaskCoreLocker locker;
+	if (sSmallTaskCore != NULL && !sSmallTaskCore->IsDefunct() && sSmallTaskCore != core) {
+		// If there's an active STC different from the core we are considering waking,
+		// prefer to send load to STC if it's not too overloaded.
+		if (sSmallTaskCore->GetLoad() < kVeryHighLoad) // kVeryHighLoad from scheduler_common.h
+			return false; // STC can probably take it, don't wake 'core'.
+	}
+	// If core is already the STC, or no STC, or STC is overloaded:
+	// Wake this 'core' if its current load plus new thread load won't make it excessively busy,
+	// OR if the thread_load_estimate itself is very high (implying an important task).
+	if (core->GetLoad() + thread_load_estimate < kHighLoad || thread_load_estimate > kMaxLoad / 2)
+		return true;
+
+	return false; // Default to not waking.
+}
+
+
 static CoreEntry*
 power_saving_choose_core(const ThreadData* threadData)
 {
@@ -310,29 +334,6 @@ power_saving_choose_core(const ThreadData* threadData)
 
 	panic("power_saving_choose_core: No suitable core found!");
 	return NULL; // Should not be reached
-}
-
-static bool
-power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estimate)
-{
-	// In power saving, be reluctant to wake cores.
-	// Only wake if the thread_load_estimate is significant AND
-	// there isn't already an active core (like STC) that could take it,
-	// or if all active cores are genuinely overloaded.
-	SmallTaskCoreLocker locker;
-	if (sSmallTaskCore != NULL && !sSmallTaskCore->IsDefunct() && sSmallTaskCore != core) {
-		// If there's an active STC different from the core we are considering waking,
-		// prefer to send load to STC if it's not too overloaded.
-		if (sSmallTaskCore->GetLoad() < kVeryHighLoad) // kVeryHighLoad from scheduler_common.h
-			return false; // STC can probably take it, don't wake 'core'.
-	}
-	// If core is already the STC, or no STC, or STC is overloaded:
-	// Wake this 'core' if its current load plus new thread load won't make it excessively busy,
-	// OR if the thread_load_estimate itself is very high (implying an important task).
-	if (core->GetLoad() + thread_load_estimate < kHighLoad || thread_load_estimate > kMaxLoad / 2)
-		return true;
-
-	return false; // Default to not waking.
 }
 
 static CoreEntry*

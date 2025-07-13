@@ -51,6 +51,7 @@ struct mfx_vp9_pic_params {
 	uint32_t last_ref_frame;
 	uint32_t golden_ref_frame;
 	uint32_t alt_ref_frame;
+	uint32_t buffers[8];
 };
 
 // MFX_VP9_SLICE_STATE

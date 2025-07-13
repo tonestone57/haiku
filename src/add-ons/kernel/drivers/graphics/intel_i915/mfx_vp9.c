@@ -64,7 +64,7 @@ mfx_vp9_create_command_buffer(intel_i915_device_info* devInfo,
 	cmd += devInfo->video_cmd_buffer_offset / 4;
 
 	struct mfx_vp9_pic_params params;
-	if (slice_params == NULL) {
+	if (slice_data == NULL || slice_params == NULL) {
 		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
 		return B_VIDEO_DECODING_ERROR;
 	}
@@ -85,8 +85,20 @@ mfx_vp9_create_command_buffer(intel_i915_device_info* devInfo,
 	*cmd++ = (0 << 16) | 0; // Y offset, X offset
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_PIPE_BUF_ADDR_STATE);
-	// TODO: fill in actual addresses
-	for (int i = 0; i < 18; i++)
+	for (int i = 0; i < 8; i++) {
+		if (params.buffers[i] != 0) {
+			struct intel_i915_gem_object* obj = (struct intel_i915_gem_object*)_generic_handle_lookup(params.buffers[i], HANDLE_TYPE_GEM_OBJECT);
+			if (obj != NULL) {
+				*cmd++ = obj->gtt_offset_pages * B_PAGE_SIZE;
+				intel_i915_gem_object_put(obj);
+			} else {
+				*cmd++ = 0;
+			}
+		} else {
+			*cmd++ = 0;
+		}
+	}
+	for (int i = 0; i < 10; i++)
 		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_VP9_PIC_STATE);

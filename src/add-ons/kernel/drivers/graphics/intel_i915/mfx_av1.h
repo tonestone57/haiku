@@ -67,6 +67,7 @@ struct mfx_av1_pic_params {
 	uint32_t loop_restoration_flags;
 	uint32_t lr_unit_size[3];
 	uint32_t lr_uv_shift;
+	uint32_t buffers[10];
 };
 
 #ifdef __cplusplus

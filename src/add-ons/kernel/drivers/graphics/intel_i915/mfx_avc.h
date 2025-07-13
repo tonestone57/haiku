@@ -93,6 +93,7 @@ struct mfx_avc_slice_params {
 	uint32_t chroma_weight_l1_flag;
 	uint32_t chroma_weight_l1[32][2];
 	uint32_t chroma_offset_l1[32][2];
+	uint32_t buffers[18];
 };
 
 #ifdef __cplusplus

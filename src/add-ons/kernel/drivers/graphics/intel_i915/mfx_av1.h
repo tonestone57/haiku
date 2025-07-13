@@ -10,6 +10,26 @@
 
 #include "intel_i915_priv.h"
 
+// MFX_AV1_PIC_STATE
+struct mfx_av1_pic_state {
+	uint32_t dword0;
+	uint32_t dword1;
+	uint32_t dword2;
+	uint32_t dword3;
+	uint32_t dword4;
+	uint32_t dword5;
+	uint32_t dword6;
+	uint32_t dword7;
+};
+
+// MFX_AV1_TILE_STATE
+struct mfx_av1_tile_state {
+	uint32_t dword0;
+	uint32_t dword1;
+	uint32_t dword2;
+	uint32_t dword3;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

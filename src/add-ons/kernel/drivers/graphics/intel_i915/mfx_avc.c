@@ -91,7 +91,7 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_IMG_STATE);
 	*cmd++ = (1920 / 16 - 1) << 16 | (1080 / 16 - 1);
-	*cmd++ = 0;
+	*cmd++ = (0 << 24) | (0 << 16) | 0;
 	*cmd++ = 0;
 	*cmd++ = 0;
 	*cmd++ = 0;

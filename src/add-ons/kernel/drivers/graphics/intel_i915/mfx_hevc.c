@@ -90,7 +90,7 @@ mfx_hevc_create_command_buffer(intel_i915_device_info* devInfo,
 		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_HEVC_PIC_STATE);
-	*cmd++ = 0; // TODO: fill in actual values
+	*cmd++ = (1920 / 16 - 1) << 16 | (1080 / 16 - 1);
 	*cmd++ = 0;
 	*cmd++ = 0;
 	*cmd++ = 0;

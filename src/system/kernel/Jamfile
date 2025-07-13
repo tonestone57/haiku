@@ -77,6 +77,8 @@ KernelMergeObject kernel_core.o :
 	scheduling_analysis.cpp
 	EevdfRunQueue.cpp
 	scheduler_team.cpp
+	scheduler_low_latency.cpp
+	scheduler_power_saving.cpp
 
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;

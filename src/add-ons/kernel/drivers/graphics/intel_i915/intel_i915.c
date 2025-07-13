@@ -49,8 +49,18 @@ static status_t i915_get_connector_info_ioctl_handler(intel_i915_device_info* de
 static status_t i915_get_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i915_get_display_config_args* user_args_ptr);
 static status_t i915_set_blitter_hw_clip_rect_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_hw_clip_rect_args* user_args_ptr);
 static status_t i915_wait_for_display_change_ioctl(intel_i915_device_info* devInfo, struct i915_display_change_event_ioctl_data* user_args_ptr);
-extern status_t intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info);
-extern void intel_i915_device_uninit(intel_i915_device_info* devInfo);
+extern status_t intel_i915_device_init(intel_i915_device_info* devInfo, struct pci_info* info)
+{
+	devInfo->video_cmd_buffer = NULL;
+	devInfo->video_cmd_buffer_offset = 0;
+	return B_OK;
+}
+
+extern void intel_i915_device_uninit(intel_i915_device_info* devInfo)
+{
+	if (devInfo->video_cmd_buffer)
+		intel_i915_gem_object_put(devInfo->video_cmd_buffer);
+}
 
 
 // Helper to get BPP from color_space.

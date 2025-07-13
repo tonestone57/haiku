@@ -683,6 +683,10 @@ typedef struct intel_i915_device_info {
 
 	void* guc_log_cpu_addr;
 	void* huc_log_cpu_addr;
+
+	// Video command buffer ring buffer
+	struct intel_i915_gem_object* video_cmd_buffer;
+	uint32_t video_cmd_buffer_offset;
 } intel_i915_device_info;
 
 

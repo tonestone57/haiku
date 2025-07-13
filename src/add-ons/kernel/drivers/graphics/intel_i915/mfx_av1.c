@@ -47,32 +47,34 @@ mfx_av1_create_command_buffer(intel_i915_device_info* devInfo,
 	struct intel_i915_gem_object* slice_params,
 	struct intel_i915_gem_object** cmd_buffer_out)
 {
-	struct intel_i915_gem_object* cmd_buffer;
-	status_t status = intel_i915_gem_object_create(devInfo, 4096, 0, 0, 0, 0, &cmd_buffer);
-	if (status != B_OK)
-		return status;
+	if (devInfo->video_cmd_buffer == NULL) {
+		status_t status = intel_i915_gem_object_create(devInfo, 256 * 1024, 0, 0, 0, 0, &devInfo->video_cmd_buffer);
+		if (status != B_OK)
+			return status;
+	}
 
 	uint32_t* cmd;
-	status = intel_i915_gem_object_map_cpu(cmd_buffer, (void**)&cmd);
+	status_t status = intel_i915_gem_object_map_cpu(devInfo->video_cmd_buffer, (void**)&cmd);
 	if (status != B_OK) {
-		intel_i915_gem_object_put(cmd_buffer);
+		intel_i915_gem_object_put(devInfo->video_cmd_buffer);
+		devInfo->video_cmd_buffer = NULL;
 		return status;
 	}
+
+	cmd += devInfo->video_cmd_buffer_offset / 4;
 
 	struct mfx_av1_tile_params {
 		uint32_t tile_data_size;
 	} params;
 	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
 	if (status != B_OK) {
-		intel_i915_gem_object_unmap_cpu(cmd_buffer);
-		intel_i915_gem_object_put(cmd_buffer);
+		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
 		return status;
 	}
 
 	if (params.tile_data_size == 0) {
 		intel_i915_gem_object_unmap_cpu(slice_params);
-		intel_i915_gem_object_unmap_cpu(cmd_buffer);
-		intel_i915_gem_object_put(cmd_buffer);
+		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
 		return B_BAD_VALUE;
 	}
 
@@ -114,11 +116,15 @@ mfx_av1_create_command_buffer(intel_i915_device_info* devInfo,
 
 	*cmd++ = (MI_COMMAND_TYPE_MI | MI_BATCH_BUFFER_END);
 
-	cmd_buffer->size = (cmd - cmd_start) * 4;
+	uint32_t cmd_buffer_size = (cmd - cmd_start) * 4;
+	devInfo->video_cmd_buffer_offset += cmd_buffer_size;
+	if (devInfo->video_cmd_buffer_offset >= devInfo->video_cmd_buffer->size)
+		devInfo->video_cmd_buffer_offset = 0;
 
-	intel_i915_gem_object_unmap_cpu(cmd_buffer);
+	intel_i915_gem_object_unmap_cpu(slice_params);
+	intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
 
-	*cmd_buffer_out = cmd_buffer;
+	*cmd_buffer_out = devInfo->video_cmd_buffer;
 	return B_OK;
 }
 

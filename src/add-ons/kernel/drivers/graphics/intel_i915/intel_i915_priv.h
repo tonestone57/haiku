@@ -903,6 +903,9 @@ struct intel_video_frame {
 
 #define INTEL_I915_IOCTL_SET_DISPLAY_CONFIG		(B_DEVICE_OP_CODES_END + 103)
 #define INTEL_I915_IOCTL_3D_SUBMIT_CMD		(B_DEVICE_OP_CODES_END + 104)
+#define INTEL_I915_IOCTL_3D_COLOR_SPACE_CONVERSION (B_DEVICE_OP_CODES_END + 105)
+#define INTEL_I915_IOCTL_3D_ROTATED_BLIT (B_DEVICE_OP_CODES_END + 106)
+#define INTEL_I915_IOCTL_3D_FONT_SMOOTHING (B_DEVICE_OP_CODES_END + 107)
 
 #define I915_DISPLAY_CONFIG_ENABLE 1
 #define I915_DISPLAY_CONFIG_CLONE 2
@@ -915,6 +918,36 @@ enum intel_i915_3d_command {
 	I915_3D_CMD_STATE_SIP,
 	I915_3D_CMD_3DSTATE_VF_STATISTICS,
 	I915_3D_CMD_PIPELINE_FLUSH,
+	I915_3D_CMD_COLOR_SPACE_CONVERSION,
+	I915_3D_CMD_ROTATED_BLIT,
+	I915_3D_CMD_FONT_SMOOTHING,
+};
+
+struct i915_font_smoothing {
+	bool enable;
+};
+
+struct i915_rotated_blit {
+	uint32 src_handle;
+	uint32 dst_handle;
+	uint32 src_width;
+	uint32 src_height;
+	uint32 dst_width;
+	uint32 dst_height;
+	uint32 src_stride;
+	uint32 dst_stride;
+	uint32 rotation;
+};
+
+struct i915_color_space_conversion {
+	uint32 src_handle;
+	uint32 dst_handle;
+	uint32 src_width;
+	uint32 src_height;
+	uint32 dst_width;
+	uint32 dst_height;
+	uint32 src_format;
+	uint32 dst_format;
 };
 
 struct i915_3d_command_buffer {

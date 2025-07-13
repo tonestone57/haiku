@@ -20,6 +20,15 @@ void intel_3d_uninit(intel_i915_device_info* devInfo);
 status_t intel_3d_submit_command(intel_i915_device_info* devInfo,
 	const void* data, size_t size);
 
+status_t intel_3d_color_space_conversion(intel_i915_device_info* devInfo,
+	i915_color_space_conversion* args);
+
+status_t intel_3d_rotated_blit(intel_i915_device_info* devInfo,
+	i915_rotated_blit* args);
+
+status_t intel_3d_font_smoothing(intel_i915_device_info* devInfo,
+	i915_font_smoothing* args);
+
 #ifdef __cplusplus
 }
 #endif

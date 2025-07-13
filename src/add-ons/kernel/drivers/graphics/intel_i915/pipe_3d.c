@@ -12,6 +12,33 @@ intel_3d_init(intel_i915_device_info* devInfo)
 	return B_OK;
 }
 
+
+status_t
+intel_3d_color_space_conversion(intel_i915_device_info* devInfo,
+	i915_color_space_conversion* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
+intel_3d_font_smoothing(intel_i915_device_info* devInfo,
+	i915_font_smoothing* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
+intel_3d_rotated_blit(intel_i915_device_info* devInfo,
+	i915_rotated_blit* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
 void
 intel_3d_uninit(intel_i915_device_info* devInfo)
 {

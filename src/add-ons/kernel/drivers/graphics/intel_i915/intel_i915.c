@@ -277,6 +277,15 @@ intel_i915_3d_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, si
 	switch (op) {
 		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:
 			return intel_3d_submit_command(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_3D_COLOR_SPACE_CONVERSION:
+			return intel_3d_color_space_conversion(devInfo,
+				(i915_color_space_conversion*)buffer);
+		case INTEL_I915_IOCTL_3D_ROTATED_BLIT:
+			return intel_3d_rotated_blit(devInfo,
+				(i915_rotated_blit*)buffer);
+		case INTEL_I915_IOCTL_3D_FONT_SMOOTHING:
+			return intel_3d_font_smoothing(devInfo,
+				(i915_font_smoothing*)buffer);
 	}
 
 	return B_DEV_INVALID_IOCTL;

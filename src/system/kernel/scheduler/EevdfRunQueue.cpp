@@ -66,7 +66,7 @@ EevdfRunQueue::Remove(ThreadData* thread)
 }
 
 ThreadData*
-EevdfRunQueue::PeekMinimum() const
+EevdfRunQueue::PeekMinimum()
 {
 	InterruptsSpinLocker locker(fLock);
 	if (fDeadlineHeap.IsEmpty()) // Use IsEmpty for clarity
@@ -74,26 +74,15 @@ EevdfRunQueue::PeekMinimum() const
 	return fDeadlineHeap.PeekRoot();
 }
 
-ThreadData*
-EevdfRunQueue::PopMinimum()
-{
-	InterruptsSpinLocker locker(fLock);
-	if (fDeadlineHeap.IsEmpty())
-		return NULL;
-	ThreadData* root = fDeadlineHeap.PeekRoot();
-	fDeadlineHeap.RemoveRoot();
-	return root;
-}
-
 bool
-EevdfRunQueue::IsEmpty() const
+EevdfRunQueue::IsEmpty()
 {
 	InterruptsSpinLocker locker(fLock);
 	return fDeadlineHeap.IsEmpty();
 }
 
 int32
-EevdfRunQueue::Count() const
+EevdfRunQueue::Count()
 {
 	InterruptsSpinLocker locker(fLock);
 	return fDeadlineHeap.Count();

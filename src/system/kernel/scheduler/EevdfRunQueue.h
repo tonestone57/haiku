@@ -56,11 +56,11 @@ public:
 
 	void Add(ThreadData* thread);
 	void Remove(ThreadData* thread);
-	ThreadData* PeekMinimum() const; // Gets thread with earliest virtual_deadline
-	ThreadData* PopMinimum();      // Removes and returns thread with earliest virtual_deadline
+	ThreadData* PeekMinimum();
+	ThreadData* PopMinimum();
 
-	bool IsEmpty() const;
-	int32 Count() const;
+	bool IsEmpty();
+	int32 Count();
 
 	// Update will now use SchedulerHeap::Update
 	void Update(ThreadData* thread); // oldDeadline no longer needed by this call

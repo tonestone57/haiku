@@ -17,6 +17,8 @@ struct huc_command {
 };
 
 #define HUC_CMD_HEVC_SLICE_DECODE	0x2001
+#define HUC_CMD_AVC_SLICE_DECODE	0x2002
+#define HUC_CMD_VP9_SLICE_DECODE	0x2003
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +28,7 @@ status_t intel_huc_init(intel_i915_device_info* devInfo);
 void intel_huc_uninit(intel_i915_device_info* devInfo);
 void intel_huc_handle_response(intel_i915_device_info* devInfo);
 status_t intel_huc_get_response(intel_i915_device_info* devInfo, uint32_t* response);
+status_t intel_huc_submit_command(intel_i915_device_info* devInfo, struct huc_command* cmd);
 
 #ifdef __cplusplus
 }

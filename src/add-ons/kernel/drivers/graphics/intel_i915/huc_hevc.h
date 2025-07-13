@@ -19,6 +19,12 @@ void intel_huc_hevc_uninit(intel_i915_device_info* devInfo);
 status_t intel_huc_hevc_decode_slice(intel_i915_device_info* devInfo,
 	struct intel_i915_gem_object* slice_data,
 	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_avc_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_vp9_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
 
 #ifdef __cplusplus
 }

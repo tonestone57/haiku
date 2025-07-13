@@ -57,6 +57,9 @@ status_t intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
 status_t intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
 	intel_i915_propose_specific_mode_args* args);
 
+status_t intel_i915_get_display_config_ioctl(intel_i915_device_info* devInfo,
+	i915_get_display_config_ioctl_data* args);
+
 status_t intel_i915_configure_overlay_ioctl(intel_i915_device_info* devInfo,
 	i915_overlay_plane* args);
 

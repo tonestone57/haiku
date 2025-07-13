@@ -914,6 +914,38 @@ intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
 
 
 status_t
+intel_i915_get_display_config_ioctl(intel_i915_device_info* devInfo,
+	i915_get_display_config_ioctl_data* args)
+{
+	if (args == NULL)
+		return B_BAD_VALUE;
+
+	i915_display_config* configs = new(std::nothrow) i915_display_config[devInfo->pipe_count];
+	if (configs == NULL)
+		return B_NO_MEMORY;
+
+	uint32 count = 0;
+	for (uint32 i = 0; i < devInfo->pipe_count; i++) {
+		if (devInfo->pipe_infos[i].is_active) {
+			configs[count].pipe_id = i;
+			configs[count].mode = devInfo->pipe_infos[i].current_mode;
+			configs[count].flags = I915_DISPLAY_CONFIG_ENABLE;
+			count++;
+		}
+	}
+	args->count = count;
+
+	if (user_memcpy(args->configs, configs, sizeof(i915_display_config) * args->count) != B_OK) {
+		delete[] configs;
+		return B_BAD_ADDRESS;
+	}
+
+	delete[] configs;
+	return B_OK;
+}
+
+
+status_t
 intel_i915_configure_overlay_ioctl(intel_i915_device_info* devInfo,
 	i915_overlay_plane* args)
 {

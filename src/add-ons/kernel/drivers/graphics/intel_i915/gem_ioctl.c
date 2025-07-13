@@ -449,9 +449,14 @@ intel_i915_video_decode_frame_ioctl(intel_i915_device_info* devInfo, void* buffe
 		(intel_video_frame*)args.frame);
 }
 
+#include "kaby_lake/kaby_lake_decode.h"
+
 status_t
 intel_i915_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length)
 {
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id))
+		return kaby_lake_video_ioctl(devInfo, op, buffer, length);
+
 	switch (op) {
 		case INTEL_I915_VIDEO_CREATE_DECODER:
 			return intel_i915_video_create_decoder_ioctl(devInfo, buffer, length);

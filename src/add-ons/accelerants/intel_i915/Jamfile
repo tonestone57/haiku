@@ -10,6 +10,7 @@ Accelerant intel_i915 :
 	hpd.c
 	video.c
 	kaby_lake/kaby_lake.cpp
-	# Add other source files here as they are created
+	kaby_lake/kaby_lake_cursor.c
+	kaby_lake/kaby_lake_overlay.c
 	: libbe.so libdevice.so libroot.so
 ;

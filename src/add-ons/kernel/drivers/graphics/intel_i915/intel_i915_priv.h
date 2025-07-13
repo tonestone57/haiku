@@ -1007,6 +1007,11 @@ struct i915_set_display_config_ioctl_data {
 	uint32 count;
 };
 
+struct i915_get_display_config_ioctl_data {
+	i915_display_config* configs;
+	uint32 count;
+};
+
 struct i915_video_create_decoder_ioctl_data {
 	uint32 codec; // intel_video_codec
 	uint32 decoder_handle; // Output

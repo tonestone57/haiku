@@ -39,4 +39,15 @@ void kaby_lake_stretch_blit(engine_token* et,
 void kaby_lake_set_clip_rect(engine_token* et, uint32 x1, uint32 y1,
 	uint32 x2, uint32 y2);
 
+// --- Hardware Cursor ---
+void kaby_lake_set_cursor(engine_token* et, uint32 x, uint32 y);
+void kaby_lake_set_cursor_bitmap(engine_token* et, const uint8* bitmap);
+void kaby_lake_show_cursor(engine_token* et);
+void kaby_lake_hide_cursor(engine_token* et);
+
+// --- Video Overlays ---
+void kaby_lake_configure_overlay(engine_token* et, const overlay_buffer* buffer,
+	const overlay_window* window, const overlay_view* view);
+void kaby_lake_release_overlay(engine_token* et);
+
 #endif /* KABY_LAKE_H */

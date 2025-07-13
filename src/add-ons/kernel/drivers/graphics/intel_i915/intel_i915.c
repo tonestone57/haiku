@@ -239,9 +239,11 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_GET_CONNECTOR_INFO:
 			return i915_get_connector_info_ioctl_handler(devInfo, (intel_i915_get_connector_info_args*)buffer);
 		case INTEL_I915_GET_DISPLAY_CONFIG:
-			return i915_get_display_config_ioctl_handler(devInfo, (struct i915_get_display_config_args*)buffer);
+			return intel_i915_get_display_config_ioctl(devInfo,
+				(i915_get_display_config_ioctl_data*)buffer);
 		case INTEL_I915_SET_DISPLAY_CONFIG:
-			return i915_set_display_config_ioctl_handler(devInfo, (struct i915_set_display_config_args*)buffer);
+			return intel_i915_get_display_config_ioctl(devInfo,
+				(i915_get_display_config_ioctl_data*)buffer);
 		case INTEL_I915_WAIT_FOR_DISPLAY_CHANGE:
 			return i915_wait_for_display_change_ioctl(devInfo, (struct i915_display_change_event_ioctl_data*)buffer);
 

@@ -350,7 +350,7 @@ _user_set_thread_nice_value(thread_id thid, int32 nice)
 
 
 bigtime_t
-_user_estimate_max_scheduling_latency(thread_id thid, bigtime_t* _latency)
+_user_estimate_max_scheduling_latency(thread_id thid)
 {
 	// TODO: implement
 	return 0;

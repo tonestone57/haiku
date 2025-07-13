@@ -101,18 +101,24 @@ intel_mfx_decode_frame(intel_i915_device_info* devInfo, uint32 handle,
 		return B_BAD_VALUE;
 
 	switch (decoder->codec) {
-		case INTEL_VIDEO_CODEC_H264_AVC:
-			// TODO: create slice data and slice params
-			return intel_mfx_avc_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
-		case INTEL_VIDEO_CODEC_HEVC_H265:
-			// TODO: create slice data and slice params
-			return intel_mfx_hevc_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
-		case INTEL_VIDEO_CODEC_VP9_PROFILE0:
-			// TODO: create slice data and slice params
-			return intel_mfx_vp9_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
-		case INTEL_VIDEO_CODEC_AV1_PROFILE0:
-			// TODO: create slice data and slice params
-			return intel_mfx_av1_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
+		case INTEL_VIDEO_CODEC_AVC:
+			return intel_mfx_avc_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
+		case INTEL_VIDEO_CODEC_HEVC:
+			return intel_mfx_hevc_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
+		case INTEL_VIDEO_CODEC_VP9:
+			return intel_mfx_vp9_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
+		case INTEL_VIDEO_CODEC_MPEG2:
+			return intel_mfx_mpeg2_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
+		case INTEL_VIDEO_CODEC_VC1:
+			return intel_mfx_vc1_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
+		case INTEL_VIDEO_CODEC_JPEG:
+			return intel_mfx_jpeg_decode_slice(devInfo, (struct intel_i915_gem_object*)frame->src_handle,
+				(struct intel_i915_gem_object*)frame->dst_handle);
 		default:
 			return B_UNSUPPORTED;
 	}

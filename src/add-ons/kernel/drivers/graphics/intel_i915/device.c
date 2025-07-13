@@ -58,6 +58,12 @@ intel_i915_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer,
 		case INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME:
 			return intel_video_encode_frame(devInfo,
 				(i915_video_encode_frame_ioctl_data*)buffer);
+		case INTEL_I915_IOCTL_VIDEO_CREATE_ENCODER:
+			return intel_video_create_encoder(devInfo,
+				(i915_video_create_encoder_ioctl_data*)buffer);
+		case INTEL_I915_IOCTL_VIDEO_DESTROY_ENCODER:
+			return intel_video_destroy_encoder(devInfo,
+				(i915_video_destroy_encoder_ioctl_data*)buffer);
 	}
 
 	return B_DEV_INVALID_IOCTL;

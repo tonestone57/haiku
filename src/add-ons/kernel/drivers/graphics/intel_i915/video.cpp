@@ -363,6 +363,24 @@ intel_video_encode_frame(intel_i915_device_info* devInfo,
 }
 
 
+status_t
+intel_video_create_encoder(intel_i915_device_info* devInfo,
+	i915_video_create_encoder_ioctl_data* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
+intel_video_destroy_encoder(intel_i915_device_info* devInfo,
+	i915_video_destroy_encoder_ioctl_data* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
 static status_t
 mpeg2_parse_slice_header(intel_mpeg2_decoder* decoder, const uint8* data, uint32 size)
 {

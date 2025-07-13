@@ -40,6 +40,7 @@ KernelAddon intel_i915 :
 	panel.c
 	hdcp.c
 	video.cpp
+	mfx_decode.c
 	kaby_lake/kaby_lake.cpp
 	# Add other source files here as they are created.
 	# Ensure intel_i915_priv.h is correctly used by these.

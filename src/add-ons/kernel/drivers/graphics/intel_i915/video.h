@@ -127,6 +127,18 @@ struct i915_video_encode_frame_ioctl_data {
 	uint64 frame;
 };
 
+struct intel_video_encoder {
+	uint32 id;
+	intel_video_codec codec;
+	intel_i915_device_info* devInfo;
+};
+
+struct intel_video_encode_parameters {
+	uint32 width;
+	uint32 height;
+	uint32 quality;
+};
+
 struct intel_jpeg_decoder {
 	video_decoder base;
 	intel_jpeg_picture_parameters pic_params;
@@ -149,6 +161,11 @@ status_t intel_video_decode_frame(intel_i915_device_info* devInfo,
 	i915_video_decode_frame_ioctl_data* args);
 status_t intel_video_encode_frame(intel_i915_device_info* devInfo,
 	i915_video_encode_frame_ioctl_data* args);
+
+status_t intel_video_create_encoder(intel_i915_device_info* devInfo,
+	i915_video_create_encoder_ioctl_data* args);
+status_t intel_video_destroy_encoder(intel_i915_device_info* devInfo,
+	i915_video_destroy_encoder_ioctl_data* args);
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,30 @@
 
 #include "intel_i915_priv.h"
 
+// MFX_AVC_IMG_STATE
+struct mfx_avc_img_state {
+	uint32_t dword0;
+	uint32_t dword1;
+	uint32_t dword2;
+	uint32_t dword3;
+	uint32_t dword4;
+	uint32_t dword5;
+};
+
+// MFX_AVC_REF_IDX_STATE
+struct mfx_avc_ref_idx_state {
+	uint32_t dword0;
+	uint32_t dword1;
+};
+
+// MFX_AVC_SLICE_STATE
+struct mfx_avc_slice_state {
+	uint32_t dword0;
+	uint32_t dword1;
+	uint32_t dword2;
+	uint32_t dword3;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif

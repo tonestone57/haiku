@@ -663,8 +663,7 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		if (!port_state) return B_ERROR;
 
 		uint32 bpp_val = get_bpp_from_colorspace(dm->space);
-		uint32 bpp_bytes = bpp_val / 8;
-		if (bpp_bytes == 0) return B_BAD_VALUE;
+		if (bpp_val == 0) return B_BAD_VALUE;
 
 		uint64 refresh_hz_nominal = 60;
 		if (dm->timing.h_total > 0 && dm->timing.v_total > 0 && dm->timing.pixel_clock > 0) {
@@ -672,7 +671,7 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		}
 		if (refresh_hz_nominal == 0) refresh_hz_nominal = 60;
 
-		uint64 pipe_mem_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz_nominal * bpp_bytes;
+		uint64 pipe_mem_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz_nominal * bpp_val / 8;
 		total_data_rate_bytes_sec += pipe_mem_data_rate;
 
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
@@ -686,7 +685,7 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 				effective_data_rate_per_lane_kbytes_sec = (uint64)link_symbol_clk_khz * 8 / 10;
 			}
 			uint64 total_link_data_rate_kbytes_sec = effective_data_rate_per_lane_kbytes_sec * lane_count;
-			uint64 mode_required_data_rate_kbytes_sec = (uint64)clks->pixel_clock_khz * bpp_bytes;
+			uint64 mode_required_data_rate_kbytes_sec = (uint64)clks->pixel_clock_khz * bpp_val / 8;
 			if (mode_required_data_rate_kbytes_sec > total_link_data_rate_kbytes_sec) return B_NO_MEMORY;
 		} else if (port_state->type == PRIV_OUTPUT_HDMI || port_state->type == PRIV_OUTPUT_TMDS_DVI) {
 			uint32 max_tmds_char_clk_khz = 0;
@@ -699,6 +698,36 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 			if (clks->adjusted_pixel_clock_khz > max_tmds_char_clk_khz) return B_NO_MEMORY;
 		}
 	}
+
+	if (actual_num_active_pipes > PRIV_MAX_PIPES)
+		return B_NO_MEMORY;
+
+	uint32_t num_active_transcoders = 0;
+	uint32_t num_active_dplls = 0;
+	uint8_t transcoder_in_use[PRIV_MAX_TRANSCODERS] = { 0 };
+	uint8_t dpll_in_use[MAX_HW_DPLLS] = { 0 };
+
+	for (enum pipe_id_priv pipe_idx = PRIV_PIPE_A; pipe_idx < PRIV_MAX_PIPES; pipe_idx++) {
+		if (planned_configs[pipe_idx].user_config == NULL || !planned_configs[pipe_idx].user_config->active)
+			continue;
+
+		enum transcoder_id_priv trans_id = planned_configs[pipe_idx].assigned_transcoder;
+		if (trans_id != PRIV_TRANSCODER_INVALID && !transcoder_in_use[trans_id]) {
+			transcoder_in_use[trans_id] = 1;
+			num_active_transcoders++;
+		}
+
+		int dpll_id = planned_configs[pipe_idx].assigned_dpll_id;
+		if (dpll_id != -1 && !dpll_in_use[dpll_id]) {
+			dpll_in_use[dpll_id] = 1;
+			num_active_dplls++;
+		}
+	}
+
+	if (num_active_transcoders > PRIV_MAX_TRANSCODERS)
+		return B_NO_MEMORY;
+	if (num_active_dplls > MAX_HW_DPLLS)
+		return B_NO_MEMORY;
 
 	uint64 platform_memory_bw_gbps = 0;
 	if (gen >= 12) platform_memory_bw_gbps = 40;

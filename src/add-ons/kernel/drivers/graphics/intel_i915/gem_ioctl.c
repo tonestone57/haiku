@@ -405,3 +405,60 @@ intel_i915_gem_flush_and_get_seqno_ioctl(intel_i915_device_info* devInfo, void* 
 		return B_BAD_ADDRESS;
 	return B_OK;
 }
+
+#include "mfx_decode.h"
+
+static status_t
+intel_i915_video_create_decoder_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+{
+	struct i915_video_create_decoder_ioctl_data args;
+	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	status_t status = intel_mfx_create_decoder(devInfo, args.codec, &args.decoder_handle);
+	if (status != B_OK)
+		return status;
+
+	if (copy_to_user(buffer, &args, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	return B_OK;
+}
+
+static status_t
+intel_i915_video_destroy_decoder_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+{
+	struct i915_video_destroy_decoder_ioctl_data args;
+	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	intel_mfx_destroy_decoder(devInfo, args.decoder_handle);
+
+	return B_OK;
+}
+
+static status_t
+intel_i915_video_decode_frame_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length)
+{
+	struct i915_video_decode_frame_ioctl_data args;
+	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+		return B_BAD_ADDRESS;
+
+	return intel_mfx_decode_frame(devInfo, args.decoder_handle,
+		(const void*)args.data, args.size,
+		(intel_video_frame*)args.frame);
+}
+
+status_t
+intel_i915_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length)
+{
+	switch (op) {
+		case INTEL_I915_VIDEO_CREATE_DECODER:
+			return intel_i915_video_create_decoder_ioctl(devInfo, buffer, length);
+		case INTEL_I915_VIDEO_DESTROY_DECODER:
+			return intel_i915_video_destroy_decoder_ioctl(devInfo, buffer, length);
+		case INTEL_I915_VIDEO_DECODE_FRAME:
+			return intel_i915_video_decode_frame_ioctl(devInfo, buffer, length);
+	}
+	return B_BAD_VALUE;
+}

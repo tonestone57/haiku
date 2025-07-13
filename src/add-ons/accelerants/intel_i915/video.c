@@ -7,56 +7,31 @@
  */
 
 #include "video.h"
+#include "accelerant.h"
 #include "intel_i915_priv.h"
 
-#include <stdlib.h>
-
-struct intel_video_decoder_instance {
-    intel_video_codec codec;
-    // Add more fields here as needed, such as context information,
-    // reference frame buffers, etc.
-};
+#include <sys/ioctl.h>
 
 intel_video_decoder
 intel_video_create_decoder(intel_video_codec codec)
 {
-    intel_video_decoder_instance* decoder = (intel_video_decoder_instance*)malloc(sizeof(intel_video_decoder_instance));
-    if (decoder == NULL) {
-        return NULL;
-    }
-    decoder->codec = codec;
-    return decoder;
+	struct i915_video_create_decoder_ioctl_data data;
+	data.codec = codec;
+
+	if (ioctl(gInfo->device_fd, INTEL_I915_VIDEO_CREATE_DECODER, &data, sizeof(data)) != B_OK) {
+		return NULL;
+	}
+
+	return (intel_video_decoder)data.decoder_handle;
 }
 
 void
 intel_video_destroy_decoder(intel_video_decoder decoder)
 {
-    free(decoder);
-}
+	struct i915_video_destroy_decoder_ioctl_data data;
+	data.decoder_handle = (uint32)decoder;
 
-static status_t
-intel_video_decode_h264_frame(intel_video_decoder_instance* decoder,
-    const void* data, size_t size,
-    intel_video_frame* frame);
-
-static status_t
-intel_video_decode_hevc_frame(intel_video_decoder_instance* decoder,
-    const void* data, size_t size,
-    intel_video_frame* frame);
-
-static status_t
-intel_video_decode_vp9_frame(intel_video_decoder_instance* decoder,
-    const void* data, size_t size,
-    intel_video_frame* frame);
-
-static status_t
-intel_video_decode_av1_frame(intel_video_decoder_instance* decoder,
-    const void* data, size_t size,
-    intel_video_frame* frame)
-{
-    // This is a stub. A real implementation would parse the AV1 stream,
-    // manage reference frames, and use the hardware to decode the frame.
-    return B_UNSUPPORTED;
+	ioctl(gInfo->device_fd, INTEL_I915_VIDEO_DESTROY_DECODER, &data, sizeof(data));
 }
 
 status_t
@@ -64,17 +39,11 @@ intel_video_decode_frame(intel_video_decoder decoder,
     const void* data, size_t size,
     intel_video_frame* frame)
 {
-    intel_video_decoder_instance* instance = (intel_video_decoder_instance*)decoder;
-    switch (instance->codec) {
-        case INTEL_VIDEO_CODEC_H264_AVC:
-            return intel_video_decode_h264_frame(instance, data, size, frame);
-        case INTEL_VIDEO_CODEC_HEVC_H265:
-            return intel_video_decode_hevc_frame(instance, data, size, frame);
-        case INTEL_VIDEO_CODEC_VP9_PROFILE0:
-            return intel_video_decode_vp9_frame(instance, data, size, frame);
-        case INTEL_VIDEO_CODEC_AV1_PROFILE0:
-            return intel_video_decode_av1_frame(instance, data, size, frame);
-        default:
-            return B_UNSUPPORTED;
-    }
+	struct i915_video_decode_frame_ioctl_data ioctl_data;
+	ioctl_data.decoder_handle = (uint32)decoder;
+	ioctl_data.data = (uint64)data;
+	ioctl_data.size = size;
+	ioctl_data.frame = (uint64)frame;
+
+	return ioctl(gInfo->device_fd, INTEL_I915_VIDEO_DECODE_FRAME, &ioctl_data, sizeof(ioctl_data));
 }

@@ -863,6 +863,27 @@ status_t i915_check_display_bandwidth(struct intel_i915_device_info* dev,
                                       const struct intel_i915_shared_info::per_pipe_display_info_accel pipe_configs[]);
 // --- End Transcoder Management ---
 
+// --- Video Decoding IOCTLs ---
+#define INTEL_I915_VIDEO_CREATE_DECODER		(B_DEVICE_OP_CODES_END + 100)
+#define INTEL_I915_VIDEO_DESTROY_DECODER	(B_DEVICE_OP_CODES_END + 101)
+#define INTEL_I915_VIDEO_DECODE_FRAME		(B_DEVICE_OP_CODES_END + 102)
+
+struct i915_video_create_decoder_ioctl_data {
+	uint32 codec; // intel_video_codec
+	uint32 decoder_handle; // Output
+};
+
+struct i915_video_destroy_decoder_ioctl_data {
+	uint32 decoder_handle;
+};
+
+struct i915_video_decode_frame_ioctl_data {
+	uint32 decoder_handle;
+	uint64 data; // Pointer to compressed frame data
+	uint32 size;
+	uint64 frame; // Pointer to intel_video_frame
+};
+
 
 // Structure for INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (already in accelerant.h)
 /*

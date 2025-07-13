@@ -77,7 +77,6 @@ KernelMergeObject kernel_core.o :
 	scheduling_analysis.cpp
 	EevdfRunQueue.cpp
 	scheduler_team.cpp
-	ksyscalls.cpp
 
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;

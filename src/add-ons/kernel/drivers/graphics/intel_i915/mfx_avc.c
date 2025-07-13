@@ -64,6 +64,10 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 	cmd += devInfo->video_cmd_buffer_offset / 4;
 
 	struct mfx_avc_slice_params params;
+	if (slice_params == NULL) {
+		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
+		return B_BAD_VALUE;
+	}
 	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
 	if (status != B_OK) {
 		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
@@ -92,11 +96,19 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_IMG_STATE);
-	*cmd++ = (1920 / 16 - 1) << 16 | (1080 / 16 - 1);
-	*cmd++ = (0 << 24) | (0 << 16) | 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
+	*cmd++ = (params.pic_width_in_mbs_minus1 << 16) | params.pic_height_in_mbs_minus1;
+	*cmd++ = (params.pic_fields << 24) | (params.frame_num << 16) | params.num_ref_frames;
+	*cmd++ = (params.field_pic_flag << 25) | (params.mbaff_frame_flag << 24)
+		| (params.direct_8x8_inference_flag << 17) | (params.entropy_coding_mode_flag << 16)
+		| (params.pic_order_present_flag << 15) | (params.num_ref_idx_l0_active_minus1 << 8)
+		| params.num_ref_idx_l1_active_minus1;
+	*cmd++ = (params.weighted_pred_flag << 24) | (params.weighted_bipred_idc << 22)
+		| (params.pic_init_qp_minus26 << 16) | (params.chroma_qp_index_offset << 8)
+		| params.second_chroma_qp_index_offset;
+	*cmd++ = (params.deblocking_filter_control_present_flag << 24)
+		| (params.redundant_pic_cnt_present_flag << 23) | (params.transform_8x8_mode_flag << 22)
+		| (params.pic_order_cnt_type << 16) | (params.log2_max_frame_num_minus4 << 8)
+		| params.log2_max_pic_order_cnt_lsb_minus4;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_AVC_REF_IDX_STATE);
 	*cmd++ = 0;

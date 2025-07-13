@@ -64,6 +64,10 @@ mfx_hevc_create_command_buffer(intel_i915_device_info* devInfo,
 	cmd += devInfo->video_cmd_buffer_offset / 4;
 
 	struct mfx_hevc_slice_params params;
+	if (slice_params == NULL) {
+		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
+		return B_BAD_VALUE;
+	}
 	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
 	if (status != B_OK) {
 		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
@@ -92,10 +96,23 @@ mfx_hevc_create_command_buffer(intel_i915_device_info* devInfo,
 		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_HEVC_PIC_STATE);
-	*cmd++ = (1920 / 16 - 1) << 16 | (1080 / 16 - 1);
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
+	*cmd++ = (params.pic_width_in_luma_samples << 16) | params.pic_height_in_luma_samples;
+	*cmd++ = (params.chroma_format_idc << 30) | (params.separate_colour_plane_flag << 29)
+		| (params.bit_depth_luma_minus8 << 24) | (params.bit_depth_chroma_minus8 << 21)
+		| (params.log2_max_pic_order_cnt_lsb_minus4 << 16) | (params.no_pic_reordering_flag << 15)
+		| (params.no_bipred_flag << 14) | (params.all_slices_are_intra << 13);
+	*cmd++ = (params.pic_init_qp_minus26 << 26) | (params.diff_cu_qp_delta_depth << 24)
+		| (params.pps_cb_qp_offset << 18) | (params.pps_cr_qp_offset << 12)
+		| (params.constrained_intra_pred_flag << 11) | (params.strong_intra_smoothing_enabled_flag << 10)
+		| (params.transform_skip_enabled_flag << 9) | (params.cu_qp_delta_enabled_flag << 8)
+		| (params.weighted_pred_flag << 7) | (params.weighted_bipred_flag << 6)
+		| (params.tiles_enabled_flag << 5) | (params.entropy_coding_sync_enabled_flag << 4)
+		| (params.sign_data_hiding_enabled_flag << 3) | (params.loop_filter_across_tiles_enabled_flag << 2)
+		| (params.pps_loop_filter_across_slices_enabled_flag << 1) | params.deblocking_filter_override_enabled_flag;
+	*cmd++ = (params.pps_deblocking_filter_disabled_flag << 31) | (params.pps_beta_offset_div2 << 25)
+		| (params.pps_tc_offset_div2 << 19) | (params.lists_modification_present_flag << 18)
+		| (params.log2_parallel_merge_level_minus2 << 16) | (params.num_tile_columns_minus1 << 8)
+		| params.num_tile_rows_minus1;
 	*cmd++ = 0;
 	*cmd++ = 0;
 	*cmd++ = 0;

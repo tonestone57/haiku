@@ -63,19 +63,15 @@ mfx_vp9_create_command_buffer(intel_i915_device_info* devInfo,
 
 	cmd += devInfo->video_cmd_buffer_offset / 4;
 
-	struct mfx_vp9_slice_params {
-		uint32_t slice_data_size;
-	} params;
+	struct mfx_vp9_pic_params params;
+	if (slice_params == NULL) {
+		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
+		return B_BAD_VALUE;
+	}
 	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
 	if (status != B_OK) {
 		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
 		return status;
-	}
-
-	if (params.slice_data_size == 0) {
-		intel_i915_gem_object_unmap_cpu(slice_params);
-		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
-		return B_BAD_VALUE;
 	}
 
 	uint32_t* cmd_start = cmd;
@@ -85,7 +81,7 @@ mfx_vp9_create_command_buffer(intel_i915_device_info* devInfo,
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_SURFACE_STATE);
 	*cmd++ = 0; // Surface ID 0
-	*cmd++ = (1920 << 16) | 1080; // Width, height
+	*cmd++ = (params.frame_width_minus1 + 1) << 16 | (params.frame_height_minus1 + 1); // Width, height
 	*cmd++ = (0 << 16) | 0; // Y offset, X offset
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_PIPE_BUF_ADDR_STATE);
@@ -94,13 +90,20 @@ mfx_vp9_create_command_buffer(intel_i915_device_info* devInfo,
 		*cmd++ = 0;
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_VP9_PIC_STATE);
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
-	*cmd++ = 0;
+	*cmd++ = (params.frame_width_minus1 << 16) | params.frame_height_minus1;
+	*cmd++ = (params.intra_only << 28) | (params.allow_high_precision_mv << 27)
+		| (params.mcomp_filter_type << 24) | (params.frame_parallel_decoding_mode << 23)
+		| (params.segmentation_enabled << 22) | (params.segmentation_update_map << 21)
+		| (params.segmentation_temporal_update << 20) | (params.segment_feature_mode << 18)
+		| (params.segment_id_block_size << 16) | (params.mb_segment_id_tree_probs[0] << 8)
+		| params.mb_segment_id_tree_probs[1];
+	*cmd++ = (params.mb_segment_id_tree_probs[2] << 24) | (params.mb_segment_id_tree_probs[3] << 16)
+		| (params.mb_segment_id_tree_probs[4] << 8) | params.mb_segment_id_tree_probs[5];
+	*cmd++ = (params.mb_segment_id_tree_probs[6] << 24) | (params.segment_pred_probs[0] << 16)
+		| (params.segment_pred_probs[1] << 8) | params.segment_pred_probs[2];
+	*cmd++ = (params.feature_data[0][0] << 16) | params.feature_data[0][1];
+	*cmd++ = (params.feature_data[0][2] << 16) | params.feature_data[0][3];
+	*cmd++ = (params.feature_mask[0] << 16) | params.feature_mask[1];
 
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_VP9_SLICE_STATE);
 	*cmd++ = 0;

@@ -229,6 +229,8 @@ struct i915_set_display_config_args {
 	uint64 pipe_configs_ptr; /**< User-space pointer to an array of i915_display_pipe_config. */
 	uint32 primary_pipe_id;  /**< User's preferred primary pipe (enum i915_pipe_id_user), or I915_PIPE_USER_INVALID. */
 	uint64 reserved[3];      /**< Reserved for future expansion, zero-fill. */
+#define I915_DISPLAY_CONFIG_CLONE	(1 << 1)
+#define I915_DISPLAY_CONFIG_EXTENDED	(1 << 2)
 };
 
 /** @brief Flag for i915_set_display_config_args.flags: Validate but do not apply the configuration. */

@@ -745,6 +745,24 @@ i915_set_display_config_ioctl_handler(intel_i915_device_info* devInfo, struct i9
 	if (args->num_pipe_configs > PRIV_MAX_PIPES) { TRACE("    Error: num_pipe_configs %lu exceeds PRIV_MAX_PIPES %d\n", args->num_pipe_configs, PRIV_MAX_PIPES); return B_BAD_VALUE; }
 	if (args->num_pipe_configs > 0 && args->pipe_configs_ptr == 0) { TRACE("    Error: pipe_configs_ptr is NULL for num_pipe_configs %lu\n", args->num_pipe_configs); return B_BAD_ADDRESS; }
 
+	if (args->flags & I915_DISPLAY_CONFIG_CLONE) {
+		if (args->num_pipe_configs > 0) {
+			display_mode primary_mode = pipe_configs_kernel_copy[0].mode;
+			for (uint32 i = 1; i < args->num_pipe_configs; i++) {
+				pipe_configs_kernel_copy[i].mode = primary_mode;
+			}
+		}
+	} else if (args->flags & I915_DISPLAY_CONFIG_EXTENDED) {
+		if (args->num_pipe_configs > 0) {
+			uint32_t current_x = 0;
+			for (uint32 i = 0; i < args->num_pipe_configs; i++) {
+				pipe_configs_kernel_copy[i].pos_x = current_x;
+				pipe_configs_kernel_copy[i].pos_y = 0;
+				current_x += pipe_configs_kernel_copy[i].mode.virtual_width;
+			}
+		}
+	}
+
 	if (args->num_pipe_configs > 0) {
 		pipe_configs_array_size = sizeof(struct i915_display_pipe_config) * args->num_pipe_configs;
 		pipe_configs_kernel_copy = (struct i915_display_pipe_config*)malloc(pipe_configs_array_size);

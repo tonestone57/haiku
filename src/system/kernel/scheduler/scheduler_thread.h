@@ -40,6 +40,7 @@
 #include "scheduler_cpu.h"     // Forward declares CoreEntry, CPUEntry
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
+#include "scheduler_team.h"
 #include "EevdfRunQueue.h"     // For EevdfRunQueueLink
 
 namespace Scheduler {

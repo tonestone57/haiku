@@ -93,7 +93,7 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 	*cmd++ = (MI_COMMAND_TYPE_MFX | MFX_PIPE_BUF_ADDR_STATE);
 	for (int i = 0; i < 18; i++) {
 		if (params.buffers[i] != 0) {
-			struct intel_i915_gem_object* obj = (struct intel_i915_gem_object*)_generic_handle_lookup(params.buffers[i], HANDLE_TYPE_GEM_OBJECT);
+			struct intel_i915_gem_object* obj = devInfo->get_buffer(devInfo, params.buffers[i]);
 			if (obj != NULL) {
 				*cmd++ = obj->gtt_offset_pages * B_PAGE_SIZE;
 				intel_i915_gem_object_put(obj);

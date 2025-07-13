@@ -103,16 +103,16 @@ intel_mfx_decode_frame(intel_i915_device_info* devInfo, uint32 handle,
 	switch (decoder->codec) {
 		case INTEL_VIDEO_CODEC_H264_AVC:
 			// TODO: create slice data and slice params
-			return intel_mfx_avc_decode_slice(devInfo, NULL, NULL);
+			return intel_mfx_avc_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
 		case INTEL_VIDEO_CODEC_HEVC_H265:
 			// TODO: create slice data and slice params
-			return intel_mfx_hevc_decode_slice(devInfo, NULL, NULL);
+			return intel_mfx_hevc_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
 		case INTEL_VIDEO_CODEC_VP9_PROFILE0:
 			// TODO: create slice data and slice params
-			return intel_mfx_vp9_decode_slice(devInfo, NULL, NULL);
+			return intel_mfx_vp9_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
 		case INTEL_VIDEO_CODEC_AV1_PROFILE0:
 			// TODO: create slice data and slice params
-			return intel_mfx_av1_decode_slice(devInfo, NULL, NULL);
+			return intel_mfx_av1_decode_slice(devInfo, (struct intel_i915_gem_object*)data, (struct intel_i915_gem_object*)frame);
 		default:
 			return B_UNSUPPORTED;
 	}

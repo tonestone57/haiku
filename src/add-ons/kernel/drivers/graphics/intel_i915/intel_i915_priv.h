@@ -687,6 +687,8 @@ typedef struct intel_i915_device_info {
 	// Video command buffer ring buffer
 	struct intel_i915_gem_object* video_cmd_buffer;
 	uint32_t video_cmd_buffer_offset;
+
+	struct intel_i915_gem_object* (*get_buffer)(void* cookie, uint32_t handle);
 } intel_i915_device_info;
 
 

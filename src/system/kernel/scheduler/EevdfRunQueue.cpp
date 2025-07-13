@@ -82,9 +82,8 @@ EevdfRunQueue::IsEmpty()
 }
 
 int32
-EevdfRunQueue::Count()
+EevdfRunQueue::Count() const
 {
-	InterruptsSpinLocker locker(fLock);
 	return fDeadlineHeap.Count();
 }
 

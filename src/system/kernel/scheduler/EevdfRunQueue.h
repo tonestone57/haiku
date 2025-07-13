@@ -60,7 +60,7 @@ public:
 	ThreadData* PopMinimum();
 
 	bool IsEmpty();
-	int32 Count();
+	int32 Count() const;
 
 	// Update will now use SchedulerHeap::Update
 	void Update(ThreadData* thread); // oldDeadline no longer needed by this call

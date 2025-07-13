@@ -835,6 +835,19 @@ intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
 		}
 	}
 
+	if (args->count > 1 && (configs[0].flags & (I915_DISPLAY_CONFIG_CLONE | I915_DISPLAY_CONFIG_EXTENDED))) {
+		if (configs[0].flags & I915_DISPLAY_CONFIG_CLONE) {
+			for (uint32 i = 1; i < args->count; i++)
+				configs[i].mode = configs[0].mode;
+		} else {
+			uint32 x_offset = configs[0].mode.virtual_width;
+			for (uint32 i = 1; i < args->count; i++) {
+				configs[i].mode.h_display_start = x_offset;
+				x_offset += configs[i].mode.virtual_width;
+			}
+		}
+	}
+
 	for (uint32 i = 0; i < args->count; i++) {
 		if (configs[i].flags & I915_DISPLAY_CONFIG_ENABLE) {
 			devInfo->pipe_infos[configs[i].pipe_id].is_active = true;

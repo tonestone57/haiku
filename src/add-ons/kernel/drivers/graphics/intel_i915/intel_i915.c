@@ -260,11 +260,26 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_IOCTL_VIDEO_DECODE_FRAME:
 			return intel_i915_video_ioctl(devInfo, op, buffer, length);
 
+		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:
+			return intel_i915_3d_ioctl(devInfo, op, buffer, length);
+
 		default:
 			TRACE("intel_i915_ioctl: Unknown opcode %lu\n", op);
 			return B_DEV_INVALID_IOCTL;
 	}
 	return B_OK;
+}
+
+
+status_t
+intel_i915_3d_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length)
+{
+	switch (op) {
+		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:
+			return intel_3d_submit_command(devInfo, buffer, length);
+	}
+
+	return B_DEV_INVALID_IOCTL;
 }
 
 status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) { return B_OK;}

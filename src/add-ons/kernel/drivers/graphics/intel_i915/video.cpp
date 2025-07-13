@@ -126,14 +126,27 @@ intel_video_destroy_decoder(intel_i915_device_info* devInfo,
 static status_t
 avc_parse_slice_header(intel_avc_decoder* decoder, const uint8* data, uint32 size)
 {
-	// TODO: implement
-	decoder->slice_params.slice_data_size = size;
-	decoder->slice_params.slice_data_offset = 0;
-	decoder->slice_params.slice_data_bit_offset = 0;
-	decoder->slice_params.num_macroblocks = (decoder->pic_params.width * decoder->pic_params.height) / 256;
+	if (size < 4)
+		return B_BAD_DATA;
+
+	uint32 forbidden_zero_bit = (data[0] >> 7) & 0x01;
+	if (forbidden_zero_bit != 0)
+		return B_BAD_DATA;
+
+	uint32 nal_ref_idc = (data[0] >> 5) & 0x03;
+	uint32 nal_unit_type = data[0] & 0x1f;
+
+	if (nal_unit_type != 1 && nal_unit_type != 5)
+		return B_BAD_DATA;
+
 	decoder->slice_params.first_macroblock = 0;
-	decoder->slice_params.slice_type = 2; // P slice
+	decoder->slice_params.slice_type = 0;
 	decoder->slice_params.direct_prediction_type = 0;
+	decoder->slice_params.num_macroblocks = 0;
+	decoder->slice_params.slice_data_size = size - 1;
+	decoder->slice_params.slice_data_offset = 1;
+	decoder->slice_params.slice_data_bit_offset = 0;
+
 	return B_OK;
 }
 
@@ -226,16 +239,40 @@ intel_video_decode_frame(intel_i915_device_info* devInfo,
 
 
 static status_t
+hevc_parse_slice_header(intel_hevc_decoder* decoder, const uint8* data, uint32 size)
+{
+	// TODO: implement
+	return B_OK;
+}
+
+
+static status_t
 hevc_decode_slice(intel_hevc_decoder* decoder, const uint8* data, uint32 size)
 {
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
+
+	hevc_parse_slice_header(decoder, data, size);
+
 	// TODO: implement
 	return B_ERROR;
 }
 
 
 static status_t
+vp9_parse_slice_header(intel_vp9_decoder* decoder, const uint8* data, uint32 size)
+{
+	// TODO: implement
+	return B_OK;
+}
+
+
+static status_t
 vp9_decode_slice(intel_vp9_decoder* decoder, const uint8* data, uint32 size)
 {
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
+
+	vp9_parse_slice_header(decoder, data, size);
+
 	// TODO: implement
 	return B_ERROR;
 }

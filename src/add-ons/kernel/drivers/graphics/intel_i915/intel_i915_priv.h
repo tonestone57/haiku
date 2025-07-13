@@ -902,8 +902,31 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_VIDEO_DECODE_FRAME		(B_DEVICE_OP_CODES_END + 102)
 
 #define INTEL_I915_IOCTL_SET_DISPLAY_CONFIG		(B_DEVICE_OP_CODES_END + 103)
+#define INTEL_I915_IOCTL_3D_SUBMIT_CMD		(B_DEVICE_OP_CODES_END + 104)
 
 #define I915_DISPLAY_CONFIG_ENABLE 1
+#define I915_DISPLAY_CONFIG_CLONE 2
+#define I915_DISPLAY_CONFIG_EXTENDED 4
+
+// --- 3D Pipeline ---
+enum intel_i915_3d_command {
+	I915_3D_CMD_PIPELINE_SELECT = 0,
+	I915_3D_CMD_STATE_BASE_ADDRESS,
+	I915_3D_CMD_STATE_SIP,
+	I915_3D_CMD_3DSTATE_VF_STATISTICS,
+	I915_3D_CMD_PIPELINE_FLUSH,
+};
+
+struct i915_3d_command_buffer {
+	uint32 handle;
+	uint32 size;
+};
+
+struct i915_3d_vertex_buffer {
+	uint32 handle;
+	uint32 size;
+	uint32 stride;
+};
 
 struct i915_display_config {
 	uint32 pipe_id;

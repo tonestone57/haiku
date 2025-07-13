@@ -634,8 +634,10 @@ get_accelerant_hook(uint32 feature, void *data)
 		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
 		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array_unclipped;
 		case B_DRAW_LINE_ARRAY_CLIPPED: return (void*)accel_draw_line_array_clipped;
-		case B_DRAW_LINE: return (void*)accel_draw_line;
-		case B_FILL_POLYGON: return (void*)accel_fill_polygon;
+		case B_DRAW_LINE:
+			return (void*)kaby_lake_draw_line;
+		case B_FILL_POLYGON:
+			return (void*)kaby_lake_fill_polygon;
 		case B_FILL_TRIANGLE: return (void*)accel_fill_triangle;
 
 		// New Multi-Monitor Hooks
@@ -648,7 +650,13 @@ get_accelerant_hook(uint32 feature, void *data)
 
 		// Stubs for new features
 		case B_ALPHA_BLEND:
-			return (void *)intel_i915_alpha_blend;
+			return (void*)kaby_lake_alpha_blend;
+		case B_COLOR_KEY:
+			return (void*)kaby_lake_color_key;
+		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT:
+			return (void*)kaby_lake_stretch_blit;
+		case B_SET_CLIPPING_RECT:
+			return (void*)kaby_lake_set_clip_rect;
 		case B_DRAW_STRING:
 			return (void *)intel_i915_draw_string;
 		case B_OVERLAY_COUNT:

@@ -29,6 +29,9 @@ status_t intel_3d_rotated_blit(intel_i915_device_info* devInfo,
 status_t intel_3d_font_smoothing(intel_i915_device_info* devInfo,
 	i915_font_smoothing* args);
 
+status_t intel_3d_multi_layer_composition(intel_i915_device_info* devInfo,
+	i915_multi_layer_composition* args);
+
 #ifdef __cplusplus
 }
 #endif

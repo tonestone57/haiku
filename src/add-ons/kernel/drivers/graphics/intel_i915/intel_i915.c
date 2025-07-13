@@ -286,6 +286,12 @@ intel_i915_3d_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, si
 		case INTEL_I915_IOCTL_3D_FONT_SMOOTHING:
 			return intel_3d_font_smoothing(devInfo,
 				(i915_font_smoothing*)buffer);
+		case INTEL_I915_IOCTL_CONFIGURE_OVERLAY:
+			return intel_i915_configure_overlay_ioctl(devInfo,
+				(i915_overlay_plane*)buffer);
+		case INTEL_I915_IOCTL_MULTI_LAYER_COMPOSITION:
+			return intel_3d_multi_layer_composition(devInfo,
+				(i915_multi_layer_composition*)buffer);
 	}
 
 	return B_DEV_INVALID_IOCTL;

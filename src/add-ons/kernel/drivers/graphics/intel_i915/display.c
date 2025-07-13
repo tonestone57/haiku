@@ -914,6 +914,24 @@ intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
 
 
 status_t
+intel_i915_configure_overlay_ioctl(intel_i915_device_info* devInfo,
+	i915_overlay_plane* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
+intel_i915_configure_overlay_ioctl(intel_i915_device_info* devInfo,
+	i915_overlay_plane* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
+
+status_t
 intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
 	i915_set_display_config_ioctl_data* args)
 {

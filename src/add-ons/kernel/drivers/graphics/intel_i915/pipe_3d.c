@@ -51,6 +51,15 @@ intel_3d_rotated_blit(intel_i915_device_info* devInfo,
 	return B_ERROR;
 }
 
+
+status_t
+intel_3d_multi_layer_composition(intel_i915_device_info* devInfo,
+	i915_multi_layer_composition* args)
+{
+	// TODO: implement
+	return B_ERROR;
+}
+
 void
 intel_3d_uninit(intel_i915_device_info* devInfo)
 {

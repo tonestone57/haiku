@@ -907,6 +907,33 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_3D_ROTATED_BLIT (B_DEVICE_OP_CODES_END + 106)
 #define INTEL_I915_IOCTL_3D_FONT_SMOOTHING (B_DEVICE_OP_CODES_END + 107)
 #define INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME (B_DEVICE_OP_CODES_END + 108)
+#define INTEL_I915_IOCTL_CONFIGURE_OVERLAY (B_DEVICE_OP_CODES_END + 109)
+#define INTEL_I915_IOCTL_MULTI_LAYER_COMPOSITION (B_DEVICE_OP_CODES_END + 110)
+
+struct i915_layer {
+	uint32 handle;
+	uint32 width;
+	uint32 height;
+	uint32 stride;
+	uint32 x;
+	uint32 y;
+	uint32 format;
+};
+
+struct i915_multi_layer_composition {
+	i915_layer* layers;
+	uint32 count;
+};
+
+struct i915_overlay_plane {
+	uint32 handle;
+	uint32 width;
+	uint32 height;
+	uint32 stride;
+	uint32 x;
+	uint32 y;
+	uint32 format;
+};
 
 #define I915_DISPLAY_CONFIG_ENABLE 1
 #define I915_DISPLAY_CONFIG_CLONE 2

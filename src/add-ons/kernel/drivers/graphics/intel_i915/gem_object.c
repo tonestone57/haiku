@@ -581,11 +581,11 @@ intel_i915_gem_object_map_gtt(struct intel_i915_gem_object* obj,
 		// A robust version would call unmap_gtt here if parameters differ.
 		// For now, if gtt_mapped is true but params differ, this is a logic error state.
 		if (obj->gtt_offset_pages != gtt_page_offset || obj->gtt_cache_type != cache_type) {
-			// TRACE("GEM: WARN - Remapping already mapped object %p with different GTT params. Unmapping first.
+			TRACE("GEM: WARN - Remapping already mapped object %p with different GTT params. Unmapping first.
 ", obj);
-			// This requires careful handling of the obj->lock and potential recursive locking if unmap_gtt also takes it.
-			// For simplicity, this specific path is not fully handled here; expect unmap to be called first.
-			// intel_i915_gem_object_unmap_gtt(obj); // This would re-acquire obj->lock.
+			mutex_unlock(&obj->lock);
+			intel_i915_gem_object_unmap_gtt(obj);
+			mutex_lock(&obj->lock);
 		}
 	}
 	mutex_unlock(&obj->lock); // Unlock before calling GTT map which might sleep or take other locks

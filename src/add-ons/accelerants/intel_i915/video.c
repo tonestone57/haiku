@@ -47,9 +47,14 @@ intel_video_decode_hevc_frame(intel_video_decoder_instance* decoder,
 static status_t
 intel_video_decode_vp9_frame(intel_video_decoder_instance* decoder,
     const void* data, size_t size,
+    intel_video_frame* frame);
+
+static status_t
+intel_video_decode_av1_frame(intel_video_decoder_instance* decoder,
+    const void* data, size_t size,
     intel_video_frame* frame)
 {
-    // This is a stub. A real implementation would parse the VP9 stream,
+    // This is a stub. A real implementation would parse the AV1 stream,
     // manage reference frames, and use the hardware to decode the frame.
     return B_UNSUPPORTED;
 }
@@ -67,6 +72,8 @@ intel_video_decode_frame(intel_video_decoder decoder,
             return intel_video_decode_hevc_frame(instance, data, size, frame);
         case INTEL_VIDEO_CODEC_VP9_PROFILE0:
             return intel_video_decode_vp9_frame(instance, data, size, frame);
+        case INTEL_VIDEO_CODEC_AV1_PROFILE0:
+            return intel_video_decode_av1_frame(instance, data, size, frame);
         default:
             return B_UNSUPPORTED;
     }

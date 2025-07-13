@@ -16,6 +16,7 @@
 namespace Scheduler {
 	class ThreadData;
 	class CoreEntry;
+	class CPUEntry;
 	// CPUSet is defined in kernel.h, usually included via OS.h or kernel.h
 }
 

@@ -367,6 +367,29 @@ extern spinlock gIrqTaskAffinityLock;
 
 // Defined in power_saving.cpp, used by scheduler_thread.cpp for DTQ refinement
 extern CoreEntry* sSmallTaskCore;
+extern spinlock sSmallTaskCoreLock;
+extern bigtime_t sSmallTaskCoreDesignationTime;
+extern bigtime_t gIRQBalanceCheckInterval;
+extern float gModeIrqTargetFactor;
+extern int32 gModeMaxTargetCpuIrqLoad;
+extern int32 gHighAbsoluteIrqThreshold;
+extern int32 gSignificantIrqLoadDifference;
+extern int32 gMaxIRQsToMoveProactively;
+
+
+class SmallTaskCoreLocker {
+public:
+	SmallTaskCoreLocker()
+	{
+		acquire_spinlock(&sSmallTaskCoreLock);
+	}
+
+
+	~SmallTaskCoreLocker()
+	{
+		release_spinlock(&sSmallTaskCoreLock);
+	}
+};
 
 
 void init_debug_commands();

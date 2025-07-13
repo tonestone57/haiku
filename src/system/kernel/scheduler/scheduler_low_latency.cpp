@@ -4,9 +4,9 @@
  * Distributed under the terms of the MIT License.
  */
 
+#include "scheduler_cpu.h"
 #include "scheduler_modes.h"
 #include "scheduler_common.h"
-#include "scheduler_cpu.h"
 #include "scheduler_thread.h"
 
 
@@ -41,7 +41,6 @@ low_latency_switch_to_mode()
 	if (sSmallTaskCore != NULL) {
 		SmallTaskCoreLocker locker; // Unlocks on destruction
 		sSmallTaskCore = NULL;
-		sSmallTaskCoreDesignationTime = 0;
 	}
 }
 

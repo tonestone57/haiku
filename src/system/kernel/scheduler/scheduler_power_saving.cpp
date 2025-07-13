@@ -4,9 +4,9 @@
  * Distributed under the terms of the MIT License.
  */
 
+#include "scheduler_cpu.h"
 #include "scheduler_modes.h"
 #include "scheduler_common.h"
-#include "scheduler_cpu.h"
 #include "scheduler_thread.h"
 #include <kernel.h> // For debug output, system_time, etc.
 
@@ -16,8 +16,8 @@ using namespace Scheduler;
 // Small Task Consolidation Core - a core designated to handle small,
 // potentially latency-sensitive tasks to allow other cores to go idle.
 CoreEntry* Scheduler::sSmallTaskCore = NULL;
-bigtime_t Scheduler::sSmallTaskCoreDesignationTime = 0;
-Spinlock Scheduler::sSmallTaskCoreLock = B_SPINLOCK_INITIALIZER; // Protects sSmallTaskCore and its designation time
+bigtime_t sSmallTaskCoreDesignationTime = 0;
+spinlock Scheduler::sSmallTaskCoreLock = B_SPINLOCK_INITIALIZER; // Protects sSmallTaskCore and its designation time
 
 // Defines the threshold for considering a core's cache affinity "expired" or "cold"
 // for a thread in power saving mode. Longer than low latency to encourage consolidation.
@@ -34,14 +34,12 @@ static const bigtime_t kPowerSavingSTCMinDesignationTime = 200000; // 200ms
 static void
 power_saving_switch_to_mode()
 {
-	gKernelKDistFactor = 0.6f; // Value from original generic power saving mode
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
-	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING; // From scheduler_common.h
+	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
-	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2; // Check less often
-	gModeIrqTargetFactor = 0.1f; // Be more aggressive in consolidating IRQs
-	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD * 6 / 10; // Target lower IRQ load on active CPUs
-	// Other IRQ params could also be tuned for power saving.
+	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;
+	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
+	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker; // Unlocks on destruction

@@ -81,6 +81,13 @@ const float kLoadBalanceIntervalDecreaseFactor = 0.75f;
 // Teams with lower quota percentages will have their vruntime advance faster.
 #define TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT 100
 
+#define DEFAULT_IRQ_BALANCE_CHECK_INTERVAL 500000
+#define DEFAULT_IRQ_TARGET_FACTOR 0.3f
+#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD 700
+#define DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD 1000
+#define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300
+#define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3
+
 
 namespace Scheduler {
 	struct IntHashDefinition {

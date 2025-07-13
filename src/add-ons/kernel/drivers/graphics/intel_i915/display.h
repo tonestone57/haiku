@@ -52,6 +52,10 @@ intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* de
 
 // Modesetting entry point from IOCTL
 status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode);
+status_t intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
+	i915_set_display_config_ioctl_data* args);
+status_t intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
+	intel_i915_propose_specific_mode_args* args);
 
 // DPMS Kernel Functions
 status_t intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo,

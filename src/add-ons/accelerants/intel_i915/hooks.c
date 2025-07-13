@@ -616,14 +616,33 @@ get_accelerant_hook(uint32 feature, void *data)
 		case B_SYNC_TO_TOKEN: return (void*)intel_i915_sync_to_token;
 
 		// 2D Acceleration Hooks (currently stubs)
-		case B_FILL_RECTANGLE: return (void*)accel_fill_rectangle_unclipped;
+		case B_FILL_RECTANGLE:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_fill_rectangle;
+			return (void*)accel_fill_rectangle_unclipped;
 		case B_FILL_RECTANGLE_CLIPPED: return (void*)accel_fill_rect_clipped;
-		case B_SCREEN_TO_SCREEN_BLIT: return (void*)accel_screen_to_screen_blit_unclipped;
+		case B_SCREEN_TO_SCREEN_BLIT:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_screen_to_screen_blit;
+			return (void*)accel_screen_to_screen_blit_unclipped;
 		case B_BLIT_CLIPPED: return (void*)accel_blit_clipped;
-		case B_INVERT_RECTANGLE: return (void*)accel_invert_rectangle_unclipped;
+		case B_INVERT_RECTANGLE:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_invert_rectangle;
+			return (void*)accel_invert_rectangle_unclipped;
 		case B_INVERT_RECTANGLE_CLIPPED: return (void*)accel_invert_rect_clipped;
-		case B_FILL_SPAN: return (void*)accel_fill_span_unclipped;
-		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT: return (void*)accel_s2s_transparent_blit_unclipped;
+		case B_FILL_SPAN:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_fill_span;
+			return (void*)accel_fill_span_unclipped;
+		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_screen_to_screen_transparent_blit;
+			return (void*)accel_s2s_transparent_blit_unclipped;
+		case B_SCREEN_TO_SCREEN_MONOCHROME_BLIT:
+			if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE)
+				return (void*)kaby_lake_screen_to_screen_monochrome_blit;
+			return NULL;
 		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
 		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array_unclipped;
 		case B_DRAW_LINE_ARRAY_CLIPPED: return (void*)accel_draw_line_array_clipped;

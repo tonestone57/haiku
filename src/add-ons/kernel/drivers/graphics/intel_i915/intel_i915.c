@@ -255,9 +255,9 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_IOCTL_SET_BLITTER_HW_CLIP_RECT:
 			return i915_set_blitter_hw_clip_rect_ioctl_handler(devInfo, (intel_i915_set_blitter_hw_clip_rect_args*)buffer);
 
-		case INTEL_I915_VIDEO_CREATE_DECODER:
-		case INTEL_I915_VIDEO_DESTROY_DECODER:
-		case INTEL_I915_VIDEO_DECODE_FRAME:
+		case INTEL_I915_IOCTL_VIDEO_CREATE_DECODER:
+		case INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER:
+		case INTEL_I915_IOCTL_VIDEO_DECODE_FRAME:
 			return intel_i915_video_ioctl(devInfo, op, buffer, length);
 
 		default:

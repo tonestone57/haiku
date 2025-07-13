@@ -28,3 +28,25 @@ intel_mfx_handle_response(intel_i915_device_info* devInfo)
 		// Handle error.
 	}
 }
+
+
+status_t
+intel_mfx_submit_command(intel_i915_device_info* devInfo,
+	const void* data, size_t size)
+{
+	if (devInfo->video_cmd_buffer == NULL)
+		return B_NO_INIT;
+
+	if (devInfo->video_cmd_buffer_offset + size > devInfo->video_cmd_buffer->size)
+		return B_NO_MEMORY;
+
+	uint8* p = (uint8*)devInfo->video_cmd_buffer->kernel_virtual_address
+		+ devInfo->video_cmd_buffer_offset;
+	memcpy(p, data, size);
+
+	devInfo->video_cmd_buffer_offset += size;
+
+	intel_i915_write32(devInfo, MFX_CMD_TAIL, devInfo->video_cmd_buffer_offset);
+
+	return B_OK;
+}

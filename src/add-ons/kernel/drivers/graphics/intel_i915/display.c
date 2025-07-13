@@ -77,6 +77,16 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	if (!devInfo || !devInfo->shared_info) { return B_BAD_VALUE; }
 	if (!devInfo->vbt) { return B_NO_INIT; }
 
+	devInfo->pipe_count = 0;
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id))
+		devInfo->pipe_count = 3;
+	else
+		devInfo->pipe_count = 2;
+
+	for (uint32 i = 0; i < devInfo->pipe_count; i++) {
+		devInfo->pipe_infos[i].is_active = false;
+	}
+
 	TRACE("display_init: Probing ports for EDID and compiling mode list.\n");
 	uint8 edid_buffer[PRIV_EDID_BLOCK_SIZE];
 	display_mode* global_mode_list = NULL;
@@ -88,40 +98,42 @@ intel_i915_display_init(intel_i915_device_info* devInfo)
 	if (global_mode_list == NULL) return B_NO_MEMORY;
 	global_mode_capacity = MAX_TOTAL_MODES;
 
-	for (uint8_t i = 0; i < devInfo->num_ports_detected; i++) {
-		intel_output_port_state* port = &devInfo->ports[i];
-		port->connected = false; port->edid_valid = false; port->num_modes = 0;
-		if (!port->present_in_vbt) continue;
+	for (uint32 i = 0; i < devInfo->pipe_count; i++) {
+		for (uint8_t j = 0; j < devInfo->num_ports_detected; j++) {
+			intel_output_port_state* port = &devInfo->ports[j];
+			port->connected = false; port->edid_valid = false; port->num_modes = 0;
+			if (!port->present_in_vbt) continue;
 
-		intel_ddi_init_port(devInfo, port);
+			intel_ddi_init_port(devInfo, port);
 
-		if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP ||
-			port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI ||
-			port->type == PRIV_OUTPUT_ANALOG) {
-			if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
-				if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, edid_buffer, 0) == B_OK) {
-					memcpy(port->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE);
-					port->edid_valid = true;
-					int current_port_mode_count = intel_i915_parse_edid(port->edid_data, port->modes, PRIV_MAX_EDID_MODES_PER_PORT);
-					port->num_modes = current_port_mode_count;
+			if (port->type == PRIV_OUTPUT_DP || port->type == PRIV_OUTPUT_EDP ||
+				port->type == PRIV_OUTPUT_HDMI || port->type == PRIV_OUTPUT_TMDS_DVI ||
+				port->type == PRIV_OUTPUT_ANALOG) {
+				if (port->gmbus_pin_pair != GMBUS_PIN_DISABLED) {
+					if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, edid_buffer, 0) == B_OK) {
+						memcpy(port->edid_data, edid_buffer, PRIV_EDID_BLOCK_SIZE);
+						port->edid_valid = true;
+						int current_port_mode_count = intel_i915_parse_edid(port->edid_data, port->modes, PRIV_MAX_EDID_MODES_PER_PORT);
+						port->num_modes = current_port_mode_count;
 
-					const struct edid_v1_info* base_edid = (const struct edid_v1_info*)port->edid_data;
-					uint8_t num_extensions = base_edid->extension_flag;
-					for (uint8_t ext_idx = 0; ext_idx < num_extensions && ext_idx < (sizeof(port->edid_data)/PRIV_EDID_BLOCK_SIZE - 1); ext_idx++) {
-						if (current_port_mode_count >= PRIV_MAX_EDID_MODES_PER_PORT) break;
-						uint8_t extension_block_buffer[PRIV_EDID_BLOCK_SIZE];
-						if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, extension_block_buffer, ext_idx + 1) == B_OK) {
-							memcpy(port->edid_data + (ext_idx + 1) * PRIV_EDID_BLOCK_SIZE, extension_block_buffer, PRIV_EDID_BLOCK_SIZE);
-							intel_i915_parse_edid_extension_block(extension_block_buffer, port->modes, &current_port_mode_count, PRIV_MAX_EDID_MODES_PER_PORT);
-							port->num_modes = current_port_mode_count;
-						} else { TRACE("    Failed to read EDID extension block %u.\n", ext_idx + 1); }
-					}
-					if (port->num_modes > 0) {
-						port->connected = true;
-						if (port->modes[0].timing.pixel_clock != 0) port->preferred_mode = port->modes[0];
-						for (int j = 0; j < port->num_modes; j++) {
-							if (global_mode_count < global_mode_capacity && !mode_already_in_list(&port->modes[j], global_mode_list, global_mode_count)) {
-								global_mode_list[global_mode_count++] = port->modes[j];
+						const struct edid_v1_info* base_edid = (const struct edid_v1_info*)port->edid_data;
+						uint8_t num_extensions = base_edid->extension_flag;
+						for (uint8_t ext_idx = 0; ext_idx < num_extensions && ext_idx < (sizeof(port->edid_data)/PRIV_EDID_BLOCK_SIZE - 1); ext_idx++) {
+							if (current_port_mode_count >= PRIV_MAX_EDID_MODES_PER_PORT) break;
+							uint8_t extension_block_buffer[PRIV_EDID_BLOCK_SIZE];
+							if (intel_i915_gmbus_read_edid_block(devInfo, port->gmbus_pin_pair, extension_block_buffer, ext_idx + 1) == B_OK) {
+								memcpy(port->edid_data + (ext_idx + 1) * PRIV_EDID_BLOCK_SIZE, extension_block_buffer, PRIV_EDID_BLOCK_SIZE);
+								intel_i915_parse_edid_extension_block(extension_block_buffer, port->modes, &current_port_mode_count, PRIV_MAX_EDID_MODES_PER_PORT);
+								port->num_modes = current_port_mode_count;
+							} else { TRACE("    Failed to read EDID extension block %u.\n", ext_idx + 1); }
+						}
+						if (port->num_modes > 0) {
+							port->connected = true;
+							if (port->modes[0].timing.pixel_clock != 0) port->preferred_mode = port->modes[0];
+							for (int k = 0; k < port->num_modes; k++) {
+								if (global_mode_count < global_mode_capacity && !mode_already_in_list(&port->modes[k], global_mode_list, global_mode_count)) {
+									global_mode_list[global_mode_count++] = port->modes[k];
+								}
 							}
 						}
 					}
@@ -792,4 +804,112 @@ intel_output_port_state* intel_display_get_port_by_id(intel_i915_device_info* de
         if (devInfo->ports[i].logical_port_id == port_id) return &devInfo->ports[i];
     }
     return NULL;
+}
+
+
+status_t
+intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
+	i915_set_display_config_ioctl_data* args)
+{
+	if (args == NULL)
+		return B_BAD_VALUE;
+
+	i915_display_config* configs = new(std::nothrow) i915_display_config[args->count];
+	if (configs == NULL)
+		return B_NO_MEMORY;
+
+	if (user_memcpy(configs, args->configs, sizeof(i915_display_config) * args->count) != B_OK) {
+		delete[] configs;
+		return B_BAD_ADDRESS;
+	}
+
+	for (uint32 i = 0; i < args->count; i++) {
+		intel_i915_propose_specific_mode_args propose_args;
+		propose_args.target_mode = configs[i].mode;
+		propose_args.low_bound = configs[i].mode;
+		propose_args.high_bound = configs[i].mode;
+		propose_args.pipe_id = configs[i].pipe_id;
+		if (intel_display_propose_mode_ioctl(devInfo, &propose_args) != B_OK) {
+			delete[] configs;
+			return B_BAD_VALUE;
+		}
+	}
+
+	for (uint32 i = 0; i < args->count; i++) {
+		if (configs[i].flags & I915_DISPLAY_CONFIG_ENABLE) {
+			devInfo->pipe_infos[configs[i].pipe_id].is_active = true;
+			devInfo->pipe_infos[configs[i].pipe_id].current_mode = configs[i].mode;
+			devInfo->pipe_infos[configs[i].pipe_id].pos_x = configs[i].mode.h_display_start;
+			devInfo->pipe_infos[configs[i].pipe_id].pos_y = configs[i].mode.v_display_start;
+
+			// TODO: allocate framebuffer
+			// TODO: program display controller
+		} else {
+			devInfo->pipe_infos[configs[i].pipe_id].is_active = false;
+			// TODO: disable display controller
+		}
+	}
+
+	delete[] configs;
+	return B_OK;
+}
+
+
+status_t
+intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
+	intel_i915_propose_specific_mode_args* args)
+{
+	if (args == NULL)
+		return B_BAD_VALUE;
+
+	// TODO: implement
+	return B_OK;
+}
+
+
+status_t
+intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
+	i915_set_display_config_ioctl_data* args)
+{
+	if (args == NULL)
+		return B_BAD_VALUE;
+
+	i915_display_config* configs = new(std::nothrow) i915_display_config[args->count];
+	if (configs == NULL)
+		return B_NO_MEMORY;
+
+	if (user_memcpy(configs, args->configs, sizeof(i915_display_config) * args->count) != B_OK) {
+		delete[] configs;
+		return B_BAD_ADDRESS;
+	}
+
+	for (uint32 i = 0; i < args->count; i++) {
+		intel_i915_propose_specific_mode_args propose_args;
+		propose_args.target_mode = configs[i].mode;
+		propose_args.low_bound = configs[i].mode;
+		propose_args.high_bound = configs[i].mode;
+		propose_args.pipe_id = configs[i].pipe_id;
+		if (intel_display_propose_mode_ioctl(devInfo, &propose_args) != B_OK) {
+			delete[] configs;
+			return B_BAD_VALUE;
+		}
+	}
+
+	for (uint32 i = 0; i < args->count; i++) {
+		if (configs[i].flags & I915_DISPLAY_CONFIG_ENABLE) {
+			devInfo->pipe_infos[configs[i].pipe_id].is_active = true;
+			devInfo->pipe_infos[configs[i].pipe_id].current_mode = configs[i].mode;
+			devInfo->pipe_infos[configs[i].pipe_id].pos_x = configs[i].mode.h_display_start;
+			devInfo->pipe_infos[configs[i].pipe_id].pos_y = configs[i].mode.v_display_start;
+
+			// TODO: allocate framebuffer
+			// TODO: program display controller
+		} else {
+			devInfo->pipe_infos[configs[i].pipe_id].is_active = false;
+			// TODO: disable display controller
+		}
+	}
+
+	delete[] configs;
+	return B_OK;
 }

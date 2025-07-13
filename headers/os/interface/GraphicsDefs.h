@@ -343,6 +343,17 @@ enum alpha_function {
 };
 
 
+// 2D acceleration capabilities
+enum {
+	B_BLIT = 0x0001,
+	B_FILL_RECT = 0x0002,
+	B_INVERT_RECT = 0x0004,
+	B_FILL_SPAN = 0x0008,
+	B_TRANSPARENT_BLIT = 0x0010,
+	B_MONOCHROME_BLIT = 0x0020,
+};
+
+
 // Fixed Screen Modes
 enum {
 	B_8_BIT_640x480		= 0x00000001,

@@ -16,4 +16,9 @@ void kaby_lake_fill_rectangle(engine_token *et, uint32 color, fill_rect_params *
 void kaby_lake_invert_rectangle(engine_token *et, fill_rect_params *list, uint32 count);
 void kaby_lake_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count);
 
+void kaby_lake_screen_to_screen_transparent_blit(engine_token* et,
+	blit_params* list, uint32 count);
+void kaby_lake_screen_to_screen_monochrome_blit(engine_token* et,
+	blit_params* list, uint32 count);
+
 #endif /* KABY_LAKE_H */

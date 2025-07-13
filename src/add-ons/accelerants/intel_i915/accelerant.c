@@ -387,7 +387,30 @@ ssize_t ACCELERANT_CLONE_INFO_SIZE(void) { return B_PATH_NAME_LENGTH; }
 void GET_ACCELERANT_CLONE_INFO(void *data) { if (gInfo) strlcpy((char*)data, gInfo->device_path_suffix, B_PATH_NAME_LENGTH); else memset(data, 0, B_PATH_NAME_LENGTH); }
 status_t CLONE_ACCELERANT(void *data) { TRACE("CLONE_ACCELERANT called for path suffix: %s\n", (char*)data); /* TODO: Proper clone logic */ return init_common(gInfo->device_fd, true); } // Simplified
 void UNINIT_ACCELERANT(void) { uninit_common(); }
-status_t GET_ACCELERANT_DEVICE_INFO(accelerant_device_info *adi) { /* ... as before ... */ return B_OK; }
+status_t
+GET_ACCELERANT_DEVICE_INFO(accelerant_device_info* adi)
+{
+	if (adi == NULL || gInfo == NULL || gInfo->shared_info == NULL)
+		return B_BAD_VALUE;
+
+	adi->version = B_ACCELERANT_VERSION;
+	strcpy(adi->name, "Intel i915");
+	strcpy(adi->chipset, gInfo->shared_info->device_name);
+	strcpy(adi->serial_no, "unknown");
+
+	adi->memory = gInfo->shared_info->graphics_mem_size;
+	adi->dac_speed = gInfo->shared_info->max_pixel_clock * 1000;
+
+	uint16 capabilities = B_8_BIT_DAC | B_HARDWARE_CURSOR | B_DPMS;
+	if (gInfo->shared_info->device_type >= INTEL_KABY_LAKE) {
+		capabilities |= B_BLIT | B_FILL_RECT | B_INVERT_RECT | B_FILL_SPAN
+			| B_TRANSPARENT_BLIT | B_MONOCHROME_BLIT;
+	}
+	adi->capability_flags = capabilities;
+
+	return B_OK;
+}
+
 sem_id ACCELERANT_RETRACE_SEMAPHORE(void) { /* ... (now points to intel_i915_accelerant_retrace_semaphore in hooks.c) ... */ return B_ERROR;}
 
 

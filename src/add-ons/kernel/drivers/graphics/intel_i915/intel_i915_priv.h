@@ -553,6 +553,14 @@ typedef struct intel_clock_params_t {
 } intel_clock_params_t;
 
 
+struct intel_pipe_info {
+	bool is_active;
+	display_mode current_mode;
+	uint32 fb_gem_handle;
+	uint32 pos_x;
+	uint32 pos_y;
+};
+
 typedef struct intel_i915_device_info {
 	pci_info	pciinfo;
 	// uint16_t	vendor_id, device_id; // Moved to runtime_caps
@@ -601,6 +609,8 @@ typedef struct intel_i915_device_info {
 	struct intel_vbt_data* vbt; area_id rom_area; uint8_t* rom_base;
 	intel_output_port_state ports[PRIV_MAX_PORTS]; uint8_t num_ports_detected;
 	display_mode current_hw_mode; intel_pipe_hw_state pipes[PRIV_MAX_PIPES];
+	uint32 pipe_count;
+	intel_pipe_info pipe_infos[PRIV_MAX_PIPES];
 
 	// These global FB fields now primarily serve shared_info for Pipe A or last configured pipe.
 	area_id	framebuffer_area;
@@ -869,10 +879,43 @@ status_t i915_check_display_bandwidth(struct intel_i915_device_info* dev,
                                       const struct intel_i915_shared_info::per_pipe_display_info_accel pipe_configs[]);
 // --- End Transcoder Management ---
 
+// --- Video Decoding ---
+enum intel_video_codec {
+	INTEL_VIDEO_CODEC_AVC = 0,
+	INTEL_VIDEO_CODEC_VC1,
+	INTEL_VIDEO_CODEC_MPEG2,
+	INTEL_VIDEO_CODEC_JPEG,
+};
+
+struct intel_video_frame {
+	uint32 src_handle;
+	uint32 dst_handle;
+	uint32 width;
+	uint32 height;
+	uint32 src_stride;
+	uint32 dst_stride;
+};
+
 // --- Video Decoding IOCTLs ---
-#define INTEL_I915_VIDEO_CREATE_DECODER		(B_DEVICE_OP_CODES_END + 100)
-#define INTEL_I915_VIDEO_DESTROY_DECODER	(B_DEVICE_OP_CODES_END + 101)
-#define INTEL_I915_VIDEO_DECODE_FRAME		(B_DEVICE_OP_CODES_END + 102)
+#define INTEL_I915_IOCTL_VIDEO_CREATE_DECODER		(B_DEVICE_OP_CODES_END + 100)
+#define INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER	(B_DEVICE_OP_CODES_END + 101)
+#define INTEL_I915_IOCTL_VIDEO_DECODE_FRAME		(B_DEVICE_OP_CODES_END + 102)
+
+#define INTEL_I915_IOCTL_SET_DISPLAY_CONFIG		(B_DEVICE_OP_CODES_END + 103)
+
+#define I915_DISPLAY_CONFIG_ENABLE 1
+
+struct i915_display_config {
+	uint32 pipe_id;
+	uint32 connector_id;
+	display_mode mode;
+	uint32 flags;
+};
+
+struct i915_set_display_config_ioctl_data {
+	i915_display_config* configs;
+	uint32 count;
+};
 
 struct i915_video_create_decoder_ioctl_data {
 	uint32 codec; // intel_video_codec

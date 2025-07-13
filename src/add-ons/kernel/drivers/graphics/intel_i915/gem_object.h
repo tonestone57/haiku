@@ -56,6 +56,9 @@ status_t intel_i915_gem_object_create(intel_i915_device_info* devInfo,
 	uint32_t width_px, uint32_t height_px, uint32_t bits_per_pixel,
 	struct intel_i915_gem_object** obj_out);
 
+status_t intel_i915_gem_object_create_for_framebuffer(intel_i915_device_info* devInfo,
+	phys_addr_t phys_addr, size_t size, struct intel_i915_gem_object** obj_out);
+
 void intel_i915_gem_object_put(struct intel_i915_gem_object* obj);
 void intel_i915_gem_object_get(struct intel_i915_gem_object* obj);
 

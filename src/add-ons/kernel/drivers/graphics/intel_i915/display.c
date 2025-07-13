@@ -842,11 +842,26 @@ intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
 			devInfo->pipe_infos[configs[i].pipe_id].pos_x = configs[i].mode.h_display_start;
 			devInfo->pipe_infos[configs[i].pipe_id].pos_y = configs[i].mode.v_display_start;
 
-			// TODO: allocate framebuffer
-			// TODO: program display controller
+			// Allocate framebuffer
+			size_t fb_size = configs[i].mode.virtual_width * configs[i].mode.virtual_height
+				* (get_bpp_from_colorspace(configs[i].mode.space) / 8);
+			intel_i915_gem_object* fb_obj;
+			if (intel_i915_gem_object_create_for_framebuffer(devInfo, 0, fb_size, &fb_obj) != B_OK) {
+				delete[] configs;
+				return B_NO_MEMORY;
+			}
+			devInfo->pipe_infos[configs[i].pipe_id].fb_gem_handle = fb_obj->base.handle;
+
+			// Program display controller
+			intel_clock_params params;
+			intel_i915_calculate_display_clocks(devInfo, &configs[i].mode,
+				(enum pipe_id_priv)configs[i].pipe_id,
+				(enum intel_port_id_priv)configs[i].connector_id, &params);
+			intel_i915_pipe_enable(devInfo, (enum pipe_id_priv)configs[i].pipe_id,
+				&configs[i].mode, &params);
 		} else {
 			devInfo->pipe_infos[configs[i].pipe_id].is_active = false;
-			// TODO: disable display controller
+			intel_i915_pipe_disable(devInfo, (enum pipe_id_priv)configs[i].pipe_id);
 		}
 	}
 
@@ -862,8 +877,26 @@ intel_display_propose_mode_ioctl(intel_i915_device_info* devInfo,
 	if (args == NULL)
 		return B_BAD_VALUE;
 
-	// TODO: implement
-	return B_OK;
+	// Find the port for the given pipe
+	intel_output_port_state* port = NULL;
+	for (uint8 i = 0; i < devInfo->num_ports_detected; i++) {
+		if (devInfo->ports[i].current_pipe == args->pipe_id) {
+			port = &devInfo->ports[i];
+			break;
+		}
+	}
+	if (port == NULL)
+		return B_BAD_VALUE;
+
+	// Check if the mode is in the list of modes supported by the display
+	for (int i = 0; i < port->num_modes; i++) {
+		if (memcmp(&args->target_mode, &port->modes[i], sizeof(display_mode)) == 0) {
+			args->result_mode = args->target_mode;
+			return B_OK;
+		}
+	}
+
+	return B_BAD_VALUE;
 }
 
 

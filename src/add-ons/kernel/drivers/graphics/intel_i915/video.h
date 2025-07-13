@@ -40,10 +40,42 @@ struct video_decoder {
 	intel_i915_device_info* devInfo;
 };
 
+struct intel_hevc_picture_parameters {
+	uint32 width;
+	uint32 height;
+};
+
+struct intel_hevc_slice_parameters {
+	uint32 slice_data_size;
+	uint32 slice_data_offset;
+};
+
+struct intel_vp9_picture_parameters {
+	uint32 width;
+	uint32 height;
+};
+
+struct intel_vp9_slice_parameters {
+	uint32 slice_data_size;
+	uint32 slice_data_offset;
+};
+
 struct intel_avc_decoder {
 	video_decoder base;
 	intel_avc_picture_parameters pic_params;
 	intel_avc_slice_parameters slice_params;
+};
+
+struct intel_hevc_decoder {
+	video_decoder base;
+	intel_hevc_picture_parameters pic_params;
+	intel_hevc_slice_parameters slice_params;
+};
+
+struct intel_vp9_decoder {
+	video_decoder base;
+	intel_vp9_picture_parameters pic_params;
+	intel_vp9_slice_parameters slice_params;
 };
 
 

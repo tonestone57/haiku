@@ -462,6 +462,74 @@ err_mutex: mutex_destroy(&obj->lock);
 	return status;
 }
 
+
+status_t
+intel_i915_gem_object_create_for_framebuffer(intel_i915_device_info* devInfo,
+	phys_addr_t phys_addr, size_t size, struct intel_i915_gem_object** obj_out)
+{
+	struct intel_i915_gem_object* obj;
+	status_t status;
+
+	obj = (struct intel_i915_gem_object*)malloc(sizeof(*obj));
+	if (obj == NULL)
+		return B_NO_MEMORY;
+
+	memset(obj, 0, sizeof(*obj));
+
+	obj->dev_priv = devInfo;
+	obj->size = size;
+	obj->refcount = 1;
+	obj->backing_store_area = -1;
+	obj->gtt_mapped = false;
+	obj->gtt_offset_pages = (uint32_t)-1;
+	obj->fence_reg_id = -1;
+
+	if (phys_addr == 0) {
+		obj->backing_store_area = create_area("i915_framebuffer",
+			&obj->kernel_virtual_address, B_ANY_KERNEL_ADDRESS, size,
+			B_CONTIGUOUS, B_READ_AREA | B_WRITE_AREA);
+		if (obj->backing_store_area < B_OK) {
+			status = obj->backing_store_area;
+			goto err_free;
+		}
+	} else {
+		obj->backing_store_area = map_physical_memory("i915_framebuffer_map",
+			phys_addr, size, B_ANY_KERNEL_ADDRESS, B_READ_AREA | B_WRITE_AREA,
+			&obj->kernel_virtual_address);
+		if (obj->backing_store_area < B_OK) {
+			status = obj->backing_store_area;
+			goto err_free;
+		}
+	}
+
+	obj->num_phys_pages = size / B_PAGE_SIZE;
+	obj->phys_pages_list = (phys_addr_t*)malloc(obj->num_phys_pages * sizeof(phys_addr_t));
+	if (obj->phys_pages_list == NULL) {
+		status = B_NO_MEMORY;
+		goto err_area;
+	}
+
+	physical_entry pe_map[1];
+	for (uint32_t i = 0; i < obj->num_phys_pages; i++) {
+		status = get_memory_map((uint8*)obj->kernel_virtual_address + (i * B_PAGE_SIZE), B_PAGE_SIZE, pe_map, 1);
+		if (status != B_OK)
+			goto err_phys_list;
+		obj->phys_pages_list[i] = pe_map[0].address;
+	}
+
+	*obj_out = obj;
+	return B_OK;
+
+err_phys_list:
+	free(obj->phys_pages_list);
+err_area:
+	delete_area(obj->backing_store_area);
+err_free:
+	free(obj);
+	return status;
+}
+
+
 void intel_i915_gem_object_get(struct intel_i915_gem_object* obj) { if (obj) atomic_add(&obj->refcount, 1); }
 void intel_i915_gem_object_put(struct intel_i915_gem_object* obj) {
 	if (obj && atomic_add(&obj->refcount, -1) == 1) {

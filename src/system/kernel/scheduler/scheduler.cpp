@@ -357,7 +357,7 @@ scheduler_calculate_eevdf_slice(ThreadData* threadData, CPUEntry* cpu)
 static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
-static void scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
+void scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
 	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU);
 static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
 static timer sIRQBalanceTimer;

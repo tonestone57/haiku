@@ -273,7 +273,7 @@ power_saving_choose_core(const ThreadData* threadData)
 			// Core is idle, check if we should wake it
 			// Estimate thread load (simplified: assume medium impact if unknown)
 			int32 estimatedThreadLoadImpact = kMaxLoad / 10; // Example: 10%
-			if (Scheduler::power_saving_should_wake_core_for_load(core, estimatedThreadLoadImpact)) {
+			if (power_saving_should_wake_core_for_load(core, estimatedThreadLoadImpact)) {
 				canUseCore = true;
 			}
 		}

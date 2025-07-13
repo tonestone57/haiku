@@ -257,4 +257,3 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 // This is a placeholder as the actual IRQ balancing is in scheduler.cpp
 // void generic_rebalance_irqs(bool idle) { (void)idle; }
 
-[end of src/system/kernel/scheduler/scheduler_low_latency.cpp]

@@ -230,6 +230,12 @@
 #	define TRACE_SCHED(...) do { } while (false)
 #endif
 
+#ifdef TRACE_SCHEDULER_CHOICE
+#	define TRACE_SCHED_CHOICE(...) dprintf_no_syslog(__VA_ARGS__)
+#else
+#	define TRACE_SCHED_CHOICE(...) do { } while (false)
+#endif
+
 
 namespace Scheduler {
 

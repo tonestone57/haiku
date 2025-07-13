@@ -44,7 +44,7 @@ power_saving_switch_to_mode()
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker; // Unlocks on destruction
 	sSmallTaskCore = NULL;
-	sSmallTaskCoreDesignationTime = 0;
+	Scheduler::sSmallTaskCoreDesignationTime = 0;
 }
 
 static bool
@@ -385,4 +385,3 @@ scheduler_mode_operations gSchedulerPowerSavingMode = {
 	power_saving_is_cpu_effectively_parked				// is_cpu_effectively_parked
 };
 
-[end of src/system/kernel/scheduler/scheduler_power_saving.cpp]

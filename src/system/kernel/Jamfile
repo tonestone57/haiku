@@ -66,8 +66,6 @@ KernelMergeObject kernel_core.o :
 	user_mutex.cpp
 
 	# scheduler
-	low_latency.cpp
-	power_saving.cpp
 	scheduler.cpp
 	scheduler_cpu.cpp
 	scheduler_load.cpp

@@ -132,11 +132,11 @@ power_saving_designate_consolidation_core(const CPUSet* affinity_mask_or_null)
 
 	if (bestCore != NULL) {
 		sSmallTaskCore = bestCore;
-		sSmallTaskCoreDesignationTime = system_time();
+		Scheduler::sSmallTaskCoreDesignationTime = system_time();
 		TRACE_SCHED("PowerSaving: Designated Core %" B_PRId32 " as Small Task Core (STC)\n", bestCore->ID());
 	} else {
 		sSmallTaskCore = NULL; // Failed to designate
-		sSmallTaskCoreDesignationTime = 0;
+		Scheduler::sSmallTaskCoreDesignationTime = 0;
 		TRACE_SCHED("PowerSaving: Failed to designate an STC.\n");
 	}
 	return sSmallTaskCore;
@@ -210,7 +210,7 @@ power_saving_choose_core(const ThreadData* threadData)
 
 		SmallTaskCoreLocker stcLock; // Lock to check sSmallTaskCore
 		CoreEntry* currentSTC = sSmallTaskCore; // Get current STC under lock
-		stcLock.Unlock();
+
 
 		for (int32 i = 0; i < gCoreCount; i++) {
 			CoreEntry* coreInPackage = &gCoreEntries[i];
@@ -273,7 +273,7 @@ power_saving_choose_core(const ThreadData* threadData)
 			// Core is idle, check if we should wake it
 			// Estimate thread load (simplified: assume medium impact if unknown)
 			int32 estimatedThreadLoadImpact = kMaxLoad / 10; // Example: 10%
-			if (power_saving_should_wake_core_for_load(core, estimatedThreadLoadImpact)) {
+			if (Scheduler::power_saving_should_wake_core_for_load(core, estimatedThreadLoadImpact)) {
 				canUseCore = true;
 			}
 		}
@@ -339,7 +339,7 @@ power_saving_attempt_proactive_stc_designation()
 	// This could be called periodically by load balancer if system is active but no STC.
 	SmallTaskCoreLocker locker;
 	if (sSmallTaskCore == NULL || sSmallTaskCore->IsDefunct() ||
-		(system_time() - sSmallTaskCoreDesignationTime > kPowerSavingSTCMinDesignationTime
+		(system_time() - Scheduler::sSmallTaskCoreDesignationTime > kPowerSavingSTCMinDesignationTime
 			&& sSmallTaskCore->GetLoad() < kPowerSavingSTCCandidateMaxLoad
 			&& gIdlePackageList.Count() < gPackageCount)) { // System not fully idle
 		// Current STC is gone, or has been STC for a while and is very lightly loaded,

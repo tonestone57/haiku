@@ -26,7 +26,6 @@ low_latency_switch_to_mode()
 	// Low latency mode specific initialization if any.
 	// For now, this might set global factors if they weren't default.
 	// This function is called when switching TO this mode.
-	gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // Default from scheduler_common.h
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 

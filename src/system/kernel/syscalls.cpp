@@ -187,6 +187,53 @@ _user_is_computer_on(void)
 	return 1;
 }
 
+status_t
+_user_get_team_cpu_usage(team_id tmid, bigtime_t* usage, bigtime_t* allowance)
+{
+	return B_OK;
+}
+
+status_t
+_user_get_team_cpu_quota(team_id tmid, bigtime_t* period, bigtime_t* quota)
+{
+	return B_OK;
+}
+
+status_t
+_user_set_team_cpu_quota(team_id tmid, bigtime_t period, bigtime_t quota)
+{
+	return B_OK;
+}
+
+int
+_user_get_scheduler_mode(void)
+{
+	return 0;
+}
+
+void
+_user_set_scheduler_mode(int mode)
+{
+}
+
+int32
+_user_get_thread_nice_value(thread_id thid)
+{
+	return 0;
+}
+
+status_t
+_user_set_thread_nice_value(thread_id thid, int32 nice)
+{
+	return B_OK;
+}
+
+status_t
+_user_estimate_max_scheduling_latency(thread_id thid, bigtime_t* latency)
+{
+	return B_OK;
+}
+
 
 //	#pragma mark -
 

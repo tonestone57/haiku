@@ -222,7 +222,7 @@ extern status_t		_kern_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, big
 extern status_t		_kern_set_scheduler_mode(int32 mode);
 extern int32		_kern_get_scheduler_mode(void);
 extern status_t		_kern_set_thread_nice_value(thread_id thid, int32 nice);
-extern status_t		_kern_estimate_max_scheduling_latency(thread_id thid,
+extern bigtime_t		_kern_estimate_max_scheduling_latency(thread_id thid,
 						bigtime_t* _latency);
 
 // user/group functions

@@ -13,6 +13,8 @@
 
 using namespace Scheduler;
 
+static bool power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estimate);
+
 // Small Task Consolidation Core - a core designated to handle small,
 // potentially latency-sensitive tasks to allow other cores to go idle.
 CoreEntry* Scheduler::sSmallTaskCore = NULL;

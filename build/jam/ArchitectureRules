@@ -432,7 +432,7 @@ rule KernelArchitectureSetup architecture
 		case x86_64 :
 			# Kernel lives in the top 2GB of the address space, use kernel code
 			# model.
-			HAIKU_KERNEL_PIC_CCFLAGS = -fPIE -mcmodel=kernel ;
+			HAIKU_KERNEL_PIC_CCFLAGS = -fPIE ;
 
 			# Disable the red zone, which cannot be used in kernel code due to
 			# interrupts, and always enable the frame pointer so stack traces

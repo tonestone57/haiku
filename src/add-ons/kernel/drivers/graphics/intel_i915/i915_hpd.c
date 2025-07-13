@@ -161,6 +161,8 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
 			intel_ddi_init_port(dev, port_state); // This reads DPCD
 		}
+
+		intel_i915_display_init(dev);
 	} else { // Disconnected
 		TRACE("HPD Disconnect on port %s (logical_id %d, HPD line %d)\n",
 			port_state->name, port_state->logical_port_id, hpdLine);
@@ -171,6 +173,10 @@ i915_handle_hotplug_event(struct intel_i915_device_info* dev, i915_hpd_line_iden
 		// Clear DPCD data as well for DP/eDP
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {
 			memset(&port_state->dpcd_data, 0, sizeof(port_state->dpcd_data));
+		}
+
+		if (port_state->current_pipe != PRIV_PIPE_INVALID) {
+			intel_i915_pipe_disable(dev, port_state->current_pipe);
 		}
 	}
 	mutex_unlock(&dev->display_commit_lock);

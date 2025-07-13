@@ -555,7 +555,9 @@ intel_i915_rc6_work_handler(void* data)
 			next_check_delay = 50000; // Quicker check if events are pending
 		}
 
-		if (queue_work_item(gPmWorkQueue, &rpsState->rc6_work_item,
+		if (rpsState->current_power_state == B_DPMS_OFF) {
+			// Don't schedule a new work item if the display is off
+		} else if (queue_work_item(gPmWorkQueue, &rpsState->rc6_work_item,
 					intel_i915_rc6_work_handler, rpsState, next_check_delay) == B_OK) {
 			rpsState->rc6_work_scheduled = true;
 		}

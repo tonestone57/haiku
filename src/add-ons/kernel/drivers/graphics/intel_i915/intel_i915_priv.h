@@ -903,6 +903,7 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_VIDEO_CREATE_DECODER		(B_DEVICE_OP_CODES_END + 100)
 #define INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER	(B_DEVICE_OP_CODES_END + 101)
 #define INTEL_I915_IOCTL_VIDEO_DECODE_FRAME		(B_DEVICE_OP_CODES_END + 102)
+#define INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME		(B_DEVICE_OP_CODES_END + 114)
 
 #define INTEL_I915_IOCTL_SET_DISPLAY_CONFIG		(B_DEVICE_OP_CODES_END + 103)
 #define INTEL_I915_IOCTL_3D_SUBMIT_CMD		(B_DEVICE_OP_CODES_END + 104)
@@ -1005,6 +1006,7 @@ struct i915_display_config {
 struct i915_set_display_config_ioctl_data {
 	i915_display_config* configs;
 	uint32 count;
+	uint32 flags;
 };
 
 struct i915_get_display_config_ioctl_data {

@@ -49,6 +49,8 @@ typedef struct {
 	bool             rc6_work_scheduled;
 
 	mutex    lock;
+
+	uint32 current_power_state;
 } rps_info;
 
 

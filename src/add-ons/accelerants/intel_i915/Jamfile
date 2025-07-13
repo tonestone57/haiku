@@ -12,5 +12,7 @@ Accelerant intel_i915 :
 	kaby_lake/kaby_lake.cpp
 	kaby_lake/kaby_lake_cursor.c
 	kaby_lake/kaby_lake_overlay.c
+	kaby_lake/kaby_lake_mem.c
+	kaby_lake/kaby_lake_blit.c
 	: libbe.so libdevice.so libroot.so
 ;

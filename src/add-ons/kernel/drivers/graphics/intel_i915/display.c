@@ -772,7 +772,28 @@ status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, con
 static status_t intel_i915_display_set_mode_internal(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipeInternal, enum intel_port_id_priv targetPortId) { return B_OK; } // Simplified
 status_t intel_display_load_palette(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint8_t first_color_index, uint16_t count, const uint8_t* color_data) { return B_OK; } // Simplified
 status_t intel_display_set_plane_offset(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint16_t x_offset, uint16_t y_offset) { return B_OK; } // Simplified
-status_t intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint32_t dpms_mode) { return B_OK; } // Simplified
+status_t
+intel_display_set_pipe_dpms_mode(intel_i915_device_info* devInfo, enum pipe_id_priv pipe, uint32_t dpms_mode)
+{
+	if (devInfo == NULL || devInfo->rps_state == NULL)
+		return B_BAD_VALUE;
+
+	devInfo->rps_state->current_power_state = dpms_mode;
+
+	switch (dpms_mode) {
+		case B_DPMS_ON:
+			intel_i915_pipe_enable(devInfo, pipe, &devInfo->pipe_infos[pipe].current_mode,
+				&devInfo->pipes[pipe].cached_clock_params);
+			break;
+		case B_DPMS_STANDBY:
+		case B_DPMS_SUSPEND:
+		case B_DPMS_OFF:
+			intel_i915_pipe_disable(devInfo, pipe);
+			break;
+	}
+
+	return B_OK;
+}
 status_t intel_i915_set_cursor_bitmap_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length) { return B_OK; } // Simplified
 status_t intel_i915_set_cursor_state_ioctl(intel_i915_device_info* devInfo, void* buffer, size_t length) { return B_OK; } // Simplified
 
@@ -835,16 +856,14 @@ intel_i915_set_display_config_ioctl(intel_i915_device_info* devInfo,
 		}
 	}
 
-	if (args->count > 1 && (configs[0].flags & (I915_DISPLAY_CONFIG_CLONE | I915_DISPLAY_CONFIG_EXTENDED))) {
-		if (configs[0].flags & I915_DISPLAY_CONFIG_CLONE) {
-			for (uint32 i = 1; i < args->count; i++)
-				configs[i].mode = configs[0].mode;
-		} else {
-			uint32 x_offset = configs[0].mode.virtual_width;
-			for (uint32 i = 1; i < args->count; i++) {
-				configs[i].mode.h_display_start = x_offset;
-				x_offset += configs[i].mode.virtual_width;
-			}
+	if (args->flags & I915_DISPLAY_CONFIG_CLONE) {
+		for (uint32 i = 1; i < args->count; i++)
+			configs[i].mode = configs[0].mode;
+	} else if (args->flags & I915_DISPLAY_CONFIG_EXTENDED) {
+		uint32 x_offset = configs[0].mode.virtual_width;
+		for (uint32 i = 1; i < args->count; i++) {
+			configs[i].mode.h_display_start = x_offset;
+			x_offset += configs[i].mode.virtual_width;
 		}
 	}
 

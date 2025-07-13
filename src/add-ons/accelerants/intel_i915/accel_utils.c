@@ -1,6 +1,13 @@
 #include "accel_utils.h"
 #include <syslog.h>
 
+size_t
+get_batch_size(size_t count, size_t dwords_per_op)
+{
+	size_t max_ops = (4096 - 5) / dwords_per_op;
+	return min_c(count, max_ops);
+}
+
 status_t create_gem_bo(size_t size, uint32* handle) {
     intel_i915_gem_create_args create_args = { .size = size };
     if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CREATE, &create_args, sizeof(create_args)) != 0) {
@@ -32,6 +39,10 @@ void unmap_and_close_gem_bo(uint32 handle, area_id area) {
     delete_area(area);
     intel_i915_gem_close_args close_args = { .handle = handle };
     ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args, sizeof(close_args));
+}
+
+void unmap_gem_bo(area_id area) {
+	delete_area(area);
 }
 
 uint32_t* emit_pipe_control_render_stall(uint32_t* ring_buffer) {

@@ -25,6 +25,21 @@ status_t intel_huc_avc_decode_slice(intel_i915_device_info* devInfo,
 status_t intel_huc_vp9_decode_slice(intel_i915_device_info* devInfo,
 	struct intel_i915_gem_object* slice_data,
 	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_vp8_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_av1_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_mpeg2_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_vc1_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
+status_t intel_huc_jpeg_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params);
 
 #ifdef __cplusplus
 }

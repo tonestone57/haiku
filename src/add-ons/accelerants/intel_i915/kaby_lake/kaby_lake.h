@@ -50,4 +50,14 @@ void kaby_lake_configure_overlay(engine_token* et, const overlay_buffer* buffer,
 	const overlay_window* window, const overlay_view* view);
 void kaby_lake_release_overlay(engine_token* et);
 
+// --- Memory Management ---
+void kaby_lake_init_mem();
+void kaby_lake_uninit_mem();
+status_t get_cmd_buffer(size_t size, uint32* handle, area_id* area, void** cpu_addr);
+void put_cmd_buffer(uint32 handle, area_id area);
+
+// --- Blitting ---
+void kaby_lake_emit_blit(uint32* cmd_buf, uint32* cur_dw_idx, const blit_params* blit,
+	uint32 cmd_dw0);
+
 #endif /* KABY_LAKE_H */

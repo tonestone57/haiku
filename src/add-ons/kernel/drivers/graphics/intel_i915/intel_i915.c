@@ -262,6 +262,7 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 		case INTEL_I915_IOCTL_VIDEO_CREATE_DECODER:
 		case INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER:
 		case INTEL_I915_IOCTL_VIDEO_DECODE_FRAME:
+		case INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME:
 			return intel_i915_video_ioctl(devInfo, op, buffer, length);
 
 		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:

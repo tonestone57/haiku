@@ -45,6 +45,116 @@ intel_huc_hevc_decode_slice(intel_i915_device_info* devInfo,
 }
 
 status_t
+intel_huc_mpeg2_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params)
+{
+	struct huc_command cmd;
+	struct huc_mpeg2_slice_data data;
+	struct huc_mpeg2_slice_params params;
+
+	data.slice_data_address = slice_data->gtt_offset;
+	data.slice_data_size = slice_data->base.size;
+	params.slice_params_address = slice_params->gtt_offset;
+	params.slice_params_size = slice_params->base.size;
+
+	cmd.command = HUC_CMD_MPEG2_SLICE_DECODE;
+	cmd.length = sizeof(data) + sizeof(params);
+	cmd.data[0] = (uint32_t)&data;
+	cmd.data[1] = (uint32_t)&params;
+
+	return intel_huc_submit_command(devInfo, &cmd);
+}
+
+status_t
+intel_huc_vc1_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params)
+{
+	struct huc_command cmd;
+	struct huc_vc1_slice_data data;
+	struct huc_vc1_slice_params params;
+
+	data.slice_data_address = slice_data->gtt_offset;
+	data.slice_data_size = slice_data->base.size;
+	params.slice_params_address = slice_params->gtt_offset;
+	params.slice_params_size = slice_params->base.size;
+
+	cmd.command = HUC_CMD_VC1_SLICE_DECODE;
+	cmd.length = sizeof(data) + sizeof(params);
+	cmd.data[0] = (uint32_t)&data;
+	cmd.data[1] = (uint32_t)&params;
+
+	return intel_huc_submit_command(devInfo, &cmd);
+}
+
+status_t
+intel_huc_jpeg_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params)
+{
+	struct huc_command cmd;
+	struct huc_jpeg_slice_data data;
+	struct huc_jpeg_slice_params params;
+
+	data.slice_data_address = slice_data->gtt_offset;
+	data.slice_data_size = slice_data->base.size;
+	params.slice_params_address = slice_params->gtt_offset;
+	params.slice_params_size = slice_params->base.size;
+
+	cmd.command = HUC_CMD_JPEG_SLICE_DECODE;
+	cmd.length = sizeof(data) + sizeof(params);
+	cmd.data[0] = (uint32_t)&data;
+	cmd.data[1] = (uint32_t)&params;
+
+	return intel_huc_submit_command(devInfo, &cmd);
+}
+
+status_t
+intel_huc_vp8_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params)
+{
+	struct huc_command cmd;
+	struct huc_vp8_slice_data data;
+	struct huc_vp8_slice_params params;
+
+	data.slice_data_address = slice_data->gtt_offset;
+	data.slice_data_size = slice_data->base.size;
+	params.slice_params_address = slice_params->gtt_offset;
+	params.slice_params_size = slice_params->base.size;
+
+	cmd.command = HUC_CMD_VP8_SLICE_DECODE;
+	cmd.length = sizeof(data) + sizeof(params);
+	cmd.data[0] = (uint32_t)&data;
+	cmd.data[1] = (uint32_t)&params;
+
+	return intel_huc_submit_command(devInfo, &cmd);
+}
+
+status_t
+intel_huc_av1_decode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* slice_data,
+	struct intel_i915_gem_object* slice_params)
+{
+	struct huc_command cmd;
+	struct huc_av1_slice_data data;
+	struct huc_av1_slice_params params;
+
+	data.slice_data_address = slice_data->gtt_offset;
+	data.slice_data_size = slice_data->base.size;
+	params.slice_params_address = slice_params->gtt_offset;
+	params.slice_params_size = slice_params->base.size;
+
+	cmd.command = HUC_CMD_AV1_SLICE_DECODE;
+	cmd.length = sizeof(data) + sizeof(params);
+	cmd.data[0] = (uint32_t)&data;
+	cmd.data[1] = (uint32_t)&params;
+
+	return intel_huc_submit_command(devInfo, &cmd);
+}
+
+status_t
 intel_huc_avc_decode_slice(intel_i915_device_info* devInfo,
 	struct intel_i915_gem_object* slice_data,
 	struct intel_i915_gem_object* slice_params)

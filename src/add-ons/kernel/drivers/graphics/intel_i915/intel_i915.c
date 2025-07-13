@@ -148,6 +148,7 @@ static status_t intel_i915_open(const char* name, uint32 flags, void** cookie) {
 			return status;
 		}
 		intel_i915_forcewake_init_device(devInfo);
+		intel_i915_pm_init(devInfo);
 	}
 	*cookie = devInfo;
 	return B_OK;
@@ -156,6 +157,7 @@ static status_t intel_i915_close(void* cookie) { return B_OK;}
 static status_t intel_i915_free(void* cookie) {
 	intel_i915_device_info* devInfo = (intel_i915_device_info*)cookie;
 	if (atomic_add(&devInfo->open_count, -1) -1 == 0) {
+		intel_i915_pm_uninit(devInfo);
 		intel_i915_forcewake_uninit_device(devInfo);
 		intel_i915_device_uninit(devInfo);
 	}

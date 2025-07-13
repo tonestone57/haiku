@@ -221,9 +221,16 @@ extern status_t		_kern_set_scheduler_mode(int32 mode);
 extern int32		_kern_get_scheduler_mode(void);
 extern status_t		_kern_get_loadavg(struct loadavg* info, size_t size);
 
-extern status_t		_kern_set_team_cpu_quota(team_id teamId, uint32 percent_quota);
-extern status_t		_kern_get_team_cpu_quota(team_id teamId, uint32* _percent_quota);
+extern status_t		_kern_set_team_cpu_quota(team_id teamId, bigtime_t period, bigtime_t quota);
+extern status_t		_kern_get_team_cpu_quota(team_id teamId, bigtime_t* _period, bigtime_t* _quota);
 extern status_t		_kern_get_team_cpu_usage(team_id teamId, bigtime_t* _usage, bigtime_t* _allowance);
+
+extern status_t		_kern_set_scheduler_mode(int32 mode);
+extern int32		_kern_get_scheduler_mode(void);
+extern status_t		_kern_set_thread_nice_value(thread_id thid, int32 nice);
+extern int32		_kern_get_thread_nice_value(thread_id thid);
+extern status_t		_kern_estimate_max_scheduling_latency(thread_id thid,
+						bigtime_t* _latency);
 
 // user/group functions
 extern gid_t		_kern_getgid(bool effective);

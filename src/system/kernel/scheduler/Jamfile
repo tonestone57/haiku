@@ -1,5 +1,4 @@
-KernelObject scheduler.o
-	:
+Merge scheduler.o :
 	EevdfRunQueue.cpp
 	scheduler.cpp
 	scheduler_cpu.cpp

@@ -66,7 +66,7 @@ mfx_avc_create_command_buffer(intel_i915_device_info* devInfo,
 	struct mfx_avc_slice_params params;
 	if (slice_params == NULL) {
 		intel_i915_gem_object_unmap_cpu(devInfo->video_cmd_buffer);
-		return B_BAD_VALUE;
+		return B_VIDEO_DECODING_ERROR;
 	}
 	status = intel_i915_gem_object_map_cpu(slice_params, (void**)&params);
 	if (status != B_OK) {

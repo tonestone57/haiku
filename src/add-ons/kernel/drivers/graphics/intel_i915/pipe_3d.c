@@ -17,8 +17,12 @@ status_t
 intel_3d_color_space_conversion(intel_i915_device_info* devInfo,
 	i915_color_space_conversion* args)
 {
-	// TODO: implement
-	return B_ERROR;
+	uint32 cmd[2];
+	cmd[0] = MFX_PIPE_MODE_SELECT | (2 - 2);
+	cmd[1] = (args->src_format << 16) | args->dst_format;
+	intel_3d_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 
@@ -26,8 +30,16 @@ status_t
 intel_3d_font_smoothing(intel_i915_device_info* devInfo,
 	i915_font_smoothing* args)
 {
-	// TODO: implement
-	return B_ERROR;
+	uint32 cmd[2];
+	cmd[0] = I915_3D_CMD_PIPELINE_SELECT | (2 - 2);
+	cmd[1] = 0;
+	intel_3d_submit_command(devInfo, cmd, sizeof(cmd));
+
+	cmd[0] = I915_3D_CMD_PIPELINE_FLUSH | (2 - 2);
+	cmd[1] = 0;
+	intel_3d_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 

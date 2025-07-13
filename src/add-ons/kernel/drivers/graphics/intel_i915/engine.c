@@ -137,6 +137,11 @@ status_t
 intel_engine_execlists_submit(struct intel_engine_cs* engine,
 	struct intel_i915_gem_context* context)
 {
+	intel_i915_device_info* devInfo = engine->dev_priv;
+	if (IS_KABYLAKE(devInfo->runtime_caps.device_id)) {
+		return intel_engine_guc_submit(engine, context);
+	}
+
 	intel_i915_write32(devInfo, EL_CTL, 0);
 	return B_OK;
 }
@@ -196,10 +201,13 @@ intel_engine_guc_submit(struct intel_engine_cs* engine,
 
 	intel_i915_write32(devInfo, 0xc030, 1); // DOORBELL_TO_GUC
 
-	// Wait for the GuC to process the command.
-	while (cmd_queue[GUC_CMD_QUEUE_HEAD_OFFSET / 4] != tail) {
-		spin(100);
-	}
+	uint32_t response;
+	status_t status = intel_guc_get_response(devInfo, &response);
+	if (status != B_OK)
+		return status;
+
+	if (response != 0)
+		return B_ERROR;
 
 	return B_OK;
 }

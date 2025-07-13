@@ -292,6 +292,9 @@ intel_i915_3d_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, si
 		case INTEL_I915_IOCTL_MULTI_LAYER_COMPOSITION:
 			return intel_3d_multi_layer_composition(devInfo,
 				(i915_multi_layer_composition*)buffer);
+		case INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE:
+			return i915_wait_for_display_change_ioctl(devInfo,
+				(struct i915_display_change_event_ioctl_data*)buffer);
 	}
 
 	return B_DEV_INVALID_IOCTL;

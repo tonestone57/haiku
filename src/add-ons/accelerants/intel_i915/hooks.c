@@ -618,20 +618,24 @@ get_accelerant_hook(uint32 feature, void *data)
 		// 2D Acceleration Hooks
 		case B_FILL_RECTANGLE:
 			return (void*)kaby_lake_fill_rectangle;
-		case B_FILL_RECTANGLE_CLIPPED: return (void*)accel_fill_rect_clipped;
+		case B_FILL_RECTANGLE_CLIPPED:
+			return (void*)kaby_lake_fill_rectangle;
 		case B_SCREEN_TO_SCREEN_BLIT:
 			return (void*)kaby_lake_screen_to_screen_blit;
-		case B_BLIT_CLIPPED: return (void*)accel_blit_clipped;
+		case B_BLIT_CLIPPED:
+			return (void*)kaby_lake_screen_to_screen_blit;
 		case B_INVERT_RECTANGLE:
 			return (void*)kaby_lake_invert_rectangle;
-		case B_INVERT_RECTANGLE_CLIPPED: return (void*)accel_invert_rect_clipped;
+		case B_INVERT_RECTANGLE_CLIPPED:
+			return (void*)kaby_lake_invert_rectangle;
 		case B_FILL_SPAN:
 			return (void*)kaby_lake_fill_span;
 		case B_SCREEN_TO_SCREEN_TRANSPARENT_BLIT:
 			return (void*)kaby_lake_screen_to_screen_transparent_blit;
 		case B_SCREEN_TO_SCREEN_MONOCHROME_BLIT:
 			return (void*)kaby_lake_screen_to_screen_monochrome_blit;
-		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT: return (void*)accel_s2s_scaled_filtered_blit_unclipped;
+		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT:
+			return (void*)kaby_lake_stretch_blit;
 		case B_DRAW_LINE_ARRAY: return (void*)accel_draw_line_array_unclipped;
 		case B_DRAW_LINE_ARRAY_CLIPPED: return (void*)accel_draw_line_array_clipped;
 		case B_DRAW_LINE:
@@ -653,8 +657,6 @@ get_accelerant_hook(uint32 feature, void *data)
 			return (void*)kaby_lake_alpha_blend;
 		case B_COLOR_KEY:
 			return (void*)kaby_lake_color_key;
-		case B_SCREEN_TO_SCREEN_SCALED_FILTERED_BLIT:
-			return (void*)kaby_lake_stretch_blit;
 		case B_SET_CLIPPING_RECT:
 			return (void*)kaby_lake_set_clip_rect;
 		case B_DRAW_STRING:

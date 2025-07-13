@@ -156,7 +156,7 @@ intel_video_destroy_decoder(intel_i915_device_info* devInfo,
 static status_t
 avc_parse_slice_header(intel_avc_decoder* decoder, const uint8* data, uint32 size)
 {
-	if (size < 4)
+	if (size < 5)
 		return B_BAD_DATA;
 
 	uint32 forbidden_zero_bit = (data[0] >> 7) & 0x01;
@@ -169,10 +169,22 @@ avc_parse_slice_header(intel_avc_decoder* decoder, const uint8* data, uint32 siz
 	if (nal_unit_type != 1 && nal_unit_type != 5)
 		return B_BAD_DATA;
 
-	decoder->slice_params.first_macroblock = 0;
-	decoder->slice_params.slice_type = 0;
+	uint32 first_mb_in_slice = 0;
+	uint32 slice_type = 0;
+	uint32 pic_parameter_set_id = 0;
+	uint32 frame_num = 0;
+	uint32 idr_pic_id = 0;
+	uint32 pic_order_cnt_lsb = 0;
+	int32 delta_pic_order_cnt_bottom = 0;
+	int32 delta_pic_order_cnt0 = 0;
+	int32 delta_pic_order_cnt1 = 0;
+
+	// TODO: parse the slice header properly
+
+	decoder->slice_params.first_macroblock = first_mb_in_slice;
+	decoder->slice_params.slice_type = slice_type;
 	decoder->slice_params.direct_prediction_type = 0;
-	decoder->slice_params.num_macroblocks = 0;
+	decoder->slice_params.num_macroblocks = (decoder->pic_params.width * decoder->pic_params.height) / 256;
 	decoder->slice_params.slice_data_size = size - 1;
 	decoder->slice_params.slice_data_offset = 1;
 	decoder->slice_params.slice_data_bit_offset = 0;
@@ -280,7 +292,8 @@ intel_video_decode_frame(intel_i915_device_info* devInfo,
 static status_t
 hevc_parse_slice_header(intel_hevc_decoder* decoder, const uint8* data, uint32 size)
 {
-	// TODO: implement
+	decoder->slice_params.slice_data_size = size;
+	decoder->slice_params.slice_data_offset = 0;
 	return B_OK;
 }
 
@@ -307,24 +320,63 @@ intel_video_encode_frame(intel_i915_device_info* devInfo,
 
 
 static status_t
+mpeg2_parse_slice_header(intel_mpeg2_decoder* decoder, const uint8* data, uint32 size)
+{
+	decoder->slice_params.slice_data_size = size;
+	decoder->slice_params.slice_data_offset = 0;
+	return B_OK;
+}
+
+
+static status_t
 mpeg2_decode_slice(intel_mpeg2_decoder* decoder, const uint8* data, uint32 size)
 {
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
+
+	mpeg2_parse_slice_header(decoder, data, size);
+
 	// TODO: implement
 	return B_ERROR;
+}
+
+
+static status_t
+vc1_parse_slice_header(intel_vc1_decoder* decoder, const uint8* data, uint32 size)
+{
+	decoder->slice_params.slice_data_size = size;
+	decoder->slice_params.slice_data_offset = 0;
+	return B_OK;
 }
 
 
 static status_t
 vc1_decode_slice(intel_vc1_decoder* decoder, const uint8* data, uint32 size)
 {
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
+
+	vc1_parse_slice_header(decoder, data, size);
+
 	// TODO: implement
 	return B_ERROR;
 }
 
 
 static status_t
+jpeg_parse_slice_header(intel_jpeg_decoder* decoder, const uint8* data, uint32 size)
+{
+	decoder->slice_params.slice_data_size = size;
+	decoder->slice_params.slice_data_offset = 0;
+	return B_OK;
+}
+
+
+static status_t
 jpeg_decode_slice(intel_jpeg_decoder* decoder, const uint8* data, uint32 size)
 {
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
+
+	jpeg_parse_slice_header(decoder, data, size);
+
 	// TODO: implement
 	return B_ERROR;
 }
@@ -333,7 +385,8 @@ jpeg_decode_slice(intel_jpeg_decoder* decoder, const uint8* data, uint32 size)
 static status_t
 vp9_parse_slice_header(intel_vp9_decoder* decoder, const uint8* data, uint32 size)
 {
-	// TODO: implement
+	decoder->slice_params.slice_data_size = size;
+	decoder->slice_params.slice_data_offset = 0;
 	return B_OK;
 }
 

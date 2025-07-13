@@ -671,7 +671,11 @@ i915_check_display_bandwidth(intel_i915_device_info* devInfo,
 		}
 		if (refresh_hz_nominal == 0) refresh_hz_nominal = 60;
 
-		uint64 pipe_mem_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz_nominal * bpp_val / 8;
+		uint32_t scaling_factor = user_cfg->scaling_factor;
+		if (scaling_factor == 0)
+			scaling_factor = 1;
+
+		uint64 pipe_mem_data_rate = (uint64)dm->timing.h_display * dm->timing.v_display * refresh_hz_nominal * bpp_val / 8 * scaling_factor;
 		total_data_rate_bytes_sec += pipe_mem_data_rate;
 
 		if (port_state->type == PRIV_OUTPUT_DP || port_state->type == PRIV_OUTPUT_EDP) {

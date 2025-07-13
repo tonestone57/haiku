@@ -217,7 +217,8 @@ struct i915_display_pipe_config {
 	uint32 fb_gem_handle;    /**< User-space GEM handle for the framebuffer. */
 	int32  pos_x;        /**< X position in the virtual desktop. */
 	int32  pos_y;        /**< Y position in the virtual desktop. */
-	uint32 reserved[4];  /**< Reserved for future expansion, zero-fill. */
+	uint32 scaling_factor; /**< Scaling factor for the display. 0 = no scaling. */
+	uint32 reserved[3];  /**< Reserved for future expansion, zero-fill. */
 };
 
 /**

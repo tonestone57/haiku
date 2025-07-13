@@ -128,6 +128,8 @@ extern "C" status_t init_driver(void) {
 					gDeviceInfo[gDeviceCount]->framebuffer_user_handle[k] = 0;
 				}
 
+				i915_init_hpd_handling(gDeviceInfo[gDeviceCount]);
+
 
 				char nameBuffer[128];
 				snprintf(nameBuffer, sizeof(nameBuffer), "graphics/intel_i915/%u", gDeviceCount);
@@ -304,6 +306,41 @@ status_t intel_i915_runtime_caps_init(intel_i915_device_info* devInfo) { return 
 status_t i915_apply_staged_display_config(intel_i915_device_info* devInfo, const struct i915_set_display_config_args* config_args) { return B_UNSUPPORTED; }
 static inline uint32 PipeEnumToArrayIndex(enum pipe_id_priv pipe) { if (pipe >= PRIV_PIPE_A && pipe < PRIV_MAX_PIPES) return (uint32)pipe; return MAX_PIPES_I915; }
 status_t intel_display_set_mode_ioctl_entry(intel_i915_device_info* devInfo, const display_mode* mode, enum pipe_id_priv targetPipeFromIOCtl);
+
+
+status_t
+i915_init_hpd_handling(intel_i915_device_info* dev)
+{
+	dev->hpd_events_queue = (hpd_event_data*)malloc(sizeof(hpd_event_data) * MAX_HPD_EVENTS_QUEUE_SIZE);
+	if (dev->hpd_events_queue == NULL)
+		return B_NO_MEMORY;
+	dev->hpd_events_head = 0;
+	dev->hpd_events_tail = 0;
+	dev->hpd_queue_capacity = MAX_HPD_EVENTS_QUEUE_SIZE;
+	return B_OK;
+}
+
+
+void
+i915_uninit_hpd_handling(intel_i915_device_info* dev)
+{
+	free(dev->hpd_events_queue);
+}
+
+
+void
+i915_queue_hpd_event(intel_i915_device_info* dev, i915_hpd_line_identifier hpd_line, bool connected)
+{
+	int32 next_head = (dev->hpd_events_head + 1) % dev->hpd_queue_capacity;
+	if (next_head == dev->hpd_events_tail) {
+		// Queue is full
+		return;
+	}
+	dev->hpd_events_queue[dev->hpd_events_head].hpd_line = hpd_line;
+	dev->hpd_events_queue[dev->hpd_events_head].connected = connected;
+	dev->hpd_events_head = next_head;
+	condition_variable_pulse_all(&dev->hpd_wait_condition);
+}
 
 
 // --- CDCLK Helper Functions ---

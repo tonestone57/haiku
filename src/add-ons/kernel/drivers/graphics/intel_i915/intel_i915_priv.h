@@ -807,6 +807,9 @@ void i915_queue_hpd_event(intel_i915_device_info* dev, i915_hpd_line_identifier 
 status_t i915_init_hpd_handling(intel_i915_device_info* dev); // Changed struct i915_device* to intel_i915_device_info*
 void i915_uninit_hpd_handling(intel_i915_device_info* dev); // Changed struct i915_device* to intel_i915_device_info*
 
+status_t i915_wait_for_display_change_ioctl(intel_i915_device_info* devInfo,
+	struct i915_display_change_event_ioctl_data* user_args_ptr);
+
 // --- DPLL Management Function Declarations (for clocks.c) ---
 // Placeholder for SKL+ DPLL parameters. Actual struct needs PRM details.
 typedef struct skl_dpll_params {

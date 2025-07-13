@@ -154,40 +154,48 @@ intel_video_destroy_decoder(intel_i915_device_info* devInfo,
 
 
 static status_t
-avc_parse_slice_header(intel_avc_decoder* decoder, const uint8* data, uint32 size)
+avc_decode_slice(intel_avc_decoder* decoder, const uint8* data, uint32 size)
 {
-	if (size < 5)
-		return B_BAD_DATA;
+	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	uint32 forbidden_zero_bit = (data[0] >> 7) & 0x01;
-	if (forbidden_zero_bit != 0)
-		return B_BAD_DATA;
+	// TODO: parse slice header
 
-	uint32 nal_ref_idc = (data[0] >> 5) & 0x03;
-	uint32 nal_unit_type = data[0] & 0x1f;
+	// Set up MFX_AVC_IMG_STATE
+	uint32 cmd[13];
+	cmd[0] = MFX_AVC_IMG_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
 
-	if (nal_unit_type != 1 && nal_unit_type != 5)
-		return B_BAD_DATA;
+	// Set up MFX_AVC_SLICE_STATE
+	cmd[0] = MFX_AVC_SLICE_STATE | (10 - 2);
+	cmd[1] = decoder->slice_params.slice_data_size;
+	cmd[2] = decoder->slice_params.slice_data_offset;
+	cmd[3] = decoder->slice_params.slice_data_bit_offset;
+	cmd[4] = decoder->slice_params.num_macroblocks;
+	cmd[5] = decoder->slice_params.first_macroblock;
+	cmd[6] = decoder->slice_params.slice_type;
+	cmd[7] = decoder->slice_params.direct_prediction_type;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
 
-	uint32 first_mb_in_slice = 0;
-	uint32 slice_type = 0;
-	uint32 pic_parameter_set_id = 0;
-	uint32 frame_num = 0;
-	uint32 idr_pic_id = 0;
-	uint32 pic_order_cnt_lsb = 0;
-	int32 delta_pic_order_cnt_bottom = 0;
-	int32 delta_pic_order_cnt0 = 0;
-	int32 delta_pic_order_cnt1 = 0;
-
-	// TODO: parse the slice header properly
-
-	decoder->slice_params.first_macroblock = first_mb_in_slice;
-	decoder->slice_params.slice_type = slice_type;
-	decoder->slice_params.direct_prediction_type = 0;
-	decoder->slice_params.num_macroblocks = (decoder->pic_params.width * decoder->pic_params.height) / 256;
-	decoder->slice_params.slice_data_size = size - 1;
-	decoder->slice_params.slice_data_offset = 1;
-	decoder->slice_params.slice_data_bit_offset = 0;
+	// Set up MFD_AVC_BSD_OBJECT
+	cmd[0] = MFD_AVC_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
 
 	return B_OK;
 }
@@ -303,10 +311,46 @@ hevc_decode_slice(intel_hevc_decoder* decoder, const uint8* data, uint32 size)
 {
 	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	hevc_parse_slice_header(decoder, data, size);
+	// TODO: parse slice header
 
-	// TODO: implement
-	return B_ERROR;
+	// Set up MFX_HEVC_PIC_STATE
+	uint32 cmd[13];
+	cmd[0] = MFX_HEVC_PIC_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFX_HEVC_SLICE_STATE
+	cmd[0] = MFX_HEVC_SLICE_STATE | (10 - 2);
+	cmd[1] = decoder->slice_params.slice_data_size;
+	cmd[2] = decoder->slice_params.slice_data_offset;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFD_HEVC_BSD_OBJECT
+	cmd[0] = MFD_HEVC_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 
@@ -333,10 +377,33 @@ mpeg2_decode_slice(intel_mpeg2_decoder* decoder, const uint8* data, uint32 size)
 {
 	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	mpeg2_parse_slice_header(decoder, data, size);
+	// TODO: parse slice header
 
-	// TODO: implement
-	return B_ERROR;
+	// Set up MFX_MPEG2_PIC_STATE
+	uint32 cmd[13];
+	cmd[0] = MFX_MPEG2_PIC_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFD_MPEG2_BSD_OBJECT
+	cmd[0] = MFD_MPEG2_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 
@@ -354,10 +421,33 @@ vc1_decode_slice(intel_vc1_decoder* decoder, const uint8* data, uint32 size)
 {
 	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	vc1_parse_slice_header(decoder, data, size);
+	// TODO: parse slice header
 
-	// TODO: implement
-	return B_ERROR;
+	// Set up MFX_VC1_PIC_STATE
+	uint32 cmd[13];
+	cmd[0] = MFD_VC1_LONG_PIC_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFD_VC1_BSD_OBJECT
+	cmd[0] = MFD_VC1_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 
@@ -375,10 +465,33 @@ jpeg_decode_slice(intel_jpeg_decoder* decoder, const uint8* data, uint32 size)
 {
 	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	jpeg_parse_slice_header(decoder, data, size);
+	// TODO: parse slice header
 
-	// TODO: implement
-	return B_ERROR;
+	// Set up MFX_JPEG_PIC_STATE
+	uint32 cmd[13];
+	cmd[0] = MFX_JPEG_PIC_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFD_JPEG_BSD_OBJECT
+	cmd[0] = MFD_JPEG_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }
 
 
@@ -396,8 +509,31 @@ vp9_decode_slice(intel_vp9_decoder* decoder, const uint8* data, uint32 size)
 {
 	intel_i915_device_info* devInfo = decoder->base.devInfo;
 
-	vp9_parse_slice_header(decoder, data, size);
+	// TODO: parse slice header
 
-	// TODO: implement
-	return B_ERROR;
+	// Set up MFX_VP9_PIC_STATE
+	uint32 cmd[13];
+	cmd[0] = MFX_VP9_PIC_STATE | (13 - 2);
+	cmd[1] = (decoder->pic_params.width - 1) | ((decoder->pic_params.height - 1) << 16);
+	cmd[2] = 0;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+	cmd[12] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	// Set up MFD_VP9_BSD_OBJECT
+	cmd[0] = MFD_VP9_BSD_OBJECT | (4 - 2);
+	cmd[1] = 0;
+	cmd[2] = 0;
+	cmd[3] = 0;
+	intel_mfx_submit_command(devInfo, cmd, sizeof(cmd));
+
+	return B_OK;
 }

@@ -9,6 +9,13 @@ intel_3d_init(intel_i915_device_info* devInfo)
 	gfx_mode |= GFX_MODE_3D_PIPELINE_ENABLE;
 	intel_i915_write32(devInfo, GFX_MODE, gfx_mode);
 
+	// Create a command buffer for the 3D pipeline
+	if (intel_i915_gem_object_create(devInfo, 4096, 0, 0, 0, 0,
+		&devInfo->video_cmd_buffer) != B_OK) {
+		return B_NO_MEMORY;
+	}
+	devInfo->video_cmd_buffer_offset = 0;
+
 	return B_OK;
 }
 
@@ -76,8 +83,10 @@ intel_3d_submit_command(intel_i915_device_info* devInfo,
 	if (devInfo->video_cmd_buffer == NULL)
 		return B_NO_INIT;
 
-	if (devInfo->video_cmd_buffer_offset + size > devInfo->video_cmd_buffer->size)
-		return B_NO_MEMORY;
+	if (devInfo->video_cmd_buffer_offset + size > devInfo->video_cmd_buffer->size) {
+		// Wrap the command buffer
+		devInfo->video_cmd_buffer_offset = 0;
+	}
 
 	uint8* p = (uint8*)devInfo->video_cmd_buffer->kernel_virtual_address
 		+ devInfo->video_cmd_buffer_offset;

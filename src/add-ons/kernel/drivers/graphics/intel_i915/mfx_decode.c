@@ -10,6 +10,9 @@
 #include "intel_i915_priv.h"
 #include "mfx_avc.h"
 #include "mfx_vc1.h"
+#include "mfx_hevc.h"
+#include "mfx_vp9.h"
+#include "mfx_av1.h"
 
 #include <string.h>
 
@@ -23,7 +26,10 @@ intel_mfx_decode_init(intel_i915_device_info* devInfo)
 	mutex_init(&sDecodersLock, "i915 MFX decoders lock");
 	memset(sDecoders, 0, sizeof(sDecoders));
 	intel_mfx_avc_init(devInfo);
-	return intel_mfx_vc1_init(devInfo);
+	intel_mfx_vc1_init(devInfo);
+	intel_mfx_hevc_init(devInfo);
+	intel_mfx_vp9_init(devInfo);
+	return intel_mfx_av1_init(devInfo);
 }
 
 void
@@ -72,11 +78,42 @@ intel_mfx_destroy_decoder(intel_i915_device_info* devInfo, uint32 handle)
 	mutex_unlock(&sDecodersLock);
 }
 
+#include "mfx_hevc.h"
+#include "mfx_vp9.h"
+#include "mfx_av1.h"
+
 status_t
 intel_mfx_decode_frame(intel_i915_device_info* devInfo, uint32 handle,
     const void* data, size_t size,
     intel_video_frame* frame)
 {
-	// TODO: Implement video frame decoding
-	return B_UNSUPPORTED;
+	mutex_lock(&sDecodersLock);
+	struct intel_mfx_decoder* decoder = NULL;
+	for (int i = 0; i < MAX_VIDEO_DECODERS; i++) {
+		if (sDecoders[i] != NULL && sDecoders[i]->handle == handle) {
+			decoder = sDecoders[i];
+			break;
+		}
+	}
+	mutex_unlock(&sDecodersLock);
+
+	if (decoder == NULL)
+		return B_BAD_VALUE;
+
+	switch (decoder->codec) {
+		case INTEL_VIDEO_CODEC_H264_AVC:
+			// TODO: create slice data and slice params
+			return intel_mfx_avc_decode_slice(devInfo, NULL, NULL);
+		case INTEL_VIDEO_CODEC_HEVC_H265:
+			// TODO: create slice data and slice params
+			return intel_mfx_hevc_decode_slice(devInfo, NULL, NULL);
+		case INTEL_VIDEO_CODEC_VP9_PROFILE0:
+			// TODO: create slice data and slice params
+			return intel_mfx_vp9_decode_slice(devInfo, NULL, NULL);
+		case INTEL_VIDEO_CODEC_AV1_PROFILE0:
+			// TODO: create slice data and slice params
+			return intel_mfx_av1_decode_slice(devInfo, NULL, NULL);
+		default:
+			return B_UNSUPPORTED;
+	}
 }

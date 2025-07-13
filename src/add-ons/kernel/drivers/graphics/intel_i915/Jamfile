@@ -33,6 +33,9 @@ KernelAddon intel_i915 :
 	mfx_decode.c
 	mfx_avc.c
 	mfx_vc1.c
+	mfx_hevc.c
+	mfx_vp9.c
+	mfx_av1.c
 	dp.c
 	panel.c
 	hdcp.c

@@ -24,4 +24,14 @@ struct av1_frame_info {
 	struct av1_tile_info* tiles;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+status_t parse_av1_frame(const uint8* data, size_t size, struct av1_frame_info* frame_info);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* KABY_LAKE_AV1_H */

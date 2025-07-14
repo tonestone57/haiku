@@ -149,7 +149,7 @@ kaby_lake_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, 
 			struct i915_video_decode_av1_frame_data args;
 			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
 				return B_BAD_ADDRESS;
-			return kaby_lake_av1_decode_frame(devInfo, (struct av1_frame_info*)args.slices);
+			return kaby_lake_av1_decode_frame(devInfo, &args);
 		}
 		case INTEL_I915_VIDEO_DECODE_MPEG2_FRAME:
 			return intel_i915_video_decode_mpeg2_frame_ioctl(devInfo, buffer, length);

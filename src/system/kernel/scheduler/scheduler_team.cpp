@@ -3,6 +3,12 @@
 
 namespace Scheduler {
 
+int32
+scheduler_reset_team_quotas_event(timer* timer)
+{
+	return 0;
+}
+
 // Implementation for TeamSchedulerData methods if any become non-inline.
 
 // Example of how global list and lock might be declared (actual declaration

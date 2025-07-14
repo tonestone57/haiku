@@ -20,7 +20,9 @@
 
 static const int32 kNewMinActiveWeight = 15;
 static const int32 kNewMaxWeightCap = 35000000;
-static int32* gHaikuContinuousWeights;
+namespace Scheduler {
+int32* gHaikuContinuousWeights;
+}
 
 
 static int32
@@ -73,9 +75,9 @@ scheduler_init_weights()
 {
 	dprintf("Scheduler: Initializing continuous weights table...\n");
 	int max_prio = sched_get_priority_max(SCHED_RR);
-	gHaikuContinuousWeights = new int32[max_prio + 1];
+	Scheduler::gHaikuContinuousWeights = new int32[max_prio + 1];
 	for (int32 i = 0; i <= max_prio; i++) {
-		gHaikuContinuousWeights[i] = calculate_weight(i);
+		Scheduler::gHaikuContinuousWeights[i] = calculate_weight(i);
 	}
 	dprintf("Scheduler: Continuous weights table initialized.\n");
 }
@@ -96,7 +98,7 @@ scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 	if (priority > sched_get_priority_max(SCHED_RR))
 		priority = sched_get_priority_max(SCHED_RR);
 
-	int32 weight = gHaikuContinuousWeights[priority];
+	int32 weight = Scheduler::gHaikuContinuousWeights[priority];
 
 	if (thread->team != NULL && thread->team->team_scheduler_data != NULL
 		&& thread->priority < B_REAL_TIME_DISPLAY_PRIORITY) {
@@ -110,7 +112,7 @@ scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 
 			if (!isBorrowing) {
 				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+					return Scheduler::gHaikuContinuousWeights[B_IDLE_PRIORITY];
 				}
 			}
 		}

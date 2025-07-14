@@ -654,5 +654,7 @@ PackageEntry::GetLeastIdlePackage()
 
 }	// namespace Scheduler
 
+int32 scheduler_get_dynamic_max_irq_target_load(Scheduler::CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
+int32 scheduler_reset_team_quotas_event(timer* timer);
 
 #endif	// KERNEL_SCHEDULER_CPU_H

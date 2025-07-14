@@ -1797,8 +1797,8 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 	       current scheduler mode.
 	\return The calculated dynamic maximum IRQ load for the CPU.
 */
-static int32
-_scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
+int32
+scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
 {
 	if (cpu == NULL || cpu->Core() == NULL || gCPU[cpu->ID()].disabled)
 		return 0; // Disabled CPU cannot take IRQs

@@ -137,8 +137,10 @@ kaby_lake_decode_frame(intel_i915_device_info* devInfo, uint32 codec,
 		intel_i915_gem_object_put(slice_data);
 		intel_i915_gem_object_put(slice_params);
 
-		if (status != B_OK)
+		if (status != B_OK) {
+			syslog(LOG_ERR, "Failed to decode slice: %s\n", strerror(status));
 			return status;
+		}
 	}
 
 	return B_OK;

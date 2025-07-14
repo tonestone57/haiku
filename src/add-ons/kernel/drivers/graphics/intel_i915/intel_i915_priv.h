@@ -933,6 +933,7 @@ struct i915_multi_layer_composition {
 };
 
 struct i915_overlay_plane {
+	uint32 pipe_id;
 	uint32 handle;
 	uint32 width;
 	uint32 height;

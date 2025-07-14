@@ -9,6 +9,7 @@
 #define KABY_LAKE_ENCODE_H
 
 #include "intel_i915_priv.h"
+#include "kaby_lake_hevc_encode.h"
 
 #define INTEL_I915_VIDEO_ENCODE_HEVC_FRAME 1
 #define INTEL_I915_VIDEO_ENCODE_AVC_FRAME  2
@@ -66,6 +67,11 @@ extern "C" {
 status_t kaby_lake_video_encode_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length);
 status_t kaby_lake_av1_encode_frame(intel_i915_device_info* devInfo,
 	struct av1_encode_frame_info* frame_info);
+status_t intel_huc_hevc_encode_slice(intel_i915_device_info* devInfo,
+	struct intel_i915_gem_object* frame,
+	struct intel_i915_gem_object* encoded_frame);
+status_t kaby_lake_hevc_loop_filter_frame(intel_i915_device_info* devInfo,
+	struct hevc_encode_frame_info* frame_info);
 
 #ifdef __cplusplus
 }

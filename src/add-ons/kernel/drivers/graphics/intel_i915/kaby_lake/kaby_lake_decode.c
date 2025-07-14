@@ -99,31 +99,7 @@ intel_i915_video_decode_hevc_frame_ioctl(intel_i915_device_info* devInfo, void* 
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
 		return B_BAD_ADDRESS;
 
-	for (uint32_t i = 0; i < args.slice_count; i++) {
-		struct i915_video_decode_hevc_slice_data slice_args;
-		if (copy_from_user(&slice_args, &args.slices[i], sizeof(slice_args)) != B_OK)
-			return B_BAD_ADDRESS;
-
-		struct intel_i915_gem_object* slice_data = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1);
-		if (slice_data == NULL)
-			return B_BAD_VALUE;
-
-		struct intel_i915_gem_object* slice_params = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1);
-		if (slice_params == NULL) {
-			intel_i915_gem_object_put(slice_data);
-			return B_BAD_VALUE;
-		}
-
-		status_t status = intel_huc_hevc_decode_slice(devInfo, slice_data, slice_params);
-
-		intel_i915_gem_object_put(slice_data);
-		intel_i915_gem_object_put(slice_params);
-
-		if (status != B_OK)
-			return status;
-	}
-
-	return B_OK;
+	return kaby_lake_decode_frame(devInfo, INTEL_VIDEO_CODEC_HEVC, args.slices, args.slice_count);
 }
 
 status_t
@@ -272,31 +248,7 @@ intel_i915_video_decode_vp8_frame_ioctl(intel_i915_device_info* devInfo, void* b
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
 		return B_BAD_ADDRESS;
 
-	for (uint32_t i = 0; i < args.slice_count; i++) {
-		struct i915_video_decode_vp8_slice_data slice_args;
-		if (copy_from_user(&slice_args, &args.slices[i], sizeof(slice_args)) != B_OK)
-			return B_BAD_ADDRESS;
-
-		struct intel_i915_gem_object* slice_data = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1);
-		if (slice_data == NULL)
-			return B_BAD_VALUE;
-
-		struct intel_i915_gem_object* slice_params = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1);
-		if (slice_params == NULL) {
-			intel_i915_gem_object_put(slice_data);
-			return B_BAD_VALUE;
-		}
-
-		status_t status = intel_huc_vp8_decode_slice(devInfo, slice_data, slice_params);
-
-		intel_i915_gem_object_put(slice_data);
-		intel_i915_gem_object_put(slice_params);
-
-		if (status != B_OK)
-			return status;
-	}
-
-	return B_OK;
+	return kaby_lake_decode_frame(devInfo, INTEL_VIDEO_CODEC_VP8, args.slices, args.slice_count);
 }
 
 static status_t
@@ -340,31 +292,7 @@ intel_i915_video_decode_avc_frame_ioctl(intel_i915_device_info* devInfo, void* b
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
 		return B_BAD_ADDRESS;
 
-	for (uint32_t i = 0; i < args.slice_count; i++) {
-		struct i915_video_decode_avc_slice_data slice_args;
-		if (copy_from_user(&slice_args, &args.slices[i], sizeof(slice_args)) != B_OK)
-			return B_BAD_ADDRESS;
-
-		struct intel_i915_gem_object* slice_data = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1);
-		if (slice_data == NULL)
-			return B_BAD_VALUE;
-
-		struct intel_i915_gem_object* slice_params = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1);
-		if (slice_params == NULL) {
-			intel_i915_gem_object_put(slice_data);
-			return B_BAD_VALUE;
-		}
-
-		status_t status = intel_huc_avc_decode_slice(devInfo, slice_data, slice_params);
-
-		intel_i915_gem_object_put(slice_data);
-		intel_i915_gem_object_put(slice_params);
-
-		if (status != B_OK)
-			return status;
-	}
-
-	return B_OK;
+	return kaby_lake_decode_frame(devInfo, INTEL_VIDEO_CODEC_AVC, args.slices, args.slice_count);
 }
 
 static status_t
@@ -374,29 +302,5 @@ intel_i915_video_decode_vp9_frame_ioctl(intel_i915_device_info* devInfo, void* b
 	if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
 		return B_BAD_ADDRESS;
 
-	for (uint32_t i = 0; i < args.slice_count; i++) {
-		struct i915_video_decode_vp9_slice_data slice_args;
-		if (copy_from_user(&slice_args, &args.slices[i], sizeof(slice_args)) != B_OK)
-			return B_BAD_ADDRESS;
-
-		struct intel_i915_gem_object* slice_data = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1);
-		if (slice_data == NULL)
-			return B_BAD_VALUE;
-
-		struct intel_i915_gem_object* slice_params = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1);
-		if (slice_params == NULL) {
-			intel_i915_gem_object_put(slice_data);
-			return B_BAD_VALUE;
-		}
-
-		status_t status = intel_huc_vp9_decode_slice(devInfo, slice_data, slice_params);
-
-		intel_i915_gem_object_put(slice_data);
-		intel_i915_gem_object_put(slice_params);
-
-		if (status != B_OK)
-			return status;
-	}
-
-	return B_OK;
+	return kaby_lake_decode_frame(devInfo, INTEL_VIDEO_CODEC_VP9, args.slices, args.slice_count);
 }

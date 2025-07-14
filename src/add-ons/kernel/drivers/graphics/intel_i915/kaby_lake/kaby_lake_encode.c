@@ -33,7 +33,9 @@ intel_i915_video_encode_hevc_frame_ioctl(intel_i915_device_info* devInfo, void* 
 		return B_BAD_VALUE;
 	}
 
-	// TODO: Implement HEVC encoding
+	intel_huc_hevc_encode_slice(devInfo, frame, encoded_frame);
+	kaby_lake_hevc_loop_filter_frame(devInfo,
+		(struct hevc_encode_frame_info*)frame_info);
 
 	intel_i915_gem_object_put(frame);
 	intel_i915_gem_object_put(encoded_frame);

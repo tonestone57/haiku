@@ -16,6 +16,7 @@ kaby_lake_configure_overlay(engine_token* et, const overlay_buffer* buffer,
 	if (gInfo == NULL || gInfo->device_fd < 0) return;
 
 	i915_overlay_plane plane;
+	plane.pipe_id = et->pipe_id;
 	plane.handle = buffer->handle;
 	plane.width = buffer->width;
 	plane.height = buffer->height;
@@ -24,7 +25,9 @@ kaby_lake_configure_overlay(engine_token* et, const overlay_buffer* buffer,
 	plane.y = window->v_start;
 	plane.format = buffer->space;
 
-	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_CONFIGURE_OVERLAY, &plane, sizeof(plane));
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_CONFIGURE_OVERLAY, &plane, sizeof(plane)) != 0) {
+		syslog(LOG_ERR, "intel_i915_accelerant: Failed to configure overlay.\n");
+	}
 }
 
 void
@@ -33,7 +36,10 @@ kaby_lake_release_overlay(engine_token* et)
 	if (gInfo == NULL || gInfo->device_fd < 0) return;
 
 	i915_overlay_plane plane;
+	plane.pipe_id = et->pipe_id;
 	plane.handle = 0;
 
-	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_CONFIGURE_OVERLAY, &plane, sizeof(plane));
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_CONFIGURE_OVERLAY, &plane, sizeof(plane)) != 0) {
+		syslog(LOG_ERR, "intel_i915_accelerant: Failed to release overlay.\n");
+	}
 }

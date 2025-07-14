@@ -78,7 +78,7 @@ KernelMergeObject kernel_core.o :
 	scheduler_low_latency.cpp
 	scheduler_power_saving.cpp
 
-	: $(TARGET_KERNEL_PIC_CCFLAGS)
+	: $(TARGET_KERNEL_PIC_CCFLAGS) libroot.so
 ;
 
 # We need to specify the dependency on the generated syscalls files explicitly.
@@ -198,6 +198,7 @@ SubInclude HAIKU_TOP src system kernel lib ;
 SubInclude HAIKU_TOP src system kernel messaging ;
 SubInclude HAIKU_TOP src system kernel posix ;
 SubInclude HAIKU_TOP src system kernel slab ;
+SubInclude HAIKU_TOP src system kernel util ;
 SubInclude HAIKU_TOP src system kernel vm ;
 
 if $(TARGET_KERNEL_PLATFORM) {

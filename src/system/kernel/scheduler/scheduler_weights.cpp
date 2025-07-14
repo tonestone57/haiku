@@ -17,6 +17,7 @@
 #include "scheduler_thread.h"
 #include "scheduler_team.h"
 #include <sched.h>
+#include <sched.h>
 
 
 static const int32 kNewMinActiveWeight = 15;

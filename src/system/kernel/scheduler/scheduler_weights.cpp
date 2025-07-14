@@ -13,7 +13,6 @@
 
 #include "scheduler_cpu.h"
 #include "scheduler_defs.h"
-#include "scheduler_defs.h"
 #include "scheduler_thread.h"
 #include "scheduler_team.h"
 
@@ -80,7 +79,7 @@ scheduler_init_weights()
 
 
 int32
-scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
+scheduler_priority_to_weight(Thread* thread, CPUEntry* cpu)
 {
 	if (thread == NULL)
 		return 1;

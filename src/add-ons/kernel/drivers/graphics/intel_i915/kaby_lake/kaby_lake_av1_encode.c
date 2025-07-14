@@ -41,7 +41,21 @@ motion_estimation(const uint8* data, size_t size, struct av1_encode_frame_info* 
 	aom_codec_iter_t iter = NULL;
 	while ((pkt = aom_codec_get_cx_data(&codec, &iter)) != NULL) {
 		if (pkt->kind == AOM_CX_FRAME_PKT) {
-			// TODO: Copy encoded data to user buffer
+			struct intel_i915_gem_object* encoded_frame = (struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->encoded_frame_handle, 1);
+			if (encoded_frame == NULL) {
+				aom_codec_destroy(&codec);
+				return B_BAD_VALUE;
+			}
+			void* encoded_frame_addr;
+			area_id encoded_frame_area;
+			if (map_gem_bo(frame_info->encoded_frame_handle, encoded_frame->size, &encoded_frame_area, &encoded_frame_addr) != B_OK) {
+				intel_i915_gem_object_put(encoded_frame);
+				aom_codec_destroy(&codec);
+				return B_ERROR;
+			}
+			memcpy(encoded_frame_addr, pkt->data.frame.buf, pkt->data.frame.sz);
+			unmap_gem_bo(encoded_frame_area);
+			intel_i915_gem_object_put(encoded_frame);
 		}
 	}
 
@@ -73,8 +87,13 @@ kaby_lake_av1_encode_frame(intel_i915_device_info* devInfo,
 	if (status != B_OK)
 		return status;
 
-	// TODO: Offload entropy encoding to the GPU
-	// TODO: Offload loop filtering to the GPU
+	// Offload entropy encoding to the GPU
+	intel_huc_av1_encode_slice(devInfo,
+		(struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->frame_handle, 1),
+		(struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->encoded_frame_handle, 1));
 
-	return B_UNSUPPORTED;
+	// Offload loop filtering to the GPU
+	kaby_lake_av1_loop_filter_frame(devInfo, frame_info);
+
+	return B_OK;
 }

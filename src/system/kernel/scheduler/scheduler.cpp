@@ -998,7 +998,7 @@ reschedule(int32 nextState)
 		selectedTeamForThisCpu = bestNominalTeam;
 	}
 
-	if (selectedTeamForThisCpu == NULL && gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
+	if (selectedTeamForThisCpu == NULL && Scheduler::gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
 		TRACE_SCHED_TEAM_VERBOSE("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
 		TeamSchedulerData* startNode = (sLastSelectedBorrowingTeam != NULL
 				&& gTeamSchedulerDataList.Contains(sLastSelectedBorrowingTeam))

@@ -370,7 +370,6 @@ extern int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
 int32 scheduler_reset_team_quotas_event(timer*);
 int32 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
-int32 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
 
 
 inline void

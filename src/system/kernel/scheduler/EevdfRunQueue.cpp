@@ -74,6 +74,16 @@ EevdfRunQueue::PeekMinimum()
 	return fDeadlineHeap.PeekRoot();
 }
 
+
+ThreadData*
+EevdfRunQueue::PopMinimum()
+{
+	InterruptsSpinLocker locker(fLock);
+	if (fDeadlineHeap.IsEmpty())
+		return NULL;
+	return fDeadlineHeap.RemoveRoot();
+}
+
 bool
 EevdfRunQueue::IsEmpty()
 {

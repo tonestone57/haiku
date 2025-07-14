@@ -6,7 +6,17 @@ namespace Scheduler {
 int32
 scheduler_reset_team_quotas_event(timer* timer)
 {
-	return 0;
+	// This function is called periodically to reset the CPU usage quotas for all teams.
+	InterruptsSpinLocker locker(gTeamSchedulerListLock);
+	TeamSchedulerData* tsd = gTeamSchedulerDataList.Head();
+	while (tsd != NULL) {
+		InterruptsSpinLocker teamLocker(tsd->lock);
+		tsd->quota_period_usage = 0;
+		tsd->quota_exhausted = false;
+		teamLocker.Unlock();
+		tsd = gTeamSchedulerDataList.GetNext(tsd);
+	}
+	return B_HANDLED_INTERRUPT;
 }
 
 // Implementation for TeamSchedulerData methods if any become non-inline.

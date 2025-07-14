@@ -8,6 +8,10 @@
 #include "scheduler_defs.h" // For latency_nice constants and factors
 #include <util/Random.h> // For get_random<T>()
 
+namespace Scheduler {
+int32* gHaikuContinuousWeights = NULL;
+}
+
 
 using namespace Scheduler;
 

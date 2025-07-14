@@ -20,9 +20,7 @@
 
 static const int32 kNewMinActiveWeight = 15;
 static const int32 kNewMaxWeightCap = 35000000;
-namespace Scheduler {
-int32* gHaikuContinuousWeights;
-}
+int32* Scheduler::gHaikuContinuousWeights;
 
 
 static int32

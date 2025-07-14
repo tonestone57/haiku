@@ -1797,8 +1797,8 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 	       current scheduler mode.
 	\return The calculated dynamic maximum IRQ load for the CPU.
 */
-int32
-scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
+static int32
+_scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
 {
 	if (cpu == NULL || cpu->Core() == NULL || gCPU[cpu->ID()].disabled)
 		return 0; // Disabled CPU cannot take IRQs
@@ -1884,7 +1884,7 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		CPUEntry* currentCPU = CPUEntry::GetCPU(i);
 		ASSERT(currentCPU->Core() == targetCore);
 
-		int32 dynamicMaxForThisCpu = scheduler_get_dynamic_max_irq_target_load(currentCPU, baseMaxIrqLoadFromMode);
+		int32 dynamicMaxForThisCpu = _scheduler_get_dynamic_max_irq_target_load(currentCPU, baseMaxIrqLoadFromMode);
 		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
 
 		if (dynamicMaxForThisCpu > 0 && currentCpuExistingIrqLoad + irqLoadToMove >= dynamicMaxForThisCpu) {

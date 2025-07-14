@@ -8,7 +8,8 @@
 #include <OS.h>
 #include <debug.h>
 #include <kernel.h>
-#include <thread.h>
+#include <OS.h>
+#include <thread_types.h>
 #include <algorithm>
 
 #include "scheduler_cpu.h"
@@ -78,8 +79,11 @@ scheduler_init_weights()
 }
 
 
+using namespace BKernel;
+
+
 int32
-scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
+scheduler_priority_to_weight(BKernel::Thread* thread, Scheduler::CPUEntry* cpu)
 {
 	if (thread == NULL)
 		return 1;

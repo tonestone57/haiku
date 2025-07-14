@@ -277,26 +277,26 @@ static int32* sCPUToCore;
 static int32* sCPUToPackage;
 
 static inline bigtime_t
-scheduler_calculate_eevdf_slice(ThreadData* threadData, const CPUEntry* cpu)
+scheduler_calculate_eevdf_slice(Scheduler::ThreadData* threadData, const Scheduler::CPUEntry* cpu)
 {
 	if (threadData == NULL) return kMinSliceGranularity;
 	return threadData->CalculateDynamicQuantum(cpu);
 }
 
-static void enqueue_thread_on_cpu_eevdf(Thread* thread, CPUEntry* cpu, CoreEntry* core);
+static void enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler::CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
-static ThreadData* scheduler_try_work_steal(CPUEntry* thiefCPU);
+static Scheduler::ThreadData* scheduler_try_work_steal(Scheduler::CPUEntry* thiefCPU);
 
 void
 scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
-	int8 irqCount, CoreEntry* targetCore, CPUEntry* targetCPU)
+	int8 irqCount, Scheduler::CoreEntry* targetCore, Scheduler::CPUEntry* targetCPU)
 {
 }
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
-static CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
-static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
+static Scheduler::CPUEntry* _scheduler_select_cpu_for_irq(Scheduler::CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
+static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(Scheduler::CoreEntry* core, bool preferBusiest, const Scheduler::ThreadData* affinityCheckThread);
 
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
@@ -308,21 +308,21 @@ static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
 static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
-static int32
-_find_idle_cpu_on_core(CoreEntry* core)
+static Scheduler::CPUEntry*
+_find_idle_cpu_on_core(Scheduler::CoreEntry* core)
 {
-	if (core == NULL || core->IsDefunct()) return -1;
+	if (core == NULL || core->IsDefunct()) return NULL;
 	CPUSet coreCPUs = core->CPUMask();
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (coreCPUs.GetBit(i) && !gCPU[i].disabled) {
 			Thread* runningThread = gCPU[i].running_thread;
 			if (runningThread != NULL && runningThread->scheduler_data != NULL
 				&& runningThread->scheduler_data->IsIdle()) {
-				return i;
+				return Scheduler::CPUEntry::GetCPU(i);
 			}
 		}
 	}
-	return -1;
+	return NULL;
 }
 
 static timer sLoadBalanceTimer;
@@ -339,14 +339,14 @@ static const int32 kBenefitScoreEligFactor = 1;
 static const bigtime_t kMinUnweightedNormWorkToSteal = 1000;
 
 void
-ThreadEnqueuer::operator()(ThreadData* thread)
+ThreadEnqueuer::operator()(Scheduler::ThreadData* thread)
 {
 	Thread* t = thread->GetThread();
-	int32 targetCPU = -1;
-	int32 targetCore = -1;
+	Scheduler::CPUEntry* targetCPU = NULL;
+	Scheduler::CoreEntry* targetCore = NULL;
 	thread->ChooseCoreAndCPU(targetCore, targetCPU);
-	ASSERT(targetCPU != -1);
-	ASSERT(targetCore != -1);
+	ASSERT(targetCPU != NULL);
+	ASSERT(targetCore != NULL);
 
 	InterruptsSpinLocker schedulerLocker(t->scheduler_lock);
 
@@ -367,44 +367,43 @@ scheduler_dump_thread_data(Thread* thread)
 
 
 static void
-enqueue_thread_on_cpu_eevdf(Thread* thread, int32 cpu, int32 core)
+enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler::CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ThreadData* threadData = thread->scheduler_data;
-	CPUEntry* cpuEntry = CPUEntry::GetCPU(cpu);
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 
 	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
 	TRACE_SCHED("enqueue_thread_on_cpu_eevdf: T %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ") onto CPU %" B_PRId32 "\n",
-		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu);
+		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
-	cpuEntry->LockRunQueue();
-	cpuEntry->AddThread(threadData);
-	cpuEntry->UnlockRunQueue();
+	cpu->LockRunQueue();
+	cpu->AddThread(threadData);
+	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
 
-	Thread* currentThreadOnTarget = gCPU[cpu].running_thread;
+	Thread* currentThreadOnTarget = gCPU[cpu->ID()].running_thread;
 	bool invokeScheduler = false;
 
 	if (currentThreadOnTarget == NULL || thread_is_idle_thread(currentThreadOnTarget)) {
 		invokeScheduler = true;
 	} else {
-		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
+		Scheduler::ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
 		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime());
 		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline()) {
 			TRACE_SCHED("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
 				thread->id, threadData->VirtualDeadline(),
 				currentThreadOnTarget->id, currentThreadDataOnTarget->VirtualDeadline(),
-				cpu);
+				cpu->ID());
 			invokeScheduler = true;
 		}
 	}
 
 	if (invokeScheduler) {
-		if (cpu == smp_get_current_cpu()) {
-			gCPU[cpu].invoke_scheduler = true;
+		if (cpu->ID() == smp_get_current_cpu()) {
+			gCPU[cpu->ID()].invoke_scheduler = true;
 		} else {
-			smp_send_ici(cpu, SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
 	}
 }
@@ -419,13 +418,13 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 	TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): T %" B_PRId32 " prio %" B_PRId32 "\n",
 		thread->id, thread->priority);
 
-	ThreadData* threadData = thread->scheduler_data;
-	int32 targetCPU = -1;
-	int32 targetCore = -1;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
+	Scheduler::CPUEntry* targetCPU = NULL;
+	Scheduler::CoreEntry* targetCore = NULL;
 
 	threadData->ChooseCoreAndCPU(targetCore, targetCPU);
-	ASSERT(targetCPU != -1 && targetCore != -1);
-	ASSERT(threadData->Core() == CoreEntry::GetCore(targetCPU) && "ThreadData's core must match targetCore after ChooseCoreAndCPU");
+	ASSERT(targetCPU != NULL && targetCore != NULL);
+	ASSERT(threadData->Core() == targetCore && "ThreadData's core must match targetCore after ChooseCoreAndCPU");
 
 	if (thread_is_idle_thread(thread)) {
 		TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): idle T %" B_PRId32 " not added to EEVDF queue.\n", thread->id);
@@ -453,24 +452,24 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
 		thread->id, oldActualPriority, priority);
 
-	int32 cpuContextForUpdate = -1;
+	Scheduler::CPUEntry* cpuContextForUpdate = NULL;
 	bool wasRunning = (thread->state == B_THREAD_RUNNING && thread->cpu != NULL);
 	bool wasReadyAndEnqueuedPrior = (thread->state == B_THREAD_READY && threadData->IsEnqueued());
 
 	if (wasRunning) {
-		cpuContextForUpdate = thread->cpu->cpu_num;
+		cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (thread->previous_cpu != NULL && threadData->Core() != NULL
-			&& CoreEntry::GetCore(thread->previous_cpu->cpu_num) == threadData->Core()) {
-			cpuContextForUpdate = thread->previous_cpu->cpu_num;
+			&& Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
+			cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
 		} else if (threadData->Core() != NULL && threadData->Core()->CPUCount() > 0) {
 			int32 firstCpuIdOnCore = threadData->Core()->CPUMask().FirstSetBit();
 			if (firstCpuIdOnCore >= 0)
-				cpuContextForUpdate = firstCpuIdOnCore;
+				cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(firstCpuIdOnCore);
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, using first CPU (%d) of its core (%d) as context for weight calc.\n",
                 thread->id, firstCpuIdOnCore, threadData->Core()->ID() );
 		} else {
-			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but no valid CPU context found for weight calc. Using -1.\n", thread->id);
+			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but no valid CPU context found for weight calc. Using NULL.\n", thread->id);
 		}
 	}
 
@@ -480,10 +479,10 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	int32 newWeight = scheduler_priority_to_weight(thread, cpuContextForUpdate);
 
 	if (wasRunning) {
-		ASSERT(cpuContextForUpdate != -1);
+		ASSERT(cpuContextForUpdate != NULL);
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (thread->previous_cpu != NULL && threadData->Core() != NULL
-			&& CoreEntry::GetCore(thread->previous_cpu->cpu_num) == threadData->Core()) {
+			&& Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
 			// cpuContextForUpdate already set
 		} else if (threadData->Core() != NULL) {
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, but previous_cpu inconsistent or NULL for oldWeight/newWeight context. Using potentially already set or new first CPU of core.\n", thread->id);
@@ -491,10 +490,9 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	}
 
 
-	if (cpuContextForUpdate != -1 && oldWeight != newWeight && newWeight > 0) {
-		CPUEntry* cpuEntry = CPUEntry::GetCPU(cpuContextForUpdate);
-		cpuEntry->LockRunQueue();
-		bigtime_t min_v = cpuEntry->MinVirtualRuntime();
+	if (cpuContextForUpdate != NULL && oldWeight != newWeight && newWeight > 0) {
+		cpuContextForUpdate->LockRunQueue();
+		bigtime_t min_v = cpuContextForUpdate->MinVirtualRuntime();
 		bigtime_t currentVRuntime = threadData->VirtualRuntime();
 		if (currentVRuntime > min_v) {
 			bigtime_t delta_v = currentVRuntime - min_v;
@@ -503,7 +501,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			TRACE_SCHED("set_prio: T %" B_PRId32 " vruntime adjusted from %" B_PRId64 " to %" B_PRId64 " (weight %" B_PRId32 "->%" B_PRId32 ") rel_to_min_v %" B_PRId64 "\n",
 				thread->id, currentVRuntime, newAdjustedVRuntime, oldWeight, newWeight, min_v);
 		}
-		cpuEntry->UnlockRunQueue();
+		cpuContextForUpdate->UnlockRunQueue();
 	}
 
 	if (wasRunning && oldWeight != newWeight && oldWeight > 0 && newWeight > 0) {
@@ -526,28 +524,27 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 
 	if (wasRunning) {
 		ASSERT(cpuContextForUpdate != -1);
-		gCPU[cpuContextForUpdate].invoke_scheduler = true;
-		if (cpuContextForUpdate != smp_get_current_cpu()) {
-			smp_send_ici(cpuContextForUpdate, SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+		gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
+		if (cpuContextForUpdate->ID() != smp_get_current_cpu()) {
+			smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 		}
 	} else if (wasReadyAndEnqueuedPrior) {
-		if (cpuContextForUpdate != -1) {
-			CPUEntry* cpuEntry = CPUEntry::GetCPU(cpuContextForUpdate);
-			cpuEntry->LockRunQueue();
-			cpuEntry->GetEevdfRunQueue().Update(threadData);
-			cpuEntry->UnlockRunQueue();
-			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate].running_thread;
+		if (cpuContextForUpdate != NULL) {
+			cpuContextForUpdate->LockRunQueue();
+			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
+			cpuContextForUpdate->UnlockRunQueue();
+			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
 			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
 				|| (system_time() >= threadData->EligibleTime()
 					&& threadData->VirtualDeadline() < currentOnThatCpu->scheduler_data->VirtualDeadline())) {
-				if (cpuContextForUpdate == smp_get_current_cpu()) {
-					gCPU[cpuContextForUpdate].invoke_scheduler = true;
+				if (cpuContextForUpdate->ID() == smp_get_current_cpu()) {
+					gCPU[cpuContextForUpdate->ID()].invoke_scheduler = true;
 				} else {
-					smp_send_ici(cpuContextForUpdate, SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+					smp_send_ici(cpuContextForUpdate->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
 				}
 			}
 			TRACE_SCHED("set_prio: T %" B_PRId32 " updated in runqueue on CPU %" B_PRId32 "\n",
-				thread->id, cpuContextForUpdate);
+				thread->id, cpuContextForUpdate->ID());
 		} else {
 			TRACE_SCHED_WARNING("set_prio: T %" B_PRId32 " was ready&enqueued, but no valid CPU context. Runqueue update skipped. Thread may need re-enqueue if VD changed significantly.\n", thread->id);
 		}

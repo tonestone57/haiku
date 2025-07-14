@@ -911,6 +911,7 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_3D_ROTATED_BLIT (B_DEVICE_OP_CODES_END + 106)
 #define INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY (B_DEVICE_OP_CODES_END + 117)
 #define INTEL_I915_IOCTL_SET_BLITTER_SCALING (B_DEVICE_OP_CODES_END + 118)
+#define INTEL_I915_IOCTL_SET_BLITTER_COLOR_KEY (B_DEVICE_OP_CODES_END + 120)
 #define INTEL_I915_IOCTL_CREATE_OFFSCREEN_BUFFER (B_DEVICE_OP_CODES_END + 119)
 #define INTEL_I915_IOCTL_3D_FONT_SMOOTHING (B_DEVICE_OP_CODES_END + 107)
 #define INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME (B_DEVICE_OP_CODES_END + 108)
@@ -1059,6 +1060,12 @@ typedef struct {
 	uint32_t height;
 	uint32_t handle; // Output
 } intel_i915_create_offscreen_buffer_args;
+
+typedef struct {
+	uint32_t color;
+	uint32_t mask;
+	bool enable;
+} intel_i915_set_blitter_color_key_args;
 
 
 // Structure for INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (already in accelerant.h)

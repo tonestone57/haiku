@@ -51,6 +51,7 @@ static status_t i915_set_blitter_hw_clip_rect_ioctl_handler(intel_i915_device_in
 static status_t i915_set_blitter_chroma_key_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_chroma_key_args* user_args_ptr);
 static status_t i915_set_blitter_scaling_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_scaling_args* user_args_ptr);
 static status_t i915_create_offscreen_buffer_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_create_offscreen_buffer_args* user_args_ptr);
+static status_t i915_set_blitter_color_key_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_color_key_args* user_args_ptr);
 static status_t i915_wait_for_display_change_ioctl(intel_i915_device_info* devInfo, struct i915_display_change_event_ioctl_data* user_args_ptr);
 static struct intel_i915_gem_object*
 get_buffer(void* cookie, uint32_t handle)
@@ -63,6 +64,30 @@ extern status_t intel_i915_device_init(intel_i915_device_info* devInfo, struct p
 	devInfo->video_cmd_buffer = NULL;
 	devInfo->video_cmd_buffer_offset = 0;
 	devInfo->get_buffer = get_buffer;
+	return B_OK;
+}
+
+
+static status_t
+i915_set_blitter_color_key_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_color_key_args* user_args_ptr)
+{
+	if (devInfo == NULL || user_args_ptr == NULL) {
+		return B_BAD_VALUE;
+	}
+
+	intel_i915_set_blitter_color_key_args args;
+	if (copy_from_user(&args, user_args_ptr, sizeof(args)) != B_OK) {
+		return B_BAD_ADDRESS;
+	}
+
+	if (args.enable) {
+		intel_i915_write32(devInfo, BCS_COLOR_KEY_LOW, args.color);
+		intel_i915_write32(devInfo, BCS_COLOR_KEY_MASK, args.mask);
+	} else {
+		// Disable color keying by clearing the mask.
+		intel_i915_write32(devInfo, BCS_COLOR_KEY_MASK, 0);
+	}
+
 	return B_OK;
 }
 
@@ -348,6 +373,8 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			return i915_set_blitter_scaling_ioctl_handler(devInfo, (intel_i915_set_blitter_scaling_args*)buffer);
 		case INTEL_I915_IOCTL_CREATE_OFFSCREEN_BUFFER:
 			return i915_create_offscreen_buffer_ioctl_handler(devInfo, (intel_i915_create_offscreen_buffer_args*)buffer);
+		case INTEL_I915_IOCTL_SET_BLITTER_COLOR_KEY:
+			return i915_set_blitter_color_key_ioctl_handler(devInfo, (intel_i915_set_blitter_color_key_args*)buffer);
 
 		case INTEL_I915_IOCTL_VIDEO_CREATE_DECODER:
 		case INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER:

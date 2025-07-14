@@ -131,6 +131,18 @@ int main(int argc, char** argv)
 		delete[] frp.y;
 	}
 
+	// Test screen_to_screen_monochrome_blit
+	{
+		blit_params bp;
+		bp.src_left = 0;
+		bp.src_top = 0;
+		bp.dest_left = 1100;
+		bp.dest_top = 1100;
+		bp.width = 100;
+		bp.height = 100;
+		intel_i915_screen_to_screen_monochrome_blit(NULL, &bp, 1, 0, 0);
+	}
+
 	uninit_accelerant_t uninit_accelerant;
 	if (get_image_symbol(gInfo->accelerant_image, "UNINIT_ACCELERANT",
 			B_SYMBOL_TYPE_TEXT, (void**)&uninit_accelerant) != B_OK) {

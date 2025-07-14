@@ -154,6 +154,12 @@ kaby_lake_stretch_blit(engine_token* et,
 		for (size_t i = 0; i < current_batch_count; i++) {
 			blit_params *blit = &list[batch * max_ops_per_batch + i];
 
+			intel_i915_set_blitter_scaling_args args;
+			args.x_scale = (blit->src_width << 12) / blit->width;
+			args.y_scale = (blit->src_height << 12) / blit->height;
+			args.enable = true;
+			ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_SCALING, &args, sizeof(args));
+
 			uint32 cmd_dw0 = (0x53 << 22) | (8 - 2) | (0xCC << 16) | (1 << 17);
 			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
@@ -194,6 +200,12 @@ kaby_lake_color_key(engine_token* et, uint32 color, uint32 x1, uint32 y1,
 	uint32 x2, uint32 y2)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0) return;
+
+	intel_i915_set_blitter_color_key_args args;
+	args.color = color;
+	args.mask = 0xFFFFFFFF;
+	args.enable = true;
+	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_COLOR_KEY, &args, sizeof(args));
 
 	size_t cmd_dwords = 7;
 	size_t pipe_control_dwords = 4;
@@ -240,7 +252,7 @@ kaby_lake_alpha_blend(engine_token* et, uint32 color, uint32 x1, uint32 y1,
 {
 	if (gInfo == NULL || gInfo->device_fd < 0) return;
 
-	size_t cmd_dwords = 8;
+	size_t cmd_dwords = 12;
 	size_t pipe_control_dwords = 4;
 	size_t cmd_buffer_size = (cmd_dwords + pipe_control_dwords + 1) * sizeof(uint32);
 
@@ -251,14 +263,31 @@ kaby_lake_alpha_blend(engine_token* et, uint32 color, uint32 x1, uint32 y1,
 		return;
 
 	uint32 cur_dw_idx = 0;
-	((uint32*)cpu_buf)[cur_dw_idx++] = (0x79000000 | (8 - 2));
-	((uint32*)cpu_buf)[cur_dw_idx++] = (1 << 24) | (0x1 << 22) | (0xCC << 16);
+	// Disable VF statistics
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 8);
+	// Select 3D pipeline
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 0);
+	// Set state base address
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x8 << 0);
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+
+	// 3DPRIMITIVE
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x6 << 16) | (0x3 << 8) | (0x3);
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 	((uint32*)cpu_buf)[cur_dw_idx++] = color;
-	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 	((uint32*)cpu_buf)[cur_dw_idx++] = (x1 & 0xFFFF) | ((y1 & 0xFFFF) << 16);
-	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = (x2 & 0xFFFF) | ((y1 & 0xFFFF) << 16);
+	((uint32*)cpu_buf)[cur_dw_idx++] = (x1 & 0xFFFF) | ((y2 & 0xFFFF) << 16);
 	((uint32*)cpu_buf)[cur_dw_idx++] = (x2 & 0xFFFF) | ((y2 & 0xFFFF) << 16);
-	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 
 	uint32* p = emit_pipe_control_render_stall((uint32*)cpu_buf + cur_dw_idx);
 	*p = 0x0A000000;
@@ -287,14 +316,30 @@ kaby_lake_fill_polygon(engine_token* et, uint32 color, uint32 count,
 		return;
 
 	uint32 cur_dw_idx = 0;
-	((uint32*)cpu_buf)[cur_dw_idx++] = (0x79000000 | (4 + count * 2 - 2));
+	// Disable VF statistics
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 8);
+	// Select 3D pipeline
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 0);
+	// Set state base address
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x8 << 0);
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+
+	// 3DPRIMITIVE
+	((uint32*)cpu_buf)[cur_dw_idx++] = (0x7 << 24) | (0x6 << 16) | (0x5 << 8) | (count);
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
+	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 	((uint32*)cpu_buf)[cur_dw_idx++] = color;
-	((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 
 	for (uint32 i = 0; i < count; i++) {
 		((uint32*)cpu_buf)[cur_dw_idx++] = (points[i * 2] & 0xFFFF) | ((points[i * 2 + 1] & 0xFFFF) << 16);
-		((uint32*)cpu_buf)[cur_dw_idx++] = 0;
 	}
 
 	uint32* p = emit_pipe_control_render_stall((uint32*)cpu_buf + cur_dw_idx);
@@ -309,9 +354,15 @@ kaby_lake_fill_polygon(engine_token* et, uint32 color, uint32 count,
 
 void
 kaby_lake_screen_to_screen_transparent_blit(engine_token* et,
-	blit_params* list, uint32 count)
+	uint32 transparent_color, blit_params* list, uint32 count)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
+
+	intel_i915_set_blitter_color_key_args args;
+	args.color = transparent_color;
+	args.mask = 0xFFFFFFFF;
+	args.enable = true;
+	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_COLOR_KEY, &args, sizeof(args));
 
 	size_t max_ops_per_batch = get_batch_size(count, 6);
 	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
@@ -352,7 +403,8 @@ kaby_lake_screen_to_screen_transparent_blit(engine_token* et,
 
 void
 kaby_lake_screen_to_screen_monochrome_blit(engine_token* et,
-	blit_params* list, uint32 count)
+	blit_params* list, uint32 count, uint32 foreground_color,
+	uint32 background_color)
 {
 	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
 
@@ -380,8 +432,8 @@ kaby_lake_screen_to_screen_monochrome_blit(engine_token* et,
 			blit_params *blit = &list[batch * max_ops_per_batch + i];
 			kaby_lake_emit_blit((uint32*)cpu_buf, &cur_dw_idx, blit,
 				(0x55 << 22) | (10 - 2) | (0xCC << 16));
-			((uint32*)cpu_buf)[cur_dw_idx++] = 0; // foreground color
-			((uint32*)cpu_buf)[cur_dw_idx++] = 0; // background color
+			((uint32*)cpu_buf)[cur_dw_idx++] = foreground_color;
+			((uint32*)cpu_buf)[cur_dw_idx++] = background_color;
 			((uint32*)cpu_buf)[cur_dw_idx++] = 0; // pattern base address
 			((uint32*)cpu_buf)[cur_dw_idx++] = 0; // pattern mask
 		}

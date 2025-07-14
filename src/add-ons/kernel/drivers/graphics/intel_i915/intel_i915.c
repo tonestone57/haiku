@@ -69,6 +69,69 @@ extern status_t intel_i915_device_init(intel_i915_device_info* devInfo, struct p
 
 
 static status_t
+intel_video_create_decoder(intel_i915_device_info* devInfo, i915_video_create_decoder* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_video_destroy_decoder(intel_i915_device_info* devInfo, i915_video_destroy_decoder* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_video_decode_frame(intel_i915_device_info* devInfo, i915_video_decode_frame* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_video_encode_frame(intel_i915_device_info* devInfo, i915_video_encode_frame* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_3d_pipeline_select(intel_i915_device_info* devInfo, i915_3d_pipeline_select* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_3d_state_base_address(intel_i915_device_info* devInfo, i915_3d_state_base_address* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_3d_state_sip(intel_i915_device_info* devInfo, i915_3d_state_sip* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_3d_3dstate_vf_statistics(intel_i915_device_info* devInfo, i915_3d_3dstate_vf_statistics* args)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_3d_pipeline_flush(intel_i915_device_info* devInfo, i915_3d_pipeline_flush* args)
+{
+	return B_OK;
+}
+
+
+static status_t
 i915_set_blitter_color_key_ioctl_handler(intel_i915_device_info* devInfo, intel_i915_set_blitter_color_key_args* user_args_ptr)
 {
 	if (devInfo == NULL || user_args_ptr == NULL) {
@@ -377,10 +440,13 @@ intel_i915_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			return i915_set_blitter_color_key_ioctl_handler(devInfo, (intel_i915_set_blitter_color_key_args*)buffer);
 
 		case INTEL_I915_IOCTL_VIDEO_CREATE_DECODER:
+			return intel_video_create_decoder(devInfo, (i915_video_create_decoder*)buffer);
 		case INTEL_I915_IOCTL_VIDEO_DESTROY_DECODER:
+			return intel_video_destroy_decoder(devInfo, (i915_video_destroy_decoder*)buffer);
 		case INTEL_I915_IOCTL_VIDEO_DECODE_FRAME:
+			return intel_video_decode_frame(devInfo, (i915_video_decode_frame*)buffer);
 		case INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME:
-			return intel_i915_video_ioctl(devInfo, op, buffer, length);
+			return intel_video_encode_frame(devInfo, (i915_video_encode_frame*)buffer);
 
 		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:
 			return intel_i915_3d_ioctl(devInfo, op, buffer, length);
@@ -399,6 +465,16 @@ intel_i915_3d_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, si
 	switch (op) {
 		case INTEL_I915_IOCTL_3D_SUBMIT_CMD:
 			return intel_3d_submit_command(devInfo, buffer, length);
+		case INTEL_I915_IOCTL_3D_PIPELINE_SELECT:
+			return intel_3d_pipeline_select(devInfo, (i915_3d_pipeline_select*)buffer);
+		case INTEL_I915_IOCTL_3D_STATE_BASE_ADDRESS:
+			return intel_3d_state_base_address(devInfo, (i915_3d_state_base_address*)buffer);
+		case INTEL_I915_IOCTL_3D_STATE_SIP:
+			return intel_3d_state_sip(devInfo, (i915_3d_state_sip*)buffer);
+		case INTEL_I915_IOCTL_3D_3DSTATE_VF_STATISTICS:
+			return intel_3d_3dstate_vf_statistics(devInfo, (i915_3d_3dstate_vf_statistics*)buffer);
+		case INTEL_I915_IOCTL_3D_PIPELINE_FLUSH:
+			return intel_3d_pipeline_flush(devInfo, (i915_3d_pipeline_flush*)buffer);
 		case INTEL_I915_IOCTL_3D_COLOR_SPACE_CONVERSION:
 			return intel_3d_color_space_conversion(devInfo,
 				(i915_color_space_conversion*)buffer);

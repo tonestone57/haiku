@@ -914,7 +914,14 @@ struct intel_video_frame {
 #define INTEL_I915_IOCTL_SET_BLITTER_COLOR_KEY (B_DEVICE_OP_CODES_END + 120)
 #define INTEL_I915_IOCTL_CREATE_OFFSCREEN_BUFFER (B_DEVICE_OP_CODES_END + 119)
 #define INTEL_I915_IOCTL_3D_FONT_SMOOTHING (B_DEVICE_OP_CODES_END + 107)
+#define INTEL_I915_IOCTL_3D_PIPELINE_SELECT (B_DEVICE_OP_CODES_END + 121)
+#define INTEL_I915_IOCTL_3D_STATE_BASE_ADDRESS (B_DEVICE_OP_CODES_END + 122)
+#define INTEL_I915_IOCTL_3D_STATE_SIP (B_DEVICE_OP_CODES_END + 123)
+#define INTEL_I915_IOCTL_3D_3DSTATE_VF_STATISTICS (B_DEVICE_OP_CODES_END + 124)
+#define INTEL_I915_IOCTL_3D_PIPELINE_FLUSH (B_DEVICE_OP_CODES_END + 125)
 #define INTEL_I915_IOCTL_VIDEO_ENCODE_FRAME (B_DEVICE_OP_CODES_END + 108)
+#define INTEL_I915_IOCTL_VIDEO_CREATE_ENCODER (B_DEVICE_OP_CODES_END + 112)
+#define INTEL_I915_IOCTL_VIDEO_DESTROY_ENCODER (B_DEVICE_OP_CODES_END + 113)
 #define INTEL_I915_IOCTL_CONFIGURE_OVERLAY (B_DEVICE_OP_CODES_END + 109)
 #define INTEL_I915_IOCTL_MULTI_LAYER_COMPOSITION (B_DEVICE_OP_CODES_END + 110)
 #define INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (B_DEVICE_OP_CODES_END + 111)
@@ -1066,6 +1073,39 @@ typedef struct {
 	uint32_t mask;
 	bool enable;
 } intel_i915_set_blitter_color_key_args;
+
+typedef struct {
+	uint32_t pipeline;
+} i915_3d_pipeline_select;
+
+typedef struct {
+	uint32_t general_state_base_address;
+	uint32_t surface_state_base_address;
+	uint32_t dynamic_state_base_address;
+	uint32_t indirect_object_base_address;
+	uint32_t instruction_base_address;
+} i915_3d_state_base_address;
+
+typedef struct {
+	uint32_t sip;
+} i915_3d_state_sip;
+
+typedef struct {
+	bool enable;
+} i915_3d_3dstate_vf_statistics;
+
+typedef struct {
+	uint32_t flags;
+} i915_3d_pipeline_flush;
+
+typedef struct {
+	uint32_t codec; // intel_video_codec
+	uint32_t encoder_handle; // Output
+} i915_video_create_encoder;
+
+typedef struct {
+	uint32_t encoder_handle;
+} i915_video_destroy_encoder;
 
 
 // Structure for INTEL_I915_IOCTL_WAIT_FOR_DISPLAY_CHANGE (already in accelerant.h)

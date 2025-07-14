@@ -65,8 +65,7 @@ scheduler before its state (lag, deadline) is re-evaluated.
 
   - **Determination**: Influenced by the thread's base priority (converted to a weight),
     its real-time status, I/O behavior heuristics, and system contention levels.
-    The ``fLatencyNice`` parameter and its associated syscalls for direct slice
-    duration tuning have been removed.
+    The ``fLatencyNice`` parameter for direct slice duration tuning has been removed.
   - **Current Implementation**: Derived using
     ``ThreadData::CalculateDynamicQuantum()`` which incorporates these factors.
 
@@ -405,9 +404,8 @@ Relevant Debugger Commands
 TODOs / Future Work
 -------------------
 The EEVDF scheduler has undergone significant development, incorporating
-mechanisms for weighted fair queuing, latency-nice control, big.LITTLE
-awareness, and advanced IRQ handling.
-The ``latency-nice`` mechanism for direct slice tuning has been removed.
+mechanisms for weighted fair queuing, big.LITTLE awareness, and advanced IRQ
+handling.
 The continuous priority-to-weight mapping has been implemented, with an
 important correction made to its core formula. Fairness considerations in
 ``scheduler_set_thread_priority()`` (via virtual runtime and lag adjustments)

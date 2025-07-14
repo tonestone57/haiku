@@ -12,10 +12,6 @@
 using namespace Scheduler;
 
 
-// Note: The static arrays sQuantumLengths and sMaximumQuantumLengths,
-// and the static methods ThreadData::ComputeQuantumLengths() and
-// ThreadData::_ScaleQuantum() have been removed as they are dead code
-// with the new DTQ+MLFQ-RR scheduler design.
 
 // Constants for DTQ calculation in power saving mode
 static const float POWER_SAVING_DTQ_IDLE_CPU_THRESHOLD = 0.05f;
@@ -50,7 +46,6 @@ ThreadData::_InitBase()
 	fEnqueued = false;
 	fReady = false;
 
-	// MLFQ specific (REMOVED)
 
 
 	// Load estimation
@@ -479,7 +474,6 @@ ThreadData::Dump() const
 	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", fEligibleTime);
 	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", fSliceDuration);
 	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", fVirtualRuntime);
-	// kprintf("\t  latency_nice:\t\t%d\n", fLatencyNice); // Removed
 }
 
 

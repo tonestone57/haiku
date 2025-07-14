@@ -103,15 +103,12 @@ static const float kDynamicIrqLoadMaxFactor = 1.25f; // Max % of base load for a
 static const int32 kDynamicIrqLoadAbsoluteMin = 50;  // Absolute minimum IRQ load capacity
 
 
-// ThreadRunQueue::Dump() is removed as ThreadRunQueue is removed.
-// A new dump method for EevdfRunQueue will be part of DebugDumper.
 
 static const int MAX_PEEK_ELIGIBLE_CANDIDATES = 3;
 
 
 CPUEntry::CPUEntry()
 	:
-	// fMlfqHighestNonEmptyLevel is removed.
 	fIdleThread(NULL),
 	fMinVirtualRuntime(0),
 	fLoad(0),
@@ -316,7 +313,6 @@ CPUEntry::AddThread(ThreadData* thread)
 	atomic_add(&fTotalThreadCount, 1);
 	fEevdfRunQueueTaskCount.fetch_add(1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
-	// fMlfqHighestNonEmptyLevel logic removed.
 }
 
 
@@ -336,7 +332,6 @@ CPUEntry::RemoveThread(ThreadData* thread)
 		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
 	}
-	// fMlfqHighestNonEmptyLevel logic removed.
 }
 
 

@@ -24,14 +24,13 @@
 #include <util/Random.h>
 #include <util/DoublyLinkedList.h>
 #include <algorithm>
-#include <math.h> // For roundf, pow
+#include <math.h> // For roundf
 #include <thread.h>
 #include <kernel/thread.h>
 
 #include <stdlib.h> // For strtoul
 #include <stdio.h>  // For kprintf, snprintf (though kprintf is kernel specific)
 
-// #include <UserTeamCapabilities.h> // Temporarily commented out
 
 #include "scheduler_common.h"
 #include "scheduler_cpu.h"
@@ -42,6 +41,7 @@
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
 #include "scheduler_team.h"
+#include "scheduler_weights.h"
 #include "EevdfRunQueue.h"
 #include <thread_defs.h>
 
@@ -71,62 +71,8 @@
 static const int32 kNewMinActiveWeight = 15; // Similar to current gNiceToWeight[39], a floor for active threads.
 static const int32 kNewMaxWeightCap = 35000000;
 
-// The new weight table and its initialization function
-static int32 gHaikuContinuousWeights[B_REAL_TIME_PRIORITY + 1];
-
-// Prototype function to calculate weights (uses double for precision during generation)
-static int32
-calculate_continuous_haiku_weight_prototype(int32 priority)
-{
-	if (priority == B_IDLE_PRIORITY) // 0
-		return 1; // Smallest distinct weight for idle
-	if (priority > B_IDLE_PRIORITY && priority < B_LOWEST_ACTIVE_PRIORITY) // Priorities 1-4
-		return 2 + (priority - 1) * 2; // Small, distinct weights: 2, 4, 6, 8
-
-	int32 calcPrio = priority;
-	if (calcPrio < B_LOWEST_ACTIVE_PRIORITY) calcPrio = B_LOWEST_ACTIVE_PRIORITY;
-	if (calcPrio > B_REAL_TIME_PRIORITY) calcPrio = B_REAL_TIME_PRIORITY; // Clamp to max valid prio
-
-	const double haiku_priority_step_factor = 1.091507805494422;
-	double weight_fp;
-	int exponent = calcPrio - B_NORMAL_PRIORITY;
-	weight_fp = (double)SCHEDULER_WEIGHT_SCALE * pow(haiku_priority_step_factor, exponent);
-
-	if (calcPrio >= B_REAL_TIME_PRIORITY) {
-		weight_fp *= 4.0;
-	} else if (calcPrio >= B_URGENT_PRIORITY) {
-		weight_fp *= 2.5;
-	} else if (calcPrio >= B_REAL_TIME_PRIORITY) {
-		weight_fp *= 1.5;
-	} else if (calcPrio >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		weight_fp *= 1.2;
-	}
-
-	int32 calculated_weight = static_cast<int32>(round(weight_fp));
-
-	if (calculated_weight < kNewMinActiveWeight && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
-		calculated_weight = kNewMinActiveWeight;
-	if (calculated_weight > kNewMaxWeightCap)
-		calculated_weight = kNewMaxWeightCap;
-
-	if (calculated_weight <= 1 && calcPrio >= B_LOWEST_ACTIVE_PRIORITY)
-		calculated_weight = kNewMinActiveWeight;
-
-	return calculated_weight;
-}
-
-static void
-_init_continuous_weights()
-{
-	dprintf("Scheduler: Initializing continuous weights table...\n");
-	for (int32 i = 0; i <= B_REAL_TIME_PRIORITY; i++) { // Iterate up to and including B_REAL_TIME_PRIORITY
-		gHaikuContinuousWeights[i] = calculate_continuous_haiku_weight_prototype(i);
-	}
-	gHaikuContinuousWeights[B_IDLE_PRIORITY] = 1; // Ensure idle is minimal after loop
-	dprintf("Scheduler: Continuous weights table initialized.\n");
-}
-
-static const bool kUseContinuousWeights = true;
+// Removido: gHaikuContinuousWeights, _init_continuous_weights, kUseContinuousWeights
+// A lógica de peso agora está encapsulada em scheduler_weights.cpp.
 
 
 
@@ -240,46 +186,6 @@ static timer gQuotaResetTimer;
 bigtime_t gGlobalMinTeamVRuntime = 0;
 
 
-static int
-cmd_dump_eevdf_weights(int argc, char** argv)
-{
-	kprintf("Haiku Priority to EEVDF Weight Mapping (Continuous Prototype):\n");
-	kprintf("Prio | Weight     | Ratio to Prev | Notes\n");
-	kprintf("-----|------------|---------------|------------------------------------\n");
-
-	int32 previousWeight = 0;
-
-	for (int32 prio = 0; prio < B_REAL_TIME_PRIORITY; prio++) {
-		int32 currentWeight = gHaikuContinuousWeights[prio];
-		char notes[80] = "";
-		char ratioStr[16] = "N/A";
-
-		if (prio == B_IDLE_PRIORITY && currentWeight == 1) {
-		} else if (prio > B_IDLE_PRIORITY && prio < B_LOWEST_ACTIVE_PRIORITY && currentWeight == (2 + (prio - 1) * 2)) {
-		} else if (prio >= B_LOWEST_ACTIVE_PRIORITY && currentWeight == kNewMinActiveWeight) {
-			snprintf(notes, sizeof(notes), "At kNewMinActiveWeight (%d)", kNewMinActiveWeight);
-		} else if (currentWeight == kNewMaxWeightCap) {
-			snprintf(notes, sizeof(notes), "At kNewMaxWeightCap (%d)", kNewMaxWeightCap);
-		}
-
-		if (prio > 0 && previousWeight > 0) {
-			double ratio = (double)currentWeight / previousWeight;
-			snprintf(ratioStr, sizeof(ratioStr), "%.3fx", ratio);
-		} else if (prio > 0 && currentWeight > 0 && previousWeight == 0) {
-			snprintf(ratioStr, sizeof(ratioStr), "Inf");
-		}
-
-		kprintf("%4" B_PRId32 " | %10" B_PRId32 " | %13s | %s\n", prio, currentWeight, ratioStr, notes);
-		previousWeight = currentWeight;
-	}
-	kprintf("-----|------------|---------------|------------------------------------\n");
-	kprintf("Note: SCHEDULER_WEIGHT_SCALE = %d\n", SCHEDULER_WEIGHT_SCALE);
-	kprintf("      kNewMinActiveWeight = %d, kNewMaxWeightCap = %d\n", kNewMinActiveWeight, kNewMaxWeightCap);
-	kprintf("      Base scaling factor per Haiku prio point: ~%.5f\n", 1.0915078);
-	kprintf("      RT Multipliers: >=20: 1.2x; >=30: 1.5x; >=100: 2.5x; >=120: 4.0x (applied to base exponential)\n");
-
-	return 0;
-}
 
 
 class ThreadEnqueuer : public ThreadProcessing {
@@ -395,8 +301,6 @@ static CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusie
 #if SCHEDULER_TRACING
 static int cmd_scheduler(int argc, char** argv);
 #endif
-// static int cmd_scheduler_set_kdf(int argc, char** argv); // REMOVED
-// static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
@@ -423,11 +327,16 @@ _find_idle_cpu_on_core(CoreEntry* core)
 
 static timer sLoadBalanceTimer;
 static bigtime_t gDynamicLoadBalanceInterval = kInitialLoadBalanceInterval;
-static const bigtime_t kMinTimeBetweenMigrations = 20000;
-static const int32 kIOBoundScorePenaltyFactor = 2;
-static const int32 kBenefitScoreLagFactor = 1;
-static const int32 kBenefitScoreEligFactor = 2;
-static const bigtime_t kMinUnweightedNormWorkToSteal = 500;
+// minimum time between two migrations of the same thread
+static const bigtime_t kMinTimeBetweenMigrations = 10000;
+// penalty factor for I/O bound threads
+static const int32 kIOBoundScorePenaltyFactor = 4;
+// factor for lag in benefit score
+static const int32 kBenefitScoreLagFactor = 2;
+// factor for eligibility improvement in benefit score
+static const int32 kBenefitScoreEligFactor = 1;
+// minimum unweighted normalized work to steal
+static const bigtime_t kMinUnweightedNormWorkToSteal = 1000;
 
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
@@ -1790,10 +1699,6 @@ _scheduler_init_kdf_debug_commands()
 #if SCHEDULER_TRACING
 	add_debugger_command_etc("scheduler", &cmd_scheduler, "Analyze scheduler tracing information", "<thread>\n...", 0);
 #endif
-	// add_debugger_command_etc("scheduler_set_kdf", &cmd_scheduler_set_kdf, "Set ... gKernelKDistFactor ...", "<factor>\n...", 0); // REMOVED
-	// add_debugger_command_alias("set_kdf", "scheduler_set_kdf", "Alias for scheduler_set_kdf"); // REMOVED
-	// add_debugger_command_etc("scheduler_get_kdf", &cmd_scheduler_get_kdf, "Get ... gKernelKDistFactor ...", "...", 0); // REMOVED
-	// add_debugger_command_alias("get_kdf", "scheduler_get_kdf", "Alias for scheduler_get_kdf"); // REMOVED
 	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor, "Set ... SMT conflict factor.", "<factor>\n...", 0);
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
@@ -1806,7 +1711,7 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("set_exhaustion_policy", "scheduler_set_exhaustion_policy", "Alias for scheduler_set_exhaustion_policy");
 	add_debugger_command_etc("scheduler_get_exhaustion_policy", &cmd_scheduler_get_exhaustion_policy, "Get ... team quota exhaustion policy.", "...", 0);
 	add_debugger_command_alias("get_exhaustion_policy", "scheduler_get_exhaustion_policy", "Alias for scheduler_get_exhaustion_policy");
-	add_debugger_command_etc("dump_eevdf_weights", &cmd_dump_eevdf_weights, "Dump ... EEVDF weight mapping table.", "\n...", 0);
+	// Removido: dump_eevdf_weights
 }
 
 
@@ -1855,7 +1760,7 @@ scheduler_init()
 
 	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
 	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod, B_PERIODIC_TIMER);
-	_init_continuous_weights();
+	scheduler_init_weights();
 }
 
 
@@ -1865,28 +1770,6 @@ scheduler_init()
 static const double SMT_DEBUG_MIN_FACTOR = 0.0;
 static const double SMT_DEBUG_MAX_FACTOR = 1.0;
 
-/* // REMOVED KDF Commands
-static int
-cmd_scheduler_set_kdf(int argc, char** argv)
-{
-	if (argc != 2) { kprintf("Usage: scheduler_set_kdf <factor (float)>\n"); return B_KDEBUG_ERROR; }
-	char* endPtr;
-	double newFactor = strtod(argv[1], &endPtr);
-	if (argv[1] == endPtr || *endPtr != '\0') { kprintf("Error: Invalid float value for factor: %s\n", argv[1]); return B_KDEBUG_ERROR; }
-	if (newFactor < KDF_DEBUG_MIN_FACTOR || newFactor > KDF_DEBUG_MAX_FACTOR) { kprintf("Error: factor %f is out of reasonable range [%.1f - %.1f]. Value not changed.\n", newFactor, KDF_DEBUG_MIN_FACTOR, KDF_DEBUG_MAX_FACTOR); return B_KDEBUG_ERROR; }
-	Scheduler::gKernelKDistFactor = (float)newFactor;
-	kprintf("Scheduler gKernelKDistFactor set to: %f (EEVDF: effect may change from MLFQ DTQ)\n", Scheduler::gKernelKDistFactor);
-	return 0;
-}
-
-static int
-cmd_scheduler_get_kdf(int argc, char** argv)
-{
-	if (argc != 1) { kprintf("Usage: scheduler_get_kdf\n"); return B_KDEBUG_ERROR; }
-	kprintf("Current scheduler gKernelKDistFactor: %f (EEVDF: effect may change from MLFQ DTQ)\n", Scheduler::gKernelKDistFactor);
-	return 0;
-}
-*/
 
 static int
 cmd_scheduler_set_smt_factor(int argc, char** argv)
@@ -2686,7 +2569,8 @@ scheduler_perform_load_balance()
 									  + (kBenefitScoreEligFactor * eligibilityImprovementWallClock)
 									  + typeCompatibilityBonus
 									  + affinityBonusWallClock
-									  + targetCpuIdleBonus;
+									  + targetCpuIdleBonus
+									  - (queueDepthPenalty > 0 ? queueDepthPenalty : 0);
 
 		bigtime_t teamQuotaPenalty = 0;
 		Thread* candidateThread = candidate->GetThread();

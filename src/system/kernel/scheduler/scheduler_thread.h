@@ -45,7 +45,7 @@
 
 namespace Scheduler {
 
-extern int32* gHaikuContinuousWeights;
+extern int32 gHaikuContinuousWeights[B_REAL_TIME_PRIORITY + 1];
 
 static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
     const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);

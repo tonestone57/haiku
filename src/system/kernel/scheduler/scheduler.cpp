@@ -65,11 +65,6 @@
 // EEVDF Specific Defines (Initial values, require tuning)
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
-namespace Scheduler {
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
-bool gSchedulerElasticQuotaMode = true;
-}
-
 // --- New Continuous Weight Calculation Logic ---
 
 // Minimum and maximum weights for the new scheme
@@ -1626,12 +1621,10 @@ init()
 }
 
 
-namespace Scheduler {
 // Global minimum virtual runtime for the system
 bigtime_t gGlobalMinVirtualRuntime = 0;
 spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
 int64 gReportedCpuMinVR[SMP_MAX_CPUS];
-}
 
 
 static void

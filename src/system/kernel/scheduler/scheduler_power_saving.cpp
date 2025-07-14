@@ -8,10 +8,6 @@
 #include "scheduler_modes.h"
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
-
-namespace Scheduler {
-bigtime_t sSmallTaskCoreDesignationTime = 0;
-}
 #include <kernel.h> // For debug output, system_time, etc.
 
 

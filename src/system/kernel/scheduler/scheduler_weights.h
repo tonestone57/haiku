@@ -7,12 +7,15 @@
 
 #include <OS.h>
 
+namespace BKernel {
+	struct Thread;
+}
+
 namespace Scheduler {
 	class CPUEntry;
 }
-struct Thread;
 
 void scheduler_init_weights();
-int32 scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu = NULL);
+int32 scheduler_priority_to_weight(BKernel::Thread* thread, Scheduler::CPUEntry* cpu = NULL);
 
 #endif // _SCHEDULER_WEIGHTS_H_

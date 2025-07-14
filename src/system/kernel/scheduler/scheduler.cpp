@@ -1630,10 +1630,12 @@ init()
 }
 
 
+namespace Scheduler {
 // Global minimum virtual runtime for the system
 bigtime_t gGlobalMinVirtualRuntime = 0;
 spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
 int64 gReportedCpuMinVR[SMP_MAX_CPUS];
+}
 
 
 static void

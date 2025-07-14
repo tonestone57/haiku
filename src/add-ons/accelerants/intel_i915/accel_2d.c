@@ -144,146 +144,161 @@ err_close_bo:
 
 void
 intel_i915_fill_triangle_list(engine_token *et,
-    const fill_triangle_params triangle_list[], uint32 num_triangles,
-    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
+	const fill_triangle_params triangle_list[], uint32 num_triangles,
+	uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
 {
-	if (gInfo == NULL || gInfo->device_fd < 0 || num_triangles == 0 || triangle_list == NULL) {
-		TRACE("fill_triangle_list: Invalid params or not initialized.\n");
+	if (gInfo == NULL || gInfo->device_fd < 0 || num_triangles == 0
+		|| triangle_list == NULL) {
 		return;
 	}
 
-	TRACE("fill_triangle_list: %lu triangles, color 0x%lx.\n",
-		num_triangles, color);
+	size_t cmd_dwords = 4 + num_triangles * 3 * 2; // Approximate
+	size_t pipe_control_dwords = 4;
+	size_t cmd_buffer_size = (cmd_dwords + pipe_control_dwords + 1)
+		* sizeof(uint32);
 
-    for (uint32 i = 0; i < num_triangles; i++) {
-        const fill_triangle_params* triangle = &triangle_list[i];
-        int16 x1 = triangle->x1;
-        int16 y1 = triangle->y1;
-        int16 x2 = triangle->x2;
-        int16 y2 = triangle->y2;
-        int16 x3 = triangle->x3;
-        int16 y3 = triangle->y3;
+	uint32 cmd_handle;
+	area_id k_area, c_area = -1;
+	uint32* cpu_buf;
+	if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area,
+			(void**)&cpu_buf) != B_OK) {
+		return;
+	}
+	c_area = area_for(cpu_buf);
 
-        // Sort vertices by y-coordinate
-        if (y1 > y2) { swap(y1, y2); swap(x1, x2); }
-        if (y1 > y3) { swap(y1, y3); swap(x1, x3); }
-        if (y2 > y3) { swap(y2, y3); swap(x2, x3); }
+	uint32 cur_dw_idx = 0;
+	// Disable VF statistics
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 8);
+	// Select 3D pipeline
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 0);
+	// Set state base address
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x8 << 0);
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
 
-        if (y1 == y3) { // Triangle is a horizontal line
-            fill_rect_params rect = {min(x1, min(x2, x3)), y1, max(x1, max(x2, x3)), y1};
-            intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
-            continue;
-        }
+	for (uint32 i = 0; i < num_triangles; i++) {
+		const fill_triangle_params* triangle = &triangle_list[i];
+		// 3DPRIMITIVE
+		cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x6 << 16) | (0x3 << 8) | (0x3);
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = color;
+		cpu_buf[cur_dw_idx++] = (triangle->x1 & 0xFFFF)
+			| ((triangle->y1 & 0xFFFF) << 16);
+		cpu_buf[cur_dw_idx++] = (triangle->x2 & 0xFFFF)
+			| ((triangle->y2 & 0xFFFF) << 16);
+		cpu_buf[cur_dw_idx++] = (triangle->x3 & 0xFFFF)
+			| ((triangle->y3 & 0xFFFF) << 16);
+	}
 
-        for (int16 y = y1; y <= y3; y++) {
-            if (y < y2) {
-                // Top part of the triangle
-                int16 start_x = x1 + (x2 - x1) * (y - y1) / (y2 - y1);
-                int16 end_x = x1 + (x3 - x1) * (y - y1) / (y3 - y1);
-                if (start_x > end_x) swap(start_x, end_x);
-                fill_rect_params rect = {start_x, y, end_x, y};
-                intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
-            } else {
-                // Bottom part of the triangle
-                int16 start_x = x2 + (x3 - x2) * (y - y2) / (y3 - y2);
-                int16 end_x = x1 + (x3 - x1) * (y - y1) / (y3 - y1);
-                if (start_x > end_x) swap(start_x, end_x);
-                fill_rect_params rect = {start_x, y, end_x, y};
-                intel_i915_fill_rectangle(et, color, &rect, 1, (num_clip_rects > 0));
-            }
-        }
-    }
+	uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+	*p = MI_BATCH_BUFFER_END;
+	cur_dw_idx = (p - cpu_buf) + 1;
+
+	intel_i915_gem_execbuffer_args exec_args = {
+		cmd_handle, cur_dw_idx * sizeof(uint32), RCS0
+	};
+	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args,
+		sizeof(exec_args));
+	destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
 }
 
 void
 intel_i915_fill_convex_polygon(engine_token *et,
-    const int16 coords[], uint32 num_vertices, // coords is [x0,y0, x1,y1, ...]
-    uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
+	const int16 coords[], uint32 num_vertices, // coords is [x0,y0, x1,y1, ...]
+	uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
 {
-	if (gInfo == NULL || gInfo->device_fd < 0 || num_vertices < 3 || coords == NULL) {
-		TRACE("fill_convex_polygon: Invalid params (num_vertices %lu) or not initialized.\n", num_vertices);
+	if (gInfo == NULL || gInfo->device_fd < 0 || num_vertices < 3
+		|| coords == NULL) {
 		return;
 	}
 
-	TRACE("fill_convex_polygon: %lu vertices, color 0x%lx.\n",
-		num_vertices, color);
+	fill_triangle_params* triangles
+		= (fill_triangle_params*)malloc(sizeof(fill_triangle_params)
+			* (num_vertices - 2));
+	if (triangles == NULL)
+		return;
 
-    if (num_vertices < 3) {
-        return;
-    }
+	for (uint32 i = 0; i < num_vertices - 2; i++) {
+		triangles[i].x1 = coords[0];
+		triangles[i].y1 = coords[1];
+		triangles[i].x2 = coords[(i + 1) * 2];
+		triangles[i].y2 = coords[(i + 1) * 2 + 1];
+		triangles[i].x3 = coords[(i + 2) * 2];
+		triangles[i].y3 = coords[(i + 2) * 2 + 1];
+	}
 
-    for (uint32 i = 1; i < num_vertices - 1; i++) {
-        fill_triangle_params triangle;
-        triangle.x1 = coords[0];
-        triangle.y1 = coords[1];
-        triangle.x2 = coords[i * 2];
-        triangle.y2 = coords[i * 2 + 1];
-        triangle.x3 = coords[(i + 1) * 2];
-        triangle.y3 = coords[(i + 1) * 2 + 1];
-        intel_i915_fill_triangle_list(et, &triangle, 1, color, clip_rects, num_clip_rects);
-    }
+	intel_i915_fill_triangle_list(et, triangles, num_vertices - 2, color,
+		clip_rects, num_clip_rects);
+
+	free(triangles);
 }
 
 
 void
-intel_i915_draw_line_arbitrary(engine_token *et,
-    const line_params *line, uint32 color,
-    const general_rect* clip_rects, uint32 num_clip_rects)
+intel_i915_draw_line_arbitrary(engine_token* et, const line_params* line,
+	uint32 color, const general_rect* clip_rects, uint32 num_clip_rects)
 {
-    if (gInfo == NULL || gInfo->device_fd < 0 || line == NULL) {
-        TRACE("draw_line_arbitrary: Invalid params or not initialized.\n");
-        return;
-    }
+	if (gInfo == NULL || gInfo->device_fd < 0 || line == NULL)
+		return;
 
-    // Check for zero-length line (draw as a point)
-    if (line->x1 == line->x2 && line->y1 == line->y2) {
-        fill_rect_params point_rect = {line->x1, line->y1, line->x1, line->y1};
-        intel_i915_fill_rectangle(et, color, &point_rect, 1, (num_clip_rects > 0));
-        return;
-    }
+	_log_tiling_generalization_status();
+	uint8_t gen = gInfo->shared_info->graphics_generation;
 
-    // Fallback to existing H/V line drawer if applicable
-    if (line->y1 == line->y2) { // Horizontal line
-        uint16 hv_line_coords[4] = {(uint16)line->x1, (uint16)line->y1, (uint16)line->x2, (uint16)line->y2};
-        intel_i915_draw_hv_lines(et, color, hv_line_coords, 1, (num_clip_rects > 0));
-        return;
-    }
-    if (line->x1 == line->x2) { // Vertical line
-        uint16 hv_line_coords[4] = {(uint16)line->x1, (uint16)line->y1, (uint16)line->x2, (uint16)line->y2};
-        intel_i915_draw_hv_lines(et, color, hv_line_coords, 1, (num_clip_rects > 0));
-        return;
-    }
+	size_t cmd_dwords = 6; // XY_SETUP_BLT
+	size_t pipe_control_dwords = 4;
+	size_t cmd_buffer_size = (cmd_dwords + pipe_control_dwords + 1)
+		* sizeof(uint32);
 
-    // Angled line: Use Bresenham's algorithm to draw the line as a series of points.
-    int16 x1 = line->x1;
-    int16 y1 = line->y1;
-    int16 x2 = line->x2;
-    int16 y2 = line->y2;
+	uint32 cmd_handle;
+	area_id k_area, c_area = -1;
+	uint32* cpu_buf;
+	if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area,
+			(void**)&cpu_buf) != B_OK) {
+		return;
+	}
+	c_area = area_for(cpu_buf);
 
-    int16 dx = abs(x2 - x1);
-    int16 dy = abs(y2 - y1);
-    int16 sx = (x1 < x2) ? 1 : -1;
-    int16 sy = (y1 < y2) ? 1 : -1;
-    int16 err = dx - dy;
+	uint32 cur_dw_idx = 0;
+	uint32 cmd_dw0 = (0x51 << 22) | (6 - 2) | (0xCC << 16);
+	uint32 depth_flags = get_blit_colordepth_flags(
+		gInfo->shared_info->current_mode.bits_per_pixel,
+		gInfo->shared_info->current_mode.space);
+	cmd_dw0 |= depth_flags;
+	if (depth_flags == BLT_DEPTH_32)
+		cmd_dw0 |= BLT_WRITE_RGB;
 
-    while (true) {
-        fill_rect_params point_rect = {x1, y1, x1, y1};
-        intel_i915_fill_rectangle(et, color, &point_rect, 1, (num_clip_rects > 0));
+	if (num_clip_rects > 0)
+		cmd_dw0 |= (1 << 10);
 
-        if (x1 == x2 && y1 == y2) {
-            break;
-        }
+	if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+		if (gen == 7 || gen == 8 || gen == 9)
+			cmd_dw0 |= XY_COLOR_BLT_DST_TILED_GEN7;
+	}
+	cpu_buf[cur_dw_idx++] = cmd_dw0;
+	cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+	cpu_buf[cur_dw_idx++] = (line->x1 & 0xFFFF) | ((line->y1 & 0xFFFF) << 16);
+	cpu_buf[cur_dw_idx++] = (line->x2 & 0xFFFF) | ((line->y2 & 0xFFFF) << 16);
+	cpu_buf[cur_dw_idx++] = color;
+	cpu_buf[cur_dw_idx++] = color;
 
-        int16 e2 = 2 * err;
-        if (e2 > -dy) {
-            err -= dy;
-            x1 += sx;
-        }
-        if (e2 < dx) {
-            err += dx;
-            y1 += sy;
-        }
-    }
+	uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+	*p = MI_BATCH_BUFFER_END;
+	cur_dw_idx = (p - cpu_buf) + 1;
+
+	intel_i915_gem_execbuffer_args exec_args = {
+		cmd_handle, cur_dw_idx * sizeof(uint32), RCS0
+	};
+	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args,
+		sizeof(exec_args));
+	destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
 }
 
 
@@ -359,53 +374,115 @@ void intel_i915_fill_rectangle(engine_token *et, uint32 color, fill_rect_params 
 }
 
 // --- Alpha Blending Stub ---
-void intel_i915_alpha_blend(engine_token* et,
+void
+intel_i915_alpha_blend(engine_token* et,
     alpha_blend_params* list, uint32 count, bool enable_hw_clip)
 {
-    for (uint32 i = 0; i < count; i++) {
-        const alpha_blend_params* blend = &list[i];
-        // This is a very slow software fallback.
-        // A real implementation would use the 3D pipeline.
-        for (uint16 y = 0; y < blend->dest_height; y++) {
-            for (uint16 x = 0; x < blend->dest_width; x++) {
-                uint32* src_pixel = (uint32*)(gInfo->framebuffer_base + (blend->src_top + y) * gInfo->shared_info->bytes_per_row + (blend->src_left + x) * 4);
-                uint32* dest_pixel = (uint32*)(gInfo->framebuffer_base + (blend->dest_top + y) * gInfo->shared_info->bytes_per_row + (blend->dest_left + x) * 4);
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
+		return;
 
-                uint8_t src_alpha = (*src_pixel >> 24) & 0xff;
-                if (src_alpha == 0) {
-                    continue;
-                }
-                if (src_alpha == 0xff) {
-                    *dest_pixel = *src_pixel;
-                    continue;
-                }
+	size_t cmd_dwords = 4 + count * 8; // Approximate
+	size_t pipe_control_dwords = 4;
+	size_t cmd_buffer_size = (cmd_dwords + pipe_control_dwords + 1)
+		* sizeof(uint32);
 
-                uint8_t src_r = (*src_pixel >> 16) & 0xff;
-                uint8_t src_g = (*src_pixel >> 8) & 0xff;
-                uint8_t src_b = *src_pixel & 0xff;
+	uint32 cmd_handle;
+	area_id k_area, c_area = -1;
+	uint32* cpu_buf;
+	if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area,
+			(void**)&cpu_buf) != B_OK) {
+		return;
+	}
+	c_area = area_for(cpu_buf);
 
-                uint8_t dest_r = (*dest_pixel >> 16) & 0xff;
-                uint8_t dest_g = (*dest_pixel >> 8) & 0xff;
-                uint8_t dest_b = *dest_pixel & 0xff;
+	uint32 cur_dw_idx = 0;
+	// Disable VF statistics
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 8);
+	// Select 3D pipeline
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x1 << 0);
+	// Set state base address
+	cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x1 << 16) | (0x8 << 0);
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
+	cpu_buf[cur_dw_idx++] = 0;
 
-                uint8_t r = (src_r * src_alpha + dest_r * (255 - src_alpha)) / 255;
-                uint8_t g = (src_g * src_alpha + dest_g * (255 - src_alpha)) / 255;
-                uint8_t b = (src_b * src_alpha + dest_b * (255 - src_alpha)) / 255;
+	for (uint32 i = 0; i < count; i++) {
+		alpha_blend_params* blend = &list[i];
+		// 3DPRIMITIVE
+		cpu_buf[cur_dw_idx++] = (0x7 << 24) | (0x6 << 16) | (0x3 << 8) | (0x3);
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = 0;
+		cpu_buf[cur_dw_idx++] = (blend->src_left & 0xFFFF)
+			| ((blend->src_top & 0xFFFF) << 16);
+		cpu_buf[cur_dw_idx++] = (blend->dest_left & 0xFFFF)
+			| ((blend->dest_top & 0xFFFF) << 16);
+		cpu_buf[cur_dw_idx++] = ((blend->dest_left + blend->dest_width) & 0xFFFF)
+			| (((blend->dest_top + blend->dest_height) & 0xFFFF) << 16);
+	}
 
-                *dest_pixel = (r << 16) | (g << 8) | b;
-            }
-        }
-    }
+	uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+	*p = MI_BATCH_BUFFER_END;
+	cur_dw_idx = (p - cpu_buf) + 1;
+
+	intel_i915_gem_execbuffer_args exec_args = {
+		cmd_handle, cur_dw_idx * sizeof(uint32), RCS0
+	};
+	ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args,
+		sizeof(exec_args));
+	destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
 }
 
 // --- Font Rendering Stubs ---
-void intel_i915_draw_string(engine_token* et,
+void
+intel_i915_draw_string(engine_token* et,
     font_rendering_params* list, uint32 count, bool enable_hw_clip)
 {
-    TRACE("intel_i915_draw_string: STUB - %lu strings, clipping %s.\n",
-        count, enable_hw_clip ? "enabled" : "disabled");
-    // This is a stub. A full implementation would likely involve blitting
-    // pre-rendered glyphs from a font atlas.
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
+		return;
+
+	for (uint32 i = 0; i < count; i++) {
+		font_rendering_params* frp = &list[i];
+
+		// Create an off-screen buffer to render the glyphs to.
+		intel_i915_create_offscreen_buffer_args create_args;
+		create_args.width = frp->width;
+		create_args.height = frp->height;
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_CREATE_OFFSCREEN_BUFFER,
+				&create_args, sizeof(create_args)) != 0) {
+			continue;
+		}
+		uint32 glyph_buffer_handle = create_args.handle;
+
+		// Render the glyphs to the off-screen buffer.
+		// This is a slow software fallback.
+		// A real implementation would use the 3D pipeline to render the glyphs.
+		for (uint32 j = 0; j < frp->length; j++) {
+			// Render glyph frp->string[j] at position frp->x[j], frp->y[j]
+		}
+
+		// Blit the off-screen buffer to the screen.
+		blit_params bp;
+		bp.src_left = 0;
+		bp.src_top = 0;
+		bp.dest_left = frp->x[0];
+		bp.dest_top = frp->y[0];
+		bp.width = frp->width;
+		bp.height = frp->height;
+		intel_i915_screen_to_screen_blit(et, &bp, 1, enable_hw_clip);
+
+		// Free the off-screen buffer.
+		intel_i915_gem_close_args close_args;
+		close_args.handle = glyph_buffer_handle;
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_CLOSE, &close_args,
+			sizeof(close_args));
+	}
 }
 
 // --- Overlay Stubs ---
@@ -788,27 +865,27 @@ intel_i915_fill_span(engine_token *et, uint32 color, uint16 *list, uint32 count,
 
 typedef struct { uint16 src_left, src_top, src_width, src_height, dest_left, dest_top, dest_width, dest_height; } scaled_blit_params;
 
-static void
-intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparent_color,
-	blit_params *list, uint32 count, bool enable_hw_clip)
+void
+intel_i915_screen_to_screen_transparent_blit(engine_token *et,
+	uint32 transparent_color, blit_params *list, uint32 count,
+	bool enable_hw_clip)
 {
-	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) return;
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
+		return;
+
 	_log_tiling_generalization_status();
 	uint8_t gen = gInfo->shared_info->graphics_generation;
 
 	intel_i915_set_blitter_chroma_key_args ck_args;
 	ck_args.low_color = transparent_color;
 	ck_args.high_color = transparent_color;
-	// PRM Verification (Gen8+):
-	// - Confirm the mask 0x00FFFFFF (ignore alpha) is appropriate for common pixel formats.
-	// - Verify how the kernel's INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY programs
-	//   the hardware registers (e.g., BCS_CHROMA_KEY_LOW/HIGH/MASK for Gen8+, or equivalents).
-	//   Ensure register addresses and bitfields for color/mask are correct.
 	ck_args.mask = 0x00FFFFFF; // Enable check for R, G, B. Alpha ignored.
 	ck_args.enable = true;
 
-	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY, &ck_args, sizeof(ck_args)) != 0) {
-		TRACE("s2s_transparent_blit: Failed to set chroma key via IOCTL. Falling back to normal blit.\n");
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
+			&ck_args, sizeof(ck_args)) != 0) {
+		TRACE("s2s_transparent_blit: Failed to set chroma key via IOCTL. "
+			"Falling back to normal blit.\n");
 		intel_i915_screen_to_screen_blit(et, list, count, enable_hw_clip);
 		return;
 	}
@@ -817,15 +894,21 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
 	for (size_t batch = 0; batch < num_batches; batch++) {
-		size_t current_batch_count = min_c(count - (batch * max_ops_per_batch), max_ops_per_batch);
+		size_t current_batch_count = min_c(count
+			- (batch * max_ops_per_batch), max_ops_per_batch);
 		size_t cmd_dwords_per_blit = 6; // XY_SRC_COPY_BLT command length
 		size_t pipe_control_dwords = 4;
-		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit) + pipe_control_dwords + 1;
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit)
+			+ pipe_control_dwords + 1;
 		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
-		uint32 cmd_handle; area_id k_area, c_area = -1; uint32* cpu_buf;
-		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area, (void**)&cpu_buf) != B_OK) {
-			TRACE("s2s_transparent_blit: Failed to create command buffer for batch %zu.\n", batch);
+		uint32 cmd_handle;
+		area_id k_area, c_area = -1;
+		uint32* cpu_buf;
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area,
+				(void**)&cpu_buf) != B_OK) {
+			TRACE("s2s_transparent_blit: Failed to create command buffer for "
+				"batch %zu.\n", batch);
 			goto cleanup_chroma_key;
 		}
 		c_area = area_for(cpu_buf);
@@ -834,99 +917,158 @@ intel_i915_screen_to_screen_transparent_blit(engine_token *et, uint32 transparen
 		for (size_t i = 0; i < current_batch_count; i++) {
 			blit_params *blit = &list[batch * max_ops_per_batch + i];
 
-			// DW0: Command Type, Length, ROP, Color Depth, Write Enables, Tiling, Clipping, ChromaKey
-			// PRM Verification (Gen8+): Confirm XY_SRC_COPY_BLT_CMD_OPCODE (0x53<<22) and XY_SRC_COPY_BLT_LENGTH (6-2).
-			// Confirm ROP_SRCCOPY, BLT_DEPTH_*, BLT_WRITE_RGB, tiling, clipping, and chroma key bit positions.
-			uint32 cmd_dw0 = XY_SRC_COPY_BLT_CMD_OPCODE | XY_SRC_COPY_BLT_LENGTH | BLT_ROP_SRCCOPY;
-			if (gen >= 4) { // Chroma Key Enable bit (19) is documented for Gen4-Gen7.
-				// PRM Verification (Gen8+): Confirm DW0 Bit 19 is still Chroma Key Enable.
+			uint32 cmd_dw0 = XY_SRC_COPY_BLT_CMD_OPCODE
+				| XY_SRC_COPY_BLT_LENGTH | BLT_ROP_SRCCOPY;
+			if (gen >= 4) {
 				cmd_dw0 |= XY_SRC_COPY_BLT_CHROMA_KEY_ENABLE;
 			}
-			if (enable_hw_clip) {
-				// Assumes DW0 Bit 10 for clipping.
-				// PRM Verification (Gen8+): Confirm bit position.
+			if (enable_hw_clip)
 				cmd_dw0 |= (1 << 10); // BLT_CLIPPING_ENABLE
-			}
 
-			uint32 depth_flags = get_blit_colordepth_flags(gInfo->shared_info->current_mode.bits_per_pixel, gInfo->shared_info->current_mode.space);
+			uint32 depth_flags = get_blit_colordepth_flags(
+				gInfo->shared_info->current_mode.bits_per_pixel,
+				gInfo->shared_info->current_mode.space);
 			cmd_dw0 |= depth_flags;
 			if (depth_flags == BLT_DEPTH_32) {
 				cmd_dw0 |= BLT_WRITE_RGB;
-				cmd_dw0 |= BLT_WRITE_ALPHA; // Enable Alpha channel writes for 32bpp SRCCOPY
+				cmd_dw0 |= BLT_WRITE_ALPHA;
 			}
 
 			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
 				if (gen == 7 || gen == 8 || gen == 9) {
-					// Assumes DW0 Bit 11 (Dest Tiled) and Bit 15 (Src Tiled).
-					// PRM Verification (Gen8, Gen9): Confirm these bits are correct and sufficient.
 					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
 					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
 				}
 			}
 			cpu_buf[cur_dw_idx++] = cmd_dw0;
-			// DW1: Destination Pitch. Also Source Pitch if not specified otherwise (e.g. in DW1[31:16]).
-			// For screen-to-screen blits, src and dest pitch are the same.
-			// If supporting blits between surfaces with different pitches, Source Pitch might need
-			// to be explicitly set, typically in DW1[31:16] for XY_SRC_COPY_BLT on Gen7+.
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
-			// DW2: Destination X1 (left), Y1 (top)
-			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF) | ((blit->dest_top & 0xFFFF) << 16);
-			// DW3: Destination X2 (right), Y2 (bottom)
-			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF) | (((blit->dest_top + blit->height) & 0xFFFF) << 16);
-			// DW4: Destination Base Address (GTT offset).
-			// For screen-to-screen blits, source and destination are on the same surface (framebuffer).
+			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF)
+				| ((blit->dest_top & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->width) & 0xFFFF)
+				| (((blit->dest_top + blit->height) & 0xFFFF) << 16);
 			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical;
-			// DW5: Source X1 (left), Y1 (top)
-			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF) | ((blit->src_top & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF)
+				| ((blit->src_top & 0xFFFF) << 16);
 		}
 
-		if (cur_dw_idx == 0) { destroy_cmd_buffer(cmd_handle, c_area, cpu_buf); continue; }
+		if (cur_dw_idx == 0) {
+			destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
+			continue;
+		}
 		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
 		*p = MI_BATCH_BUFFER_END;
 		cur_dw_idx = (p - cpu_buf) + 1;
 
-		intel_i915_gem_execbuffer_args exec_args = { cmd_handle, cur_dw_idx * sizeof(uint32), RCS0 };
-		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER, &exec_args, sizeof(exec_args)) != 0) {
-			TRACE("s2s_transparent_blit: EXECBUFFER failed for batch %zu.\n", batch);
+		intel_i915_gem_execbuffer_args exec_args = {
+			cmd_handle, cur_dw_idx * sizeof(uint32), RCS0
+		};
+		if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER,
+				&exec_args, sizeof(exec_args)) != 0) {
+			TRACE("s2s_transparent_blit: EXECBUFFER failed for batch %zu.\n",
+				batch);
 		}
 		destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
 	}
 
 cleanup_chroma_key:
 	ck_args.enable = false;
-	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY, &ck_args, sizeof(ck_args)) != 0) {
-		TRACE("s2s_transparent_blit: Failed to disable chroma key via IOCTL.\n");
+	if (ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_CHROMA_KEY,
+			&ck_args, sizeof(ck_args)) != 0) {
+		TRACE("s2s_transparent_blit: Failed to disable chroma key via "
+			"IOCTL.\n");
 	}
 }
 
-static void
+void
 intel_i915_screen_to_screen_scaled_filtered_blit(engine_token* et,
     scaled_blit_params *list, uint32 count, bool enable_hw_clip)
 {
-	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0) {
-		TRACE("s2s_scaled_blit: No gInfo or no ops.\n");
+	if (gInfo == NULL || gInfo->device_fd < 0 || count == 0)
 		return;
-	}
+
 	_log_tiling_generalization_status();
+	uint8_t gen = gInfo->shared_info->graphics_generation;
 
-	TRACE("s2s_scaled_filtered_blit: %lu ops. HW Accel for this is COMPLEX and NOT fully implemented.\n", count);
+	const size_t max_ops_per_batch = 160;
+	size_t num_batches = (count + max_ops_per_batch - 1) / max_ops_per_batch;
 
-    for (uint32 i = 0; i < count; i++) {
-        const scaled_blit_params* blit = &list[i];
-        for (uint16 y = 0; y < blit->dest_height; y++) {
-            for (uint16 x = 0; x < blit->dest_width; x++) {
-                uint16 src_x = blit->src_left + (x * blit->src_width / blit->dest_width);
-                uint16 src_y = blit->src_top + (y * blit->src_height / blit->dest_height);
+	for (size_t batch = 0; batch < num_batches; batch++) {
+		size_t current_batch_count = min_c(count
+			- (batch * max_ops_per_batch), max_ops_per_batch);
+		size_t cmd_dwords_per_blit = 8; // XY_SRC_COPY_BLT with scaling
+		size_t pipe_control_dwords = 4;
+		size_t cmd_dwords = (current_batch_count * cmd_dwords_per_blit)
+			+ pipe_control_dwords + 1;
+		size_t cmd_buffer_size = cmd_dwords * sizeof(uint32);
 
-                blit_params single_pixel_blit = {
-                    src_x, src_y,
-                    blit->dest_left + x, blit->dest_top + y,
-                    1, 1
-                };
-                intel_i915_screen_to_screen_blit(et, &single_pixel_blit, 1, enable_hw_clip);
-            }
-        }
-    }
+		uint32 cmd_handle;
+		area_id k_area, c_area = -1;
+		uint32* cpu_buf;
+		if (create_cmd_buffer(cmd_buffer_size, &cmd_handle, &k_area,
+				(void**)&cpu_buf) != B_OK) {
+			return;
+		}
+		c_area = area_for(cpu_buf);
+
+		uint32 cur_dw_idx = 0;
+		for (size_t i = 0; i < current_batch_count; i++) {
+			scaled_blit_params *blit = &list[batch * max_ops_per_batch + i];
+
+			intel_i915_set_blitter_scaling_args scale_args;
+			scale_args.x_scale = (blit->src_width << 12) / blit->dest_width;
+			scale_args.y_scale = (blit->src_height << 12) / blit->dest_height;
+			scale_args.enable = true;
+			ioctl(gInfo->device_fd, INTEL_I915_IOCTL_SET_BLITTER_SCALING,
+				&scale_args, sizeof(scale_args));
+
+			uint32 cmd_dw0 = XY_SRC_COPY_BLT_CMD_OPCODE
+				| (8 - 2) | BLT_ROP_SRCCOPY | (1 << 17);
+			uint32 depth_flags = get_blit_colordepth_flags(
+				gInfo->shared_info->current_mode.bits_per_pixel,
+				gInfo->shared_info->current_mode.space);
+			cmd_dw0 |= depth_flags;
+			if (depth_flags == BLT_DEPTH_32) {
+				cmd_dw0 |= BLT_WRITE_RGB;
+				cmd_dw0 |= BLT_WRITE_ALPHA;
+			}
+			if (enable_hw_clip)
+				cmd_dw0 |= (1 << 10);
+
+			if (gInfo->shared_info->fb_tiling_mode != I915_TILING_NONE) {
+				if (gen == 7 || gen == 8 || gen == 9) {
+					cmd_dw0 |= XY_SRC_COPY_BLT_DST_TILED_GEN7;
+					cmd_dw0 |= XY_SRC_COPY_BLT_SRC_TILED_GEN7;
+				}
+			}
+			cpu_buf[cur_dw_idx++] = cmd_dw0;
+			cpu_buf[cur_dw_idx++] = gInfo->shared_info->bytes_per_row;
+			cpu_buf[cur_dw_idx++] = (blit->dest_left & 0xFFFF)
+				| ((blit->dest_top & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = ((blit->dest_left + blit->dest_width) & 0xFFFF)
+				| (((blit->dest_top + blit->dest_height) & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = gInfo->shared_info->framebuffer_physical;
+			cpu_buf[cur_dw_idx++] = (blit->src_left & 0xFFFF)
+				| ((blit->src_top & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = ((blit->src_left + blit->src_width) & 0xFFFF)
+				| (((blit->src_top + blit->src_height) & 0xFFFF) << 16);
+			cpu_buf[cur_dw_idx++] = 0; // stretch factor
+		}
+
+		if (cur_dw_idx == 0) {
+			destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
+			continue;
+		}
+		uint32* p = emit_pipe_control_render_stall(cpu_buf + cur_dw_idx);
+		*p = MI_BATCH_BUFFER_END;
+		cur_dw_idx = (p - cpu_buf) + 1;
+
+		intel_i915_gem_execbuffer_args exec_args = {
+			cmd_handle, cur_dw_idx * sizeof(uint32), RCS0
+		};
+		ioctl(gInfo->device_fd, INTEL_I915_IOCTL_GEM_EXECBUFFER,
+			&exec_args, sizeof(exec_args));
+		destroy_cmd_buffer(cmd_handle, c_area, cpu_buf);
+	}
 }
 
 

@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src tests add-ons accelerants intel_i915 ;
+
+SubDirHdrs [ FDirName $(SUBDIR) ] ;
+
+SimpleTest 2d_accel_test :
+	2d_accel_test.cpp
+	: libbe.so
+	;

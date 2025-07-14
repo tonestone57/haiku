@@ -56,10 +56,10 @@ kaby_lake_av1_decode_frame(intel_i915_device_info* devInfo,
 		return status;
 
 	// Offload entropy decoding to the GPU
-	for (uint32_t i = 0; i < frame_info.tile_count; i++) {
+	for (uint32_t i = 0; i < args->slice_count; i++) {
 		struct i915_video_decode_av1_slice_data slice_args;
-		slice_args.slice_data_handle = 0; // TODO: get handle from frame_info
-		slice_args.slice_params_handle = 0; // TODO: get handle from frame_info
+		if (copy_from_user(&slice_args, &args->slices[i], sizeof(slice_args)) != B_OK)
+			return B_BAD_ADDRESS;
 		intel_huc_av1_decode_slice(devInfo,
 			(struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1),
 			(struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1));

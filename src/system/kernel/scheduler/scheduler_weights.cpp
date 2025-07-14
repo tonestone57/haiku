@@ -85,7 +85,7 @@ using namespace BKernel;
 
 
 int32
-scheduler_priority_to_weight(BKernel::Thread* thread, Scheduler::CPUEntry* cpu)
+scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 {
 	if (thread == NULL)
 		return 1;

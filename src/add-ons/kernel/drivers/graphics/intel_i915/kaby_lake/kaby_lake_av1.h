@@ -29,6 +29,8 @@ extern "C" {
 #endif
 
 status_t parse_av1_frame(const uint8* data, size_t size, struct av1_frame_info* frame_info);
+status_t kaby_lake_av1_loop_filter_frame(intel_i915_device_info* devInfo,
+	struct av1_frame_info* frame_info);
 
 #ifdef __cplusplus
 }

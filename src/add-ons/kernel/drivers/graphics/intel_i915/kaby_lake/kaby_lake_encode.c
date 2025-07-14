@@ -239,7 +239,7 @@ kaby_lake_video_encode_ioctl(intel_i915_device_info* devInfo, uint32 op, void* b
 		case INTEL_I915_VIDEO_ENCODE_VP8_FRAME:
 			return intel_i915_video_encode_vp8_frame_ioctl(devInfo, buffer, length);
 		case INTEL_I915_VIDEO_ENCODE_AV1_FRAME:
-			return intel_i915_video_encode_av1_frame_ioctl(devInfo, buffer, length);
+			return kaby_lake_av1_encode_frame(devInfo, (struct av1_encode_frame_info*)buffer);
 		case INTEL_I915_VIDEO_ENCODE_MPEG2_FRAME:
 			return intel_i915_video_encode_mpeg2_frame_ioctl(devInfo, buffer, length);
 		case INTEL_I915_VIDEO_ENCODE_VC1_FRAME:

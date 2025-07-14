@@ -79,7 +79,7 @@ KernelMergeObject kernel_core.o :
 	scheduler_low_latency.cpp
 	scheduler_power_saving.cpp
 
-	: $(TARGET_KERNEL_PIC_CCFLAGS) libroot.so
+	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;
 
 # We need to specify the dependency on the generated syscalls files explicitly.

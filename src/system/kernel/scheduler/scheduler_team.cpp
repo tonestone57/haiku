@@ -1,5 +1,7 @@
 #include "scheduler_team.h"
 #include <kernel.h> // For dprintf or other kernel utilities if needed
+#include "scheduler_locking.h"
+#include "scheduler_cpu.h"
 
 namespace Scheduler {
 

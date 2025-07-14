@@ -20,7 +20,6 @@
 
 static const int32 kNewMinActiveWeight = 15;
 static const int32 kNewMaxWeightCap = 35000000;
-int32* Scheduler::gHaikuContinuousWeights;
 
 
 static int32
@@ -73,7 +72,7 @@ scheduler_init_weights()
 {
 	dprintf("Scheduler: Initializing continuous weights table...\n");
 	int max_prio = sched_get_priority_max(SCHED_RR);
-	Scheduler::gHaikuContinuousWeights = new int32[max_prio + 1];
+	Scheduler::gHaikuContinuousWeights = new(std::nothrow) int32[max_prio + 1];
 	for (int32 i = 0; i <= max_prio; i++) {
 		Scheduler::gHaikuContinuousWeights[i] = calculate_weight(i);
 	}

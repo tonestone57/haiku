@@ -334,7 +334,7 @@ void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
 }	// namespace Scheduler
 
 status_t
-_user_get_thread_nice_value(thread_id thid, int32* _nice)
+_user_get_thread_nice_value(thread_id thid, int* niceValue)
 {
 	// TODO: implement
 	return B_OK;
@@ -342,7 +342,7 @@ _user_get_thread_nice_value(thread_id thid, int32* _nice)
 
 
 status_t
-_user_set_thread_nice_value(thread_id thid, int32 nice)
+_user_set_thread_nice_value(thread_id thid, int niceValue)
 {
 	// TODO: implement
 	return B_OK;
@@ -350,7 +350,7 @@ _user_set_thread_nice_value(thread_id thid, int32 nice)
 
 
 bigtime_t
-_user_estimate_max_scheduling_latency(thread_id thid, bigtime_t* _latency)
+_user_estimate_max_scheduling_latency(thread_id thid)
 {
 	// TODO: implement
 	return 0;

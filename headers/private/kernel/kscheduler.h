@@ -89,8 +89,7 @@ status_t scheduler_loadavg_init();
 void scheduler_enable_scheduling(void);
 void scheduler_update_policy(void);
 
-bigtime_t _user_estimate_max_scheduling_latency(thread_id thread,
-	bigtime_t* _latency);
+bigtime_t _user_estimate_max_scheduling_latency(thread_id thread);
 status_t _user_analyze_scheduling(bigtime_t from, bigtime_t until, void* buffer,
 	size_t size, struct scheduling_analysis* analysis);
 

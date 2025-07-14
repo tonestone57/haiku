@@ -64,6 +64,8 @@ extern "C" {
 #endif
 
 status_t kaby_lake_video_encode_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length);
+status_t kaby_lake_av1_encode_frame(intel_i915_device_info* devInfo,
+	struct av1_encode_frame_info* frame_info);
 
 #ifdef __cplusplus
 }

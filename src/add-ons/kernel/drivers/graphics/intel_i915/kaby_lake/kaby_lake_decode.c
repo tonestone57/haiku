@@ -8,6 +8,7 @@
 
 #include "kaby_lake_decode.h"
 #include "kaby_lake_encode.h"
+#include "kaby_lake_av1.h"
 #include "huc_hevc.h"
 #include "gem_object.h"
 #include "intel_i915_priv.h"
@@ -144,7 +145,12 @@ kaby_lake_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, 
 		case INTEL_I915_VIDEO_DECODE_VP8_FRAME:
 			return intel_i915_video_decode_vp8_frame_ioctl(devInfo, buffer, length);
 		case INTEL_I915_VIDEO_DECODE_AV1_FRAME:
-			return intel_i915_video_decode_av1_frame_ioctl(devInfo, buffer, length);
+		{
+			struct i915_video_decode_av1_frame_data args;
+			if (copy_from_user(&args, buffer, sizeof(args)) != B_OK)
+				return B_BAD_ADDRESS;
+			return kaby_lake_av1_decode_frame(devInfo, (struct av1_frame_info*)args.slices);
+		}
 		case INTEL_I915_VIDEO_DECODE_MPEG2_FRAME:
 			return intel_i915_video_decode_mpeg2_frame_ioctl(devInfo, buffer, length);
 		case INTEL_I915_VIDEO_DECODE_VC1_FRAME:

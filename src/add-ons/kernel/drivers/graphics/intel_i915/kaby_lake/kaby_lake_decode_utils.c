@@ -7,6 +7,7 @@
  */
 
 #include "kaby_lake_decode.h"
+#include "kaby_lake_av1.h"
 #include "huc_hevc.h"
 #include "gem_object.h"
 #include "intel_i915_priv.h"

@@ -45,6 +45,8 @@ KernelAddon intel_i915 :
 	kaby_lake/kaby_lake_decode.c
 	kaby_lake/kaby_lake_encode.c
 	kaby_lake/kaby_lake_decode_utils.c
+	kaby_lake/kaby_lake_av1.c
+	kaby_lake/kaby_lake_av1_encode.c
 	# Ensure intel_i915_priv.h is correctly used by these.
 	: libkernel.a
 ;

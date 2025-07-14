@@ -109,6 +109,8 @@ extern "C" {
 status_t kaby_lake_video_ioctl(intel_i915_device_info* devInfo, uint32 op, void* buffer, size_t length);
 status_t kaby_lake_decode_frame(intel_i915_device_info* devInfo, uint32 codec,
 	const void* slices, uint32 slice_count);
+status_t kaby_lake_av1_decode_frame(intel_i915_device_info* devInfo,
+	struct av1_frame_info* frame_info);
 
 #ifdef __cplusplus
 }

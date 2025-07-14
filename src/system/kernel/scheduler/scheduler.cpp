@@ -2408,6 +2408,7 @@ scheduler_perform_load_balance()
 				candidate->GetThread()->id, representativeTargetCPU->ID(), targetCpuIdleBonus);
 		}
 
+		bigtime_t queueDepthPenalty = 0;
 		bigtime_t currentBenefitScore = (kBenefitScoreLagFactor * lagWallClockOnSource)
 									  + (kBenefitScoreEligFactor * eligibilityImprovementWallClock)
 									  + typeCompatibilityBonus

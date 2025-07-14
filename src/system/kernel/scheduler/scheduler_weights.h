@@ -7,10 +7,11 @@
 
 #include <OS.h>
 
+#include <kernel/thread.h>
+
 namespace Scheduler {
 	class CPUEntry;
 }
-struct Thread;
 
 void scheduler_init_weights();
 int32 scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu = NULL);

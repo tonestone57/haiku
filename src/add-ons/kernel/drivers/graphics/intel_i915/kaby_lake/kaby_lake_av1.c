@@ -9,6 +9,7 @@
 #include "kaby_lake_av1.h"
 #include "kaby_lake_av1_encode.h"
 #include "intel_i915_priv.h"
+#include "huc.h"
 
 #include <aom/aom_decoder.h>
 #include <aom/aomdx.h>
@@ -18,10 +19,14 @@ parse_av1_frame(const uint8* data, size_t size, struct av1_frame_info* frame_inf
 {
 	aom_codec_ctx_t codec;
 	aom_codec_dec_cfg_t cfg = {0};
-	if (aom_codec_dec_init(&codec, aom_codec_av1_dx(), &cfg, 0))
+	if (aom_codec_dec_init(&codec, aom_codec_av1_dx(), &cfg, 0)) {
+		syslog(LOG_ERR, "Failed to initialize AV1 decoder.\n");
 		return B_ERROR;
+	}
 
 	if (aom_codec_decode(&codec, data, size, NULL)) {
+		const char* error = aom_codec_error(&codec);
+		syslog(LOG_ERR, "Failed to decode frame: %s\n", error);
 		aom_codec_destroy(&codec);
 		return B_ERROR;
 	}
@@ -29,6 +34,8 @@ parse_av1_frame(const uint8* data, size_t size, struct av1_frame_info* frame_inf
 	aom_codec_iter_t iter = NULL;
 	aom_image_t* img = aom_codec_get_frame(&codec, &iter);
 	if (img == NULL) {
+		const char* error = aom_codec_error(&codec);
+		syslog(LOG_ERR, "Failed to get frame: %s\n", error);
 		aom_codec_destroy(&codec);
 		return B_ERROR;
 	}
@@ -60,9 +67,21 @@ kaby_lake_av1_decode_frame(intel_i915_device_info* devInfo,
 		struct i915_video_decode_av1_slice_data slice_args;
 		if (copy_from_user(&slice_args, &args->slices[i], sizeof(slice_args)) != B_OK)
 			return B_BAD_ADDRESS;
-		intel_huc_av1_decode_slice(devInfo,
-			(struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1),
-			(struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1));
+
+		struct intel_i915_gem_object* slice_data = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_data_handle, 1);
+		if (slice_data == NULL)
+			return B_BAD_VALUE;
+
+		struct intel_i915_gem_object* slice_params = (struct intel_i915_gem_object*)_generic_handle_lookup(slice_args.slice_params_handle, 1);
+		if (slice_params == NULL) {
+			intel_i915_gem_object_put(slice_data);
+			return B_BAD_VALUE;
+		}
+
+		intel_huc_av1_decode_slice(devInfo, slice_data, slice_params);
+
+		intel_i915_gem_object_put(slice_data);
+		intel_i915_gem_object_put(slice_params);
 	}
 
 	// Offload loop filtering to the GPU
@@ -76,6 +95,9 @@ status_t
 kaby_lake_av1_loop_filter_frame(intel_i915_device_info* devInfo,
 	struct av1_frame_info* frame_info)
 {
-	// TODO: Implement AV1 loop filtering
-	return B_UNSUPPORTED;
+	struct huc_command cmd;
+	cmd.command = HUC_CMD_AV1_LOOP_FILTER_FRAME;
+	cmd.length = sizeof(*frame_info);
+	cmd.data[0] = (uint32_t)frame_info;
+	return intel_huc_submit_command(devInfo, &cmd);
 }

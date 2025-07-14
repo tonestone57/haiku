@@ -16,23 +16,29 @@ static status_t
 motion_estimation(const uint8* data, size_t size, struct av1_encode_frame_info* frame_info,
 	uint32_t width, uint32_t height, uint32_t bitrate)
 {
+	// Initialize the AV1 encoder
 	aom_codec_ctx_t codec;
 	aom_codec_enc_cfg_t cfg;
 	aom_codec_enc_config_default(aom_codec_av1_cx(), &cfg, 0);
 
+	// Configure the encoder
 	cfg.g_w = width;
 	cfg.g_h = height;
 	cfg.g_timebase.num = 1;
 	cfg.g_timebase.den = 30;
 	cfg.rc_target_bitrate = bitrate;
 
-	if (aom_codec_enc_init(&codec, aom_codec_av1_cx(), &cfg, 0))
+	if (aom_codec_enc_init(&codec, aom_codec_av1_cx(), &cfg, 0)) {
+		syslog(LOG_ERR, "Failed to initialize AV1 encoder.\n");
 		return B_ERROR;
+	}
 
 	aom_image_t img;
 	aom_img_wrap(&img, AOM_IMG_FMT_I420, width, height, 1, (uint8_t*)data);
 
 	if (aom_codec_encode(&codec, &img, 0, 1, 0)) {
+		const char* error = aom_codec_error(&codec);
+		syslog(LOG_ERR, "Failed to encode frame: %s\n", error);
 		aom_codec_destroy(&codec);
 		return B_ERROR;
 	}
@@ -43,12 +49,21 @@ motion_estimation(const uint8* data, size_t size, struct av1_encode_frame_info* 
 		if (pkt->kind == AOM_CX_FRAME_PKT) {
 			struct intel_i915_gem_object* encoded_frame = (struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->encoded_frame_handle, 1);
 			if (encoded_frame == NULL) {
+				syslog(LOG_ERR, "Failed to lookup encoded frame handle.\n");
 				aom_codec_destroy(&codec);
 				return B_BAD_VALUE;
 			}
 			void* encoded_frame_addr;
 			area_id encoded_frame_area;
 			if (map_gem_bo(frame_info->encoded_frame_handle, encoded_frame->size, &encoded_frame_area, &encoded_frame_addr) != B_OK) {
+				syslog(LOG_ERR, "Failed to map encoded frame.\n");
+				intel_i915_gem_object_put(encoded_frame);
+				aom_codec_destroy(&codec);
+				return B_ERROR;
+			}
+			if (pkt->data.frame.sz > encoded_frame->size) {
+				syslog(LOG_ERR, "Encoded frame is larger than the buffer.\n");
+				unmap_gem_bo(encoded_frame_area);
 				intel_i915_gem_object_put(encoded_frame);
 				aom_codec_destroy(&codec);
 				return B_ERROR;
@@ -88,9 +103,17 @@ kaby_lake_av1_encode_frame(intel_i915_device_info* devInfo,
 		return status;
 
 	// Offload entropy encoding to the GPU
-	intel_huc_av1_encode_slice(devInfo,
-		(struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->frame_handle, 1),
-		(struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->encoded_frame_handle, 1));
+	struct intel_i915_gem_object* frame = (struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->frame_handle, 1);
+	if (frame == NULL)
+		return B_BAD_VALUE;
+	struct intel_i915_gem_object* encoded_frame = (struct intel_i915_gem_object*)_generic_handle_lookup(frame_info->encoded_frame_handle, 1);
+	if (encoded_frame == NULL) {
+		intel_i915_gem_object_put(frame);
+		return B_BAD_VALUE;
+	}
+	intel_huc_av1_encode_slice(devInfo, frame, encoded_frame);
+	intel_i915_gem_object_put(frame);
+	intel_i915_gem_object_put(encoded_frame);
 
 	// Offload loop filtering to the GPU
 	kaby_lake_av1_loop_filter_frame(devInfo, frame_info);

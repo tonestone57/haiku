@@ -24,6 +24,8 @@ struct huc_command {
 #define HUC_CMD_MPEG2_SLICE_DECODE	0x2006
 #define HUC_CMD_VC1_SLICE_DECODE	0x2007
 #define HUC_CMD_JPEG_SLICE_DECODE	0x2008
+#define HUC_CMD_AV1_LOOP_FILTER_FRAME	0x2009
+#define HUC_CMD_AV1_ENCODE_SLICE	0x200A
 
 #ifdef __cplusplus
 extern "C" {

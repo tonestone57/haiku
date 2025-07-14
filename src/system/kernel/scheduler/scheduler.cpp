@@ -68,7 +68,6 @@
 namespace Scheduler {
 TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 bool gSchedulerElasticQuotaMode = true;
-int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 }
 
 // --- New Continuous Weight Calculation Logic ---

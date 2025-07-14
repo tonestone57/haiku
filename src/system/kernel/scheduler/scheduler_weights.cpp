@@ -8,7 +8,6 @@
 #include <OS.h>
 #include <debug.h>
 #include <kernel.h>
-#include <OS.h>
 #include <thread_types.h>
 #include <algorithm>
 
@@ -102,12 +101,12 @@ scheduler_priority_to_weight(BKernel::Thread* thread, Scheduler::CPUEntry* cpu)
 		InterruptsSpinLocker teamLocker(teamData->lock);
 		if (teamData->quota_exhausted) {
 			bool isBorrowing = false;
-			if (gSchedulerElasticQuotaMode && cpu != NULL && cpu->GetCurrentActiveTeam() == teamData) {
+			if (Scheduler::gSchedulerElasticQuotaMode && cpu != NULL && cpu->GetCurrentActiveTeam() == teamData) {
 				isBorrowing = true;
 			}
 
 			if (!isBorrowing) {
-				if (gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
+				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
 					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 				}
 			}

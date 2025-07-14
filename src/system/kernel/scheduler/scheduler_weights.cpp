@@ -80,7 +80,7 @@ scheduler_init_weights()
 
 
 int32
-scheduler_priority_to_weight(Thread* thread, CPUEntry* cpu)
+scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 {
 	if (thread == NULL)
 		return 1;

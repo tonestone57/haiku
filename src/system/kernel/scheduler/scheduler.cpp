@@ -68,7 +68,6 @@
 namespace Scheduler {
 TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 bool gSchedulerElasticQuotaMode = true;
-int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
 }
 
 // --- New Continuous Weight Calculation Logic ---
@@ -79,9 +78,6 @@ static const int32 kNewMaxWeightCap = 35000000;
 
 // Removido: gHaikuContinuousWeights, _init_continuous_weights, kUseContinuousWeights
 // A lógica de peso agora está encapsulada em scheduler_weights.cpp.
-
-
-
 
 
 static int
@@ -1191,7 +1187,6 @@ _find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, Scheduler::CPUEnt
 		if (candidateIsSensitive)
 			continue;
 
-				extern int32 scheduler_get_dynamic_max_irq_target_load(Scheduler::CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
 		int32 dynamicMaxLoad = scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
 		if (candidateCpu->CalculateTotalIrqLoad() + irqToMove->load >= dynamicMaxLoad)
 			continue;

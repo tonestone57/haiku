@@ -1884,7 +1884,7 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 		CPUEntry* currentCPU = CPUEntry::GetCPU(i);
 		ASSERT(currentCPU->Core() == targetCore);
 
-		int32 dynamicMaxForThisCpu = _scheduler_get_dynamic_max_irq_target_load(currentCPU, baseMaxIrqLoadFromMode);
+		int32 dynamicMaxForThisCpu = scheduler_get_dynamic_max_irq_target_load(currentCPU, baseMaxIrqLoadFromMode);
 		int32 currentCpuExistingIrqLoad = currentCPU->CalculateTotalIrqLoad();
 
 		if (dynamicMaxForThisCpu > 0 && currentCpuExistingIrqLoad + irqLoadToMove >= dynamicMaxForThisCpu) {

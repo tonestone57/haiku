@@ -81,6 +81,7 @@ static kernel_args sKernelArgs;
 static uint32 sCpuRendezvous;
 static uint32 sCpuRendezvous2;
 static uint32 sCpuRendezvous3;
+static uint32 sCpuRendezvous4;
 
 static int32 main2(void *);
 
@@ -250,6 +251,8 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
 		smp_cpu_rendezvous(&sCpuRendezvous2);
 			// release the AP cpus to go enter the scheduler
 
+		smp_cpu_rendezvous(&sCpuRendezvous4);
+
 		TRACE("starting scheduler on cpu 0 and enabling interrupts\n");
 		scheduler_start();
 		enable_interrupts();
@@ -266,6 +269,8 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
 		// wait for all other AP cpus to get to this point
 		smp_cpu_rendezvous(&sCpuRendezvous);
 		smp_cpu_rendezvous(&sCpuRendezvous2);
+
+		smp_cpu_rendezvous(&sCpuRendezvous4);
 
 		// welcome to the machine
 		scheduler_start();

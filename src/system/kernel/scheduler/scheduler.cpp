@@ -222,7 +222,7 @@ void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
 	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
-	InterruptsSpinLocker locker(sTeamSchedulerListLock);
+	InterruptsSpinLocker locker(gTeamSchedulerListLock);
 	gTeamSchedulerDataList.Add(tsd);
 	TRACE_SCHED_TEAM("Added TeamSchedulerData for team %" B_PRId32 " to global list. Initial VR: %" B_PRId64 "\n",
 		tsd->teamID, tsd->team_virtual_runtime);
@@ -233,7 +233,7 @@ void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
-	InterruptsSpinLocker locker(sTeamSchedulerListLock);
+	InterruptsSpinLocker locker(gTeamSchedulerListLock);
 	if (tsd->GetDoublyLinkedListLink()->previous != NULL || tsd->GetDoublyLinkedListLink()->next != NULL
 		|| gTeamSchedulerDataList.Head() == tsd) {
 		gTeamSchedulerDataList.Remove(tsd);
@@ -1243,60 +1243,6 @@ reschedule(int32 nextState)
 #define IRQ_INTERFERENCE_LOAD_THRESHOLD (kMaxLoad / 20) // e.g., 50 for kMaxLoad = 1000
 #define DYNAMIC_IRQ_MOVE_COOLDOWN (150000)          // 150ms
 
-static Scheduler::CPUEntry*
-_find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, Scheduler::CPUEntry* currentOwnerCpu)
-{
-	Scheduler::CPUEntry* bestAlternative = NULL;
-	float bestAlternativeScore = 1e9;
-
-	CoreEntry* ownerCore = currentOwnerCpu->Core();
-
-	for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
-		Scheduler::CPUEntry* candidateCpu = Scheduler::CPUEntry::GetCPU(i);
-		if (candidateCpu == currentOwnerCpu || gCPU[i].disabled || candidateCpu->Core() == NULL)
-			continue;
-
-		Thread* runningOnCandidate = gCPU[i].running_thread;
-		bool candidateIsSensitive = false;
-		if (runningOnCandidate != NULL && runningOnCandidate->scheduler_data != NULL) {
-			ThreadData* td = runningOnCandidate->scheduler_data;
-			// LatencyNice is deprecated. Sensitivity primarily determined by high priority.
-			if (td->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY) {
-				candidateIsSensitive = true;
-			}
-		}
-		if (candidateIsSensitive)
-			continue;
-
-		int32 dynamicMaxLoad = Scheduler::scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
-		if (candidateCpu->CalculateTotalIrqLoad() + irqToMove->load >= dynamicMaxLoad)
-			continue;
-
-		float score = (float)candidateCpu->CalculateTotalIrqLoad() * 0.7f + candidateCpu->GetInstantaneousLoad() * 0.3f;
-
-		if (candidateCpu->Core()->Type() == CORE_TYPE_LITTLE) {
-			if (irqToMove->load < IRQ_INTERFERENCE_LOAD_THRESHOLD * 2)
-				score *= 0.8f;
-			else if (ownerCore->Type() == CORE_TYPE_BIG || ownerCore->Type() == CORE_TYPE_UNIFORM_PERFORMANCE)
-				score *= 0.9f;
-		}
-
-		if (candidateCpu->Core() == ownerCore)
-			score *= 0.5f;
-		else if (candidateCpu->Core()->Package() == ownerCore->Package())
-			score *= 0.75f;
-
-		if (score < bestAlternativeScore) {
-			bestAlternativeScore = score;
-			bestAlternative = candidateCpu;
-		}
-	}
-	if (bestAlternative != NULL) {
-		TRACE_SCHED_IRQ_DYNAMIC("AltIRQCPU: Found alt CPU %d for IRQ %d (load %d) from CPU %d. Score %f\n",
-			bestAlternative->ID(), irqToMove->irq, irqToMove->load, currentOwnerCpu->ID(), bestAlternativeScore);
-	}
-	return bestAlternative;
-}
 
 
 void
@@ -1435,7 +1381,7 @@ InterruptsSpinLocker lock(thread->scheduler_lock);
             InterruptsSpinLocker mapLock(gIrqTaskAffinityLock);
             thread_id* val = sIrqTaskAffinityMap->Lookup(irq);
             if (val && *val == thread->id) {
-                sIrqTaskAffinityMap->Remove(irq); // ✅ Fixed: use key, not pointer
+                sIrqTaskAffinityMap->Remove(*val);
             }
         }
     }
@@ -2800,6 +2746,33 @@ scheduler_perform_load_balance()
 }
 
 void
+Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
+{
+    Scheduler::CPUEntry* best = nullptr;
+    float bestScore = 1e9;
+    for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+        auto* cpu = Scheduler::CPUEntry::GetCPU(i);
+        if (!cpu || cpu == current || gCPU[i].disabled) continue;
+
+        Thread* t = gCPU[i].running_thread;
+        if (t && t->priority >= B_URGENT_DISPLAY_PRIORITY) continue;
+
+        int32 targetLoad = cpu->CalculateTotalIrqLoad();
+        int32 dynamicMax = Scheduler::scheduler_get_dynamic_max_irq_target_load(cpu, gModeMaxTargetCpuIrqLoad);
+
+        if (targetLoad + irq->load >= dynamicMax) continue;
+
+        float score = targetLoad * 0.7f + cpu->GetInstantaneousLoad() * 0.3f;
+        if (cpu->Core()->Type() == CORE_TYPE_LITTLE) score *= 0.8f;
+
+        if (score < bestScore) {
+            best = cpu;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
 maybe_relocate_irqs(Thread* thread)
 {
     if (!thread || thread_is_idle_thread(thread)) return;

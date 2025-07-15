@@ -78,9 +78,6 @@ KernelMergeObject kernel_core.o :
 	scheduler_weights.cpp
 	scheduler_low_latency.cpp
 	scheduler_power_saving.cpp
-	posix/realtime_sem.cpp
-	posix/xsi_message_queue.cpp
-	posix/xsi_semaphore.cpp
 
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;

@@ -2746,8 +2746,7 @@ scheduler_perform_load_balance()
 }
 
 void
-Scheduler::CPUEntry*
-find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
+static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
 {
     Scheduler::CPUEntry* best = nullptr;
     float bestScore = 1e9;
@@ -2774,8 +2773,7 @@ find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
     return best;
 }
 
-void
-maybe_relocate_irqs(Thread* thread)
+void maybe_relocate_irqs(Thread* thread)
 {
     if (!thread || thread_is_idle_thread(thread)) return;
     if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;

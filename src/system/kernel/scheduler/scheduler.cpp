@@ -1585,54 +1585,25 @@ init()
 		gPackageEntries[i].Init(i);
 	}
 
-	bool* coreHasRegisteredWithPackage = new(std::nothrow) bool[coreCount];
-	if (coreHasRegisteredWithPackage == NULL) {
-		return B_NO_MEMORY;
-	}
-	ArrayDeleter<bool> coreRegisteredDeleter(coreHasRegisteredWithPackage);
-	for (int32 i = 0; i < coreCount; ++i)
-		coreHasRegisteredWithPackage[i] = false;
+	for (int32 i = 0; i < packageCount; i++)
+		gPackageEntries[i].Init(i);
 
-	for (int32 i = 0; i < cpuCount; ++i) {
-		int32 coreIdx = sCPUToCore[i];
-		int32 packageIdx = sCPUToPackage[i];
-
-		ASSERT(coreIdx >= 0 && coreIdx < coreCount);
+	for (int32 i = 0; i < coreCount; i++) {
+		int32 packageIdx = -1;
+		for (int32 j = 0; j < cpuCount; j++) {
+			if (sCPUToCore[j] == i) {
+				packageIdx = sCPUToPackage[j];
+				break;
+			}
+		}
 		ASSERT(packageIdx >= 0 && packageIdx < packageCount);
-
-		CoreEntry* currentCore = &gCoreEntries[coreIdx];
-		PackageEntry* currentPackage = &gPackageEntries[packageIdx];
-
-		if (currentCore->ID() == -1) {
-			currentCore->Init(coreIdx, currentPackage);
-
-			if (currentCore->Type() == CORE_TYPE_UNKNOWN) { // Use public getter
-				if (gCoreCount > 0) {
-					// currentCore->fCoreType = CORE_TYPE_UNIFORM_PERFORMANCE; // Cannot directly set private member
-					// This logic needs to be within CoreEntry::Init or a setter if fCoreType is private
-				}
-			}
-			if (currentCore->PerformanceCapacity() == 0) { // Use public getter
-				// currentCore->fPerformanceCapacity = SCHEDULER_NOMINAL_CAPACITY; // Cannot directly set private member
-			}
-
-			dprintf("scheduler_init: Core %" B_PRId32 ": Type %d, Capacity %" B_PRIu32 ", Efficiency %" B_PRIu32 "\n",
-				currentCore->ID(), currentCore->Type(), currentCore->PerformanceCapacity(), currentCore->EnergyEfficiency());
-		}
-
-		if (!coreHasRegisteredWithPackage[coreIdx]) {
-			ASSERT(currentPackage != NULL);
-			currentPackage->_AddConfiguredCore();
-			coreHasRegisteredWithPackage[coreIdx] = true;
-		}
+		gCoreEntries[i].Init(i, &gPackageEntries[packageIdx]);
 	}
-	coreRegisteredDeleter.Detach();
 
 	for (int32 i = 0; i < cpuCount; i++) {
 		int32 coreIdx = sCPUToCore[i];
-		CoreEntry* currentCore = &gCoreEntries[coreIdx];
-		gCPUEntries[i].Init(i, currentCore);
-		currentCore->AddCPU(&gCPUEntries[i]);
+		gCoreEntries[coreIdx].AddCPU(&gCPUEntries[i]);
+		gCPUEntries[i].Init(i, &gCoreEntries[coreIdx]);
 	}
 
 	packageEntriesDeleter.Detach();

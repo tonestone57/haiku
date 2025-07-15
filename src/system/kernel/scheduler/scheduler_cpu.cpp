@@ -1107,6 +1107,7 @@ CoreEntry::Init(int32 id, PackageEntry* package)
 {
 	fCoreID = id;
 	fPackage = package;
+	fPackage->_AddConfiguredCore();
 	fDefunct = false;
 	fInstantaneousLoad = 0.0f;
 

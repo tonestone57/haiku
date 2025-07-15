@@ -1338,10 +1338,11 @@ scheduler_on_thread_init(Thread* thread)
 
 	if (thread_is_idle_thread(thread)) {
 		static int32 sIdleThreadsCPUIDCounter = 0;
-		int32 cpuID = atomic_add(&sIdleThreadsCPUIDCounter, 1) -1;
+		int32 cpuID = sIdleThreadsCPUIDCounter++;
 
 		if (cpuID < 0 || cpuID >= smp_get_num_cpus()) {
-			panic("scheduler_on_thread_init: Invalid cpuID %" B_PRId32 " for idle thread %" B_PRId32, cpuID, thread->id);
+			panic("scheduler_on_thread_init: Invalid cpuID %" B_PRId32
+				" for idle thread %" B_PRId32, cpuID, thread->id);
 		}
 
 		thread->previous_cpu = &gCPU[cpuID];

@@ -17,6 +17,22 @@
 #include "scheduler_thread.h"
 #include "scheduler_team.h"
 #include <sched.h>
+#include <kscheduler.h>
+
+int
+sched_get_priority_max(int policy)
+{
+	switch (policy) {
+		case SCHED_RR:
+			return B_REAL_TIME_PRIORITY;
+
+		case SCHED_OTHER:
+			return B_URGENT_DISPLAY_PRIORITY;
+
+		default:
+			return -1;
+	}
+}
 #include <sched.h>
 
 

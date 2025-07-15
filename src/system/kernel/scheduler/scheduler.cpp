@@ -1316,7 +1316,7 @@ scheduler_on_thread_init(Thread* thread)
 	ThreadData* threadData = thread->scheduler_data;
 
 	if (thread_is_idle_thread(thread)) {
-		static int32 sIdleThreadsCPUIDCounter;
+		static int32 sIdleThreadsCPUIDCounter = 0;
 		int32 cpuID = atomic_add(&sIdleThreadsCPUIDCounter, 1) -1;
 
 		if (cpuID < 0 || cpuID >= smp_get_num_cpus()) {
@@ -2060,6 +2060,9 @@ scheduler_irq_balance_event(timer* /* unused */)
 						sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
 						finalTargetCpu->ID(), finalTargetCpu->Core()->ID(),
 						hasAffinity ? " (affinity considered)" : "");
+					if (hasAffinity) {
+						// do nothing
+					}
 					assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
 				}
 			} else {

@@ -183,7 +183,7 @@ namespace Scheduler {
 const bigtime_t kDefaultQuotaPeriod = 100000;
 bigtime_t gQuotaPeriod = kDefaultQuotaPeriod;
 DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
-static spinlock sTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
+spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
 static timer gQuotaResetTimer;
 bigtime_t gGlobalMinTeamVRuntime = 0;
 

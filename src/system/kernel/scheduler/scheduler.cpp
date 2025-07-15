@@ -329,6 +329,36 @@ static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
 static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
+static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
+
+void
+maybe_relocate_irqs(Thread* thread)
+{
+    if (!thread || thread_is_idle_thread(thread)) return;
+    if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;
+
+    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
+    if (!cpu) return;
+
+    cpu_ent* cpuStruct = &gCPU[cpu->ID()];
+    SpinLocker irqLock(cpuStruct->irqs_lock);
+
+    irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuStruct->irqs);
+    while (irq) {
+        if (irq->load > IRQ_INTERFERENCE_LOAD_THRESHOLD) {
+            Scheduler::CPUEntry* alt = find_quiet_cpu_for_irq(irq, cpu);
+            if (alt && alt != cpu) {
+                bigtime_t now = system_time();
+                if (now - atomic_get64(&gIrqLastFollowMoveTime[irq->irq]) > DYNAMIC_IRQ_MOVE_COOLDOWN) {
+                    assign_io_interrupt_to_cpu(irq->irq, alt->ID());
+                    atomic_set64(&gIrqLastFollowMoveTime[irq->irq], now);
+                }
+            }
+        }
+        irq = (irq_assignment*)list_get_next_item(&cpuStruct->irqs, irq);
+    }
+}
+
 static Scheduler::CPUEntry*
 _find_idle_cpu_on_core(CoreEntry* core)
 {

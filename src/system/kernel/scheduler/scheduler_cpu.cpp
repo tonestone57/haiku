@@ -500,7 +500,7 @@ CPUEntry::PeekEligibleNextThread()
 		fEevdfRunQueue.Add(toReAdd);
 		fEevdfRunQueueTaskCount.fetch_add(1);
 		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
-		// becomes the head or if the queue was empty.
+		// becomes the head or if the queue was empty. This should cover most cases.
 	}
 
 	if (eligibleCandidate != NULL) {
@@ -1245,7 +1245,7 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		// If the CPU being removed was one of these idle CPUs, we must decrement fIdleCPUCount.
 		// A CPU is "in the idle count" if it was previously passed to CPUGoesIdle and not CPUWakesUp.
 
-		// Let's simplify: if this CPU was part of fIdleCores list in PackageEntry,
+		// Let's simplify: if the CPU was part of fIdleCores list in PackageEntry,
 		// then it was considered idle. Or, more locally, if its removal means an idle CPU is gone.
 		// The fPackage->RemoveIdleCore(this) call later handles the package list.
 		// The fIdleCPUCount on the CoreEntry itself needs to be consistent.
@@ -1472,6 +1472,7 @@ PackageEntry::Init(int32 id)
 {
 	fPackageID = id;
 	B_INITIALIZE_RW_SPINLOCK(&fCoreLock);
+	new(&fIdleCores) DoublyLinkedList<CoreEntry>();
 }
 
 
@@ -1721,7 +1722,6 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 		kprintf("---- Shard %" B_PRId32 " (High Load) ----\n", shardIdx);
 		// shardLocker is still held, no need to re-acquire for the same shard's other heap
 		// unless Dump() itself releases and re-acquires, which it shouldn't.
-		// However, if Dump() is complex, it's safer to manage lock explicitly if needed.
 		// For now, assume Dump() doesn't alter lock state.
 		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].Count() > 0) {
 			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump();
@@ -2037,4 +2037,3 @@ void Scheduler::init_debug_commands()
 // Actually, the best is to use the one that was accepted: `ASSERT(fQueueLock.IsOwnedByCurrentThread());`
 // I will ensure the implementation of _UpdateMinVirtualRuntime uses this.
 // The diff from the previous step already includes this.
-

@@ -1220,10 +1220,8 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	// A CPU is idle if its running thread is its designated idle thread.
 	// This check is relevant if the CPU was enabled and part of scheduling.
 	// If gCPU[cpu->ID()].disabled is already true, scheduler_set_cpu_enabled is in progress.
-	bool removingAnIdleCpu = false;
 	if (!gCPU[cpu->ID()].disabled && cpu->fIdleThread != NULL
 		&& gCPU[cpu->ID()].running_thread == cpu->fIdleThread->GetThread()) {
-		removingAnIdleCpu = true;
 	} else if (gCPU[cpu->ID()].disabled) {
 		// If it's being disabled, it's effectively becoming idle from the core's perspective
 		// for the purpose of fIdleCPUCount if it wasn't already.
@@ -1797,6 +1795,7 @@ dump_idle_cores(int /* argc */, char** /* argv */)
 	       current scheduler mode.
 	\return The calculated dynamic maximum IRQ load for the CPU.
 */
+namespace Scheduler {
 int32
 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode)
 {
@@ -1821,6 +1820,7 @@ scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFro
 		cpu->ID(), cpuInstantLoad, baseMaxIrqLoadFromMode, effectiveFactor, dynamicTargetLoad);
 
 	return dynamicTargetLoad;
+}
 }
 
 

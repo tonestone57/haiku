@@ -1187,7 +1187,7 @@ _find_quiet_alternative_cpu_for_irq(irq_assignment* irqToMove, Scheduler::CPUEnt
 		if (candidateIsSensitive)
 			continue;
 
-		int32 dynamicMaxLoad = scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
+		int32 dynamicMaxLoad = Scheduler::scheduler_get_dynamic_max_irq_target_load(candidateCpu, gModeMaxTargetCpuIrqLoad);
 		if (candidateCpu->CalculateTotalIrqLoad() + irqToMove->load >= dynamicMaxLoad)
 			continue;
 

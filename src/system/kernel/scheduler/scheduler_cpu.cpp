@@ -1470,6 +1470,7 @@ void
 PackageEntry::Init(int32 id)
 {
 	fPackageID = id;
+	B_INITIALIZE_RW_SPINLOCK(&fCoreLock);
 }
 
 

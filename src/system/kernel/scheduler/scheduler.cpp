@@ -280,7 +280,7 @@ _user_get_scheduler_mode(void)
 
 
 int
-_user_sched_get_priority_max(int policy)
+_kern_sched_get_priority_max(int policy)
 {
 	return sched_get_priority_max(policy);
 }

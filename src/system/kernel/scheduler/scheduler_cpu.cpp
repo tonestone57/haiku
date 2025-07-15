@@ -1472,6 +1472,8 @@ PackageEntry::Init(int32 id)
 {
 	fPackageID = id;
 	B_INITIALIZE_RW_SPINLOCK(&fCoreLock);
+	// The fIdleCores list is a member of the object, so it is automatically
+	// constructed. No need to use placement new.
 	new(&fIdleCores) DoublyLinkedList<CoreEntry>();
 }
 

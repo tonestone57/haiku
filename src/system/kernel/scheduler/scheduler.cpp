@@ -1337,11 +1337,11 @@ scheduler_on_thread_init(Thread* thread)
 	ThreadData* threadData = thread->scheduler_data;
 
 	if (thread_is_idle_thread(thread)) {
-		int32 cpuID = thread->cpu->cpu_num;
+		static int32 sIdleThreadsCPUIDCounter = 0;
+		int32 cpuID = atomic_add(&sIdleThreadsCPUIDCounter, 1) -1;
 
 		if (cpuID < 0 || cpuID >= smp_get_num_cpus()) {
-			panic("scheduler_on_thread_init: Invalid cpuID %" B_PRId32
-				" for idle thread %" B_PRId32, cpuID, thread->id);
+			panic("scheduler_on_thread_init: Invalid cpuID %" B_PRId32 " for idle thread %" B_PRId32, cpuID, thread->id);
 		}
 
 		thread->previous_cpu = &gCPU[cpuID];
@@ -1409,6 +1409,7 @@ scheduler_on_thread_destroy(Thread* thread)
 void
 scheduler_start()
 {
+	dprintf("scheduler_start: entry\n");
 	InterruptsSpinLocker _(thread_get_current_thread()->scheduler_lock);
 	SCHEDULER_ENTER_FUNCTION();
 	reschedule(B_THREAD_READY);
@@ -1579,11 +1580,17 @@ init()
 		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		B_INITIALIZE_RW_SPINLOCK(&gCoreHeapsShardLock[i]);
+		dprintf("gCoreHeapsShardLock[%ld] at %p\n", i, &gCoreHeapsShardLock[i]);
 	}
 	new(&gIdlePackageList) IdlePackageList;
+	dprintf("gIdlePackageLock at %p\n", &gIdlePackageLock);
 
 	for (int32 i = 0; i < SMP_MAX_CPUS; i++) {
 		atomic_set64(&gReportedCpuMinVR[i], 0);
+	}
+
+	for (int32 i = 0; i < packageCount; ++i) {
+		gPackageEntries[i].Init(i);
 	}
 
 	for (int32 i = 0; i < packageCount; i++)
@@ -1603,8 +1610,8 @@ init()
 
 	for (int32 i = 0; i < cpuCount; i++) {
 		int32 coreIdx = sCPUToCore[i];
-		gCPUEntries[i].Init(i, &gCoreEntries[coreIdx]);
 		gCoreEntries[coreIdx].AddCPU(&gCPUEntries[i]);
+		gCPUEntries[i].Init(i, &gCoreEntries[coreIdx]);
 	}
 
 	packageEntriesDeleter.Detach();

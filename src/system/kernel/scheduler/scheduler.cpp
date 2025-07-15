@@ -279,11 +279,6 @@ _user_get_scheduler_mode(void)
 }
 
 
-int
-_kern_sched_get_priority_max(int policy)
-{
-	return sched_get_priority_max(policy);
-}
 
 using namespace Scheduler;
 

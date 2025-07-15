@@ -17,7 +17,7 @@
 #include "scheduler_thread.h"
 #include "scheduler_team.h"
 #include <sched.h>
-#include <kscheduler.h>
+#include <sched.h>
 
 int
 sched_get_priority_max(int policy)
@@ -49,7 +49,7 @@ calculate_weight(int32 priority)
 		return 2 + (priority - 1) * 2;
 
 	int32 calcPrio = std::max(B_LOWEST_ACTIVE_PRIORITY,
-		std::min(priority, sched_get_priority_max(SCHED_RR)));
+		std::min(priority, B_REAL_TIME_PRIORITY));
 
 	const double haiku_priority_step_factor = 1.091507805494422;
 	double weight_fp;
@@ -89,7 +89,7 @@ void
 scheduler_init_weights()
 {
 	dprintf("Scheduler: Initializing continuous weights table...\n");
-	int max_prio = sched_get_priority_max(SCHED_RR);
+	int max_prio = B_REAL_TIME_PRIORITY;
 	Scheduler::gHaikuContinuousWeights = new(std::nothrow) int32[max_prio + 1];
 	for (int32 i = 0; i <= max_prio; i++) {
 		Scheduler::gHaikuContinuousWeights[i] = calculate_weight(i);
@@ -110,8 +110,8 @@ scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 	int32 priority = thread->priority;
 	if (priority < 0)
 		priority = 0;
-	if (priority > sched_get_priority_max(SCHED_RR))
-		priority = sched_get_priority_max(SCHED_RR);
+	if (priority > B_REAL_TIME_PRIORITY)
+		priority = B_REAL_TIME_PRIORITY;
 
 	int32 weight = Scheduler::gHaikuContinuousWeights[priority];
 

@@ -577,7 +577,6 @@ extern status_t		_kern_set_cpu_enabled(int32 cpu, bool enabled);
 extern bigtime_t	_kern_estimate_max_scheduling_latency(thread_id thread);
 extern status_t		_kern_set_scheduler_mode(int32 mode);
 extern int32		_kern_get_scheduler_mode(void);
-extern int			_kern_sched_get_priority_max(int policy);
 
 #if defined(__i386__) || defined(__x86_64__)
 // our only x86 only syscall

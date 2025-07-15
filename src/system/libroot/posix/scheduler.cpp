@@ -39,10 +39,8 @@ sched_get_priority_min(int policy)
 }
 
 
-#include <kscheduler.h>
-
 int
 sched_get_priority_max(int policy)
 {
-	return sched_get_priority_max(policy);
+	return _kern_sched_get_priority_max(policy);
 }

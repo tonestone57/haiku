@@ -183,7 +183,7 @@ namespace Scheduler {
 const bigtime_t kDefaultQuotaPeriod = 100000;
 bigtime_t gQuotaPeriod = kDefaultQuotaPeriod;
 DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
-spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
+static spinlock sTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
 static timer gQuotaResetTimer;
 bigtime_t gGlobalMinTeamVRuntime = 0;
 
@@ -216,20 +216,24 @@ int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
 static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
+// Adds a team's scheduler data to the global list.
+// This function must be called with interrupts disabled.
 void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
 	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
+	InterruptsSpinLocker locker(sTeamSchedulerListLock);
 	gTeamSchedulerDataList.Add(tsd);
 	TRACE_SCHED_TEAM("Added TeamSchedulerData for team %" B_PRId32 " to global list. Initial VR: %" B_PRId64 "\n",
 		tsd->teamID, tsd->team_virtual_runtime);
 }
 
+// Removes a team's scheduler data from the global list.
+// This function must be called with interrupts disabled.
 void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
 {
 	if (tsd == NULL) return;
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
+	InterruptsSpinLocker locker(sTeamSchedulerListLock);
 	if (tsd->GetDoublyLinkedListLink()->previous != NULL || tsd->GetDoublyLinkedListLink()->next != NULL
 		|| gTeamSchedulerDataList.Head() == tsd) {
 		gTeamSchedulerDataList.Remove(tsd);
@@ -284,7 +288,7 @@ using namespace Scheduler;
 
 static bool sSchedulerEnabled;
 SchedulerListenerList gSchedulerListeners;
-spinlock gSchedulerListenersLock = B_SPINLOCK_INITIALIZER;
+static spinlock sSchedulerListenersLock = B_SPINLOCK_INITIALIZER;
 
 static scheduler_mode_operations* sSchedulerModes[] = {
 	&gSchedulerLowLatencyMode,
@@ -426,6 +430,8 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 }
 
 
+// Enqueues a thread in the appropriate run queue.
+// This function must be called with interrupts disabled.
 void
 scheduler_enqueue_in_run_queue(Thread *thread)
 {
@@ -456,6 +462,8 @@ scheduler_enqueue_in_run_queue(Thread *thread)
 }
 
 
+// Sets the priority of a thread.
+// This function must be called with interrupts enabled.
 int32
 scheduler_set_thread_priority(Thread *thread, int32 priority)
 {
@@ -1721,6 +1729,9 @@ _scheduler_init_kdf_debug_commands()
 void
 scheduler_init()
 {
+	if (sSchedulerEnabled)
+		return;
+
 	int32 cpuCount = smp_get_num_cpus();
 	dprintf("scheduler_init: found %" B_PRId32 " logical cpu%s and %" B_PRId32
 		" cache level%s\n", cpuCount, cpuCount != 1 ? "s" : "",
@@ -2117,7 +2128,7 @@ extern "C" void scheduler_dump_cpu_heap(int32 cpu)
 void
 scheduler_add_listener(struct SchedulerListener* listener)
 {
-	InterruptsSpinLocker _(gSchedulerListenersLock);
+	InterruptsSpinLocker _(sSchedulerListenersLock);
 	gSchedulerListeners.Add(listener);
 }
 
@@ -2125,7 +2136,7 @@ scheduler_add_listener(struct SchedulerListener* listener)
 void
 scheduler_remove_listener(struct SchedulerListener* listener)
 {
-	InterruptsSpinLocker _(gSchedulerListenersLock);
+	InterruptsSpinLocker _(sSchedulerListenersLock);
 	gSchedulerListeners.Remove(listener);
 }
 
@@ -2439,7 +2450,7 @@ scheduler_perform_load_balance()
 
 	if (sourceCPU == NULL) {
 		TRACE("LoadBalance (EEVDF): Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
-		return migrationPerformed;
+		return false;
 	}
 
 	ThreadData* threadToMove = NULL;
@@ -2681,7 +2692,7 @@ scheduler_perform_load_balance()
 		sourceCPU->UnlockRunQueue();
 		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 " or target is source.\n",
 			threadToMove->GetThread()->id, finalTargetCore->ID());
-		return migrationPerformed;
+		return false;
 	}
 
 		int32 threadCount = sourceCPU->GetTotalThreadCount();
@@ -2730,7 +2741,12 @@ scheduler_perform_load_balance()
 			InterruptsSpinLocker followTaskLocker(threadToMove->GetThread()->scheduler_lock);
 			const int32* affinitizedIrqsPtr = threadToMove->GetAffinitizedIrqs(localIrqCount);
 			if (localIrqCount > 0) {
-				memcpy(localIrqList, affinitizedIrqsPtr, localIrqCount * sizeof(int32));
+				if (affinitizedIrqsPtr == NULL) {
+					// This should not happen, but if it does, we should handle it gracefully.
+					localIrqCount = 0;
+				} else {
+					memcpy(localIrqList, affinitizedIrqsPtr, localIrqCount * sizeof(int32));
+				}
 			}
 		}
 

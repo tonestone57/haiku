@@ -119,7 +119,37 @@ private:
 							bool& rescheduleNeeded) const;
 
 public:
-						ThreadData(Thread* thread);
+						ThreadData(Thread* thread)
+							:
+							fStolenTime(0),
+							fQuantumStartWallTime(0),
+							fLastInterruptTime(0),
+							fWentSleep(0),
+							fWentSleepActive(0),
+							fEnqueued(false),
+							fReady(false),
+							fThread(thread),
+							fEffectivePriority(0),
+							fTimeUsedInCurrentQuantum(0),
+							fCurrentEffectiveQuantum(0),
+							fMeasureAvailableActiveTime(0),
+							fMeasureAvailableTime(0),
+							fLastMeasureAvailableTime(0),
+							fNeededLoad(0),
+							fLoadMeasurementEpoch(0),
+							fLastMigrationTime(0),
+							fCore(NULL),
+							fVirtualDeadline(0),
+							fLag(0),
+							fEligibleTime(0),
+							fSliceDuration(SCHEDULER_TARGET_LATENCY), // Default slice duration
+							fVirtualRuntime(0),
+							// fLatencyNice(LATENCY_NICE_DEFAULT), // Removed
+							fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
+							fVoluntarySleepTransitions(0),
+							fAffinitizedIrqCount(0)
+						{
+						}
 
 			void		Init();
 			void		Init(CoreEntry* core);

@@ -535,9 +535,11 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 	if (chosenCore != initialCoreForComparison) {
 		if (!IsIdle()) {
 			SetLastMigrationTime(system_time());
-			TRACE_SCHED_LB("ChooseCoreAndCPU: T %" B_PRId32 " placed on new core %" B_PRId32 " (was %" B_PRId32 "), setting LastMigrationTime.\n",
-				GetThread()->id, chosenCore->ID(),
-				initialCoreForComparison ? initialCoreForComparison->ID() : -1);
+			if (initialCoreForComparison != NULL) {
+				TRACE_SCHED_LB("ChooseCoreAndCPU: T %" B_PRId32 " placed on new core %" B_PRId32 " (was %" B_PRId32 "), setting LastMigrationTime.\n",
+					GetThread()->id, chosenCore->ID(),
+					initialCoreForComparison->ID());
+			}
 		}
 	}
 
@@ -756,5 +758,3 @@ ThreadData::IsLikelyIOBound() const
 		fThread->id, fAverageRunBurstTimeEWMA, IO_BOUND_BURST_THRESHOLD_US, isIOBound ? "true" : "false");
 	return isIOBound;
 }
-
-

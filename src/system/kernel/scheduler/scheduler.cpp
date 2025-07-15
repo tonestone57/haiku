@@ -33,7 +33,7 @@
 
 
 #include "scheduler_common.h"
-#include "scheduler_cpu.h"
+#include "scheduler_cpu.hh"
 #include "scheduler_defs.h"
 #include "scheduler_locking.h"
 #include "scheduler_modes.h"
@@ -824,7 +824,11 @@ scheduler_try_work_steal(Scheduler::CPUEntry* thiefCPU)
 	int32 numCPUs = smp_get_num_cpus();
 	int32 thiefCpuID = thiefCPU->ID();
 	CoreEntry* thiefCore = thiefCPU->Core();
-	PackageEntry* thiefPackage = (thiefCore != NULL) ? thiefCore->Package() : NULL;
+	if (thiefCore == NULL)
+		return NULL;
+	PackageEntry* thiefPackage = thiefCore->Package();
+	if (thiefPackage == NULL)
+		return NULL;
 
     if (thiefCore != NULL) {
         CPUSet sameCoreCPUs = thiefCore->CPUMask();
@@ -902,7 +906,8 @@ reschedule(int32 nextState)
 	Thread* oldThread = thread_get_current_thread();
 
 	ThreadData* oldThreadData = oldThread->scheduler_data;
-	oldThreadData->StopCPUTime();
+	if (oldThreadData != NULL)
+		oldThreadData->StopCPUTime();
 
 	TRACE_SCHED("reschedule (EEVDF): cpu %" B_PRId32 ", oldT %" B_PRId32 " (VD %" B_PRId64 ", Lag %" B_PRId64 ", VRun %" B_PRId64 ", Elig %" B_PRId64 ", state %s), next_state %" B_PRId32 "\n",
 		thisCPUId, oldThread->id, oldThreadData->VirtualDeadline(), oldThreadData->Lag(), oldThreadData->VirtualRuntime(), oldThreadData->EligibleTime(),

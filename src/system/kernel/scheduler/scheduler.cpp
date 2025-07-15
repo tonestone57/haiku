@@ -2748,13 +2748,3 @@ scheduler_perform_load_balance()
 	}
 	return migrationPerformed;
 }
-
-
-
-
-
-// Syscall implementations (do_... functions) follow...
-// ... (rest of the file as previously read)
-// For brevity, the syscall implementations are not repeated here but are part of the full file content.
-
-[end of src/system/kernel/scheduler/scheduler.cpp]

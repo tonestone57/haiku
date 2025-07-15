@@ -1580,7 +1580,7 @@ init()
 		new(&Scheduler::gCoreLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		new(&Scheduler::gCoreHighLoadHeapShards[i]) CoreLoadHeap(shardHeapSize);
 		B_INITIALIZE_RW_SPINLOCK(&gCoreHeapsShardLock[i]);
-		dprintf("gCoreHeapsShardLock[%ld] at %p\n", i, &gCoreHeapsShardLock[i]);
+		dprintf("gCoreHeapsShardLock[%" B_PRId32 "] at %p\n", i, &gCoreHeapsShardLock[i]);
 	}
 	new(&gIdlePackageList) IdlePackageList;
 	dprintf("gIdlePackageLock at %p\n", &gIdlePackageLock);

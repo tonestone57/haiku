@@ -275,12 +275,12 @@ _user_set_scheduler_mode(int32 mode)
 int32
 _user_get_scheduler_mode(void)
 {
-	return gCurrentModeID;
+	return Scheduler::gCurrentModeID;
 }
 
 
 int
-_kern_sched_get_priority_max(int policy)
+_user_sched_get_priority_max(int policy)
 {
 	return sched_get_priority_max(policy);
 }

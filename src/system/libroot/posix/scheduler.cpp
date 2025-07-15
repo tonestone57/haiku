@@ -42,5 +42,15 @@ sched_get_priority_min(int policy)
 int
 sched_get_priority_max(int policy)
 {
-	return _kern_sched_get_priority_max(policy);
+	switch (policy) {
+		case SCHED_RR:
+			return B_REAL_TIME_PRIORITY;
+
+		case SCHED_OTHER:
+			return B_URGENT_DISPLAY_PRIORITY;
+
+		default:
+			__set_errno(EINVAL);
+			return -1;
+	}
 }

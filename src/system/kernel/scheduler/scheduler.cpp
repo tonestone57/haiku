@@ -1381,7 +1381,7 @@ InterruptsSpinLocker lock(thread->scheduler_lock);
             InterruptsSpinLocker mapLock(gIrqTaskAffinityLock);
             thread_id* val = sIrqTaskAffinityMap->Lookup(irq);
             if (val && *val == thread->id) {
-                sIrqTaskAffinityMap->Remove(*val);
+                sIrqTaskAffinityMap->Remove(val);
             }
         }
     }
@@ -2746,7 +2746,8 @@ scheduler_perform_load_balance()
 }
 
 void
-Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
+Scheduler::CPUEntry*
+find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
 {
     Scheduler::CPUEntry* best = nullptr;
     float bestScore = 1e9;
@@ -2773,6 +2774,7 @@ Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUE
     return best;
 }
 
+void
 maybe_relocate_irqs(Thread* thread)
 {
     if (!thread || thread_is_idle_thread(thread)) return;

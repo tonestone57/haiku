@@ -33,7 +33,7 @@
 
 
 #include "scheduler_common.h"
-#include "scheduler_cpu.hh"
+#include "scheduler_cpu.h"
 #include "scheduler_defs.h"
 #include "scheduler_locking.h"
 #include "scheduler_modes.h"
@@ -2756,3 +2756,5 @@ scheduler_perform_load_balance()
 // Syscall implementations (do_... functions) follow...
 // ... (rest of the file as previously read)
 // For brevity, the syscall implementations are not repeated here but are part of the full file content.
+
+[end of src/system/kernel/scheduler/scheduler.cpp]

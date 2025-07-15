@@ -57,6 +57,11 @@ suggest_thread_priority(uint32 what, int32 period, bigtime_t jitter,
 }
 
 
+bigtime_t
+estimate_max_scheduling_latency(thread_id thread)
+{
+	return _kern_estimate_max_scheduling_latency(thread);
+}
 
 
 status_t
@@ -70,16 +75,6 @@ int32
 __get_scheduler_mode(void)
 {
 	return _kern_get_scheduler_mode();
-}
-
-
-bigtime_t
-estimate_max_scheduling_latency(thread_id thread)
-{
-	if (thread < 0)
-		thread = find_thread(NULL);
-
-	return _kern_estimate_max_scheduling_latency(thread);
 }
 
 

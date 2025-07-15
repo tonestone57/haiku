@@ -264,6 +264,20 @@ _user_estimate_max_scheduling_latency(thread_id thid)
 	return 0;
 }
 
+
+status_t
+_user_set_scheduler_mode(int32 mode)
+{
+	return scheduler_set_operation_mode((scheduler_mode)mode);
+}
+
+
+int32
+_user_get_scheduler_mode(void)
+{
+	return gCurrentModeID;
+}
+
 using namespace Scheduler;
 
 static bool sSchedulerEnabled;

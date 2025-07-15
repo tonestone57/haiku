@@ -574,6 +574,10 @@ extern void			_kern_clear_caches(void *address, size_t length,
 extern bool			_kern_cpu_enabled(int32 cpu);
 extern status_t		_kern_set_cpu_enabled(int32 cpu, bool enabled);
 
+extern bigtime_t	_kern_estimate_max_scheduling_latency(thread_id thread);
+extern status_t		_kern_set_scheduler_mode(int32 mode);
+extern int32		_kern_get_scheduler_mode(void);
+
 #if defined(__i386__) || defined(__x86_64__)
 // our only x86 only syscall
 extern status_t		_kern_get_cpuid(cpuid_info *info, uint32 eax, uint32 cpu);

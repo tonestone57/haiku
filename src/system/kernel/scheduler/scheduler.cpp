@@ -1559,13 +1559,13 @@ init()
 	scheduler_update_policy();
 	gCoreCount = coreCount;
 	gPackageCount = packageCount;
-	gCPUEntries = new(std::nothrow) Scheduler::CPUEntry[cpuCount];
+	gCPUEntries = new(std::nothrow) Scheduler::CPUEntry[cpuCount]();
 	if (gCPUEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<Scheduler::CPUEntry> cpuEntriesDeleter(gCPUEntries);
-	gCoreEntries = new(std::nothrow) CoreEntry[coreCount];
+	gCoreEntries = new(std::nothrow) CoreEntry[coreCount]();
 	if (gCoreEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<CoreEntry> coreEntriesDeleter(gCoreEntries);
-	gPackageEntries = new(std::nothrow) PackageEntry[packageCount];
+	gPackageEntries = new(std::nothrow) PackageEntry[packageCount]();
 	if (gPackageEntries == NULL) return B_NO_MEMORY;
 	ArrayDeleter<PackageEntry> packageEntriesDeleter(gPackageEntries);
 

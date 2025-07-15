@@ -1610,8 +1610,8 @@ init()
 
 	for (int32 i = 0; i < cpuCount; i++) {
 		int32 coreIdx = sCPUToCore[i];
-		gCoreEntries[coreIdx].AddCPU(&gCPUEntries[i]);
 		gCPUEntries[i].Init(i, &gCoreEntries[coreIdx]);
+		gCoreEntries[coreIdx].AddCPU(&gCPUEntries[i]);
 	}
 
 	packageEntriesDeleter.Detach();

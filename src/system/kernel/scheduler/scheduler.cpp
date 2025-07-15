@@ -2453,7 +2453,7 @@ scheduler_perform_load_balance()
 
 	const int MAX_LB_CANDIDATES_TO_CHECK = 10;
 
-	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK];
+	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK] = { NULL };
 	int checkedCount = 0;
 
 	for (int i = 0; i < MAX_LB_CANDIDATES_TO_CHECK && !sourceQueue.IsEmpty(); ++i) {

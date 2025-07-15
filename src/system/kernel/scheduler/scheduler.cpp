@@ -430,35 +430,47 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 }
 
 
-// Enqueues a thread in the appropriate run queue.
-// This function must be called with interrupts disabled.
 void
-scheduler_enqueue_in_run_queue(Thread *thread)
+scheduler_enqueue_in_run_queue(Thread* thread)
 {
 	ASSERT(!are_interrupts_enabled());
 	SCHEDULER_ENTER_FUNCTION();
 
-	TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): T %" B_PRId32 " prio %" B_PRId32 "\n",
-		thread->id, thread->priority);
+	ASSERT(thread != NULL);
+	ThreadData* data = thread->scheduler_data;
+	if (!data)
+		return;
 
-	ThreadData* threadData = thread->scheduler_data;
-	Scheduler::CPUEntry* targetCPU = NULL;
-	CoreEntry* targetCore = NULL;
+	Scheduler::CPUEntry* cpu = NULL;
+	CoreEntry* core = NULL;
+	data->ChooseCoreAndCPU(core, cpu);
+	ASSERT(cpu != NULL && core != NULL);
 
-	threadData->ChooseCoreAndCPU(targetCore, targetCPU);
-	ASSERT(targetCPU != NULL && targetCore != NULL);
-	ASSERT(threadData->Core() == targetCore && "ThreadData's core must match targetCore after ChooseCoreAndCPU");
+	InterruptsSpinLocker locker(thread->scheduler_lock);
 
-	if (thread_is_idle_thread(thread)) {
-		TRACE_SCHED("scheduler_enqueue_in_run_queue (EEVDF): idle T %" B_PRId32 " not added to EEVDF queue.\n", thread->id);
+	if (data->IsIdle()) {
 		if (thread->state != B_THREAD_RUNNING)
 			thread->state = B_THREAD_READY;
 		return;
 	}
 
-	threadData->UpdateEevdfParameters(targetCPU, true, false);
+	data->UpdateEevdfParameters(cpu, true, false);
+	data->MarkEnqueued(core);
 
-	enqueue_thread_on_cpu_eevdf(thread, targetCPU, targetCore);
+	cpu->LockRunQueue();
+	cpu->AddThread(data);
+	cpu->UnlockRunQueue();
+
+	Thread* running = gCPU[cpu->ID()].running_thread;
+	if (!running || thread_is_idle_thread(running)) {
+		gCPU[cpu->ID()].invoke_scheduler = true;
+	} else {
+		ThreadData* runningData = running->scheduler_data;
+		if (system_time() >= data->EligibleTime() &&
+			data->VirtualDeadline() < runningData->VirtualDeadline()) {
+			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
+		}
+	}
 }
 
 

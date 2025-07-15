@@ -1759,6 +1759,7 @@ scheduler_init()
 	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
 	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod, B_PERIODIC_TIMER);
 	scheduler_init_weights();
+	dprintf("scheduler_init: done\n");
 }
 
 

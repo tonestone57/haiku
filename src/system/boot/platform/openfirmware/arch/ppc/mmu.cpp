@@ -22,6 +22,7 @@
 #include <arch_mmu.h>
 #include <kernel.h>
 
+#include "serial.h"
 #include "support.h"
 
 
@@ -456,6 +457,7 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), kernel_size, PAGE_READ_WRITE);
 
 	dprintf("find_allocated_ranges: last dprintf\n");
+	serial_puts("find_allocated_ranges: last dprintf\n");
 	return B_OK;
 }
 
@@ -841,6 +843,7 @@ extern "C" status_t
 arch_mmu_init(void)
 {
 	dprintf("arch_mmu_init: start\n");
+	serial_puts("arch_mmu_init: start\n");
 	// get map of physical memory (fill in kernel_args structure)
 
 	size_t total;

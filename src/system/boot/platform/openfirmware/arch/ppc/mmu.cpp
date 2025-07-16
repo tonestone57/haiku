@@ -437,12 +437,14 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 
 	// remove the boot loader code from the virtual ranges to keep in the
 	// kernel
+	dprintf("find_allocated_ranges: removing boot loader range\n");
 	if (remove_virtual_range_to_keep(&__text_begin, &_end - &__text_begin)
 			!= B_OK) {
 		dprintf("Failed to remove boot loader range from virtual ranges to keep.\n");
 	}
 
 	// map the kernel range
+	dprintf("find_allocated_ranges: mapping kernel range\n");
 	size_t kernel_size = 0;
 	if (gKernelArgs.kernel_image->elf_class == ELFCLASS64) {
 		preloaded_elf64_image *image = static_cast<preloaded_elf64_image *>(
@@ -455,6 +457,7 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	}
 	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), kernel_size, PAGE_READ_WRITE);
 
+	dprintf("find_allocated_ranges done\n");
 	return B_OK;
 }
 
@@ -821,6 +824,7 @@ callback(struct of_arguments *args)
 extern "C" status_t
 arch_set_callback(void)
 {
+	dprintf("arch_set_callback\n");
 	// set OpenFirmware callbacks - it will ask us for memory after that
 	// instead of maintaining it itself
 
@@ -832,6 +836,7 @@ arch_set_callback(void)
 	}
 	TRACE("old callback = %p; new callback = %p\n", oldCallback, callback);
 
+	dprintf("arch_set_callback done\n");
 	return B_OK;
 }
 

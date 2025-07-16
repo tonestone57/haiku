@@ -51,6 +51,7 @@ KernelMergeObject kernel_arch_ppc.o :
 	arch_system_info.cpp
 	arch_thread.cpp
 	arch_timer.cpp
+	arch_tlb.cpp
 	arch_user_debugger.cpp
 	arch_vm.cpp
 	arch_vm_translation_map.cpp

@@ -113,12 +113,8 @@ void
 arch_cpu_invalidate_TLB_range(addr_t start, addr_t end)
 {
 	asm volatile("sync");
-	while (start < end) {
-		asm volatile("tlbie %0" :: "r" (start));
-		asm volatile("eieio");
-		asm volatile("sync");
-		start += B_PAGE_SIZE;
-	}
+	for (addr_t i = start; i < end; i += B_PAGE_SIZE)
+		asm volatile("tlbie %0" :: "r"(i));
 	asm volatile("tlbsync");
 	asm volatile("sync");
 }
@@ -127,14 +123,9 @@ arch_cpu_invalidate_TLB_range(addr_t start, addr_t end)
 void
 arch_cpu_invalidate_TLB_list(addr_t pages[], int num_pages)
 {
-	int i;
-
 	asm volatile("sync");
-	for (i = 0; i < num_pages; i++) {
-		asm volatile("tlbie %0" :: "r" (pages[i]));
-		asm volatile("eieio");
-		asm volatile("sync");
-	}
+	for (int i = 0; i < num_pages; i++)
+		asm volatile("tlbie %0" :: "r"(pages[i]));
 	asm volatile("tlbsync");
 	asm volatile("sync");
 }
@@ -143,25 +134,18 @@ arch_cpu_invalidate_TLB_list(addr_t pages[], int num_pages)
 void
 arch_cpu_global_TLB_invalidate(void)
 {
+	asm volatile("sync");
 	if (sHasTlbia) {
-		ppc_sync();
-		tlbia();
-		ppc_sync();
+		asm volatile("tlbia");
 	} else {
 		addr_t address = 0;
-		unsigned long i;
-
-		ppc_sync();
-		for (i = 0; i < 0x100000; i++) {
-			tlbie(address);
-			eieio();
-			ppc_sync();
-
+		for (unsigned long i = 0; i < 0x100000; i++) {
+			asm volatile("tlbie %0" :: "r"(address));
 			address += B_PAGE_SIZE;
 		}
-		tlbsync();
-		ppc_sync();
 	}
+	asm volatile("tlbsync");
+	asm volatile("sync");
 }
 
 
@@ -181,11 +165,9 @@ arch_cpu_user_memcpy(void *to, const void *from, size_t size,
 {
 	char *tmp = (char *)to;
 	char *s = (char *)from;
-	addr_t oldFaultHandler = *faultHandler;
 
-// TODO: This doesn't work correctly with gcc 4 anymore!
-	if (ppc_set_fault_handler(faultHandler, (addr_t)&&error))
-		goto error;
+	addr_t oldFaultHandler = *faultHandler;
+	*faultHandler = (addr_t)&&error;
 
 	while (size--)
 		*tmp++ = *s++;
@@ -199,25 +181,13 @@ error:
 }
 
 
-/**	\brief Copies at most (\a size - 1) characters from the string in \a from to
- *	the string in \a to, NULL-terminating the result.
- *
- *	\param to Pointer to the destination C-string.
- *	\param from Pointer to the source C-string.
- *	\param size Size in bytes of the string buffer pointed to by \a to.
- *
- *	\return strlen(\a from).
- */
-
 ssize_t
 arch_cpu_user_strlcpy(char *to, const char *from, size_t size, addr_t *faultHandler)
 {
 	int from_length = 0;
-	addr_t oldFaultHandler = *faultHandler;
 
-// TODO: This doesn't work correctly with gcc 4 anymore!
-	if (ppc_set_fault_handler(faultHandler, (addr_t)&&error))
-		goto error;
+	addr_t oldFaultHandler = *faultHandler;
+	*faultHandler = (addr_t)&&error;
 
 	if (size > 0) {
 		to[--size] = '\0';
@@ -244,11 +214,9 @@ status_t
 arch_cpu_user_memset(void *s, char c, size_t count, addr_t *faultHandler)
 {
 	char *xs = (char *)s;
-	addr_t oldFaultHandler = *faultHandler;
 
-// TODO: This doesn't work correctly with gcc 4 anymore!
-	if (ppc_set_fault_handler(faultHandler, (addr_t)&&error))
-		goto error;
+	addr_t oldFaultHandler = *faultHandler;
+	*faultHandler = (addr_t)&&error;
 
 	while (count--)
 		*xs++ = c;

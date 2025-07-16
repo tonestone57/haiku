@@ -112,6 +112,7 @@
 #define MAX_VSID_BASES (B_PAGE_SIZE * 8)
 static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
+static spinlock sPageTableLock;
 
 #define VSID_BASE_SHIFT 3
 #define VADDR_TO_VSID(vsidBase, vaddr) (vsidBase + ((vaddr) >> 28))
@@ -369,6 +370,9 @@ PPCVMTranslationMap460::Map(addr_t virtualAddress,
 
 	//dprintf("vm_translation_map.map_tmap: vsid %d, pa 0x%lx, va 0x%lx\n", vsid, pa, va);
 
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sPageTableLock);
+
 	PPCPagingMethod460* m = PPCPagingMethod460::Method();
 
 	// Search for a free page table slot using the primary hash value
@@ -384,6 +388,9 @@ PPCVMTranslationMap460::Map(addr_t virtualAddress,
 		m->FillPageTableEntry(entry, virtualSegmentID, virtualAddress,
 			physicalAddress, protection, memoryType, false);
 		fMapCount++;
+
+		release_spinlock(&sPageTableLock);
+		restore_interrupts(state);
 		return B_OK;
 	}
 
@@ -401,6 +408,9 @@ PPCVMTranslationMap460::Map(addr_t virtualAddress,
 		m->FillPageTableEntry(entry, virtualSegmentID, virtualAddress,
 			physicalAddress, protection, memoryType, false);
 		fMapCount++;
+
+		release_spinlock(&sPageTableLock);
+		restore_interrupts(state);
 		return B_OK;
 	}
 
@@ -491,12 +501,18 @@ PPCVMTranslationMap460::Unmap(addr_t start, addr_t end)
 
 //	dprintf("vm_translation_map.unmap_tmap: start 0x%lx, end 0x%lx\n", start, end);
 
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sPageTableLock);
+
 	while (start < end) {
 		if (RemovePageTableEntry(start))
 			fMapCount--;
 
 		start += B_PAGE_SIZE;
 	}
+
+	release_spinlock(&sPageTableLock);
+	restore_interrupts(state);
 
 	return B_OK;
 
@@ -957,6 +973,11 @@ PPCVMTranslationMap460::Protect(addr_t start, addr_t end, uint32 attributes,
 	uint32 memoryType)
 {
 	// XXX finish
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sPageTableLock);
+
+	release_spinlock(&sPageTableLock);
+	restore_interrupts(state);
 	return B_ERROR;
 #if 0//X86
 	start = ROUNDDOWN(start, B_PAGE_SIZE);
@@ -1036,9 +1057,15 @@ PPCVMTranslationMap460::Protect(addr_t start, addr_t end, uint32 attributes,
 status_t
 PPCVMTranslationMap460::ClearFlags(addr_t virtualAddress, uint32 flags)
 {
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sPageTableLock);
+
 	page_table_entry *entry = LookupPageTableEntry(virtualAddress);
-	if (entry == NULL)
+	if (entry == NULL) {
+		release_spinlock(&sPageTableLock);
+		restore_interrupts(state);
 		return B_NO_ERROR;
+	}
 
 	bool modified = false;
 
@@ -1059,6 +1086,9 @@ PPCVMTranslationMap460::ClearFlags(addr_t virtualAddress, uint32 flags)
 		tlbsync();
 		ppc_sync();
 	}
+
+	release_spinlock(&sPageTableLock);
+	restore_interrupts(state);
 
 	return B_OK;
 

@@ -16,6 +16,7 @@
 #include "arch_int.h"
 
 #include <arch/smp.h>
+#include <arch_tlb.h>
 #include <boot/kernel_args.h>
 #include <device_manager.h>
 #include <kscheduler.h>
@@ -236,10 +237,14 @@ dprintf("handling I/O interrupts done\n");
 		case 0xf20: // altivec unavailable exception
 			panic("alitivec unavailable exception: unimplemented\n");
 			break;
-		case 0x1000:
-		case 0x1100:
-		case 0x1200:
-			panic("TLB miss exception: unimplemented\n");
+		case 0x1000: // ITLB miss
+			ppc_handle_tlb_miss(iframe->srr0, false);
+			break;
+		case 0x1100: // DTLB miss on load
+			ppc_handle_tlb_miss(iframe->dar, false);
+			break;
+		case 0x1200: // DTLB miss on store
+			ppc_handle_tlb_miss(iframe->dar, true);
 			break;
 		case 0x1300: // instruction address exception
 			panic("instruction address exception: unimplemented\n");

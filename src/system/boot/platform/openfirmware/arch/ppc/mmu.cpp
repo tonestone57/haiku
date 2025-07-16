@@ -366,9 +366,13 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 		// map range into the page table
 
 		dprintf("mapping range: va %p, pa %p, size %d, mode %d\n", map->virtual_address, map->physical_address, map->length, map->mode);
-		if (map->virtual_address >= (void*)0x200000 && map->virtual_address < (void*)0x210000)
+		if (map->physical_address >= (void*)0xA0000 && map->physical_address < (void*)0xC0000) {
+			map_range(map->virtual_address, map->physical_address, map->length,
+				PAGE_READ_ONLY);
+		} else if (map->virtual_address >= (void*)0x200000 && map->virtual_address < (void*)0x210000) {
 			map_range(map->virtual_address, map->physical_address, map->length,
 				map->mode);
+		}
 
 		// insert range in virtual ranges to keep
 

@@ -437,14 +437,12 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 
 	// remove the boot loader code from the virtual ranges to keep in the
 	// kernel
-	dprintf("find_allocated_ranges: removing boot loader range\n");
 	if (remove_virtual_range_to_keep(&__text_begin, &_end - &__text_begin)
 			!= B_OK) {
 		dprintf("Failed to remove boot loader range from virtual ranges to keep.\n");
 	}
 
 	// map the kernel range
-	dprintf("find_allocated_ranges: mapping kernel range\n");
 	size_t kernel_size = 0;
 	if (gKernelArgs.kernel_image->elf_class == ELFCLASS64) {
 		preloaded_elf64_image *image = static_cast<preloaded_elf64_image *>(
@@ -457,7 +455,7 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	}
 	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), kernel_size, PAGE_READ_WRITE);
 
-	dprintf("find_allocated_ranges done\n");
+	dprintf("find_allocated_ranges: last dprintf\n");
 	return B_OK;
 }
 
@@ -824,7 +822,6 @@ callback(struct of_arguments *args)
 extern "C" status_t
 arch_set_callback(void)
 {
-	dprintf("arch_set_callback\n");
 	// set OpenFirmware callbacks - it will ask us for memory after that
 	// instead of maintaining it itself
 
@@ -836,7 +833,6 @@ arch_set_callback(void)
 	}
 	TRACE("old callback = %p; new callback = %p\n", oldCallback, callback);
 
-	dprintf("arch_set_callback done\n");
 	return B_OK;
 }
 
@@ -1023,11 +1019,9 @@ arch_mmu_init(void)
 
 	// Set the Open Firmware memory callback. From now on the Open Firmware
 	// will ask us for memory.
-	dprintf("arch_mmu_init: setting of callback\n");
 	arch_set_callback();
 
 	// set up new page table and turn on translation again
-	dprintf("arch_mmu_init: setting up new page table\n");
 
 	for (uint32 i = 0; i < 16; i++) {
 		ppc_set_segment_register((void *)(i * 0x10000000), sSegments[i]);
@@ -1042,14 +1036,12 @@ arch_mmu_init(void)
 
 	if (!realMode) {
 		// clear BATs
-		dprintf("arch_mmu_init: clearing BATs\n");
 		reset_ibats();
 		reset_dbats();
 		ppc_sync();
 		isync();
 	}
 
-	dprintf("arch_mmu_init: setting MSR\n");
 	set_msr(MSR_MACHINE_CHECK_ENABLED | MSR_FP_AVAILABLE
 		| MSR_INST_ADDRESS_TRANSLATION | MSR_DATA_ADDRESS_TRANSLATION);
 

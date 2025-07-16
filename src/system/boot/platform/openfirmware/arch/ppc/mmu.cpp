@@ -317,6 +317,15 @@ map_range(void *virtualAddress, void *physicalAddress, size_t size, uint8 mode)
 }
 
 
+static void
+map_physical_memory_range(addr_t base, size_t size, uint8 mode)
+{
+    insert_physical_allocated_range(base, size);
+    insert_virtual_allocated_range(base, size);
+    map_range((void*)base, (void*)base, size, mode);
+}
+
+
 static status_t
 find_allocated_ranges(void *oldPageTable, void *pageTable,
 	page_table_entry_group **_physicalPageTable, void **_exceptionHandlers)
@@ -351,6 +360,8 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 
 	for (int i = 0; i < length; i++) {
 		struct translation_map *map = &translations[i];
+		dprintf("translation %d: va=%p, pa=%p, len=%d, mode=%d\n",
+			i, map->virtual_address, map->physical_address, map->length, map->mode);
 		bool keepRange = true;
 		TRACE("%i: map: %p, length %d -> physical: %p, mode %d\n", i,
 			map->virtual_address, map->length,
@@ -428,8 +439,7 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	// kernel
 	if (remove_virtual_range_to_keep(&__text_begin, &_end - &__text_begin)
 			!= B_OK) {
-		dprintf("%s: Failed to remove boot loader range "
-			"from virtual ranges to keep.\n", __func__);
+		dprintf("Failed to remove boot loader range from virtual ranges to keep.\n");
 	}
 
 	// map the kernel range
@@ -497,12 +507,13 @@ find_free_physical_range(size_t size)
 	}
 
 	for (uint32 i = 0; i < gKernelArgs.num_physical_allocated_ranges; i++) {
-		void *address
-			= (void *)(addr_t)(gKernelArgs.physical_allocated_range[i].start
-				+ gKernelArgs.physical_allocated_range[i].size);
-		if (!is_physical_allocated(address, size)
-			&& is_physical_memory(address, size))
-			return address;
+		addr_t address = gKernelArgs.physical_allocated_range[i].start
+			+ gKernelArgs.physical_allocated_range[i].size;
+		address = ROUNDUP(address, B_PAGE_SIZE);
+
+		if (!is_physical_allocated((void*)address, size)
+			&& is_physical_memory((void*)address, size))
+			return (void*)address;
 	}
 	return PHYSINVAL;
 }
@@ -596,7 +607,7 @@ arch_mmu_allocate(void *_virtualAddress, size_t size, uint8 _protection,
 extern "C" status_t
 arch_mmu_free(void *address, size_t size)
 {
-	// TODO: implement freeing a region!
+	dprintf("arch_mmu_free(): called but not implemented (address=%p, size=%" B_PRIuSIZE ")\n", address, size);
 	return B_OK;
 }
 
@@ -733,15 +744,10 @@ success:
 		| entry->page_protection;
 	error = B_OK;
 
-	// Invalidate the old TLB entry and write the new one
+	// Invalidate the old TLB entry
 	asm volatile("tlbie %0" :: "r"(virtualAddress));
 	asm volatile("eieio");
 	asm volatile("tlbsync");
-	asm volatile("ptesync");
-	asm volatile("tlbwe");
-	asm volatile("eieio");
-	asm volatile("tlbsync");
-	asm volatile("sync");
 
 	return B_OK;
 }
@@ -912,6 +918,7 @@ arch_mmu_init(void)
 	for (int32 i = 0; i < 16; i++) {
 		sSegments[i].virtual_segment_id = 0x400 + i;
 		ppc_set_segment_register((void *)(i * 0x10000000), sSegments[i]);
+		TRACE("Segment %d -> VSID=0x%lx\n", i, sSegments[i].virtual_segment_id);
 	}
 
 	// find already allocated ranges of physical memory
@@ -955,11 +962,13 @@ arch_mmu_init(void)
 		insert_virtual_allocated_range((addr_t)table, tableSize);
 
 		// QEMU OpenHackware work-around
-		insert_physical_allocated_range(0x05800000, 0x06000000 - 0x05800000);
-		insert_virtual_allocated_range(0x05800000, 0x06000000 - 0x05800000);
+		map_physical_memory_range(0x05800000, 0x06000000 - 0x05800000, PAGE_READ_WRITE);
 
 		physicalTable = table;
 	}
+
+	if (physicalTable == NULL)
+		panic("could not find page table!");
 
 	if (exceptionHandlers == (void *)-1) {
 		// We need to map the exception vectors using a BAT entry, because the
@@ -975,6 +984,9 @@ arch_mmu_init(void)
 		set_ibat0(&bat);
 		set_dbat0(&bat);
 		isync();
+
+		dprintf("BAT0: va=%p, pa=%p, len=%d, prot=%d\n",
+			bat.VirtualAddress(), bat.PhysicalAddress(), bat.length, bat.protection);
 
 		exceptionHandlers = (void*)0x0;
 		gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
@@ -1023,6 +1035,12 @@ arch_mmu_init(void)
 
 	gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
 	gKernelArgs.arch_args.exception_handlers.size = B_PAGE_SIZE;
+
+	dprintf("MMU Summary:\n");
+	dprintf("  Page Table Base: %p\n", sPageTable);
+	dprintf("  Page Table Size: %" B_PRIuSIZE "\n", tableSize);
+	dprintf("  Hash Mask: 0x%08lx\n", sPageTableHashMask);
+	dprintf("  Exception Handlers: %p\n", (void*)gKernelArgs.arch_args.exception_handlers.start);
 
 	dprintf("arch_mmu_init: end\n");
 	dprintf("MMU setup complete.\n");

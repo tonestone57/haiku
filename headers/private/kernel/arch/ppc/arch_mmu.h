@@ -27,28 +27,33 @@ enum bat_length {
 	BAT_LENGTH_64MB		= 0x01ff,
 	BAT_LENGTH_128MB	= 0x03ff,
 	BAT_LENGTH_256MB	= 0x07ff,
+	BAT_LENGTH_512MB	= 0x0fff,
+	BAT_LENGTH_1GB		= 0x1fff,
+	BAT_LENGTH_2GB		= 0x3fff,
 };
 
 enum bat_protection {
-	BAT_READ_ONLY = 1,
-	BAT_READ_WRITE = 2,
+	BAT_NO_ACCESS	= 0,
+	BAT_READ_ONLY	= 1,
+	BAT_READ_WRITE	= 2,
+	BAT_EXECUTE		= 3,
 };
 
 struct block_address_translation {
 	// upper 32 bit
 	uint32	page_index : 15;				// BEPI, block effective page index
-	uint32	_reserved0 : 4;
-	uint32	length : 11;
+	uint32	_reserved0 : 4;					// Reserved
+	uint32	length : 11;					// BL, block length
 	uint32	kernel_valid : 1;				// Vs, Supervisor-state valid
 	uint32	user_valid : 1;					// Vp, User-state valid
 	// lower 32 bit
-	uint32	physical_block_number : 15;		// BPRN
-	uint32	write_through : 1;				// WIMG
-	uint32	caching_inhibited : 1;
-	uint32	memory_coherent : 1;
-	uint32	guarded : 1;
-	uint32	_reserved1 : 1;
-	uint32	protection : 2;
+	uint32	physical_block_number : 15;		// BPRN, physical block number
+	uint32	write_through : 1;				// W, Write-through
+	uint32	caching_inhibited : 1;			// I, Caching-inhibited
+	uint32	memory_coherent : 1;			// M, Memory coherent
+	uint32	guarded : 1;					// G, Guarded
+	uint32	_reserved1 : 1;					// Reserved
+	uint32	protection : 2;					// PP, page protection
 
 	block_address_translation()
 	{

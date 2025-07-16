@@ -974,6 +974,9 @@ arch_mmu_init(void)
 		// We need to map the exception vectors using a BAT entry, because the
 		// exception handlers in the kernel will be called with address
 		// translation turned off.
+		if (!is_physical_memory((void*)0x0, 0x20000))
+			panic("memory for exception vectors not available!");
+
 		block_address_translation bat;
 		bat.length = BAT_LENGTH_128kB;
 		bat.kernel_valid = true;

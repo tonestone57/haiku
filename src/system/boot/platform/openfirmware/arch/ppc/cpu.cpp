@@ -51,7 +51,7 @@ boot_arch_cpu_init(void)
 			sizeof(cpuPath)) == B_OK) {
 		TRACE(("found CPU: %s\n", cpuPath));
 
-		// For the first CPU get the frequencies of CPU, bus, and time base.
+		// For the first CPU, get the CPU, bus, and time base frequencies.
 		// We assume they are the same for all CPUs.
 		if (cpuCount == 0) {
 			int cpu = of_finddevice(cpuPath);
@@ -69,9 +69,7 @@ boot_arch_cpu_init(void)
 					"frequency!\n");
 				return B_ERROR;
 			}
-			if (busFrequency == 0
-				&& of_getprop(cpu, "bus-frequency", &busFrequency, 4)
-					== OF_FAILED) {
+			if (of_getprop(cpu, "bus-frequency", &busFrequency, 4) == OF_FAILED) {
 				printf("boot_arch_cpu_init: Failed to get bus clock "
 					"frequency!\n");
 				return B_ERROR;

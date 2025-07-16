@@ -114,7 +114,7 @@ static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
 
 #define VSID_BASE_SHIFT 3
-#define VADDR_TO_VSID(vsidBase, vaddr) (vsidBase + ((vaddr) >> 28))
+#define VADDR_TO_VSID(vsidBase, vaddr) (get_sr((void *)vaddr) & 0x00ffffff)
 
 
 // #pragma mark -
@@ -265,26 +265,16 @@ PPCVMTranslationMapClassic::ChangeASID()
 #error fix me
 #endif
 	int vsidBase = VSIDBase();
-	segment_descriptor segment;
-	segment.no_execute_protection = 1;
 
 	isync();	// synchronize context
-	segment.virtual_segment_id = vsidBase;
-	ppc_set_segment_register((void*)0x00000000, segment);
-	segment.virtual_segment_id = vsidBase + 1;
-	ppc_set_segment_register((void*)0x10000000, segment);
-	segment.virtual_segment_id = vsidBase + 2;
-	ppc_set_segment_register((void*)0x20000000, segment);
-	segment.virtual_segment_id = vsidBase + 3;
-	ppc_set_segment_register((void*)0x30000000, segment);
-	segment.virtual_segment_id = vsidBase + 4;
-	ppc_set_segment_register((void*)0x40000000, segment);
-	segment.virtual_segment_id = vsidBase + 5;
-	ppc_set_segment_register((void*)0x50000000, segment);
-	segment.virtual_segment_id = vsidBase + 6;
-	ppc_set_segment_register((void*)0x60000000, segment);
-	segment.virtual_segment_id = vsidBase + 7;
-	ppc_set_segment_register((void*)0x70000000, segment);
+	asm("mtsr	0,%0" : : "g"(vsidBase));
+	asm("mtsr	1,%0" : : "g"(vsidBase + 1));
+	asm("mtsr	2,%0" : : "g"(vsidBase + 2));
+	asm("mtsr	3,%0" : : "g"(vsidBase + 3));
+	asm("mtsr	4,%0" : : "g"(vsidBase + 4));
+	asm("mtsr	5,%0" : : "g"(vsidBase + 5));
+	asm("mtsr	6,%0" : : "g"(vsidBase + 6));
+	asm("mtsr	7,%0" : : "g"(vsidBase + 7));
 	isync();	// synchronize context
 }
 

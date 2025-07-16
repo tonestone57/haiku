@@ -986,7 +986,7 @@ arch_mmu_init(void)
 		isync();
 
 		dprintf("BAT0: va=%p, pa=%p, len=%d, prot=%d\n",
-			bat.VirtualAddress(), bat.PhysicalAddress(), bat.length, bat.protection);
+			(void*)0x0, (void*)0x0, bat.length, bat.protection);
 
 		exceptionHandlers = (void*)0x0;
 		gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;

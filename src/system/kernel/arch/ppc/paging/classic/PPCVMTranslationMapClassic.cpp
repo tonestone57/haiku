@@ -110,6 +110,7 @@
 // (effective) segment number, which leaves us with a 21 bit space of
 // VSID bases (= 2 * 1024 * 1024).
 #define MAX_VSID_BASES (B_PAGE_SIZE * 8)
+#define SHARED_MEMORY_VSID_BASE (MAX_VSID_BASES - 1)
 static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
 static spinlock sPageTableLock;
@@ -300,7 +301,11 @@ page_table_entry *
 PPCVMTranslationMapClassic::LookupPageTableEntry(addr_t virtualAddress)
 {
 	// lookup the vsid based off the va
-	uint32 virtualSegmentID = VADDR_TO_VSID(fVSIDBase, virtualAddress);
+	uint32 virtualSegmentID;
+	if ((attributes & B_SHARED_AREA) != 0)
+		virtualSegmentID = VADDR_TO_VSID(SHARED_MEMORY_VSID_BASE, virtualAddress);
+	else
+		virtualSegmentID = VADDR_TO_VSID(fVSIDBase, virtualAddress);
 
 //	dprintf("vm_translation_map.lookup_page_table_entry: vsid %ld, va 0x%lx\n", virtualSegmentID, virtualAddress);
 
@@ -371,7 +376,11 @@ PPCVMTranslationMapClassic::Map(addr_t virtualAddress,
 	TRACE("map_tmap: entry pa 0x%lx va 0x%lx\n", pa, va);
 
 	// lookup the vsid based off the va
-	uint32 virtualSegmentID = VADDR_TO_VSID(fVSIDBase, virtualAddress);
+	uint32 virtualSegmentID;
+	if ((attributes & B_SHARED_AREA) != 0)
+		virtualSegmentID = VADDR_TO_VSID(SHARED_MEMORY_VSID_BASE, virtualAddress);
+	else
+		virtualSegmentID = VADDR_TO_VSID(fVSIDBase, virtualAddress);
 	uint32 protection = 0;
 
 	// ToDo: check this

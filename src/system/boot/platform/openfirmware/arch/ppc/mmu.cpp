@@ -884,32 +884,23 @@ arch_mmu_init(void)
 	}
 
 	if (exceptionHandlers == (void *)-1) {
-		void* vectorBase = (void*)0x0; // Exception vectors start at 0x0 for MSR[IP]=0
-		size_t vectorSize = B_PAGE_SIZE;
-		uint8 vectorProtection = PAGE_READ_WRITE;
+		// We need to map the exception vectors using a BAT entry, because the
+		// exception handlers in the kernel will be called with address
+		// translation turned off.
+		block_address_translation bat;
+		bat.length = BAT_LENGTH_128kB;
+		bat.kernel_valid = true;
+		bat.memory_coherent = true;
+		bat.protection = BAT_READ_WRITE;
+		bat.SetVirtualAddress((void*)0x0);
+		bat.SetPhysicalAddress((void*)0x0);
+		set_ibat0(&bat);
+		set_dbat0(&bat);
+		isync();
 
-		dprintf("No pre-existing mapping for exception handlers found. Creating one...\n");
-		dprintf("Exception vector 0x%lx mapped to PA 0x%lx\n", (addr_t)vectorBase, (addr_t)vectorBase);
-		if (!is_physical_memory(vectorBase, vectorSize)) {
-			dprintf("Warning: Physical memory for exception vectors (0x0-0x%lx) "
-				"not reported in OF memory map. Attempting to map anyway.\n", vectorSize - 1);
-		}
-
-		if (insert_physical_allocated_range((addr_t)vectorBase, vectorSize) != B_OK) {
-			dprintf("Warning: Failed to record physical allocation for exception vectors. "
-				"It might already be allocated.\n");
-		}
-		if (insert_virtual_allocated_range((addr_t)vectorBase, vectorSize) != B_OK) {
-			dprintf("Warning: Failed to record virtual allocation for exception vectors. "
-				"It might already be allocated.\n");
-		}
-
-		map_range(vectorBase, vectorBase, vectorSize, vectorProtection);
-		exceptionHandlers = vectorBase;
-
+		exceptionHandlers = (void*)0x0;
 		gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
-		gKernelArgs.arch_args.exception_handlers.size = vectorSize;
-
+		gKernelArgs.arch_args.exception_handlers.size = 0x20000;
 	}
 
 	// Set the Open Firmware memory callback. From now on the Open Firmware

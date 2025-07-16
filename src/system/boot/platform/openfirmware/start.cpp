@@ -34,11 +34,13 @@ static uint32 sBootOptions;
 void
 call_ctors(void)
 {
+	dprintf("call_ctors\n");
 	void (**f)(void);
 
 	for (f = &__ctor_list; f < &__ctor_end; f++) {
 		(**f)();
 	}
+	dprintf("call_ctors done\n");
 }
 
 
@@ -62,6 +64,7 @@ get_kernel_entry(void)
 extern "C" void
 platform_start_kernel(void)
 {
+	dprintf("platform_start_kernel\n");
 	addr_t kernelEntry = get_kernel_entry();
 	addr_t stackTop = gKernelArgs.cpu_kstack[0].start
 		+ gKernelArgs.cpu_kstack[0].size;
@@ -97,6 +100,7 @@ platform_boot_options(void)
 extern "C" void
 start(void *openFirmwareEntry)
 {
+	dprintf("start\n");
 	static char bootargs[512];
 
 	// stage2 args - might be set via the command line one day

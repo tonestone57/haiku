@@ -366,8 +366,9 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 		// map range into the page table
 
 		dprintf("mapping range: va %p, pa %p, size %d, mode %d\n", map->virtual_address, map->physical_address, map->length, map->mode);
-		map_range(map->virtual_address, map->physical_address, map->length,
-			map->mode);
+		if (map->virtual_address >= (void*)0x200000 && map->virtual_address < (void*)0x210000)
+			map_range(map->virtual_address, map->physical_address, map->length,
+				map->mode);
 
 		// insert range in virtual ranges to keep
 
@@ -834,8 +835,10 @@ arch_mmu_init(void)
 	// until we're about to take over the page table - we're mapping
 	// pages into our table using these values
 
-	for (int32 i = 0; i < 16; i++)
-		sSegments[i].virtual_segment_id = i;
+	for (int32 i = 0; i < 16; i++) {
+		sSegments[i].virtual_segment_id = 0x400 + i;
+		ppc_set_segment_register((void *)(i * 0x10000000), sSegments[i]);
+	}
 
 	// find already allocated ranges of physical memory
 	// and the virtual address space
@@ -948,5 +951,6 @@ arch_mmu_init(void)
 	gKernelArgs.arch_args.exception_handlers.size = B_PAGE_SIZE;
 
 	dprintf("arch_mmu_init: end\n");
+	dprintf("MMU setup complete.\n");
 	return B_OK;
 }

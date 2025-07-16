@@ -114,7 +114,7 @@ static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
 
 #define VSID_BASE_SHIFT 3
-#define VADDR_TO_VSID(vsidBase, vaddr) (get_sr((void *)vaddr) & 0x00ffffff)
+#define VADDR_TO_VSID(vsidBase, vaddr) (vsidBase + ((vaddr) >> 28))
 
 
 // #pragma mark -
@@ -251,22 +251,6 @@ PPCVMTranslationMap460::Init(bool kernel)
 		// we already know the kernel pgdir mapping
 		fPagingStructures->Init(/*method->KernelVirtualPageDirectory(),
 			method->KernelPhysicalPageDirectory(), NULL*/method->PageTable());
-	}
-
-	if (kernel) {
-		// Set up the segment registers for the kernel address space.
-		segment_descriptor segment;
-		segment.no_execute_protection = 1;
-		segment.kernel_protection_key = 1;
-		segment.user_protection_key = 1;
-
-		isync();
-		for (int i = 0; i < 16; i++) {
-			uint32_t vsid = 0x400 + i;
-			segment.virtual_segment_id = vsid;
-			ppc_set_segment_register((void*)(i << 28), segment);
-		}
-		isync();
 	}
 
 	return B_OK;

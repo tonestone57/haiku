@@ -24,6 +24,7 @@ FUNCTION(set_sdr1):
  *				 r3
  */
 FUNCTION(get_sr):
+	srwi %r3, %r3, 28
 	mfsrin	%r3, %r3
 	blr
 

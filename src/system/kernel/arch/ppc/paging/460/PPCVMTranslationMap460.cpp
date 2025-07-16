@@ -113,6 +113,8 @@
 static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
 static spinlock sPageTableLock;
+static uint32 sVSIDFreeList;
+static spinlock sVSIDFreeListLock;
 
 #define VSID_BASE_SHIFT 3
 #define VADDR_TO_VSID(vsidBase, vaddr) (vsidBase + ((vaddr) >> 28))
@@ -143,10 +145,11 @@ PPCVMTranslationMap460::~PPCVMTranslationMap460()
 			this, fMapCount);
 	}
 
-	// mark the vsid base not in use
-	int baseBit = fVSIDBase >> VSID_BASE_SHIFT;
-	atomic_and((int32 *)&sVSIDBaseBitmap[baseBit / 32],
-			~(1 << (baseBit % 32)));
+	// add the vsid base to the free list
+	acquire_spinlock(&sVSIDFreeListLock);
+	*(uint32*)fVSIDBase = sVSIDFreeList;
+	sVSIDFreeList = fVSIDBase;
+	release_spinlock(&sVSIDFreeListLock);
 
 #if 0//X86
 	if (fPagingStructures->pgdir_virt != NULL) {
@@ -195,23 +198,31 @@ PPCVMTranslationMap460::Init(bool kernel)
 			sSegments[i].virtual_segment_id = fVSIDBase + i;
 
 	} else {
-		int i = 0;
+		acquire_spinlock(&sVSIDFreeListLock);
+		if (sVSIDFreeList != 0) {
+			fVSIDBase = sVSIDFreeList;
+			sVSIDFreeList = *(uint32*)sVSIDFreeList;
+			release_spinlock(&sVSIDFreeListLock);
+		} else {
+			release_spinlock(&sVSIDFreeListLock);
+			int i = 0;
 
-		while (i < MAX_VSID_BASES) {
-			if (sVSIDBaseBitmap[i / 32] == 0xffffffff) {
-				i += 32;
-				continue;
+			while (i < MAX_VSID_BASES) {
+				if (sVSIDBaseBitmap[i / 32] == 0xffffffff) {
+					i += 32;
+					continue;
+				}
+				if ((sVSIDBaseBitmap[i / 32] & (1 << (i % 32))) == 0) {
+					// we found it
+					sVSIDBaseBitmap[i / 32] |= 1 << (i % 32);
+					break;
+				}
+				i++;
 			}
-			if ((sVSIDBaseBitmap[i / 32] & (1 << (i % 32))) == 0) {
-				// we found it
-				sVSIDBaseBitmap[i / 32] |= 1 << (i % 32);
-				break;
-			}
-			i++;
+			if (i >= MAX_VSID_BASES)
+				panic("vm_translation_map_create: out of VSID bases\n");
+			fVSIDBase = i << VSID_BASE_SHIFT;
 		}
-		if (i >= MAX_VSID_BASES)
-			panic("vm_translation_map_create: out of VSID bases\n");
-		fVSIDBase = i << VSID_BASE_SHIFT;
 	}
 
 	release_spinlock(&sVSIDBaseBitmapLock);

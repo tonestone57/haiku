@@ -12,11 +12,12 @@
 
 #include <thread.h>
 #include <smp.h>
+#include <stdio.h>
 
 #include "paging/PPCPagingStructures.h"
 
 
-//#define TRACE_PPC_VM_TRANSLATION_MAP
+#define TRACE_PPC_VM_TRANSLATION_MAP
 #ifdef TRACE_PPC_VM_TRANSLATION_MAP
 #	define TRACE(x...) dprintf(x)
 #else

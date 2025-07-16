@@ -7,6 +7,7 @@
  */
 
 #include <KernelExport.h>
+#include <stdio.h>
 
 #include <kernel.h>
 #include <boot/kernel_args.h>
@@ -35,6 +36,7 @@ arch_vm_init(kernel_args *args)
 status_t
 arch_vm_init2(kernel_args *args)
 {
+	dprintf("arch_vm_init2\n");
 //	int bats[8];
 //	int i;
 
@@ -52,6 +54,7 @@ arch_vm_init2(kernel_args *args)
 
 #if 1
 	// turn off the first 2 BAT mappings (3 & 4 are used by the lower level code)
+	dprintf("arch_vm_init2: clearing BAT0 and BAT1\n");
 	block_address_translation bat;
 	bat.Clear();
 
@@ -90,6 +93,7 @@ arch_vm_init2(kernel_args *args)
 	bats[0] = bats[1] = 0;
 	setdbats(bats);
 #endif
+	dprintf("arch_vm_init2 done\n");
 	return B_OK;
 }
 

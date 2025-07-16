@@ -48,6 +48,7 @@
 segment_descriptor sSegments[16];
 page_table_entry_group *sPageTable;
 uint32 sPageTableHashMask;
+uint32 gKernelVSID;
 
 
 // begin and end of the boot loader
@@ -234,8 +235,7 @@ fill_page_table_entry(page_table_entry *entry, uint32 virtualSegmentID,
 static void
 map_page(void *virtualAddress, void *physicalAddress, uint8 mode)
 {
-	uint32 virtualSegmentID
-		= sSegments[addr_t(virtualAddress) >> 28].virtual_segment_id;
+	uint32 virtualSegmentID = gKernelVSID + (addr_t(virtualAddress) >> 28);
 
 	uint32 hash = page_table_entry::PrimaryHash(virtualSegmentID,
 		(uint32)virtualAddress);
@@ -830,8 +830,9 @@ arch_mmu_init(void)
 	// until we're about to take over the page table - we're mapping
 	// pages into our table using these values
 
+	gKernelVSID = 0x400;
 	for (int32 i = 0; i < 16; i++)
-		sSegments[i].virtual_segment_id = i;
+		sSegments[i].virtual_segment_id = gKernelVSID + i;
 
 	// find already allocated ranges of physical memory
 	// and the virtual address space

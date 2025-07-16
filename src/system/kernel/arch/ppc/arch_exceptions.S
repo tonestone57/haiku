@@ -107,14 +107,6 @@ exception_vector_common:
 
 	/* Address translation is turned off. We map this code via BAT, turn on
 	   address translation, and continue in the kernel proper. */
-	lis		%r3, arch_exceptions_debug_print@ha
-	addi	%r3, %r3, arch_exceptions_debug_print@l
-	lis		%r4, .Lexception_bat_on@ha
-	addi	%r4, %r4, .Lexception_bat_on@l
-	mtlr	%r3
-	mr		%r3, %r4
-	blrl
-
 	li		%r0, 0x10|0x2			/* BATL_MC | BATL_PP_RW */
 	mtibatl	0, %r0					/* load lower word of the instruction BAT */
 	li		%r0, 0x2				/* BEPI = 0, BL = 0 (128 KB), BATU_VS */
@@ -178,13 +170,6 @@ __irqvec_end:
  */
 FUNCTION(ppc_exception_tail):
 	/* turn off BAT */
-	lis		%r4, arch_exceptions_debug_print@ha
-	addi	%r4, %r4, arch_exceptions_debug_print@l
-	lis		%r3, .Lexception_bat_off@ha
-	addi	%r3, %r3, .Lexception_bat_off@l
-	mtlr	%r4
-	blrl
-
 	li		%r2, 0
 	mtibatu	0, %r2
 	mtibatl	0, %r2
@@ -454,8 +439,3 @@ __restore_regs_and_rfi:
 
 	/* return from interrupt */
 	rfi
-
-.Lexception_bat_on:
-	.string "exception_vector_common: BAT on\n"
-.Lexception_bat_off:
-	.string "ppc_exception_tail: BAT off\n"

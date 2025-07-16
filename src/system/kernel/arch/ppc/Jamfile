@@ -43,7 +43,6 @@ KernelMergeObject kernel_arch_ppc.o :
 	arch_debug_console.cpp
 	arch_debug.cpp
 	arch_elf.cpp
-		arch_exceptions_debug.cpp
 	arch_int.cpp
 	arch_mmu.cpp
 	arch_platform.cpp

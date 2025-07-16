@@ -1004,13 +1004,39 @@ status_t
 PPCVMTranslationMap460::Protect(addr_t start, addr_t end, uint32 attributes,
 	uint32 memoryType)
 {
-	// XXX finish
+	start = ROUNDDOWN(start, B_PAGE_SIZE);
+	if (start >= end)
+		return B_OK;
+
+	TRACE("protect_tmap: pages 0x%lx to 0x%lx, attributes %lx\n", start, end,
+		attributes);
+
+	// compute protection flags
+	uint32 protection = 0;
+	if ((attributes & B_USER_PROTECTION) != 0) {
+		protection = PTE_USER;
+		if ((attributes & B_WRITE_AREA) != 0)
+			protection |= PTE_READ_WRITE;
+	} else if ((attributes & B_KERNEL_WRITE_AREA) != 0)
+		protection = PTE_READ_WRITE;
+
 	cpu_status state = disable_interrupts();
 	acquire_spinlock(&sPageTableLock);
 
+	do {
+		page_table_entry* entry = LookupPageTableEntry(start);
+		if (entry != NULL && entry->valid) {
+			entry->page_protection = protection;
+			InvalidatePage(start);
+		}
+
+		start += B_PAGE_SIZE;
+	} while (start < end);
+
 	release_spinlock(&sPageTableLock);
 	restore_interrupts(state);
-	return B_ERROR;
+
+	return B_OK;
 #if 0//X86
 	start = ROUNDDOWN(start, B_PAGE_SIZE);
 	if (start >= end)

@@ -241,7 +241,7 @@ map_page(void *virtualAddress, void *physicalAddress, uint8 mode)
 		(uint32)virtualAddress);
 	page_table_entry_group *group = &sPageTable[hash & sPageTableHashMask];
 
-	dprintf("MMU: Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx, hash=0x%lx\n",
+	TRACE("MMU: Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx, hash=0x%lx\n",
 		(addr_t)virtualAddress, (addr_t)physicalAddress, virtualSegmentID,
 		hash);
 

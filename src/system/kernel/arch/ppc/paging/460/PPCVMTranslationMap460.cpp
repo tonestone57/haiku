@@ -113,6 +113,13 @@
 #define SHARED_MEMORY_VSID_BASE (MAX_VSID_BASES - 1)
 static uint32 sVSIDBaseBitmap[MAX_VSID_BASES / (sizeof(uint32) * 8)];
 static spinlock sVSIDBaseBitmapLock;
+
+void
+PPCVMTranslationMap460::Initialize()
+{
+	memset(sVSIDBaseBitmap, 0, sizeof(sVSIDBaseBitmap));
+	sVSIDBaseBitmap[0] = 0x3; // reserve VSID bases 0 and 1 for the kernel
+}
 static spinlock sPageTableLock;
 static uint32 sVSIDFreeList;
 static spinlock sVSIDFreeListLock;

@@ -17,6 +17,7 @@ struct PPCVMTranslationMap460 : PPCVMTranslationMap {
 								PPCVMTranslationMap460();
 	virtual						~PPCVMTranslationMap460();
 
+	static	void				Initialize();
 			status_t			Init(bool kernel);
 
 	inline	int					VSIDBase() const	{ return fVSIDBase; }

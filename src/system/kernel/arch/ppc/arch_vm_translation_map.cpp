@@ -221,6 +221,8 @@ arch_vm_translation_map_init(kernel_args *args,
 	TRACE("vm_translation_map_init: entry\n");
 
 #ifdef TRACE_VM_TMAP
+	PPCVMTranslationMapClassic::Initialize();
+	PPCVMTranslationMap460::Initialize();
 	TRACE("physical memory ranges:\n");
 	for (uint32 i = 0; i < args->num_physical_memory_ranges; i++) {
 		phys_addr_t start = args->physical_memory_range[i].start;

@@ -1,5 +1,5 @@
 #include "serial.h"
-#include "openfirmware.h"
+#include <platform/openfirmware/openfirmware.h>
 
 static int sScreen;
 

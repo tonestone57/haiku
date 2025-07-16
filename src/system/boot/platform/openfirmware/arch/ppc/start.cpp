@@ -9,6 +9,7 @@
 
 #include <string.h>
 #include <OS.h>
+#include <boot/stdio.h>
 #include <platform/openfirmware/openfirmware.h>
 
 #include "machine.h"

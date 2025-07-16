@@ -9,7 +9,6 @@
 
 #include <string.h>
 #include <OS.h>
-#include <boot/stdio.h>
 #include <platform/openfirmware/openfirmware.h>
 
 #include "machine.h"
@@ -80,7 +79,5 @@ _start(uint32 _unused1, uint32 _unused3, void *openFirmwareEntry)
 	call_ctors();
 		// call C++ constructors before doing anything else
 
-	dprintf("Calling start()\n");
 	start(openFirmwareEntry);
-	dprintf("start() returned\n");
 }

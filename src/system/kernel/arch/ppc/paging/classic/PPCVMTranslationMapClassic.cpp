@@ -253,6 +253,22 @@ PPCVMTranslationMapClassic::Init(bool kernel)
 			method->KernelPhysicalPageDirectory(), NULL*/method->PageTable());
 	}
 
+	if (kernel) {
+		// Set up the segment registers for the kernel address space.
+		segment_descriptor segment;
+		segment.no_execute_protection = 1;
+		segment.kernel_protection_key = 1;
+		segment.user_protection_key = 1;
+
+		isync();
+		for (int i = 0; i < 16; i++) {
+			uint32_t vsid = 0x400 + i;
+			segment.virtual_segment_id = vsid;
+			ppc_set_segment_register((void*)(i << 28), segment);
+		}
+		isync();
+	}
+
 	return B_OK;
 }
 

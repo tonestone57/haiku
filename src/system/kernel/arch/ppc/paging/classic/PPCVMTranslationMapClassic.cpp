@@ -188,6 +188,11 @@ PPCVMTranslationMapClassic::Init(bool kernel)
 		// services.
 		fVSIDBase = 0;
 		sVSIDBaseBitmap[0] |= 0x3;
+
+		// update the sSegments array with the new VSID base
+		for (int32 i = 0; i < 16; i++)
+			sSegments[i].virtual_segment_id = fVSIDBase + i;
+
 	} else {
 		int i = 0;
 

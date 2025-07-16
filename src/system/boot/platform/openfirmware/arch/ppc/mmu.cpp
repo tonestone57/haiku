@@ -25,22 +25,17 @@
 #include "support.h"
 
 
-// Page protection flags (in PTE, PowerPC-style)
-#define PP_READ_WRITE		0x02
-#define PP_READ_ONLY		0x01
-#define PP_NONE				0x00
-
 // set protection to WIMGNPP: -----PP
 // PP:	00 - no access
 //		01 - read only
 //		10 - read/write
 //		11 - read only
-#define PAGE_READ_ONLY	PP_READ_ONLY
-#define PAGE_READ_WRITE	PP_READ_WRITE
+#define PAGE_READ_ONLY	0x01
+#define PAGE_READ_WRITE	0x02
 
-// Since NULL is a valid physical address, we use this symbol to represent
-// an invalid physical address.
-#define PHYSINVAL ((void*)-1)
+// NULL is actually a possible physical address...
+//#define PHYSINVAL ((void *)-1)
+#define PHYSINVAL NULL
 
 //#define TRACE_MMU
 #ifdef TRACE_MMU
@@ -286,28 +281,28 @@ map_page(void* virtualAddress, void* physicalAddress, uint8 mode)
     uint32 hash = page_table_entry::PrimaryHash(vsid, va);
     page_table_entry_group* group = &sPageTable[hash & sPageTableHashMask];
 
-    TRACE("MMU: map_page: va=0x%lx, pa=0x%lx, vsid=0x%lx, hash=0x%lx\n",
+    TRACE("MMU: Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx, hash=0x%lx\n",
         va, pa, vsid, hash);
 
-    // Try to insert the PTE into the primary PTEG.
+    // Try primary PTEG
     for (int32 i = 0; i < 8; i++) {
         page_table_entry& entry = group->entry[i];
         if (!entry.valid) {
-            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress,
-                mode, false);
+            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress, mode, false);
+            dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=primary\n", va, pa);
             return;
         }
     }
 
-    // The primary PTEG is full. Try the secondary PTEG.
+    // Try secondary PTEG
     hash = page_table_entry::SecondaryHash(hash);
     group = &sPageTable[hash & sPageTableHashMask];
 
     for (int32 i = 0; i < 8; i++) {
         page_table_entry& entry = group->entry[i];
         if (!entry.valid) {
-            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress,
-                mode, true);
+            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress, mode, true);
+            dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=secondary\n", va, pa);
             return;
         }
     }
@@ -356,6 +351,8 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	}
 	length = length / sizeof(struct translation_map);
 	uint32 total = 0;
+	dprintf("found %d translations\n", length);
+
 	for (int i = 0; i < length; i++) {
 		struct translation_map *map = &translations[i];
 		bool keepRange = true;
@@ -374,21 +371,22 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 			return B_ERROR;
 		}
 
-		// Note: The page table is identified by its virtual address, but we
-		// need its physical address.
 		if (map->virtual_address == pageTable) {
+			dprintf("%i: found page table at va %p\n", i,
+				map->virtual_address);
 			*_physicalPageTable
-				= (page_table_entry_group*)map->physical_address;
+				= (page_table_entry_group *)map->physical_address;
 			keepRange = false;
+				// we keep it explicitely anyway
 		}
-
-		// The exception handlers are identified by their physical address.
 		if ((addr_t)map->physical_address <= 0x100
 			&& (addr_t)map->physical_address + map->length >= 0x1000) {
+			dprintf("%i: found exception handlers at va %p\n", i,
+				map->virtual_address);
 			*_exceptionHandlers = map->virtual_address;
 			keepRange = false;
+				// we keep it explicitely anyway
 		}
-
 		if (map->virtual_address == oldPageTable)
 			keepRange = false;
 
@@ -464,17 +462,18 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 static size_t
 suggested_page_table_size(size_t total)
 {
-	uint32 max = 1UL << 23;
+	uint32 max = 23;
 		// 2^23 == 8 MB
-	size_t tableSize = 1UL << 16;
-		// 2^(23-7) == 64 kB
 
-	while (max < total && tableSize < (1UL << 25)) {
-		max <<= 1;
-		tableSize <<= 1;
+	while (max < 32) {
+		if (total <= (1UL << max))
+			break;
+
+		max++;
 	}
 
-	return tableSize;
+	return 1UL << (max - 7);
+		// 2^(23 - 7) == 64 kB
 }
 
 
@@ -492,26 +491,23 @@ find_physical_memory_range(size_t size)
 static void *
 find_free_physical_range(size_t size)
 {
-	// Implements a first-fit algorithm to find a free physical range.
-	addr_t lastAddress = 0;
+	// just do a simple linear search at the end of the allocated
+	// ranges (dumb memory allocation)
+	if (gKernelArgs.num_physical_allocated_ranges == 0) {
+		if (gKernelArgs.num_physical_memory_ranges == 0)
+			return PHYSINVAL;
+
+		return find_physical_memory_range(size);
+	}
+
 	for (uint32 i = 0; i < gKernelArgs.num_physical_allocated_ranges; i++) {
-		addr_range& range = gKernelArgs.physical_allocated_range[i];
-		if (range.start > lastAddress) {
-			if (range.start - lastAddress >= size)
-				return (void*)lastAddress;
-		}
-		lastAddress = range.start + range.size;
+		void *address
+			= (void *)(addr_t)(gKernelArgs.physical_allocated_range[i].start
+				+ gKernelArgs.physical_allocated_range[i].size);
+		if (!is_physical_allocated(address, size)
+			&& is_physical_memory(address, size))
+			return address;
 	}
-
-	// Check the space after the last allocated range.
-	for (uint32 i = 0; i < gKernelArgs.num_physical_memory_ranges; i++) {
-		addr_range& range = gKernelArgs.physical_memory_range[i];
-		if (lastAddress >= range.start && lastAddress < range.start + range.size) {
-			if (range.start + range.size - lastAddress >= size)
-				return (void*)lastAddress;
-		}
-	}
-
 	return PHYSINVAL;
 }
 
@@ -519,26 +515,28 @@ find_free_physical_range(size_t size)
 static void *
 find_free_virtual_range(void *base, size_t size)
 {
-	// Implements a first-fit algorithm to find a free virtual range.
-	addr_t lastAddress = 0;
+	if (base && !is_virtual_allocated(base, size))
+		return base;
+
+	void *firstFound = NULL;
+	void *firstBaseFound = NULL;
 	for (uint32 i = 0; i < gKernelArgs.num_virtual_allocated_ranges; i++) {
-		addr_range& range = gKernelArgs.virtual_allocated_range[i];
-		if (range.start > lastAddress) {
-			if (range.start - lastAddress >= size) {
-				if ((addr_t)base <= lastAddress)
-					return (void*)lastAddress;
+		void *address
+			= (void *)(addr_t)(gKernelArgs.virtual_allocated_range[i].start
+				+ gKernelArgs.virtual_allocated_range[i].size);
+		if (!is_virtual_allocated(address, size)) {
+			if (!base)
+				return address;
+
+			if (firstFound == NULL)
+				firstFound = address;
+			if (address >= base
+				&& (firstBaseFound == NULL || address < firstBaseFound)) {
+				firstBaseFound = address;
 			}
 		}
-		lastAddress = range.start + range.size;
 	}
-
-	// Check the space after the last allocated range.
-	if (0xffffffff - lastAddress >= size) {
-		if ((addr_t)base <= lastAddress)
-			return (void*)lastAddress;
-	}
-
-	return NULL;
+	return (firstBaseFound ? firstBaseFound : firstFound);
 }
 
 
@@ -608,21 +606,20 @@ arch_mmu_free(void *address, size_t size)
 
 
 static inline void
-invalidate_tlb_range(addr_t start, addr_t end)
-{
-	for (addr_t address = start; address < end; address += B_PAGE_SIZE)
-		asm volatile("tlbie %0" : : "r" (address));
-}
-
-
-static inline void
 invalidate_tlb(void)
 {
+	dprintf("invalidate_tlb: start\n");
+	//asm volatile("tlbia");
+		// "tlbia" is obviously not available on every CPU...
+
+	// Note: this flushes the whole 4 GB address space - it
+	//		would probably be a good idea to do less here
+
 	// "tlbia" is not available on all PowerPC CPUs, so we have to invalidate
 	// the TLB entry by entry.
 	// Note: this flushes the whole 4 GB address space - it would probably be a
 	// good idea to do less here.
-	invalidate_tlb_range(0, 0x100000 * B_PAGE_SIZE);
+	invalidate_tlb_range(0, (addr_t)0x100000 * B_PAGE_SIZE);
 	tlbsync();
 }
 
@@ -667,26 +664,13 @@ map_callback(struct of_arguments *args)
 static int
 unmap_callback(struct of_arguments *args)
 {
-	void *address = (void *)args->Argument(0);
+/*	void *address = (void *)args->Argument(0);
 	int length = args->Argument(1);
-	intptr_t &error = args->ReturnValue(0);
+	int &error = args->ReturnValue(0);
+*/
+	// TODO: to be implemented
 
-	if (remove_virtual_allocated_range((addr_t)address, length) != B_OK) {
-		error = -1;
-		return OF_FAILED;
-	}
-
-	// TODO: This is not correct, we need to find the physical address for the
-	// given virtual address and remove that range.
-	if (remove_physical_allocated_range((addr_t)address, length) != B_OK) {
-		error = -1;
-		return OF_FAILED;
-	}
-
-	invalidate_tlb_range((addr_t)address, (addr_t)address + length);
-
-	error = 0;
-	return B_OK;
+	return OF_FAILED;
 }
 
 
@@ -762,10 +746,7 @@ success:
 static int
 alloc_real_mem_callback(struct of_arguments *args)
 {
-	// addr_t minAddress = (addr_t)args->Argument(0);
-+	// addr_t maxAddress = (addr_t)args->Argument(1);
 	int length = args->Argument(2);
-	// int mode = args->Argument(3);
 	intptr_t &error = args->ReturnValue(0);
 	intptr_t &physicalAddress = args->ReturnValue(1);
 

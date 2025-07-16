@@ -11,6 +11,7 @@
 #include <arch_mmu.h>
 #include <arch_tlb.h>
 
+#include <KernelExport.h>
 #include <arch/int.h>
 #include <boot/kernel_args.h>
 #include <vm/vm.h>

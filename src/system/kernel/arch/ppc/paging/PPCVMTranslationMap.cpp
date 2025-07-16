@@ -10,6 +10,7 @@
 
 #include "paging/PPCVMTranslationMap.h"
 
+#include <KernelExport.h>
 #include <thread.h>
 #include <smp.h>
 #include <stdio.h>

@@ -4,6 +4,7 @@
 */
 
 
+#include <KernelExport.h>
 #include <arch_mmu.h>
 #include <arch_cpu.h>
 #include <stdio.h>

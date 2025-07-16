@@ -615,8 +615,10 @@ arch_mmu_free(void *address, size_t size)
 static inline void
 invalidate_tlb_range(addr_t start, addr_t end)
 {
+	dprintf("invalidate_tlb_range: start=%p, end=%p\n", (void*)start, (void*)end);
 	for (addr_t address = start; address < end; address += B_PAGE_SIZE)
 		asm volatile("tlbie %0" : : "r" (address));
+	dprintf("invalidate_tlb_range: end\n");
 }
 
 
@@ -636,6 +638,7 @@ invalidate_tlb(void)
 	// good idea to do less here.
 	invalidate_tlb_range(0, (addr_t)0x100000 * B_PAGE_SIZE);
 	tlbsync();
+	dprintf("invalidate_tlb: end\n");
 }
 
 
@@ -679,13 +682,28 @@ map_callback(struct of_arguments *args)
 static int
 unmap_callback(struct of_arguments *args)
 {
-/*	void *address = (void *)args->Argument(0);
+	void *address = (void *)args->Argument(0);
 	int length = args->Argument(1);
-	int &error = args->ReturnValue(0);
-*/
-	// TODO: to be implemented
+	intptr_t &error = args->ReturnValue(0);
 
-	return OF_FAILED;
+	dprintf("unmap_callback: address=%p, length=%d\n", address, length);
+
+	if (remove_virtual_allocated_range((addr_t)address, length) != B_OK) {
+		error = -1;
+		return OF_FAILED;
+	}
+
+	// TODO: This is not correct, we need to find the physical address for the
+	// given virtual address and remove that range.
+	if (remove_physical_allocated_range((addr_t)address, length) != B_OK) {
+		error = -1;
+		return OF_FAILED;
+	}
+
+	invalidate_tlb_range((addr_t)address, (addr_t)address + length);
+
+	error = 0;
+	return B_OK;
 }
 
 
@@ -696,6 +714,8 @@ translate_callback(struct of_arguments *args)
 	intptr_t &error = args->ReturnValue(0);
 	intptr_t &physicalAddress = args->ReturnValue(1);
 	intptr_t &mode = args->ReturnValue(2);
+
+	dprintf("translate_callback: va=%p\n", (void*)virtualAddress);
 
 	// Find page table entry for this address
 
@@ -988,7 +1008,7 @@ arch_mmu_init(void)
 		set_dbat0(&bat);
 		isync();
 
-		dprintf("BAT0: va=%p, pa=%p, len=%d, prot=%d\n",
+		dprintf("arch_mmu_init: BAT0: va=%p, pa=%p, len=%d, prot=%d\n",
 			(void*)0x0, (void*)0x0, bat.length, bat.protection);
 
 		exceptionHandlers = (void*)0x0;

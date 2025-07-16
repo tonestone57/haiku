@@ -397,7 +397,17 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 	}
 
 	// map the kernel range
-	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), gKernelArgs.kernel_image->size, PAGE_READ_WRITE);
+	size_t kernel_size = 0;
+	if (gKernelArgs.kernel_image->elf_class == ELFCLASS64) {
+		preloaded_elf64_image *image = static_cast<preloaded_elf64_image *>(
+			gKernelArgs.kernel_image.Pointer());
+		kernel_size = image->elf_header.e_shoff + image->elf_header.e_shentsize * image->elf_header.e_shnum;
+	} else {
+		preloaded_elf32_image *image = static_cast<preloaded_elf32_image *>(
+			gKernelArgs.kernel_image.Pointer());
+		kernel_size = image->elf_header.e_shoff + image->elf_header.e_shentsize * image->elf_header.e_shnum;
+	}
+	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), kernel_size, PAGE_READ_WRITE);
 
 	return B_OK;
 }

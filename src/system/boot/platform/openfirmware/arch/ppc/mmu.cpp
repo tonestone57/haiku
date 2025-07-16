@@ -396,6 +396,9 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 			"from virtual ranges to keep.\n", __func__);
 	}
 
+	// map the kernel range
+	map_range((void*)KERNEL_BASE, (void*)gKernelArgs.kernel_image.Pointer(), gKernelArgs.kernel_image->size, PAGE_READ_WRITE);
+
 	return B_OK;
 }
 

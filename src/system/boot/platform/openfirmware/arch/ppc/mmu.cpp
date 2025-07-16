@@ -248,9 +248,8 @@ map_page(void *virtualAddress, void *physicalAddress, uint8 mode)
 
 		fill_page_table_entry(&group->entry[i], virtualSegmentID,
 			virtualAddress, physicalAddress, mode, false);
-		dprintf("Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx\n",
-			(addr_t)virtualAddress, (addr_t)physicalAddress,
-			virtualSegmentID);
+		//TRACE("map: va = %p -> %p, mode = %d, hash = %lu\n",
+		//	virtualAddress, physicalAddress, mode, hash);
 		return;
 	}
 
@@ -921,9 +920,6 @@ arch_mmu_init(void)
 	}
 
 	ppc_set_page_table(physicalTable, tableSize);
-	uint32 htabMask = (tableSize / 64) - 1;
-	dprintf("MMU: sdr1=0x%lx, htab_base=0x%lx, htab_mask=0x%lx\n",
-		((uint32)physicalTable >> 16) | htabMask, (uint32)physicalTable, htabMask);
 	invalidate_tlb();
 
 	if (!realMode) {

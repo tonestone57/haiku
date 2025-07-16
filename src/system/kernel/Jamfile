@@ -187,6 +187,7 @@ if $(TARGET_PLATFORM) = haiku {
 
 
 SubInclude HAIKU_TOP src system kernel arch ;
+SubInclude HAIKU_TOP src system kernel ;
 SubInclude HAIKU_TOP src system kernel cache ;
 SubInclude HAIKU_TOP src system kernel device_manager ;
 SubInclude HAIKU_TOP src system kernel debug ;

@@ -13,6 +13,8 @@
 
 #include <interrupts.h>
 
+#include "arch_int.h"
+
 #include <arch/smp.h>
 #include <boot/kernel_args.h>
 #include <device_manager.h>
@@ -123,9 +125,7 @@ ppc_exception_entry(int vector, struct iframe *iframe)
 		case 0x300: // DSI
 		case 0x400: // ISI
 		{
-			dprintf("MMU fault: DAR=0x%lx, DSISR=0x%lx\n", iframe->dar,
-				iframe->dsisr);
-
+		{
 			bool kernelDebugger = debug_debugger_running();
 
 			if (kernelDebugger) {

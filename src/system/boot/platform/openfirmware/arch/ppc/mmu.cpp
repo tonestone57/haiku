@@ -22,7 +22,7 @@
 #include <arch_mmu.h>
 #include <kernel.h>
 
-#include "serial.h"
+#include "../../serial.h"
 #include "support.h"
 
 

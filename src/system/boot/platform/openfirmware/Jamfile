@@ -20,6 +20,7 @@ local platform_src =
 	mmu.cpp
 	network.cpp
 	real_time_clock.cpp
+	serial.cpp
 	start.cpp
 	support.cpp
 	video.cpp

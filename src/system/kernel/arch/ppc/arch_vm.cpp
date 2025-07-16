@@ -29,6 +29,7 @@
 status_t
 arch_vm_init(kernel_args *args)
 {
+	dprintf("arch_vm_init\n");
 	return B_OK;
 }
 
@@ -101,6 +102,7 @@ arch_vm_init2(kernel_args *args)
 status_t
 arch_vm_init_post_area(kernel_args *args)
 {
+	dprintf("arch_vm_init_post_area\n");
 	return B_OK;
 }
 

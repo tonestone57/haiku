@@ -11,7 +11,7 @@
 uint32 
 page_table_entry::PrimaryHash(uint32 virtualSegmentID, uint32 virtualAddress)
 {
-	return (virtualSegmentID & 0x7ffff) ^ ((virtualAddress >> 12) & 0xffff) ^ ((virtualAddress >> 28) & 0xf);
+	return (virtualSegmentID & 0x7ffff) ^ ((virtualAddress >> 12) & 0xffff);
 }
 
 

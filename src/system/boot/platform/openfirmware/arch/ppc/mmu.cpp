@@ -935,8 +935,7 @@ arch_mmu_init(void)
 		isync();
 	}
 
-	set_msr(MSR_MACHINE_CHECK_ENABLED | MSR_FP_AVAILABLE
-		| MSR_INST_ADDRESS_TRANSLATION | MSR_DATA_ADDRESS_TRANSLATION);
+	set_msr(get_msr() | MSR_INST_ADDRESS_TRANSLATION | MSR_DATA_ADDRESS_TRANSLATION);
 
 	// set kernel args
 

@@ -1,6 +1,7 @@
 SubDir HAIKU_TOP src system kernel arch ppc ;
 
 SubDirHdrs $(SUBDIR) $(DOTDOT) generic ;
+SubDirHdrs [ FDirName $(SUBDIR) ] : arch_int.h ;
 UsePrivateKernelHeaders ;
 SubDirSysHdrs $(HAIKU_TOP) src add-ons kernel bus_managers fdt ;
 

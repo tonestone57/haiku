@@ -13,6 +13,8 @@
 
 #include <interrupts.h>
 
+#include "arch_int.h"
+
 #include <arch/smp.h>
 #include <boot/kernel_args.h>
 #include <device_manager.h>
@@ -93,6 +95,15 @@ print_iframe(struct iframe *frame)
 	dprintf("      cr 0x%08lx         lr 0x%08lx\n", frame->cr, frame->lr);
 	dprintf("   dsisr 0x%08lx        dar 0x%08lx\n", frame->dsisr, frame->dar);
 	dprintf("    srr1 0x%08lx       srr0 0x%08lx\n", frame->srr1, frame->srr0);
+}
+
+
+extern "C" void debug_print_registers_for_mmu_fault(void)
+{
+	struct iframe_stack temp_stack;
+	temp_stack.next = NULL;
+	ppc_push_iframe(&temp_stack, NULL);
+	print_iframe(temp_stack.iframe);
 }
 
 

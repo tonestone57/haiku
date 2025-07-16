@@ -6,6 +6,7 @@
  * Distributed under the terms of the NewOS License.
  */
 #include <asm_defs.h>
+#include "arch_int.h"
 
 /*	General exception handling concept:
 
@@ -137,7 +138,9 @@ exception_vector_common:
 DEFINE_VECTOR(0x100, system_reset_exception)
 DEFINE_VECTOR(0x200, machine_check_exception)
 DEFINE_VECTOR(0x300, DSI_exception)
+	bl debug_print_registers_for_mmu_fault
 DEFINE_VECTOR(0x400, ISI_exception)
+	bl debug_print_registers_for_mmu_fault
 DEFINE_VECTOR(0x500, external_interrupt_exception)
 DEFINE_VECTOR(0x600, alignment_exception)
 DEFINE_VECTOR(0x700, program_exception)

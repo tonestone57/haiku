@@ -55,6 +55,7 @@ KernelMergeObject kernel_arch_ppc.o :
 	arch_user_debugger.cpp
 	arch_vm.cpp
 	arch_vm_translation_map.cpp
+	reclaim_vsids.cpp
 	arch_asm.S
 
 	generic_msi.cpp

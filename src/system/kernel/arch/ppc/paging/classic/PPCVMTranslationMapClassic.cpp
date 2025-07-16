@@ -220,8 +220,24 @@ PPCVMTranslationMapClassic::Init(bool kernel)
 				}
 				i++;
 			}
+		if (i >= MAX_VSID_BASES) {
+			reclaim_vsids();
+			i = 0;
+			while (i < MAX_VSID_BASES) {
+				if (sVSIDBaseBitmap[i / 32] == 0xffffffff) {
+					i += 32;
+					continue;
+				}
+				if ((sVSIDBaseBitmap[i / 32] & (1 << (i % 32))) == 0) {
+					// we found it
+					sVSIDBaseBitmap[i / 32] |= 1 << (i % 32);
+					break;
+				}
+				i++;
+			}
 			if (i >= MAX_VSID_BASES)
-				panic("vm_translation_map_create: out of VSID bases\n");
+				return B_NO_MEMORY;
+		}
 			fVSIDBase = i << VSID_BASE_SHIFT;
 		}
 	}

@@ -365,6 +365,7 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 
 		// map range into the page table
 
+		dprintf("mapping range: va %p, pa %p, size %d, mode %d\n", map->virtual_address, map->physical_address, map->length, map->mode);
 		map_range(map->virtual_address, map->physical_address, map->length,
 			map->mode);
 

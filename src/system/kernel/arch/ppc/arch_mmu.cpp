@@ -42,13 +42,14 @@ ppc_get_page_table(page_table_entry_group **_pageTable, size_t *_size)
 
 	*_pageTable = (page_table_entry_group *)(sdr1 & 0xffff0000);
 	*_size = ((sdr1 & 0x1ff) + 1) << 16;
+	dprintf("ppc_get_page_table: page table at %p, size %ld\n", *_pageTable, *_size);
 }
 
 
 void
 ppc_set_page_table(page_table_entry_group *pageTable, size_t size)
 {
-	dprintf("ppc_set_page_table\n");
+	dprintf("ppc_set_page_table: page table at %p, size %ld\n", pageTable, size);
 	set_sdr1(((uint32)pageTable & 0xffff0000) | (((size -1) >> 16) & 0x1ff));
 }
 

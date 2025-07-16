@@ -553,6 +553,7 @@ arch_mmu_free(void *address, size_t size)
 static inline void
 invalidate_tlb(void)
 {
+	dprintf("invalidate_tlb: start\n");
 	//asm volatile("tlbia");
 		// "tlbia" is obviously not available on every CPU...
 
@@ -565,6 +566,7 @@ invalidate_tlb(void)
 		address += B_PAGE_SIZE;
 	}
 	tlbsync();
+	dprintf("invalidate_tlb: end\n");
 }
 
 
@@ -735,6 +737,7 @@ arch_set_callback(void)
 extern "C" status_t
 arch_mmu_init(void)
 {
+	dprintf("arch_mmu_init: start\n");
 	// get map of physical memory (fill in kernel_args structure)
 
 	size_t total;
@@ -952,5 +955,6 @@ arch_mmu_init(void)
 	gKernelArgs.arch_args.exception_handlers.start = (addr_t)exceptionHandlers;
 	gKernelArgs.arch_args.exception_handlers.size = B_PAGE_SIZE;
 
+	dprintf("arch_mmu_init: end\n");
 	return B_OK;
 }

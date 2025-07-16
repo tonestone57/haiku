@@ -17,9 +17,14 @@
 #include <vm/VMAddressSpace.h>
 
 
+#include <thread.h>
+
 void
 ppc_handle_tlb_miss(addr_t address, bool isWrite)
 {
+	dprintf("TLB miss: address %p, %s, thread %" B_PRId32 "\n", (void*)address,
+		isWrite ? "write" : "read", thread_get_current_thread_id());
+
 	uint32 flags;
 	phys_addr_t physicalAddress;
 

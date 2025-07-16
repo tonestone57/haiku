@@ -94,9 +94,14 @@ non_boot_cpu_init(void* args, int currentCPU)
 }
 
 
+#include <KernelExport.h>
+
 extern "C" int
 _start(kernel_args *bootKernelArgs, int currentCPU)
 {
+	if (currentCPU == 0)
+		dprintf("_start: Hello, World!\n");
+
 	if (bootKernelArgs->version == CURRENT_KERNEL_ARGS_VERSION
 		&& bootKernelArgs->kernel_args_size == kernel_args_size_v1) {
 		sKernelArgs.ucode_data = NULL;

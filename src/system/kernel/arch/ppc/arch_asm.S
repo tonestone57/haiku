@@ -435,9 +435,3 @@ FUNCTION(_arch_cpu_user_strlcpy):
 	blr
 FUNCTION_END(_arch_cpu_user_strlcpy)
 
-
-FUNCTION(debug_print_registers):
-	mr	%r3, %r1
-	bl	print_iframe
-	blr
-FUNCTION_END(debug_print_registers)

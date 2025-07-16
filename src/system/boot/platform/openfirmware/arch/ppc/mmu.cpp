@@ -606,6 +606,14 @@ arch_mmu_free(void *address, size_t size)
 
 
 static inline void
+invalidate_tlb_range(addr_t start, addr_t end)
+{
+	for (addr_t address = start; address < end; address += B_PAGE_SIZE)
+		asm volatile("tlbie %0" : : "r" (address));
+}
+
+
+static inline void
 invalidate_tlb(void)
 {
 	dprintf("invalidate_tlb: start\n");

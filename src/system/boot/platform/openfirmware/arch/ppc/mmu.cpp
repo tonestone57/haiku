@@ -231,47 +231,81 @@ fill_page_table_entry(page_table_entry *entry, uint32 virtualSegmentID,
 }
 
 
-static void
-map_page(void *virtualAddress, void *physicalAddress, uint8 mode)
+// Helper: Look up an existing page table entry
+static page_table_entry*
+lookup_page_table_entry(uint32 vsid, addr_t va)
 {
-	uint32 virtualSegmentID
-		= sSegments[addr_t(virtualAddress) >> 28].virtual_segment_id;
+    uint32 primaryHash = page_table_entry::PrimaryHash(vsid, va);
+    page_table_entry_group* group = &sPageTable[primaryHash & sPageTableHashMask];
 
-	uint32 hash = page_table_entry::PrimaryHash(virtualSegmentID,
-		(uint32)virtualAddress);
-	page_table_entry_group *group = &sPageTable[hash & sPageTableHashMask];
+    for (int32 i = 0; i < 8; i++) {
+        page_table_entry& entry = group->entry[i];
+        if (entry.valid && entry.virtual_address == va && entry.vsid == vsid)
+            return &entry;
+    }
 
-	TRACE("MMU: Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx, hash=0x%lx\n",
-		(addr_t)virtualAddress, (addr_t)physicalAddress, virtualSegmentID,
-		hash);
+    uint32 secondaryHash = page_table_entry::SecondaryHash(primaryHash);
+    group = &sPageTable[secondaryHash & sPageTableHashMask];
 
-	for (int32 i = 0; i < 8; i++) {
-		// 8 entries in a group
-		if (group->entry[i].valid)
-			continue;
+    for (int32 i = 0; i < 8; i++) {
+        page_table_entry& entry = group->entry[i];
+        if (entry.valid && entry.virtual_address == va && entry.vsid == vsid)
+            return &entry;
+    }
 
-		fill_page_table_entry(&group->entry[i], virtualSegmentID,
-			virtualAddress, physicalAddress, mode, false);
-		dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=%s\n",
-			(uint32)virtualAddress, (uint32)physicalAddress, "primary");
-		return;
-	}
+    return nullptr;
+}
 
-	hash = page_table_entry::SecondaryHash(hash);
-	group = &sPageTable[hash & sPageTableHashMask];
 
-	for (int32 i = 0; i < 8; i++) {
-		if (group->entry[i].valid)
-			continue;
+// Main mapping function
+static void
+map_page(void* virtualAddress, void* physicalAddress, uint8 mode)
+{
+    addr_t va = (addr_t)virtualAddress;
+    addr_t pa = (addr_t)physicalAddress;
 
-		fill_page_table_entry(&group->entry[i], virtualSegmentID,
-			virtualAddress, physicalAddress, mode, true);
-		dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=%s\n",
-			(uint32)virtualAddress, (uint32)physicalAddress, "secondary");
-		return;
-	}
+    uint32 segmentIndex = va >> 28;
+    uint32 vsid = sSegments[segmentIndex].virtual_segment_id;
 
-	panic("%s: out of page table entries!\n", __func__);
+    // Check if already mapped
+    page_table_entry* existing = lookup_page_table_entry(vsid, va);
+    if (existing != nullptr) {
+        // Optionally update or skip
+        TRACE("MMU: VA=0x%lx already mapped — skipping\n", va);
+        return;
+    }
+
+    // Compute primary hash
+    uint32 hash = page_table_entry::PrimaryHash(vsid, va);
+    page_table_entry_group* group = &sPageTable[hash & sPageTableHashMask];
+
+    TRACE("MMU: Mapping VA=0x%lx → PA=0x%lx, VSID=0x%lx, hash=0x%lx\n",
+        va, pa, vsid, hash);
+
+    // Try primary PTEG
+    for (int32 i = 0; i < 8; i++) {
+        page_table_entry& entry = group->entry[i];
+        if (!entry.valid) {
+            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress, mode, false);
+            dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=primary\n", va, pa);
+            return;
+        }
+    }
+
+    // Try secondary PTEG
+    hash = page_table_entry::SecondaryHash(hash);
+    group = &sPageTable[hash & sPageTableHashMask];
+
+    for (int32 i = 0; i < 8; i++) {
+        page_table_entry& entry = group->entry[i];
+        if (!entry.valid) {
+            fill_page_table_entry(&entry, vsid, virtualAddress, physicalAddress, mode, true);
+            dprintf("MMU entry: tag=0x%lx, PTE=0x%lx, mode=secondary\n", va, pa);
+            return;
+        }
+    }
+
+    panic("%s: out of page table entries for VA=0x%lx!\n", __func__, va);
 }
 
 
@@ -694,6 +728,16 @@ success:
 		| entry->page_protection;
 	error = B_OK;
 
+	// Invalidate the old TLB entry and write the new one
+	asm volatile("tlbie %0" :: "r"(virtualAddress));
+	asm volatile("eieio");
+	asm volatile("tlbsync");
+	asm volatile("ptesync");
+	asm volatile("tlbwe");
+	asm volatile("eieio");
+	asm volatile("tlbsync");
+	asm volatile("sync");
+
 	return B_OK;
 }
 
@@ -971,3 +1015,5 @@ arch_mmu_init(void)
 	dprintf("MMU setup complete.\n");
 	return B_OK;
 }
+
+[end of src/system/boot/platform/openfirmware/arch/ppc/mmu.cpp]

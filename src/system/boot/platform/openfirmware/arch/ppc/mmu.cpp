@@ -1023,9 +1023,11 @@ arch_mmu_init(void)
 
 	// Set the Open Firmware memory callback. From now on the Open Firmware
 	// will ask us for memory.
+	dprintf("arch_mmu_init: setting of callback\n");
 	arch_set_callback();
 
 	// set up new page table and turn on translation again
+	dprintf("arch_mmu_init: setting up new page table\n");
 
 	for (uint32 i = 0; i < 16; i++) {
 		ppc_set_segment_register((void *)(i * 0x10000000), sSegments[i]);
@@ -1040,12 +1042,14 @@ arch_mmu_init(void)
 
 	if (!realMode) {
 		// clear BATs
+		dprintf("arch_mmu_init: clearing BATs\n");
 		reset_ibats();
 		reset_dbats();
 		ppc_sync();
 		isync();
 	}
 
+	dprintf("arch_mmu_init: setting MSR\n");
 	set_msr(MSR_MACHINE_CHECK_ENABLED | MSR_FP_AVAILABLE
 		| MSR_INST_ADDRESS_TRANSLATION | MSR_DATA_ADDRESS_TRANSLATION);
 

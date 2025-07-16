@@ -235,7 +235,8 @@ fill_page_table_entry(page_table_entry *entry, uint32 virtualSegmentID,
 static void
 map_page(void *virtualAddress, void *physicalAddress, uint8 mode)
 {
-	uint32 virtualSegmentID = gKernelVSID + (addr_t(virtualAddress) >> 28);
+	uint32 virtualSegmentID
+		= sSegments[addr_t(virtualAddress) >> 28].virtual_segment_id;
 
 	uint32 hash = page_table_entry::PrimaryHash(virtualSegmentID,
 		(uint32)virtualAddress);

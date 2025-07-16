@@ -1,10 +1,8 @@
 SubDir HAIKU_TOP src system kernel arch ppc ;
 
 SubDirHdrs $(SUBDIR) $(DOTDOT) generic ;
-SubDirHdrs [ FDirName $(SUBDIR) ] : arch_int.h ;
 UsePrivateKernelHeaders ;
 SubDirSysHdrs $(HAIKU_TOP) src add-ons kernel bus_managers fdt ;
-SubDirHdrs [ FDirName $(SUBDIR) ] : arch_int.h ;
 
 SEARCH_SOURCE += [ FDirName $(SUBDIR) $(DOTDOT) generic ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) paging ] ;
@@ -38,7 +36,6 @@ KernelMergeObject arch_ppc_460.o :
 ;
 
 KernelMergeObject kernel_arch_ppc.o :
-	arch_int.h
 	arch_commpage.cpp
 	arch_cpu.cpp
 	arch_cpu_asm.S

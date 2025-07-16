@@ -13,9 +13,9 @@
 
 #include <interrupts.h>
 
-#include "arch_int.h"
-
 #include <arch/smp.h>
+
+extern "C" void debug_print_registers(struct iframe *iframe);
 #include <boot/kernel_args.h>
 #include <device_manager.h>
 #include <kscheduler.h>

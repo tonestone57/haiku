@@ -270,12 +270,8 @@ map_page(void* virtualAddress, void* physicalAddress, uint8 mode)
     uint32 vsid = sSegments[segmentIndex].virtual_segment_id;
 
     // Check if already mapped
-    page_table_entry* existing = lookup_page_table_entry(vsid, va);
-    if (existing != NULL) {
-        // Optionally update or skip
-        TRACE("MMU: VA=0x%lx already mapped — skipping\n", va);
+    if (lookup_page_table_entry(vsid, va) != NULL)
         return;
-    }
 
     // Compute primary hash
     uint32 hash = page_table_entry::PrimaryHash(vsid, va);

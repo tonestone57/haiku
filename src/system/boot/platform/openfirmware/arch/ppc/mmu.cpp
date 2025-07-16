@@ -239,21 +239,23 @@ lookup_page_table_entry(uint32 vsid, addr_t va)
     page_table_entry_group* group = &sPageTable[primaryHash & sPageTableHashMask];
 
     for (int32 i = 0; i < 8; i++) {
-        page_table_entry& entry = group->entry[i];
-        if (entry.valid && entry.virtual_address == va && entry.vsid == vsid)
-            return &entry;
+        page_table_entry* entry = &group->entry[i];
+        if (entry->valid && entry->virtual_segment_id == vsid
+			&& entry->abbr_page_index == ((va >> 22) & 0x3f))
+            return entry;
     }
 
     uint32 secondaryHash = page_table_entry::SecondaryHash(primaryHash);
     group = &sPageTable[secondaryHash & sPageTableHashMask];
 
     for (int32 i = 0; i < 8; i++) {
-        page_table_entry& entry = group->entry[i];
-        if (entry.valid && entry.virtual_address == va && entry.vsid == vsid)
-            return &entry;
+        page_table_entry* entry = &group->entry[i];
+        if (entry->valid && entry->virtual_segment_id == vsid
+			&& entry->abbr_page_index == ((va >> 22) & 0x3f))
+            return entry;
     }
 
-    return nullptr;
+    return NULL;
 }
 
 
@@ -269,7 +271,7 @@ map_page(void* virtualAddress, void* physicalAddress, uint8 mode)
 
     // Check if already mapped
     page_table_entry* existing = lookup_page_table_entry(vsid, va);
-    if (existing != nullptr) {
+    if (existing != NULL) {
         // Optionally update or skip
         TRACE("MMU: VA=0x%lx already mapped — skipping\n", va);
         return;
@@ -1015,5 +1017,3 @@ arch_mmu_init(void)
 	dprintf("MMU setup complete.\n");
 	return B_OK;
 }
-
-[end of src/system/boot/platform/openfirmware/arch/ppc/mmu.cpp]

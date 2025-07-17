@@ -339,8 +339,8 @@ find_allocated_ranges(void *oldPageTable, void *pageTable,
 			keepRange = false;
 				// we keep it explicitely anyway
 		}
-		if ((addr_t)map->physical_address <= 0x100
-			&& (addr_t)map->physical_address + map->length >= 0x1000) {
+		if ((addr_t)map->physical_address <= 0x1000
+			&& (addr_t)map->physical_address + map->length >= 0x2000) {
 			dprintf("%i: found exception handlers at va %p\n", i,
 				map->virtual_address);
 			*_exceptionHandlers = map->virtual_address;

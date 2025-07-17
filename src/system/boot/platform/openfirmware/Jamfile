@@ -48,7 +48,6 @@ for platform in [ MultiBootSubDirSetup openfirmware ] {
 		:
 			boot_platform_generic_openfirmware.a
 			boot_platform_openfirmware_$(TARGET_ARCH).o
-			$(HAIKU_GCC_LIB_DIR_$(TARGET_ARCH))/libgcc.a
 		;
 
 #		SEARCH on [ FGristFiles $(genericPlatformSources) ]

@@ -384,6 +384,7 @@ for platform in [ MultiBootSubDirSetup ] {
 
 			# libroot functions needed by the stage2 boot loader
 			boot_libroot_$(platform:G=).o
+			$(HAIKU_GCC_LIB_DIR_$(TARGET_ARCH))/libgcc.a
 
 			: $(HAIKU_TOP)/src/system/ldscripts/$(TARGET_ARCH)/boot_loader_$(platform:G=).ld
 			: $(ldflags)

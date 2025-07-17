@@ -847,11 +847,15 @@ arch_mmu_init(void)
 	// get map of physical memory (fill in kernel_args structure)
 
 	size_t total;
+	dprintf("arch_mmu_init: finding physical memory ranges\n");
+	serial_puts("arch_mmu_init: finding physical memory ranges\n");
 	if (find_physical_memory_ranges(total) != B_OK) {
 		dprintf("Error: could not find physical memory ranges!\n");
+		serial_puts("Error: could not find physical memory ranges!\n");
 		return B_ERROR;
 	}
 	dprintf("total physical memory = %" B_PRId32 "MB\n", total / (1024 * 1024));
+	serial_puts("arch_mmu_init: found physical memory ranges\n");
 
 	// get OpenFirmware's current page table
 

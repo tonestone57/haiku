@@ -544,6 +544,9 @@ rule KernelArchitectureSetup architecture
 			case openfirmware :
 				HAIKU_BOOT_$(bootTarget:U)_CCFLAGS += -fno-pic -fno-semantic-interposition -Wno-error=main -Wstack-usage=1023 ;
 				HAIKU_BOOT_$(bootTarget:U)_C++FLAGS += -fno-pic -fno-semantic-interposition -Wno-error=main -Wstack-usage=1023 ;
+				if $(cpu) = ppc {
+					HAIKU_BOOT_$(bootTarget:U)_LDFLAGS += -L$(HAIKU_GCC_LIB_DIR_$(architecture)) -lgcc ;
+				}
 			case * :
 				# all other bootloaders are non-PIC
 				HAIKU_BOOT_$(bootTarget:U)_CCFLAGS += -fno-pic -Wno-error=main ;

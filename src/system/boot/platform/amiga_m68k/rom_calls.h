@@ -9,7 +9,6 @@
 #ifndef _AMICALLS_H
 #define _AMICALLS_H
 
-#define EXEC_BASE_NAME SysBase
 
 
 #define IOERR_OPENFAIL		(-1)

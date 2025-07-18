@@ -9,6 +9,9 @@
 #ifndef _AMICALLS_H
 #define _AMICALLS_H
 
+struct ExecBase;
+extern struct ExecBase *SysBase;
+
 
 
 #define IOERR_OPENFAIL		(-1)
@@ -21,7 +24,6 @@
 
 
 #define RECOVERY_ALERT	0x00000000
-#define DEADEND_ALERT	0x80000000
 
 #define INTUITION_BASE_NAME IntuitionBase
 

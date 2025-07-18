@@ -36,80 +36,756 @@ extern "C" {
 */
 /* those were taken from fd2pragma, but no copyright seems to be claimed on them */
 
-#define LP0(offs, rt, name, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   _re; \
+#define LP0(offs, rt, name, bt, bn)				\
+({								\
+   register rt _##name##_re __asm("d0");			\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn)					\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
 })
 
-#define LP1(offs, rt, name, t1, v1, r1, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+#define LP0NR(offs, name, bt, bn)				\
+({								\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn)					\
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
 })
 
-#define LP2(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   _re; \
+#define LP1(offs, rt, name, t1, v1, r1, bt, bn)			\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1)				\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
 })
 
-#define LP3(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   _re; \
+#define LP1NR(offs, name, t1, v1, r1, bt, bn)			\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   :  \
+   : [libbase] "a" (bn), "rf"(_n1)				\
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
 })
 
-#define LP4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   _re; \
+/* Only graphics.library/AttemptLockLayerRom() */
+#define LP1A5(offs, rt, name, t1, v1, r1, bt, bn)		\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   __asm volatile ("exg d7,a5\n\t"			\
+   "move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)\n\t"			\
+   "exg d7,a5"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1)				\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
 })
 
-#define LP5(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) ({ \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   _re; \
+/* Only graphics.library/LockLayerRom() and graphics.library/UnlockLayerRom() */
+#define LP1NRA5(offs, name, t1, v1, r1, bt, bn)			\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   __asm volatile ("exg d7,a5\n\t"			\
+   "move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)\n\t"			\
+   "exg d7,a5"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1)				\
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
 })
+
+/* Only exec.library/Supervisor() */
+#define LP1A5FP(offs, rt, name, t1, v1, r1, bt, bn, fpt)	\
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   __asm volatile ("exg d7,a5\n\t"			\
+   "move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)\n\t"			\
+   "exg d7,a5"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1)				\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP2(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn)	\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2)		\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP2NR(offs, name, t1, v1, r1, t2, v2, r2, bt, bn)	\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2)		\
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only cia.resource/AbleICR() and cia.resource/SetICR() */
+#define LP2UB(offs, rt, name, t1, v1, r1, t2, v2, r2)		\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : "r"(_n1), "rf"(_n2)					\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* Only dos.library/InternalUnLoadSeg() */
+#define LP2FP(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn, fpt) \
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2)		\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP3(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3)	\
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP3NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3)	\
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only cia.resource/AddICRVector() */
+#define LP3UB(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   ({								\
+      register int _d1 __asm("d1");				\
+      register int _a0 __asm("a0");				\
+      register int _a1 __asm("a1");				\
+      register rt _##name##_re __asm("d0");			\
+      register t1 _n1 __asm(#r1) = _##name##_v1;		\
+      register t2 _n2 __asm(#r2) = _##name##_v2;		\
+      register t3 _n3 __asm(#r3) = _##name##_v3;		\
+      __asm volatile ("move.l %%a6,%%sp@-\n\tmove.l %[libbase],%%a6\n\tjsr %%a6@(-"#offs":W)\n\tmove.l %%sp@+,%%a6"			\
+      : "=r" (_##name##_re), "=r" (_d1), "=r" (_a0), "=r" (_a1)	\
+      : "r"(_n1), "rf"(_n2), "rf"(_n3)				\
+      : "fp0", "fp1", "cc", "memory");				\
+      _##name##_re;						\
+   });								\
+})
+
+/* Only cia.resource/RemICRVector() */
+#define LP3NRUB(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3)	\
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   {								\
+      register int _d0 __asm("d0");				\
+      register int _d1 __asm("d1");				\
+      register int _a0 __asm("a0");				\
+      register int _a1 __asm("a1");				\
+      register t1 _n1 __asm(#r1) = _##name##_v1;		\
+      register t2 _n2 __asm(#r2) = _##name##_v2;		\
+      register t3 _n3 __asm(#r3) = _##name##_v3;		\
+      __asm volatile ("move.l %%a6,%%sp@-\n\tmove.l %[libbase],%%a6\n\tjsr %%a6@(-"#offs":W)\n\tmove.l %%sp@+,%%a6"			\
+      : "=r" (_d0), "=r" (_d1), "=r" (_a0), "=r" (_a1)		\
+      : "r"(_n1), "rf"(_n2), "rf"(_n3)				\
+      : "fp0", "fp1", "cc", "memory");				\
+   }								\
+})
+
+/* Only exec.library/SetFunction() */
+#define LP3FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) \
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   ({								\
+      register int _d1 __asm("d1");				\
+      register int _a0 __asm("a0");				\
+      register int _a1 __asm("a1");				\
+      register rt _##name##_re __asm("d0");			\
+      void *const _##name##_bn = (bn);	\
+      register t1 _n1 __asm(#r1) = _##name##_v1;		\
+      register t2 _n2 __asm(#r2) = _##name##_v2;		\
+      register t3 _n3 __asm(#r3) = _##name##_v3;		\
+      __asm volatile ("move.l %%a6,%%sp@-\n\tmove.l %[libbase],%%a6\n\tjsr %%a6@(-"#offs":W)\n\tmove.l %%sp@+,%%a6"			\
+      : "=r" (_##name##_re), "=r" (_d1), "=r" (_a0), "=r" (_a1)	\
+      : [libbase] "a" (_##name##_bn), "rf"(_n1), "rf"(_n2), "rf"(_n3)	\
+      : "fp0", "fp1", "cc", "memory");				\
+      _##name##_re;						\
+   });								\
+})
+
+/* Only graphics.library/SetCollision() */
+#define LP3NRFP(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) \
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   {								\
+      register int _d0 __asm("d0");				\
+      register int _d1 __asm("d1");				\
+      register int _a0 __asm("a0");				\
+      register int _a1 __asm("a1");				\
+      void *const _##name##_bn = (bn);	\
+      register t1 _n1 __asm(#r1) = _##name##_v1;		\
+      register t2 _n2 __asm(#r2) = _##name##_v2;		\
+      register t3 _n3 __asm(#r3) = _##name##_v3;		\
+      __asm volatile ("move.l %%a6,%%sp@-\n\tmove.l %[libbase],%%a6\n\tjsr %%a6@(-"#offs":W)\n\tmove.l %%sp@+,%%a6"			\
+      : "=r" (_d0), "=r" (_d1), "=r" (_a0), "=r" (_a1)		\
+      : [libbase] "a" (_##name##_bn), "rf"(_n1), "rf"(_n2), "rf"(_n3)	\
+      : "fp0", "fp1", "cc", "memory");				\
+   }								\
+})
+
+#define LP4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP4NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only exec.library/RawDoFmt() */
+#define LP4FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn, fpt) \
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP5(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP5NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only exec.library/MakeLibrary() */
+#define LP5FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn, fpt) \
+({								\
+   typedef fpt;							\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* Only reqtools.library/XXX() */
+#define LP5A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   __asm volatile ("exg d7,a4\n\t"			\
+   "move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)\n\t"			\
+   "exg d7,a4"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP6(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP6NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+#define LP7(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+#define LP7NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only workbench.library/AddAppIconA() */
+#define LP7A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   __asm volatile ("exg d7,a4\n\t"			\
+   "move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)\n\t"			\
+   "exg d7,a4"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* Would you believe that there really are beasts that need more than 7
+   arguments? :-) */
+
+/* For example intuition.library/AutoRequest() */
+#define LP8(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* For example intuition.library/ModifyProp() */
+#define LP8NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* For example layers.library/CreateUpfrontHookLayer() */
+#define LP9(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   t9 _##name##_v9 = (v9);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   register t9 _n9 __asm(#r9) = _##name##_v9;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8), "rf"(_n9) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* For example intuition.library/NewModifyProp() */
+#define LP9NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   t9 _##name##_v9 = (v9);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   register t9 _n9 __asm(#r9) = _##name##_v9;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8), "rf"(_n9) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Kriton Kyrimis <kyrimis@cti.gr> says CyberGraphics needs the following */
+#define LP10(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   t9 _##name##_v9 = (v9);					\
+   t10 _##name##_v10 = (v10);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   register t9 _n9 __asm(#r9) = _##name##_v9;		\
+   register t10 _n10 __asm(#r10) = _##name##_v10;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8), "rf"(_n9), "rf"(_n10) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+/* Only graphics.library/BltMaskBitMapRastPort() */
+#define LP10NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   t9 _##name##_v9 = (v9);					\
+   t10 _##name##_v10 = (v10);					\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   register t9 _n9 __asm(#r9) = _##name##_v9;		\
+   register t10 _n10 __asm(#r10) = _##name##_v10;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : \
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8), "rf"(_n9), "rf"(_n10) \
+   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+})
+
+/* Only graphics.library/BltBitMap() */
+#define LP11(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, t11, v11, r11, bt, bn) \
+({								\
+   t1 _##name##_v1 = (v1);					\
+   t2 _##name##_v2 = (v2);					\
+   t3 _##name##_v3 = (v3);					\
+   t4 _##name##_v4 = (v4);					\
+   t5 _##name##_v5 = (v5);					\
+   t6 _##name##_v6 = (v6);					\
+   t7 _##name##_v7 = (v7);					\
+   t8 _##name##_v8 = (v8);					\
+   t9 _##name##_v9 = (v9);					\
+   t10 _##name##_v10 = (v10);					\
+   t11 _##name##_v11 = (v11);					\
+   register rt _##name##_re __asm("d0");			\
+   register t1 _n1 __asm(#r1) = _##name##_v1;		\
+   register t2 _n2 __asm(#r2) = _##name##_v2;		\
+   register t3 _n3 __asm(#r3) = _##name##_v3;		\
+   register t4 _n4 __asm(#r4) = _##name##_v4;		\
+   register t5 _n5 __asm(#r5) = _##name##_v5;		\
+   register t6 _n6 __asm(#r6) = _##name##_v6;		\
+   register t7 _n7 __asm(#r7) = _##name##_v7;		\
+   register t8 _n8 __asm(#r8) = _##name##_v8;		\
+   register t9 _n9 __asm(#r9) = _##name##_v9;		\
+   register t10 _n10 __asm(#r10) = _##name##_v10;		\
+   register t11 _n11 __asm(#r11) = _##name##_v11;		\
+   __asm volatile ("move.l %[libbase],%%a0\n\t"			\
+   "jsr %%a0@(-"#offs":W)"			\
+   : "=r" (_##name##_re)	\
+   : [libbase] "a" (bn), "rf"(_n1), "rf"(_n2), "rf"(_n3), "rf"(_n4), "rf"(_n5), "rf"(_n6), "rf"(_n7), "rf"(_n8), "rf"(_n9), "rf"(_n10), "rf"(_n11) \
+   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");				\
+   _##name##_re;						\
+})
+
+typedef void *APTR;
 
 #endif /* __ASSEMBLER__ */
 
@@ -289,41 +965,52 @@ struct IOStdReq {
 
 #ifndef __ASSEMBLER__
 
-extern struct ExecBase *_EXEC_BASE_NAME;
+extern ExecBase *EXEC_BASE_NAME;
 
 #define AllocAbs(par1, last) \
 	LP2(0xcc, APTR, AllocAbs, unsigned long, par1, d0, APTR, last, a1, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
 #define OldOpenLibrary(last) \
 	LP1(0x198, struct Library *, OldOpenLibrary, /*UBYTE*/const char *, last, a1, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
-extern void CloseLibrary(struct Library * last);
+#define CloseLibrary(last) \
+	LP1NR(0x19e, CloseLibrary, struct Library *, last, a1, \
+	, EXEC_BASE_NAME)
 
 #define OpenDevice(par1, par2, par3, last) \
 	LP4(0x1bc, int8, OpenDevice, /*UBYTE*/uint8 *, par1, a0, unsigned long, par2, d0, struct IORequest *, par3, a1, unsigned long, last, d1, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
-extern void CloseDevice(struct IORequest * last);
+#define CloseDevice(last) \
+	LP1NR(0x1c2, CloseDevice, struct IORequest *, last, a1, \
+	, EXEC_BASE_NAME)
 
 #define DoIO(last) \
 	LP1(0x1c8, int8, DoIO, struct IORequest *, last, a1, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
-extern struct Library * OpenLibrary(uint8 * par1, unsigned long last);
+#define OpenLibrary(par1, last) \
+	LP2(0x228, struct Library *, OpenLibrary, uint8 *, par1, a1, \
+	unsigned long, last, d0, \
+	, EXEC_BASE_NAME)
 
 #define CreateIORequest(par1, last) \
 	LP2(0x28e, APTR, CreateIORequest, struct MsgPort *, par1, a0, unsigned long, last, d0, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
-extern void DeleteIORequest(APTR last);
+#define DeleteIORequest(last) \
+	LP1NR(0x294, DeleteIORequest, APTR, last, a0, \
+	, EXEC_BASE_NAME)
 
 #define CreateMsgPort() \
 	LP0(0x29a, struct MsgPort *, CreateMsgPort, \
-	, _EXEC_BASE_NAME)
+	, EXEC_BASE_NAME)
 
-extern void ColdReboot(void);
+#define ColdReboot() \
+	LP0NR(0x2d6, ColdReboot, \
+	, EXEC_BASE_NAME)
 
 
 
@@ -417,39 +1104,55 @@ struct TextFont {
 	//...
 } _PACKED;
 
-extern struct GfxBase *_GRAPHICS_BASE_NAME;
+extern struct GfxBase *GRAPHICS_BASE_NAME;
 
-extern void ClearScreen(struct RastPort * last);
+#define ClearScreen(last) \
+	LP1NR(0x30, ClearScreen, struct RastPort *, last, a1, \
+	, GRAPHICS_BASE_NAME)
 
 #define Text(par1, par2, last) \
 	LP3(0x3c, int32, Text, struct RastPort *, par1, a1, const char *, par2, a0, unsigned long, last, d0, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
 #define SetFont(par1, last) \
 	LP2(0x42, int32, SetFont, struct RastPort *, par1, a1, struct TextFont *, last, a0, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
 #define OpenFont(last) \
 	LP1(0x48, struct TextFont *, OpenFont, struct TextAttr *, last, a0, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
-extern void LoadRGB4(struct ViewPort * par1, const uint16 * par2, long last);
-extern void Move(struct RastPort * par1, long par2, long last);
-extern void SetAPen(struct RastPort * par1, unsigned long last);
-extern void SetBPen(struct RastPort * par1, unsigned long last);
-extern void SetDrMd(struct RastPort * par1, unsigned long last);
+#define LoadRGB4(par1, par2, last) \
+	LP3NR(0xc0, LoadRGB4, struct ViewPort *, par1, a0, const uint16 *, par2, a1, long, last, d0, \
+	, GRAPHICS_BASE_NAME)
+
+#define Move(par1, par2, last) \
+	LP3NR(0xf0, Move, struct RastPort *, par1, a1, long, par2, d0, long, last, d1, \
+	, GRAPHICS_BASE_NAME)
+
+#define SetAPen(par1, last) \
+	LP2NR(0x156, SetAPen, struct RastPort *, par1, a1, unsigned long, last, d0, \
+	, GRAPHICS_BASE_NAME)
+
+#define SetBPen(par1, last) \
+	LP2NR(0x15c, SetBPen, struct RastPort *, par1, a1, unsigned long, last, d0, \
+	, GRAPHICS_BASE_NAME)
+
+#define SetDrMd(par1, last) \
+	LP2NR(0x162, SetDrMd, struct RastPort *, par1, a1, unsigned long, last, d0, \
+	, GRAPHICS_BASE_NAME)
 
 #define FindDisplayInfo(last) \
 	LP1(0x2d6, DisplayInfoHandle, FindDisplayInfo, unsigned long, last, d0, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
 #define NextDisplayInfo(last) \
 	LP1(0x2dc, uint32, NextDisplayInfo, unsigned long, last, d0, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
 #define GetDisplayInfoData(par1, par2, par3, par4, last) \
 	LP5(0x2f4, uint32, GetDisplayInfoData, DisplayInfoHandle, par1, a0, uint8 *, par2, a1, unsigned long, par3, d0, unsigned long, par4, d1, unsigned long, last, d2, \
-	, _GRAPHICS_BASE_NAME)
+	, GRAPHICS_BASE_NAME)
 
 
 #endif /* __ASSEMBLER__ */
@@ -702,7 +1405,9 @@ extern struct Library *KEYMAP_BASE_NAME;
 	LP0(0x30, uint32, GetKey, \
 	, LOWLEVEL_BASE_NAME)
 
-extern void QueryKeys(struct KeyQuery * par1, unsigned long last);
+#define QueryKeys(par1, last) \
+	LP2NR(0x36, QueryKeys, struct KeyQuery *, par1, a0, unsigned long, last, d1, \
+	, LOWLEVEL_BASE_NAME)
 
 extern struct Library *LOWLEVEL_BASE_NAME;
 

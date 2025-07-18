@@ -26,7 +26,6 @@ for platform in [ MultiBootSubDirSetup amiga_m68k ] {
 		#	shell.S
 			start.cpp
 			rom_calls.cpp
-			rom_calls.S
 			debug.cpp
 			#bios.S
 			console.cpp

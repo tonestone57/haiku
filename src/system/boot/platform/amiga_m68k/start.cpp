@@ -9,7 +9,6 @@
 #include <boot/platform.h>
 #include <boot/heap.h>
 #include <boot/stage2.h>
-#include <exec/types.h>
 #include <arch/cpu.h>
 
 #include <string.h>

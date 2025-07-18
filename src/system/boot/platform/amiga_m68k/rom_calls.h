@@ -38,8 +38,6 @@ typedef void *APTR;
 
 #if defined(__cplusplus) && !defined(__ASSEMBLER__)
 #include "rom_calls_inline.h"
-#else
-#ifdef __cplusplus
 extern "C" {
 #endif
 

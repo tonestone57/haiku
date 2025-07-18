@@ -36,559 +36,595 @@ extern "C" {
 */
 /* those were taken from fd2pragma, but no copyright seems to be claimed on them */
 
-#define LP0(offs, rt, name, bt, bn) static __inline__ rt name() \
+#define LP0(offs, rt, name, bt, bn) \
+static inline rt name() \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP0NR(offs, name, bt, bn) static __inline__ void name() \
+#define LP0NR(offs, name, bt, bn) \
+static inline void name() \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
-#define LP1(offs, rt, name, t1, v1, r1, bt, bn) static __inline__ rt name(t1 v1) \
+#define LP1(offs, rt, name, t1, v1, r1, bt, bn) \
+static inline rt name(t1 v1) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP1NR(offs, name, t1, v1, r1, bt, bn) static __inline__ void name(t1 v1) \
+#define LP1NR(offs, name, t1, v1, r1, bt, bn) \
+static inline void name(t1 v1) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only graphics.library/AttemptLockLayerRom() */
-#define LP1A5(offs, rt, name, t1, v1, r1, bt, bn) static __inline__ rt name(t1 v1) \
+#define LP1A5(offs, rt, name, t1, v1, r1, bt, bn) \
+static inline rt name(t1 v1) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("exg d7,a5\n\tjsr a6@(-"#offs":W)\n\texg d7,a5" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	__asm volatile ("exg d7,a5\n\tjsr a6@(-%c[offset]:W)\n\texg d7,a5" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only graphics.library/LockLayerRom() and graphics.library/UnlockLayerRom() */
-#define LP1NRA5(offs, name, t1, v1, r1, bt, bn) static __inline__ void name(t1 v1) \
+#define LP1NRA5(offs, name, t1, v1, r1, bt, bn) \
+static inline void name(t1 v1) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("exg d7,a5\n\tjsr a6@(-"#offs":W)\n\texg d7,a5" \
-   : \
-   : "r" (_bn), "r" (_v1) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	__asm volatile ("exg d7,a5\n\tjsr a6@(-%c[offset]:W)\n\texg d7,a5" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only exec.library/Supervisor() */
-#define LP1A5FP(offs, rt, name, t1, v1, r1, bt, bn, fpt) static __inline__ rt name(t1 v1) \
+#define LP1A5FP(offs, rt, name, t1, v1, r1, bt, bn, fpt) \
+static inline rt name(t1 v1) \
 { \
-   typedef fpt; \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   __asm volatile ("exg d7,a5\n\tjsr a6@(-"#offs":W)\n\texg d7,a5" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	typedef fpt; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	__asm volatile ("exg d7,a5\n\tjsr a6@(-%c[offset]:W)\n\texg d7,a5" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP2(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn) static __inline__ rt name(t1 v1, t2 v2) \
+#define LP2(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn) \
+static inline rt name(t1 v1, t2 v2) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP2NR(offs, name, t1, v1, r1, t2, v2, r2, bt, bn) static __inline__ void name(t1 v1, t2 v2) \
+#define LP2NR(offs, name, t1, v1, r1, t2, v2, r2, bt, bn) \
+static inline void name(t1 v1, t2 v2) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only cia.resource/AbleICR() and cia.resource/SetICR() */
-#define LP2UB(offs, rt, name, t1, v1, r1, t2, v2, r2) static __inline__ rt name(t1 v1, t2 v2) \
+#define LP2UB(offs, rt, name, t1, v1, r1, t2, v2, r2) \
+static inline rt name(t1 v1, t2 v2) \
 { \
-   register rt _re __asm("d0"); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_v1), "r" (_v2) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_v1), "r" (_v2) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only dos.library/InternalUnLoadSeg() */
-#define LP2FP(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn, fpt) static __inline__ rt name(t1 v1, t2 v2) \
+#define LP2FP(offs, rt, name, t1, v1, r1, t2, v2, r2, bt, bn, fpt) \
+static inline rt name(t1 v1, t2 v2) \
 { \
-   typedef fpt; \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	typedef fpt; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP3(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3) \
+#define LP3(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP3NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3) \
+#define LP3NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only cia.resource/AddICRVector() */
-#define LP3UB(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3) static __inline__ rt name(t1 v1, t2 v2, t3 v3) \
+#define LP3UB(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3) \
+static inline rt name(t1 v1, t2 v2, t3 v3) \
 { \
-   register rt _re __asm("d0"); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only cia.resource/RemICRVector() */
-#define LP3NRUB(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3) static __inline__ void name(t1 v1, t2 v2, t3 v3) \
+#define LP3NRUB(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3) \
+static inline void name(t1 v1, t2 v2, t3 v3) \
 { \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only exec.library/SetFunction() */
-#define LP3FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) static __inline__ rt name(t1 v1, t2 v2, t3 v3) \
+#define LP3FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) \
+static inline rt name(t1 v1, t2 v2, t3 v3) \
 { \
-   typedef fpt; \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	typedef fpt; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only graphics.library/SetCollision() */
-#define LP3NRFP(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) static __inline__ void name(t1 v1, t2 v2, t3 v3) \
+#define LP3NRFP(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, bt, bn, fpt) \
+static inline void name(t1 v1, t2 v2, t3 v3) \
 { \
-   typedef fpt; \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	typedef fpt; \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
-#define LP4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4) \
+#define LP4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP4NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4) \
+#define LP4NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only exec.library/RawDoFmt() */
-#define LP4FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn, fpt) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4) \
+#define LP4FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, bt, bn, fpt) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4) \
 { \
-   typedef fpt; \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	typedef fpt; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP5(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
+#define LP5(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP5NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
+#define LP5NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only exec.library/MakeLibrary() */
-#define LP5FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn, fpt) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
+#define LP5FP(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn, fpt) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
 { \
-   typedef fpt; \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	typedef fpt; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only reqtools.library/XXX() */
-#define LP5A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
+#define LP5A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   __asm volatile ("exg d7,a4\n\tjsr a6@(-"#offs":W)\n\texg d7,a4" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	__asm volatile ("exg d7,a4\n\tjsr a6@(-%c[offset]:W)\n\texg d7,a4" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP6(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6) \
+#define LP6(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP6NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6) \
+#define LP6NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
-#define LP7(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
+#define LP7(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
-#define LP7NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
+#define LP7NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only workbench.library/AddAppIconA() */
-#define LP7A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
+#define LP7A4(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   __asm volatile ("exg d7,a4\n\tjsr a6@(-"#offs":W)\n\texg d7,a4" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	__asm volatile ("exg d7,a4\n\tjsr a6@(-%c[offset]:W)\n\texg d7,a4" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Would you believe that there really are beasts that need more than 7
    arguments? :-) */
 
 /* For example intuition.library/AutoRequest() */
-#define LP8(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8) \
+#define LP8(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* For example intuition.library/ModifyProp() */
-#define LP8NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8) \
+#define LP8NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* For example layers.library/CreateUpfrontHookLayer() */
-#define LP9(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9) \
+#define LP9(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   register t9 _v9 __asm(#r9) = v9; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	register t9 _v9 __asm(#r9) = v9; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* For example intuition.library/NewModifyProp() */
-#define LP9NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9) \
+#define LP9NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   register t9 _v9 __asm(#r9) = v9; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	register t9 _v9 __asm(#r9) = v9; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Kriton Kyrimis <kyrimis@cti.gr> says CyberGraphics needs the following */
-#define LP10(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10) \
+#define LP10(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   register t9 _v9 __asm(#r9) = v9; \
-   register t10 _v10 __asm(#r10) = v10; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	register t9 _v9 __asm(#r9) = v9; \
+	register t10 _v10 __asm(#r10) = v10; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 /* Only graphics.library/BltMaskBitMapRastPort() */
-#define LP10NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) static __inline__ void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10) \
+#define LP10NR(offs, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, bt, bn) \
+static inline void name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10) \
 { \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   register t9 _v9 __asm(#r9) = v9; \
-   register t10 _v10 __asm(#r10) = v10; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10) \
-   : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	register t9 _v9 __asm(#r9) = v9; \
+	register t10 _v10 __asm(#r10) = v10; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10) \
+	: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
 }
 
 /* Only graphics.library/BltBitMap() */
-#define LP11(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, t11, v11, r11, bt, bn) static __inline__ rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10, t11 v11) \
+#define LP11(offs, rt, name, t1, v1, r1, t2, v2, r2, t3, v3, r3, t4, v4, r4, t5, v5, r5, t6, v6, r6, t7, v7, r7, t8, v8, r8, t9, v9, r9, t10, v10, r10, t11, v11, r11, bt, bn) \
+static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7, t8 v8, t9 v9, t10 v10, t11 v11) \
 { \
-   register rt _re __asm("d0"); \
-   register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
-   register t1 _v1 __asm(#r1) = v1; \
-   register t2 _v2 __asm(#r2) = v2; \
-   register t3 _v3 __asm(#r3) = v3; \
-   register t4 _v4 __asm(#r4) = v4; \
-   register t5 _v5 __asm(#r5) = v5; \
-   register t6 _v6 __asm(#r6) = v6; \
-   register t7 _v7 __asm(#r7) = v7; \
-   register t8 _v8 __asm(#r8) = v8; \
-   register t9 _v9 __asm(#r9) = v9; \
-   register t10 _v10 __asm(#r10) = v10; \
-   register t11 _v11 __asm(#r11) = v11; \
-   __asm volatile ("jsr a6@(-"#offs":W)" \
-   : "=r" (_re) \
-   : "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10), "r" (_v11) \
-   : "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
-   return _re; \
+	register rt _re __asm("d0"); \
+	register struct Library *const _bn __asm("a6") = (struct Library *const)(bn); \
+	register t1 _v1 __asm(#r1) = v1; \
+	register t2 _v2 __asm(#r2) = v2; \
+	register t3 _v3 __asm(#r3) = v3; \
+	register t4 _v4 __asm(#r4) = v4; \
+	register t5 _v5 __asm(#r5) = v5; \
+	register t6 _v6 __asm(#r6) = v6; \
+	register t7 _v7 __asm(#r7) = v7; \
+	register t8 _v8 __asm(#r8) = v8; \
+	register t9 _v9 __asm(#r9) = v9; \
+	register t10 _v10 __asm(#r10) = v10; \
+	register t11 _v11 __asm(#r11) = v11; \
+	__asm volatile ("jsr a6@(-%c[offset]:W)" \
+	: "=r" (_re) \
+	: [offset] "i" (offs), "r" (_bn), "r" (_v1), "r" (_v2), "r" (_v3), "r" (_v4), "r" (_v5), "r" (_v6), "r" (_v7), "r" (_v8), "r" (_v9), "r" (_v10), "r" (_v11) \
+	: "d1", "a0", "a1", "fp0", "fp1", "cc", "memory"); \
+	return _re; \
 }
 
 typedef void *APTR;

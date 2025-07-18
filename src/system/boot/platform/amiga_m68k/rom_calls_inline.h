@@ -835,5 +835,9 @@ static inline rt name(t1 v1, t2 v2, t3 v3, t4 v4, t5 v5, t6 v6, t7 v7,  \
 	return _##name##_re;                                               \
 }
 
+#define ColdReboot() \
+	LP0NR(0x2d6, ColdReboot, \
+	, EXEC_BASE_NAME)
+
 
 #endif /* _AMICALLS_INLINE_H */

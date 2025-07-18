@@ -1127,6 +1127,15 @@ struct IOStdReq {
 #define _LVOOpenLibrary		(-0x228)
 
 
+#define IOERR_OPENFAIL		(-1)
+#define IOERR_ABORTED		(-2)
+#define IOERR_NOCMD			(-3)
+#define IOERR_BADLENGTH		(-4)
+#define IOERR_BADADDRESS	(-5)
+#define IOERR_UNITBUSY		(-6)
+#define IOERR_SELFTEST		(-7)
+
+
 #ifndef __ASSEMBLER__
 
 extern ExecBase *EXEC_BASE_NAME;
@@ -1170,10 +1179,6 @@ extern ExecBase *EXEC_BASE_NAME;
 
 #define CreateMsgPort() \
 	LP0(0x29a, struct MsgPort *, CreateMsgPort, \
-	, EXEC_BASE_NAME)
-
-#define ColdReboot() \
-	LP0NR(0x2d6, ColdReboot, \
 	, EXEC_BASE_NAME)
 
 

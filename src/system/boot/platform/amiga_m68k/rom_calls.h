@@ -36,8 +36,7 @@ typedef void *APTR;
 	par2, a0, unsigned long, last, d1, \
 	, INTUITION_BASE_NAME)
 
-#ifndef __ASSEMBLER__
-#if defined(__cplusplus)
+#if defined(__cplusplus) && !defined(__ASSEMBLER__)
 #include "rom_calls_inline.h"
 #else
 #ifdef __cplusplus
@@ -1643,5 +1642,6 @@ struct InputEvent {
 }
 #endif
 
-#endif /* __ASSEMBLER__ */
+#endif /* !c++ */
+
 #endif /* _AMICALLS_H */

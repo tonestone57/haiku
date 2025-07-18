@@ -42,19 +42,16 @@ static inline rt name()                                                \
 	return _##name##_re;                                               \
 }
 
-#define LP0NR(offs, name, bt, bn)                                      \
-static inline void name()                                              \
-{                                                                      \
-	register int _d0 __asm("d0");                                      \
-	register int _d1 __asm("d1");                                      \
-	register int _a0 __asm("a0");                                      \
-	register int _a1 __asm("a1");                                      \
-	void *const _##name##_bn = (bn);                                   \
-	__asm volatile ("move.l %%a6,%%sp@-\n\tmove.l %[libbase],%%a6\n\t"   \
-		"jsr %%a6@(-"#offs":W)\n\tmove.l %%sp@+,%%a6"                   \
-	: "=r" (_d0), "=r" (_d1), "=r" (_a0), "=r" (_a1)                     \
-	: [libbase] "a" (_##name##_bn)                                     \
-	: "fp0", "fp1", "cc", "memory");                                   \
+static inline void ColdReboot()
+{
+	__asm volatile (
+		"move.l %%a6,%%sp@-\n\t"
+		"move.l %0,%%a6\n\t"
+		"jsr %%a6@(-0x2d6:W)\n\t"
+		"move.l %%sp@+,%%a6"
+		:
+		: "a" (EXEC_BASE_NAME)
+		: "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");
 }
 
 #define LP1(offs, rt, name, t1, v1, r1, bt, bn)                         \

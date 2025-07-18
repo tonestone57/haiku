@@ -24,6 +24,7 @@ extern struct ExecBase *SysBase;
 
 
 #define RECOVERY_ALERT	0x00000000
+#define DEADEND_ALERT	0x80000000
 
 #define INTUITION_BASE_NAME IntuitionBase
 
@@ -1436,8 +1437,6 @@ struct NameInfo {
 #define INTUITION_BASE_NAME IntuitionBase
 
 #define _LVODisplayAlert	(-0x5a)
-
-#ifndef __ASSEMBLER__
 
 struct Window {
 	uint8 dummy1[136];

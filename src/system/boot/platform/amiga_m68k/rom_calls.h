@@ -9,6 +9,8 @@
 #ifndef _AMICALLS_H
 #define _AMICALLS_H
 
+#define EXEC_BASE_NAME SysBase
+
 
 #define IOERR_OPENFAIL		(-1)
 #define IOERR_ABORTED		(-2)
@@ -1125,8 +1127,6 @@ struct IOStdReq {
 #define IOERR_UNITBUSY		(-6)
 #define IOERR_SELFTEST		(-7)
 
-
-#define EXEC_BASE_NAME SysBase
 
 #define _LVOFindResident	(-0x60)
 #define _LVOAllocAbs		(-0xcc)

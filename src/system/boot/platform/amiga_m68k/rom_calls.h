@@ -10,6 +10,9 @@
 #define _AMICALLS_H
 
 
+#if defined(__cplusplus) && !defined(__ASSEMBLER__)
+#include "rom_calls_inline.h"
+#else
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1623,5 +1626,7 @@ struct InputEvent {
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* !c++ */
 
 #endif /* _AMICALLS_H */

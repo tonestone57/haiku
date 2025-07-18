@@ -10,6 +10,15 @@
 #define _AMICALLS_H
 
 
+#define IOERR_OPENFAIL		(-1)
+#define IOERR_ABORTED		(-2)
+#define IOERR_NOCMD			(-3)
+#define IOERR_BADLENGTH		(-4)
+#define IOERR_BADADDRESS	(-5)
+#define IOERR_UNITBUSY		(-6)
+#define IOERR_SELFTEST		(-7)
+
+
 #if defined(__cplusplus) && !defined(__ASSEMBLER__)
 #include "rom_calls_inline.h"
 #else
@@ -1125,15 +1134,6 @@ struct IOStdReq {
 #define _LVOCloseLibrary	(-0x19e)
 #define _LVODoIO			(-0x1c8)
 #define _LVOOpenLibrary		(-0x228)
-
-
-#define IOERR_OPENFAIL		(-1)
-#define IOERR_ABORTED		(-2)
-#define IOERR_NOCMD			(-3)
-#define IOERR_BADLENGTH		(-4)
-#define IOERR_BADADDRESS	(-5)
-#define IOERR_UNITBUSY		(-6)
-#define IOERR_SELFTEST		(-7)
 
 
 #ifndef __ASSEMBLER__

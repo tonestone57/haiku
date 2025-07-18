@@ -1,0 +1,12 @@
+--- src/system/kernel/fs/vfs.cpp	2025-07-18 12:53:26.363320009 +0000
++++ src/system/kernel/fs/vfs.cpp.original	2025-07-18 12:53:39.889168848 +0000
+@@ -10134,7 +10134,8 @@
+	context->root = vnode.Detach();
+	rw_lock_write_unlock(&sIOContextRootLock);
+
+-	put_vnode(oldRoot);
++	if (oldRoot != NULL)
++		put_vnode(oldRoot);
+
+	return B_OK;
+ }

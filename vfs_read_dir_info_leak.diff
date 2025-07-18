@@ -1,0 +1,11 @@
+--- src/system/kernel/device_manager/devfs.cpp	2025-07-18 11:12:29.536433201 +0000
++++ src/system/kernel/device_manager/devfs.cpp.original	2025-07-18 11:12:39.539848197 +0000
+@@ -1406,6 +1406,8 @@
+	if (dirent->d_reclen > bufferSize)
+		return ENOBUFS;
+
++	memset(dirent, 0, dirent->d_reclen);
++
+	status = user_strlcpy(dirent->d_name, name,
+		bufferSize - offsetof(struct dirent, d_name));
+	if (status < B_OK)

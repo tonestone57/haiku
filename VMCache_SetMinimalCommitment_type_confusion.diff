@@ -1,0 +1,10 @@
+--- src/system/kernel/vm/VMCache.cpp	2025-07-18 11:42:41.392400227 +0000
++++ src/system/kernel/vm/VMCache.cpp.original	2025-07-18 11:42:51.161945907 +0000
+@@ -1093,6 +1093,8 @@
+ #endif
+
+		// try to commit more memory
++		if (commitment < 0)
++			commitment = 0;
+		status = Commit(commitment, priority);
+	}

@@ -1,0 +1,10 @@
+--- src/add-ons/kernel/file_systems/bfs/kernel_interface.cpp	2025-07-18 11:09:32.263607153 +0000
++++ src/add-ons/kernel/file_systems/bfs/kernel_interface.cpp.original	2025-07-18 11:09:41.573624997 +0000
+@@ -1168,6 +1168,8 @@
+		else
+			entry_cache_add(volume->ID(), directory->ID(), name, id);
+	}
++	if (status == B_OK && directory->IsEmpty())
++		directory->NeedsTrimming(transaction);
+	return status;
+ }

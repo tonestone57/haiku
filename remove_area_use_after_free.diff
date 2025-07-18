@@ -1,0 +1,10 @@
+--- src/system/kernel/heap.cpp	2025-07-18 11:49:54.905908812 +0000
++++ src/system/kernel/heap.cpp.original	2025-07-18 11:50:06.315265552 +0000
+@@ -1150,6 +1150,8 @@
+		"from %s heap %p\n", area->area, (void *)area->base,
+		(void *)(area->base + area->size), heap->name, heap);
+
++	delete_area(area->area);
++
+	return B_OK;
+ }

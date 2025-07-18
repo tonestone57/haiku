@@ -5159,43 +5159,6 @@ user_memcpy(void* to, const void* from, size_t size)
 }
 
 
-/*!	\brief Copies at most (\a size - 1) characters from the string in \a from to
-	the string in \a to, NULL-terminating the result.
-
-	\param to Pointer to the destination C-string.
-	\param from Pointer to the source C-string.
-	\param size Size in bytes of the string buffer pointed to by \a to.
-
-	\return strlen(\a from).
-*/
-ssize_t
-user_strlcpy(char* to, const char* from, size_t size)
-{
-	if (to == NULL && size != 0)
-		return B_BAD_VALUE;
-	if (from == NULL)
-		return B_BAD_ADDRESS;
-
-	// Protect the source address from overflows.
-	size_t maxSize = size;
-	if ((addr_t)from + maxSize < (addr_t)from)
-		maxSize -= (addr_t)from + maxSize;
-	if (IS_USER_ADDRESS(from) && !IS_USER_ADDRESS((addr_t)from + maxSize))
-		maxSize = USER_TOP - (addr_t)from;
-
-	if (!validate_memory_range(to, maxSize))
-		return B_BAD_ADDRESS;
-
-	ssize_t result = arch_cpu_user_strlcpy(to, from, maxSize);
-	if (result < 0)
-		return result;
-
-	// If we hit the address overflow boundary, fail.
-	if ((size_t)result >= maxSize && maxSize < size)
-		return B_NAME_TOO_LONG;
-
-	return result;
-}
 
 
 status_t
@@ -5952,9 +5915,14 @@ create_area_etc(team_id team, const char* name, size_t size, uint32 lock,
 {
 	fix_protection(&protection);
 
-	return vm_create_anonymous_area(team, name, size, lock, protection, flags,
-		guardSize, virtualAddressRestrictions, physicalAddressRestrictions,
-		true, _address);
+	area_id result = vm_create_anonymous_area(team, name, size, lock,
+		protection, flags, guardSize, virtualAddressRestrictions,
+		physicalAddressRestrictions, true, _address);
+
+	if (result < B_OK)
+		free(_address);
+
+	return result;
 }
 
 

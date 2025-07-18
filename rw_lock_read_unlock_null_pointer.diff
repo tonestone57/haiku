@@ -1,0 +1,12 @@
+--- src/system/kernel/locks/lock.cpp	2025-07-18 11:55:31.652116052 +0000
++++ src/system/kernel/locks/lock.cpp.original	2025-07-18 11:55:43.901467692 +0000
+@@ -671,6 +671,9 @@
+ void
+ _rw_lock_read_unlock(rw_lock* lock)
+ {
++	if (lock == NULL)
++		return;
++
+ #if KDEBUG_RW_LOCK_DEBUG
+	int32 oldCount = atomic_add(&lock->count, -1);
+	if (oldCount < RW_LOCK_WRITER_COUNT_BASE) {

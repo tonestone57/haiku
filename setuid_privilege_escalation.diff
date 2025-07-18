@@ -1,0 +1,12 @@
+--- src/bin/network/ping/ping.c	2025-07-18 12:57:40.697541749 +0000
++++ src/bin/network/ping/ping.c.original	2025-07-18 12:57:54.278240059 +0000
+@@ -273,6 +273,9 @@
+		err(EX_OSERR, "ssend socket");
+	}
+
++	if (setgid(getgid()) != 0)
++		err(EX_NOPERM, "setgid() failed");
++
+	if (srecv < 0) {
+		errno = srecv_errno;
+		err(EX_OSERR, "srecv socket");

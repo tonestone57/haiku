@@ -1,0 +1,11 @@
+--- src/libs/gnu/xattr.cpp	2025-07-18 11:46:39.173036401 +0000
++++ src/libs/gnu/xattr.cpp.original	2025-07-18 11:46:49.043540837 +0000
+@@ -202,6 +202,8 @@
+		// translate B_ENTRY_NOT_FOUND to ENOATTR
+		if (bytesRead < 0 && errno == B_ENTRY_NOT_FOUND)
+			errno = ENOATTR;
++		else if (bytesRead > (ssize_t)size)
++			return E2BIG;
+
+		return bytesRead;
+	}

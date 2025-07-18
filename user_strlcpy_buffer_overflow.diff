@@ -1,0 +1,150 @@
+--- a/src/system/kernel/vm/vm.cpp
++++ b/src/system/kernel/vm/vm.cpp
+@@ -5159,43 +5159,6 @@
+ }
+
+
+-/*!	\brief Copies at most (\a size - 1) characters from the string in \a from to
+-	the string in \a to, NULL-terminating the result.
+-
+-	\param to Pointer to the destination C-string.
+-	\param from Pointer to the source C-string.
+-	\param size Size in bytes of the string buffer pointed to by \a to.
+-
+-	\return strlen(\a from).
+-*/
+-ssize_t
+-user_strlcpy(char* to, const char* from, size_t size)
+-{
+-	if (to == NULL && size != 0)
+-		return B_BAD_VALUE;
+-	if (from == NULL)
+-		return B_BAD_ADDRESS;
+-
+-	// Protect the source address from overflows.
+-	size_t maxSize = size;
+-	if ((addr_t)from + maxSize < (addr_t)from)
+-		maxSize -= (addr_t)from + maxSize;
+-	if (IS_USER_ADDRESS(from) && !IS_USER_ADDRESS((addr_t)from + maxSize))
+-		maxSize = USER_TOP - (addr_t)from;
+-
+-	if (!validate_memory_range(to, maxSize))
+-		return B_BAD_ADDRESS;
+-
+-	ssize_t result = arch_cpu_user_strlcpy(to, from, maxSize);
+-	if (result < 0)
+-		return result;
+-
+-	// If we hit the address overflow boundary, fail.
+-	if ((size_t)result >= maxSize && maxSize < size)
+-		return B_NAME_TOO_LONG;
+-
+-	return result;
+-}
+-
+-
+ status_t
+ vm_get_physical_page(phys_addr_t paddr, addr_t* _vaddr, void** _handle)
+ {
+--- a/src/system/kernel/util/Jamfile
++++ b/src/system/kernel/util/Jamfile
+@@ -17,6 +17,7 @@
+	RadixBitmap.cpp
+	Random.cpp
+	StringHash.cpp
++	user_strlcpy.cpp
+
+	: $(TARGET_KERNEL_PIC_CCFLAGS) -DUSING_LIBGCC
+ ;
+--- /dev/null
++++ b/headers/private/kernel/user_strlcpy.h
++/*
++ * Copyright 2009, Ingo Weinhold, ingo_weinhold@gmx.de.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef _KERNEL_USER_STRLCPY_H
++#define _KERNEL_USER_STRLCPY_H
++
++#include <sys/types.h>
++
++ssize_t user_strlcpy(char *to, const char *from, size_t size);
++
++#endif	/* _KERNEL_USER_STRLCPY_H */
+--- /dev/null
++++ b/src/system/kernel/util/user_strlcpy.cpp
++/*
++ * Copyright 2005-2009, Ingo Weinhold, ingo_weinhold@gmx.de.
++ * Distributed under the terms of the MIT License.
++ */
++
++#include <user_strlcpy.h>
++
++#include <string.h>
++
++#include <arch/user_memory.h>
++#include <commpage.h>
++#include <kernel.h>
++#include <vm/vm.h>
++
++
++/*!	\brief Copies at most (\a size - 1) characters from the string in \a from to
++	the string in \a to, NULL-terminating the result.
++
++	The function is similar to strlcpy() and additionally does the necessary
++	user memory access checks.
++
++	\param to Pointer to the destination C-string.
++	\param from Pointer to the source C-string in user memory.
++	\param size Size in bytes of the string buffer pointed to by \a to.
++
++	\return The length of the source string (\c strlen(from)).
++*/
++ssize_t
++user_strlcpy(char *to, const char *from, size_t size)
++{
++	if (to == NULL && size != 0)
++		return B_BAD_VALUE;
++	if (from == NULL)
++		return B_BAD_ADDRESS;
++
++	// Don't assume anything about the size of "to".
++	// "from" is in userland and can be read page by page only.
++	ssize_t result = arch_cpu_user_strlcpy(to, from, size);
++	if (result >= 0) {
++		// arch_cpu_user_strlcpy() also returns the length of the source string
++		return result;
++	}
++
++	// The architecture specific implementation failed. This can have two
++	// reasons: The string is not in a single page, or the feature is not
++	// implemented for the architecture. In any case we try to copy the string
++	// manually.
++
++	ssize_t bytesCopied = 0;
++	if (size > 0) {
++		to[0] = '\0';
++		bytesCopied = -1;
++	}
++
++	while (true) {
++		// get the page for the next character
++		char c;
++		status_t error = user_memcpy(&c, from, 1);
++		if (error != B_OK)
++			return error;
++
++		if (bytesCopied < (ssize_t)size - 1) {
++			to[bytesCopied + 1] = c;
++			to[bytesCopied + 2] = '\0';
++		}
++
++		bytesCopied++;
++
++		if (c == '\0')
++			break;
++
++		from++;
++	}
++
++	return bytesCopied;
++}

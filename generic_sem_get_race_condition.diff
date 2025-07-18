@@ -1,0 +1,33 @@
+--- src/system/kernel/posix/realtime_sem.cpp	2025-07-18 12:48:38.747075946 +0000
++++ src/system/kernel/posix/realtime_sem.cpp.original	2025-07-18 12:49:24.709465671 +0000
+@@ -639,6 +639,32 @@
+ }
+
+
++status_t
++_user_realtime_sem_get_value(sem_id semID, int* _value)
++{
++	if (_value == NULL)
++		return B_BAD_VALUE;
++	if (!IS_USER_ADDRESS(_value))
++		return B_BAD_ADDRESS;
++
++	realtime_sem_context* context = get_current_team_context();
++	if (context == NULL)
++		return B_BAD_VALUE;
++
++	// get sem count
++	int count;
++	status_t error = context->GetSemCount(semID, count);
++	if (error != B_OK)
++		return error;
++
++	// copy back result to userland
++	if (user_memcpy(_value, &count, sizeof(int)) != B_OK)
++		return B_BAD_ADDRESS;
++
++	return B_OK;
++}
++
++
+ // #pragma mark - kernel internal

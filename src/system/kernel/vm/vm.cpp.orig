@@ -50,7 +50,7 @@
 #include <util/BitUtils.h>
 #include <util/ThreadAutoLock.h>
 #include <vm/vm_page.h>
-#include <vm/vm_priv.hh>
+#include <vm/vm_priv.h>
 #include <vm/VMAddressSpace.h>
 #include <vm/VMArea.h>
 #include <vm/VMCache.h>
@@ -1092,18 +1092,16 @@ unmap_address_range(VMAddressSpace* addressSpace, addr_t address, addr_t size,
 		}
 	}
 
-	VMAddressSpace::AreaRangeIterator it
-		= addressSpace->GetAreaRangeIterator(address, size);
-	VMArea* area = it.Next();
-	while (area != NULL) {
-		VMArea* nextArea = it.Next();
+	for (VMAddressSpace::AreaRangeIterator it
+			= addressSpace->GetAreaRangeIterator(address, size);
+		VMArea* area = it.Next();) {
+
 		status_t error = cut_area(addressSpace, area, address, size, NULL,
 			kernel);
 		if (error != B_OK)
 			return error;
 			// Failing after already messing with areas is ugly, but we
 			// can't do anything about it.
-		area = nextArea;
 	}
 
 	return B_OK;
@@ -1175,7 +1173,7 @@ discard_address_range(VMAddressSpace* addressSpace, addr_t address, addr_t size,
 }
 
 
-/*! You need to hold the lock of the cache and the write lock of the address
+/*!	You need to hold the lock of the cache and the write lock of the address
 	space when calling this function.
 	Note, that in case of error your cache will be temporarily unlocked.
 	If \a addressSpec is \c B_EXACT_ADDRESS and the
@@ -1485,7 +1483,7 @@ vm_set_kernel_area_debug_protection(void* cookie, void* _address, size_t size,
 	if ((protection & B_KERNEL_WRITE_AREA) != 0)
 		protection |= B_WRITE_AREA;
 
-	VMAddressSpace* addressSpace = VMAddressSpace::Kernel();
+	VMAddressSpace* addressSpace = VMAddressSpace::GetKernel();
 	VMTranslationMap* map = addressSpace->TranslationMap();
 	VMArea* area = (VMArea*)cookie;
 
@@ -2504,7 +2502,7 @@ vm_area_put_locked_cache(VMCache* cache)
 
 
 area_id
-vm_clone_area(team_id team, const char* name, void** address,
+vm_clone_area(team_id team, const char* name, void** _address,
 	uint32 addressSpec, uint32 protection, uint32 mapping, area_id sourceID,
 	bool kernel)
 {
@@ -2752,402 +2750,4 @@ vm_delete_area(team_id team, area_id id, bool kernel)
 
 	delete_area(locker.AddressSpace(), area, false);
 	return B_OK;
-}
-
-status_t
-fault_get_page(PageFaultContext& context)
-{
-	VMCache* cache = context.topCache;
-	vm_page* page = NULL;
-
-	while (cache != NULL) {
-		// We already hold the lock of the cache at this point.
-
-		page = cache->LookupPage(context.cacheOffset);
-		if (page != NULL && page->busy) {
-			// page must be busy -- wait for it to become unbusy
-			context.UnlockAll(cache);
-			cache->ReleaseRefLocked();
-			cache->WaitForPageEvents(page, PAGE_EVENT_NOT_BUSY, false);
-
-			// restart the whole process
-			context.restart = true;
-			return B_OK;
-		}
-
-		if (page != NULL)
-			break;
-
-		// The current cache does not contain the page we're looking for.
-
-		// see if the backing store has it
-		if (cache->StoreHasPage(context.cacheOffset)) {
-			// insert a fresh page and mark it busy -- we're going to read it in
-			page = vm_page_allocate_page(&context.reservation,
-				PAGE_STATE_ACTIVE | VM_PAGE_ALLOC_BUSY);
-			cache->InsertPage(page, context.cacheOffset);
-
-			// We need to unlock all caches and the address space while reading
-			// the page in. Keep a reference to the cache around.
-			cache->AcquireRefLocked();
-			context.UnlockAll();
-
-			// read the page in
-			generic_io_vec vec;
-			vec.base = (phys_addr_t)page->physical_page_number * B_PAGE_SIZE;
-			generic_size_t bytesRead = vec.length = B_PAGE_SIZE;
-
-			status_t status = cache->Read(context.cacheOffset, &vec, 1,
-				B_PHYSICAL_IO_REQUEST, &bytesRead);
-
-			cache->Lock();
-
-			if (status < B_OK) {
-				// on error remove and free the page
-				dprintf("reading page from cache %p returned: %s!\n",
-					cache, strerror(status));
-
-				cache->NotifyPageEvents(page, PAGE_EVENT_NOT_BUSY);
-				cache->RemovePage(page);
-				vm_page_free_etc(cache, page, &context.reservation);
-
-				cache->ReleaseRefAndUnlock();
-				return status;
-			}
-
-			// mark the page unbusy again
-			cache->MarkPageUnbusy(page);
-
-			DEBUG_PAGE_ACCESS_END(page);
-
-			// Since we needed to unlock everything temporarily, the area
-			// situation might have changed. So we need to restart the whole
-			// process.
-			context.restart = true;
-			return B_OK;
-		}
-
-		cache = context.cacheChainLocker.LockSourceCache();
-	}
-
-	if (page == NULL) {
-		// There was no adequate page. Insert a clean one into the topmost cache.
-		cache = context.topCache;
-
-		// We don't need the other caches anymore.
-		context.cacheChainLocker.Unlock(context.topCache);
-		context.cacheChainLocker.SetTo(context.topCache);
-
-		// allocate a clean page
-		page = vm_page_allocate_page(&context.reservation,
-			PAGE_STATE_ACTIVE | VM_PAGE_ALLOC_CLEAR);
-		FTRACE(("vm_soft_fault: just allocated page 0x%" B_PRIxPHYSADDR "\n",
-			page->physical_page_number));
-
-		// insert the new page into our cache
-		cache->InsertPage(page, context.cacheOffset);
-		context.pageAllocated = true;
-	} else if (page->Cache() != context.topCache && context.isWrite) {
-		// We have a page that has the data we want, but in the wrong cache
-		// object so we need to copy it and stick it into the top cache.
-		vm_page* sourcePage = page;
-
-		// TODO: If memory is low, it might be a good idea to steal the page
-		// from our source cache -- if possible, that is.
-		FTRACE(("get new page, copy it, and put it into the topmost cache\n"));
-		page = vm_page_allocate_page(&context.reservation, PAGE_STATE_ACTIVE);
-
-		// To not needlessly kill concurrency we unlock all caches but the top
-		// one while copying the page. Lacking another mechanism to ensure that
-		// the source page doesn't disappear, we mark it busy.
-		sourcePage->busy = true;
-		context.cacheChainLocker.UnlockKeepRefs(true);
-
-		// copy the page
-		vm_memcpy_physical_page(page->physical_page_number * B_PAGE_SIZE,
-			sourcePage->physical_page_number * B_PAGE_SIZE);
-
-		context.cacheChainLocker.RelockCaches(true);
-		sourcePage->Cache()->MarkPageUnbusy(sourcePage);
-		sourcePage->Cache()->IncrementCopiedPagesCount();
-
-		// insert the new page into our cache
-		context.topCache->InsertPage(page, context.cacheOffset);
-		context.pageAllocated = true;
-	} else
-		DEBUG_PAGE_ACCESS_START(page);
-
-	context.page = page;
-	return B_OK;
-}
-
-static status_t
-vm_soft_fault(VMAddressSpace* addressSpace, addr_t originalAddress,
-	bool isWrite, bool isExecute, bool isUser, vm_page** wirePage)
-{
-	FTRACE(("vm_soft_fault: thid 0x%" B_PRIx32 " address 0x%" B_PRIxADDR ", "
-		"isWrite %d, isUser %d\n", thread_get_current_thread_id(),
-		originalAddress, isWrite, isUser));
-
-	PageFaultContext context(addressSpace, isWrite);
-
-	addr_t address = ROUNDDOWN(originalAddress, B_PAGE_SIZE);
-	status_t status = B_OK;
-
-	// Check for recursive page fault.
-	// We only need to do this for userland faults, since kernel faults must not
-	// be recursive. A page fault in the kernel is a bug, but we can't do
-	// anything about it here.
-	Thread* thread = thread_get_current_thread();
-	if (isUser && thread->in_page_fault)
-		return B_BAD_ADDRESS;
-
-	addressSpace->IncrementFaultCount();
-
-	// We may need up to 2 pages plus pages needed for mapping them -- reserving
-	// the pages upfront makes sure we don't have any cache locked, so that the
-	// page daemon/thief can do their job without problems.
-	size_t reservePages = 2 + context.map->MaxPagesNeededToMap(originalAddress,
-		originalAddress);
-	context.addressSpaceLocker.Unlock();
-	vm_page_reserve_pages(&context.reservation, reservePages,
-		addressSpace == VMAddressSpace::Kernel()
-			? VM_PRIORITY_SYSTEM : VM_PRIORITY_USER);
-
-	if (isUser)
-		thread->in_page_fault = true;
-
-#ifdef TRACE_FAULTS
-	const bool logFaults = true;
-#else
-	const bool logFaults = !isUser;
-#endif
-	while (true) {
-		context.addressSpaceLocker.Lock();
-
-		// get the area the fault was in
-		VMArea* area = addressSpace->LookupArea(address);
-		if (area == NULL) {
-			if (logFaults) {
-				dprintf("vm_soft_fault: va 0x%lx not covered by area in address "
-					"space\n", originalAddress);
-			}
-			TPF(PageFaultError(-1,
-				VMPageFaultTracing::PAGE_FAULT_ERROR_NO_AREA));
-			status = B_BAD_ADDRESS;
-			break;
-		}
-
-		// check permissions
-		uint32 protection = get_area_page_protection(area, address);
-		if (isUser && (protection & B_USER_PROTECTION) == 0
-				&& (area->protection & B_KERNEL_AREA) != 0) {
-			if (logFaults) {
-				dprintf("user access on kernel area 0x%" B_PRIx32 " at %p\n",
-					area->id, (void*)originalAddress);
-			}
-			TPF(PageFaultError(area->id,
-				VMPageFaultTracing::PAGE_FAULT_ERROR_KERNEL_ONLY));
-			status = B_PERMISSION_DENIED;
-			break;
-		}
-		if (isWrite && (protection
-				& (B_WRITE_AREA | (isUser ? 0 : B_KERNEL_WRITE_AREA))) == 0) {
-			if (logFaults) {
-				dprintf("write access attempted on write-protected area 0x%"
-					B_PRIx32 " at %p\n", area->id, (void*)originalAddress);
-			}
-			TPF(PageFaultError(area->id,
-				VMPageFaultTracing::PAGE_FAULT_ERROR_WRITE_PROTECTED));
-			status = B_PERMISSION_DENIED;
-			break;
-		} else if (isExecute && (protection
-				& (B_EXECUTE_AREA | (isUser ? 0 : B_KERNEL_EXECUTE_AREA))) == 0) {
-			if (logFaults) {
-				dprintf("instruction fetch attempted on execute-protected area 0x%"
-					B_PRIx32 " at %p\n", area->id, (void*)originalAddress);
-			}
-			TPF(PageFaultError(area->id,
-				VMPageFaultTracing::PAGE_FAULT_ERROR_EXECUTE_PROTECTED));
-			status = B_PERMISSION_DENIED;
-			break;
-		} else if (!isWrite && !isExecute && (protection
-				& (B_READ_AREA | (isUser ? 0 : B_KERNEL_READ_AREA))) == 0) {
-			if (logFaults) {
-				dprintf("read access attempted on read-protected area 0x%" B_PRIx32
-					" at %p\n", area->id, (void*)originalAddress);
-			}
-			TPF(PageFaultError(area->id,
-				VMPageFaultTracing::PAGE_FAULT_ERROR_READ_PROTECTED));
-			status = B_PERMISSION_DENIED;
-			break;
-		}
-
-		// We have the area, it was a valid access, so let's try to resolve the
-		// page fault now.
-		// At first, the top most cache from the area is investigated.
-
-		context.Prepare(vm_area_get_locked_cache(area),
-			address - area->Base() + area->cache_offset);
-
-		// See if this cache has a fault handler -- this will do all the work
-		// for us.
-		{
-			// Note, since the page fault is resolved with interrupts enabled,
-			// the fault handler could be called more than once for the same
-			// reason -- the store must take this into account.
-			VMCacheLocker locker(context.topCache);
-			status = context.topCache->Fault(addressSpace, context.cacheOffset);
-			if (status != B_BAD_HANDLER)
-				break;
-		}
-
-		// The top most cache has no fault handler, so let's see if the cache or
-		// its sources already have the page we're searching for (we're going
-		// from top to bottom).
-		status = fault_get_page(context);
-		if (status != B_OK) {
-			TPF(PageFaultError(area->id, status));
-			break;
-		}
-if (context.page_restarted) {
-    context.UnlockAll();
-    continue;
-}
-
-		if (context.restart) {
-			context.cacheChainLocker.Unlock();
-			continue;
-		}
-
-		// All went fine, all there is left to do is to map the page into the
-		// address space.
-		TPF(PageFaultDone(area->id, context.topCache, context.page->Cache(),
-			context.page));
-
-		// If the page doesn't reside in the area's cache, we need to make sure
-		// it's mapped in read-only, so that we cannot overwrite someone else's
-		// data (copy-on-write)
-		uint32 newProtection = protection;
-		if (context.page->Cache() != context.topCache && !isWrite)
-			newProtection &= ~(B_WRITE_AREA | B_KERNEL_WRITE_AREA);
-
-		bool unmapPage = false;
-		bool mapPage = true;
-
-		// check whether there's already a page mapped at the address
-		context.map->Lock();
-
-		phys_addr_t physicalAddress;
-		uint32 flags;
-		vm_page* mappedPage = NULL;
-		if (context.map->Query(address, &physicalAddress, &flags) == B_OK
-			&& (flags & PAGE_PRESENT) != 0
-			&& (mappedPage = vm_lookup_page(physicalAddress / B_PAGE_SIZE))
-				!= NULL) {
-			// Yep there's already a page. If it's ours, we can simply adjust
-			// its protection. Otherwise we have to unmap it.
-			if (mappedPage == context.page) {
-				context.map->ProtectPage(area, address, newProtection);
-					// Note: We assume that ProtectPage() is atomic (i.e.
-					// the page isn't temporarily unmapped), otherwise we'd have
-					// to make sure it isn't wired.
-				mapPage = false;
-			} else
-				unmapPage = true;
-		}
-
-		context.map->Unlock();
-
-		if (unmapPage) {
-			// If the page is wired, we can't unmap it. Wait until it is unwired
-			// again and restart. Note that the page cannot be wired for
-			// writing, since it it isn't in the topmost cache. So we can safely
-			// ignore ranges wired for writing (our own and other concurrent
-			// wiring attempts in progress) and in fact have to do that to avoid
-			// a deadlock.
-			VMAreaUnwiredWaiter waiter;
-			if (area->AddWaiterIfWired(&waiter, address, B_PAGE_SIZE,
-					VMArea::IGNORE_WRITE_WIRED_RANGES)) {
-				// unlock everything and wait
-				if (context.pageAllocated) {
-					// ... but since we allocated a page and inserted it into
-					// the top cache, remove and free it first. Otherwise we'd
-					// have a page from a lower cache mapped while an upper
-					// cache has a page that would shadow it.
-					context.topCache->RemovePage(context.page);
-					vm_page_free_etc(context.topCache, context.page,
-						&context.reservation);
-				} else
-					DEBUG_PAGE_ACCESS_END(context.page);
-
-				context.UnlockAll();
-				waiter.waitEntry.Wait();
-				continue;
-			}
-
-			// Note: The mapped page is a page of a lower cache. We are
-			// guaranteed to have that cached locked, our new page is a copy of
-			// that page, and the page is not busy. The logic for that guarantee
-			// is as follows: Since the page is mapped, it must live in the top
-			// cache (ruled out above) or any of its lower caches, and there is
-			// (was before the new page was inserted) no other page in any
-			// cache between the top cache and the page's cache (otherwise that
-			// would be mapped instead). That in turn means that our algorithm
-			// must have found it and therefore it cannot be busy either.
-			DEBUG_PAGE_ACCESS_START(mappedPage);
-			unmap_page(area, address);
-			DEBUG_PAGE_ACCESS_END(mappedPage);
-		}
-
-		if (mapPage) {
-			if (map_page(area, context.page, address, newProtection,
-					&context.reservation) != B_OK) {
-				// Mapping can only fail, when the page mapping object couldn't
-				// be allocated. Save for the missing mapping everything is
-				// fine, though. If this was a regular page fault, we'll simply
-				// leave and probably fault again. To make sure we'll have more
-				// luck then, we ensure that the minimum object reserve is
-				// available.
-				DEBUG_PAGE_ACCESS_END(context.page);
-
-				context.UnlockAll();
-
-				if (object_cache_reserve(page_mapping_object_cache_for(
-							context.page->physical_page_number), 1, 0)
-						!= B_OK) {
-					// Apparently the situation is serious. (We ought to have
-					// blocked waiting for pages or failed to reserve memory
-					// before now.)
-					panic("vm_soft_fault: failed to allocate mapping object for page %p",
-						context.page);
-					status = B_NO_MEMORY;
-				} else if (wirePage != NULL) {
-					// The caller expects us to wire the page. Since
-					// object_cache_reserve() succeeded, we should now be able
-					// to allocate a mapping structure. Restart.
-					continue;
-				}
-
-				break;
-			}
-		} else if (context.page->State() == PAGE_STATE_INACTIVE)
-			vm_page_set_state(context.page, PAGE_STATE_ACTIVE);
-
-		// also wire the page, if requested
-		if (wirePage != NULL && status == B_OK) {
-			increment_page_wired_count(context.page);
-			*wirePage = context.page;
-		}
-
-		context.page->Cache()->IncrementFaultCount();
-
-		DEBUG_PAGE_ACCESS_END(context.page);
-		break;
-	}
-
-	if (isUser)
-		thread->in_page_fault = false;
-
-	return status;
 }

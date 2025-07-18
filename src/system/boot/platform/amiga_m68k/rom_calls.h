@@ -21,6 +21,19 @@
 #define IOERR_SELFTEST		(-7)
 
 
+#define ALERT_TYPE		0x80000000
+#define RECOVERY_ALERT	0x00000000
+#define DEADEND_ALERT	0x80000000
+
+#define INTUITION_BASE_NAME IntuitionBase
+
+#define _LVODisplayAlert	(-0x5a)
+
+#define DisplayAlert(par1, par2, last) \
+	LP3(0x5a, bool, DisplayAlert, unsigned long, par1, d0, void *, \
+	par2, a0, unsigned long, last, d1, \
+	, INTUITION_BASE_NAME)
+
 #if defined(__cplusplus) && !defined(__ASSEMBLER__)
 #include "rom_calls_inline.h"
 #else

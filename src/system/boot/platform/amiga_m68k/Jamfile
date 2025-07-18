@@ -5,6 +5,7 @@ SubDirHdrs $(HAIKU_TOP) headers private kernel boot platform amiga_m68k ;
 UsePrivateHeaders [ FDirName kernel boot platform amiga_m68k ] ;
 UsePrivateHeaders [ FDirName kernel platform $(TARGET_BOOT_PLATFORM) ] ;
 UsePrivateHeaders [ FDirName kernel disk_device_manager ] ;
+UsePrivateHeaders [ FDirName kernel boot platform amiga_m68k exec ] ;
 UsePrivateHeaders [ FDirName graphics common ] ;
 #UsePrivateHeaders [ FDirName graphics vesa ] ;
 UsePrivateHeaders [ FDirName storage ] ;

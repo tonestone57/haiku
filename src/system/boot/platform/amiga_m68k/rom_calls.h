@@ -11,6 +11,7 @@
 
 struct ExecBase;
 extern struct ExecBase *SysBase;
+typedef void *APTR;
 
 
 
@@ -974,8 +975,6 @@ extern "C" {
    });								\
 })
 
-typedef void *APTR;
-
 #endif /* __ASSEMBLER__ */
 
 //	#pragma mark -
@@ -1645,6 +1644,4 @@ struct InputEvent {
 #endif
 
 #endif /* __ASSEMBLER__ */
-#endif /* !c++ */
-
 #endif /* _AMICALLS_H */

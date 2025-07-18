@@ -35,14 +35,14 @@ extern struct ExecBase *SysBase;
 	par2, a0, unsigned long, last, d1, \
 	, INTUITION_BASE_NAME)
 
-#if defined(__cplusplus) && !defined(__ASSEMBLER__)
+#ifndef __ASSEMBLER__
+#if defined(__cplusplus)
 #include "rom_calls_inline.h"
 #else
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#ifndef __ASSEMBLER__
 #include <OS.h>
 #include <SupportDefs.h>
 
@@ -1644,6 +1644,7 @@ struct InputEvent {
 }
 #endif
 
+#endif /* __ASSEMBLER__ */
 #endif /* !c++ */
 
 #endif /* _AMICALLS_H */

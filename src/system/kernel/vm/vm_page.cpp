@@ -20,7 +20,7 @@
 
 #include <arch/cpu.h>
 #include <arch/vm_translation_map.h>
-#include <block_cache.h>
+#include <unified_cache.h>
 #include <boot/kernel_args.h>
 #include <condition_variable.h>
 #include <elf.h>
@@ -4211,8 +4211,9 @@ vm_page_get_stats(system_info *info)
 	// as used but as cached pages.
 	// TODO: We should subtract the blocks that are in use ATM, since those
 	// can't really be freed in a low memory situation.
-	page_num_t blockCachePages = block_cache_used_memory() / B_PAGE_SIZE;
-	info->block_cache_pages = blockCachePages;
+	//page_num_t blockCachePages = unified_cache_used_memory() / B_PAGE_SIZE;
+	//info->block_cache_pages = blockCachePages;
+	info->block_cache_pages = 0;
 
 	// Non-temporary modified pages are special as they represent pages that
 	// can be written back, so they could be freed if necessary, for us

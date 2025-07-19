@@ -33,7 +33,7 @@
 
 #include <AutoDeleter.h>
 #include <AutoDeleterDrivers.h>
-#include <block_cache.h>
+#include <unified_cache.h>
 #include <boot/kernel_args.h>
 #include <debug_heap.h>
 #include <disk_device_manager/KDiskDevice.h>
@@ -41,7 +41,6 @@
 #include <disk_device_manager/KDiskDeviceUtils.h>
 #include <disk_device_manager/KDiskSystem.h>
 #include <fd.h>
-#include <file_cache.h>
 #include <fs/node_monitor.h>
 #include <KPath.h>
 #include <lock.h>
@@ -5318,7 +5317,7 @@ vfs_init(kernel_args* args)
 
 	recursive_lock_init(&sMountOpLock, "vfs_mount_op_lock");
 
-	if (block_cache_init() != B_OK)
+	if (unified_cache_init() != B_OK)
 		return B_ERROR;
 
 #ifdef ADD_DEBUGGER_COMMANDS
@@ -5350,9 +5349,9 @@ vfs_init(kernel_args* args)
 		0);
 
 	fifo_init();
-	file_map_init();
+	//file_map_init();
 
-	return file_cache_init();
+	return unified_cache_init();
 }
 
 

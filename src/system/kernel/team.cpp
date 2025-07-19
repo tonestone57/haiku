@@ -35,8 +35,6 @@
 #include <fs/KPath.h>
 #include <heap.h>
 #include <interrupts.h>
-#include <kernel.h>
-#include <kimage.h>
 #include <kscheduler.h>
 #include <ksignal.h>
 #include <Notifications.h>

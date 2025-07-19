@@ -24,7 +24,7 @@
 
 #include <AutoDeleter.h>
 
-#include <block_cache.h>
+#include <unified_cache.h>
 #include <cpu.h>
 #include <debug.h>
 #include <kernel.h>

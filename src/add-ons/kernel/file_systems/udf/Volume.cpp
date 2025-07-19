@@ -93,7 +93,7 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 	// Set up the block cache
 	if (!status) {
 		TRACE(("Volume::Mount: partition recognized\n"));
-		fBlockCache = block_cache_create(device, length, blockSize, IsReadOnly());
+		fBlockCache = unified_cache_create(device, length, blockSize, IsReadOnly());
 	} else {
 		TRACE_ERROR(("Volume::Mount: failed to recognize partition\n"));
 		return status;
@@ -362,7 +362,7 @@ Volume::_Unset()
 		_SetPartition(i, NULL);
 	fFSVolume->id = 0;
 	if (fDevice >= 0) {
-		block_cache_delete(fBlockCache, true);	
+		unified_cache_delete(fBlockCache, true);
 		close(fDevice);
 	}
 	fBlockCache = NULL;

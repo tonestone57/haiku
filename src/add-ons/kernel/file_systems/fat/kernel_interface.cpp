@@ -550,7 +550,7 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 	void* blockCache = bsdVolume->mnt_cache;
 	u_char* buffer;
 	status
-		= block_cache_get_writable_etc(blockCache, 0, -1, reinterpret_cast<void**>(&buffer));
+		= unified_cache_get_writable_etc(blockCache, 0, -1, reinterpret_cast<void**>(&buffer));
 	if (status != B_OK)
 		return status;
 	// check for the extended boot signature
@@ -566,11 +566,11 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 			memcpy(buffer + labelOffset, name, LABEL_LENGTH);
 		} else {
 			INFORM("wfsstat: BPB position check failed\n");
-			block_cache_set_dirty(blockCache, 0, false, -1);
+			unified_cache_set_dirty(blockCache, 0, false, -1);
 			status = B_ERROR;
 		}
 	}
-	block_cache_put(blockCache, 0);
+	unified_cache_put(blockCache, 0);
 
 	// update the label file if there is one
 	if (bsdVolume->mnt_volentry >= 0) {
@@ -581,7 +581,7 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 		daddr_t dirOffset = bsdVolume->mnt_volentry * sizeof(direntry);
 		rootDirBlock += dirOffset / DEV_BSIZE;
 
-		status = block_cache_get_writable_etc(blockCache, rootDirBlock, -1,
+		status = unified_cache_get_writable_etc(blockCache, rootDirBlock, -1,
 			reinterpret_cast<void**>(&rootDirBuffer));
 		if (status == B_OK) {
 			direntry* label_direntry = reinterpret_cast<direntry*>(rootDirBuffer + dirOffset);
@@ -593,10 +593,10 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 				memcpy(label_direntry->deName, name, LABEL_LENGTH);
 			} else {
 				INFORM("wfsstat: root directory position check failed\n");
-				block_cache_set_dirty(blockCache, rootDirBlock, false, -1);
+				unified_cache_set_dirty(blockCache, rootDirBlock, false, -1);
 				status = B_ERROR;
 			}
-			block_cache_put(blockCache, rootDirBlock);
+			unified_cache_put(blockCache, rootDirBlock);
 		}
 	} else {
 		// A future enhancement could be to create a label direntry if none exists already.
@@ -644,7 +644,7 @@ _dosfs_sync(struct mount* bsdVolume, bool data)
 		returnStatus = status;
 	}
 
-	status = block_cache_sync(bsdVolume->mnt_cache);
+	status = unified_cache_sync(bsdVolume->mnt_cache);
 	if (status != B_OK) {
 		REPORT_ERROR(status);
 		returnStatus = status;
@@ -731,7 +731,7 @@ _dosfs_read_vnode(mount* bsdVolume, const ino_t id, vnode** newNode, bool create
 
 		if (createFileCache) {
 			bsdNode->v_cache
-				= file_cache_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
+				= unified_cache_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
 			bsdNode->v_file_map
 				= file_map_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
 		}
@@ -846,8 +846,8 @@ dosfs_release_vnode(fs_volume* volume, fs_vnode* vnode, bool reenter)
 	}
 
 	if (bsdNode->v_type == VREG) {
-		status = file_cache_sync(bsdNode->v_cache);
-		file_cache_delete(bsdNode->v_cache);
+		status = unified_cache_sync(bsdNode->v_cache);
+		unified_cache_delete(bsdNode->v_cache);
 		file_map_delete(bsdNode->v_file_map);
 	} else {
 		status = discard_clusters(bsdNode, 0);
@@ -883,7 +883,7 @@ dosfs_remove_vnode(fs_volume* volume, fs_vnode* vnode, bool reenter)
 	status_t status = B_OK;
 
 	if (bsdNode->v_type == VREG) {
-		file_cache_delete(bsdNode->v_cache);
+		unified_cache_delete(bsdNode->v_cache);
 		bsdNode->v_cache = NULL;
 		file_map_delete(bsdNode->v_file_map);
 		bsdNode->v_file_map = NULL;
@@ -1196,8 +1196,8 @@ _dosfs_fsync(struct vnode* bsdNode)
 
 	status_t status = B_OK;
 	if (bsdNode->v_cache != NULL) {
-		PRINT("fsync:  file_cache_sync\n");
-		status = file_cache_sync(bsdNode->v_cache);
+		PRINT("fsync:  unified_cache_sync\n");
+		status = unified_cache_sync(bsdNode->v_cache);
 	} else {
 		status = sync_clusters(bsdNode);
 	}
@@ -1209,13 +1209,13 @@ _dosfs_fsync(struct vnode* bsdNode)
 	status_t externStatus = B_OK;
 
 	if ((bsdVolume->mnt_flag & MNT_SYNCHRONOUS) != 0) {
-		externStatus = block_cache_sync(bsdVolume->mnt_cache);
+		externStatus = unified_cache_sync(bsdVolume->mnt_cache);
 		if (externStatus != B_OK)
 			REPORT_ERROR(externStatus);
 	} else {
 		size_t fatBlocks = (fatVolume->pm_fatsize * fatVolume->pm_FATs) / DEV_BSIZE;
 		status_t fatStatus
-			= block_cache_sync_etc(bsdVolume->mnt_cache, fatVolume->pm_fatblk, fatBlocks);
+			= unified_cache_sync_etc(bsdVolume->mnt_cache, fatVolume->pm_fatblk, fatBlocks);
 		if (fatStatus != B_OK) {
 			externStatus = fatStatus;
 			REPORT_ERROR(fatStatus);
@@ -1698,7 +1698,7 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 
 	if ((bsdVolume->mnt_flag & MNT_SYNCHRONOUS) != 0) {
 		// sync the directory entry changes
-		status = block_cache_sync(bsdVolume->mnt_cache);
+		status = unified_cache_sync(bsdVolume->mnt_cache);
 	}
 
 	RETURN_ERROR(status);
@@ -1851,7 +1851,7 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 
 		locker.Unlock();
 			// avoid deadlock with dosfs_io
-		file_cache_set_size(bsdNode->v_cache, fatNode->de_FileSize);
+		unified_cache_set_size(bsdNode->v_cache, fatNode->de_FileSize);
 		if (shrinking == false && (statMask & B_STAT_SIZE_INSECURE) == 0) {
 			status = fill_gap_with_zeros(bsdNode, previousSize, fatNode->de_FileSize);
 			if (status != B_OK)
@@ -2017,7 +2017,7 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 
 			existingLocker.Unlock();
 				// avoid deadlock that can happen when reducing cache size
-			file_cache_set_size(existingBsdNode->v_cache, 0);
+			unified_cache_set_size(existingBsdNode->v_cache, 0);
 
 			if ((bsdVolume->mnt_flag & MNT_SYNCHRONOUS) != 0)
 				_dosfs_fsync(existingBsdNode);
@@ -2122,7 +2122,7 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 	// This is usually done in _dosfs_read_vnode. However, the node wasn't published yet,
 	// so it would not have worked there.
 	bsdNode->v_cache
-		= file_cache_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
+		= unified_cache_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
 	bsdNode->v_file_map
 		= file_map_create(fatVolume->pm_dev->si_id, fatNode->de_inode, fatNode->de_FileSize);
 
@@ -2201,7 +2201,7 @@ dosfs_open(fs_volume* volume, fs_vnode* vnode, int openMode, void** _cookie)
 			RETURN_ERROR(status);
 
 		writeLocker.Unlock();
-		status = file_cache_set_size(bsdNode->v_cache, 0);
+		status = unified_cache_set_size(bsdNode->v_cache, 0);
 		if (status != B_OK)
 			RETURN_ERROR(status);
 	}
@@ -2304,7 +2304,7 @@ dosfs_read(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, void* bu
 	}
 #endif
 
-	RETURN_ERROR(file_cache_read(bsdNode->v_cache, fatCookie, pos, buffer, length));
+	RETURN_ERROR(unified_cache_read(bsdNode->v_cache, fatCookie, pos, buffer, length));
 }
 
 
@@ -2371,9 +2371,9 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
 	}
 
 	locker.Unlock();
-	status = file_cache_set_size(bsdNode->v_cache, fatNode->de_FileSize);
+	status = unified_cache_set_size(bsdNode->v_cache, fatNode->de_FileSize);
 	if (status == B_OK) {
-		status = file_cache_write(bsdNode->v_cache, fatCookie, pos, buffer, length);
+		status = unified_cache_write(bsdNode->v_cache, fatCookie, pos, buffer, length);
 		if (status != B_OK) {
 			REPORT_ERROR(status);
 			status = B_OK;
@@ -2393,7 +2393,7 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
 				REPORT_ERROR(undoStatus);
 			rw_lock_write_unlock(&fatVolume->pm_fatlock.haikuRW);
 			locker.Unlock();
-			file_cache_set_size(bsdNode->v_cache, origSize);
+			unified_cache_set_size(bsdNode->v_cache, origSize);
 		}
 		RETURN_ERROR(status);
 	}
@@ -3718,13 +3718,13 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	// (e.g. dosfs_fsync, read_fsinfo, write_fsinfo, sync_clusters, discard_clusters,
 	// dosfs_write_fs_stat, and the functions defined in vfs_bio.c).
 	bsdVolume->mnt_cache
-		= block_cache_create(dev->si_fd, fatVolume->pm_HugeSectors, CACHED_BLOCK_SIZE, readOnly);
+		= unified_cache_create(dev->si_fd, fatVolume->pm_HugeSectors, CACHED_BLOCK_SIZE, readOnly);
 	if (bsdVolume->mnt_cache == NULL)
 		return B_ERROR;
 
 	status = read_fsinfo(fatVolume, devvp);
 	if (status != B_OK) {
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		return status;
 	}
 
@@ -3761,7 +3761,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	rw_lock_write_unlock(&fatVolume->pm_fatlock.haikuRW);
 	if (status != 0) {
 		rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		bsdVolume->mnt_data = NULL;
 		RETURN_ERROR(status);
 	}
@@ -3778,7 +3778,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 		status = B_FROM_POSIX_ERROR(markvoldirty(fatVolume, 1));
 		if (status != B_OK) {
 			rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-			block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 			bsdVolume->mnt_data = NULL;
 			RETURN_ERROR(status);
 		}
@@ -3788,7 +3788,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	status = iconv_init(fatVolume, oemPref);
 	if (status != B_OK) {
 		rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		bsdVolume->mnt_data = NULL;
 		RETURN_ERROR(status);
 	}

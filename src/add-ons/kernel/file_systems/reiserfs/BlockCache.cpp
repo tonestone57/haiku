@@ -78,7 +78,7 @@ BlockCache::~BlockCache()
 	PRINT(("statistics: %" B_PRId64 " block gets\n", fBlockGets));
 	PRINT(("statistics: %" B_PRId64 " block releases\n", fBlockReleases));
 	if (fCacheHandle)
-		block_cache_delete(fCacheHandle, false);
+		unified_cache_delete(fCacheHandle, false);
 	fLock.Unlock();
 }
 
@@ -94,7 +94,7 @@ BlockCache::Init(int device, uint64 blockCount, uint32 blockSize)
 	fBlockCount = blockCount;
 
 	// init block cache
-	fCacheHandle = block_cache_create(fDevice, blockCount, blockSize, true);
+	fCacheHandle = unified_cache_create(fDevice, blockCount, blockSize, true);
 	if (!fCacheHandle)
 		return B_ERROR;
 
@@ -198,7 +198,7 @@ void *
 BlockCache::_GetBlock(off_t number) const
 {
 	fBlockGets++;	// statistics
-	return const_cast<void*>(block_cache_get(fCacheHandle, number));
+	return const_cast<void*>(unified_cache_get(fCacheHandle, number));
 }
 
 // _ReleaseBlock
@@ -206,6 +206,6 @@ void
 BlockCache::_ReleaseBlock(off_t number, void *data) const
 {
 	fBlockReleases++;	// statistics
-	block_cache_put(fCacheHandle, number);
+	unified_cache_put(fCacheHandle, number);
 }
 

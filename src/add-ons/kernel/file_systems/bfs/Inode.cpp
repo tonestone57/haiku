@@ -364,7 +364,7 @@ Inode::Inode(Volume* volume, ino_t id)
 	if (IsContainer())
 		fTree = new(std::nothrow) BPlusTree(this);
 	if (NeedsFileCache()) {
-		SetFileCache(file_cache_create(fVolume->ID(), ID(), Size()));
+		SetFileCache(unified_cache_create(fVolume->ID(), ID(), Size()));
 		SetMap(file_map_create(volume->ID(), ID(), Size()));
 	}
 }
@@ -420,7 +420,7 @@ Inode::~Inode()
 {
 	PRINT(("Inode::~Inode() @ %p\n", this));
 
-	file_cache_delete(FileCache());
+	unified_cache_delete(FileCache());
 	file_map_delete(Map());
 	delete fTree;
 
@@ -1574,7 +1574,7 @@ Inode::FindBlockRun(off_t pos, block_run& run, off_t& offset)
 status_t
 Inode::ReadAt(off_t pos, uint8* buffer, size_t* _length)
 {
-	return file_cache_read(FileCache(), NULL, pos, buffer, _length);
+	return unified_cache_read(FileCache(), NULL, pos, buffer, _length);
 }
 
 
@@ -1650,7 +1650,7 @@ Inode::WriteAt(Transaction& transaction, off_t pos, const uint8* buffer,
 	if (length == 0)
 		return B_OK;
 
-	status_t status = file_cache_write(FileCache(), NULL, pos, buffer, _length);
+	status_t status = unified_cache_write(FileCache(), NULL, pos, buffer, _length);
 
 	if (transaction.IsStarted())
 		WriteLockInTransaction(transaction);
@@ -1675,7 +1675,7 @@ Inode::FillGapWithZeros(off_t pos, off_t newSize)
 		else
 			size = newSize - pos;
 
-		status_t status = file_cache_write(FileCache(), NULL, pos, NULL, &size);
+		status_t status = unified_cache_write(FileCache(), NULL, pos, NULL, &size);
 		if (status < B_OK)
 			return status;
 
@@ -2294,7 +2294,7 @@ Inode::SetFileSize(Transaction& transaction, off_t size)
 	if (status < B_OK)
 		return status;
 
-	file_cache_set_size(FileCache(), size);
+	unified_cache_set_size(FileCache(), size);
 	file_map_set_size(Map(), size);
 
 	return WriteBack(transaction);
@@ -2387,7 +2387,7 @@ status_t
 Inode::Sync()
 {
 	if (FileCache())
-		return file_cache_sync(FileCache());
+		return unified_cache_sync(FileCache());
 
 	// We may also want to flush the attribute's data stream to
 	// disk here... (do we?)
@@ -2810,7 +2810,7 @@ Inode::Create(Transaction& transaction, Inode* parent, const char* name,
 		index.InsertLastModified(transaction, inode);
 
 	if (inode->NeedsFileCache()) {
-		inode->SetFileCache(file_cache_create(volume->ID(), inode->ID(),
+		inode->SetFileCache(unified_cache_create(volume->ID(), inode->ID(),
 			inode->Size()));
 		inode->SetMap(file_map_create(volume->ID(), inode->ID(),
 			inode->Size()));

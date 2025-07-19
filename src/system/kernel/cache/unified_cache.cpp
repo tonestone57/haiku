@@ -12,8 +12,10 @@
 #include <slab/Slab.h>
 #include <vfs.h>
 #include <vm/vm.h>
+#include <vm/VMCache.h>
 
 #include "IORequest.h"
+#include "vnode_store.h"
 
 
 struct unified_cache_entry {
@@ -28,6 +30,11 @@ struct unified_cache {
     unified_cache_entry* hand;
     int32 count;
     int32 size;
+};
+
+struct unified_cache_ref {
+    VMCache* cache;
+    struct vnode* vnode;
 };
 
 static object_cache* sUnifiedCacheEntryCache;
@@ -96,5 +103,92 @@ unified_cache_init(void)
     sCache->count = 0;
     sCache->size = 1024; // TODO: Make this configurable
 
+    return B_OK;
+}
+
+void*
+unified_cache_create(dev_t mountID, ino_t vnodeID, off_t size)
+{
+    unified_cache_ref* ref = new unified_cache_ref;
+    if (ref == NULL)
+        return NULL;
+
+    if (vfs_lookup_vnode(mountID, vnodeID, &ref->vnode) != B_OK)
+        goto err1;
+
+    if (vfs_get_vnode_cache(ref->vnode, &ref->cache, true) != B_OK)
+        goto err1;
+
+    ref->cache->virtual_end = size;
+    ((VMVnodeCache*)ref->cache)->SetUnifiedCacheRef(ref);
+    return ref;
+
+err1:
+    delete ref;
+    return NULL;
+}
+
+void
+unified_cache_delete(void* _cacheRef)
+{
+    unified_cache_ref* ref = (unified_cache_ref*)_cacheRef;
+
+    if (ref == NULL)
+        return;
+
+    ref->cache->ReleaseRef();
+    delete ref;
+}
+
+status_t
+unified_cache_read(void* cache_ref, void* cookie, off_t offset,
+    void* buffer, size_t* size)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_set_dirty(void* cache_ref, off_t block_number,
+    bool dirty, int32 transaction)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_get_writable_etc(void* cache_ref, off_t block_number,
+    int32 transaction, void** _block)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_sync_etc(void* cache_ref, off_t block_number, size_t num_blocks)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_write(void* cache_ref, void* cookie, off_t offset,
+    const void* buffer, size_t* size)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_set_size(void* cache_ref, off_t size)
+{
+    // TODO: Implement
+    return B_OK;
+}
+
+status_t
+unified_cache_sync(void* cache_ref)
+{
+    // TODO: Implement
     return B_OK;
 }

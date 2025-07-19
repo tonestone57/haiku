@@ -390,7 +390,7 @@ fs_read_vnode(fs_volume* _volume, ino_t vnodeID, fs_vnode* _node,
 	*_flags = 0;
 
 	if ((newNode->flags & ISO_IS_DIR) == 0) {
-		newNode->cache = file_cache_create(volume->id, vnodeID,
+		newNode->cache = unified_cache_create(volume->id, vnodeID,
 			newNode->dataLen[FS_DATA_FORMAT]);
 	}
 
@@ -410,7 +410,7 @@ fs_release_vnode(fs_volume* /*_volume*/, fs_vnode* _node, bool /*reenter*/)
 		free(node->attr.slName);
 
 		if (node->cache != NULL)
-			file_cache_delete(node->cache);
+			unified_cache_delete(node->cache);
 
 		free(node);
 	}
@@ -534,7 +534,7 @@ fs_read(fs_volume* _volume, fs_vnode* _node, void* cookie, off_t pos,
 	if ((node->flags & ISO_IS_DIR) != 0)
 		return EISDIR;
 
-	return file_cache_read(node->cache, NULL, pos, buffer, _length);
+	return unified_cache_read(node->cache, NULL, pos, buffer, _length);
 }
 
 

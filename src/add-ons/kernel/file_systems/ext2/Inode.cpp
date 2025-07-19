@@ -238,7 +238,7 @@ Inode::FindBlock(off_t offset, fsblock_t& block, uint32 *_count)
 status_t
 Inode::ReadAt(off_t pos, uint8* buffer, size_t* _length)
 {
-	return file_cache_read(FileCache(), NULL, pos, buffer, _length);
+	return unified_cache_read(FileCache(), NULL, pos, buffer, _length);
 }
 
 
@@ -312,7 +312,7 @@ Inode::WriteAt(Transaction& transaction, off_t pos, const uint8* buffer,
 
 	TRACE("Inode::WriteAt(): Performing write: %p, %" B_PRIdOFF ", %p, %"
 		B_PRIuSIZE "\n", FileCache(), pos, buffer, *_length);
-	status_t status = file_cache_write(FileCache(), NULL, pos, buffer,
+	status_t status = unified_cache_write(FileCache(), NULL, pos, buffer,
 		_length);
 
 	WriteLockInTransaction(transaction);
@@ -337,10 +337,10 @@ Inode::FillGapWithZeros(off_t start, off_t end)
 		else
 			size = end - start;
 
-		TRACE("Inode::FillGapWithZeros(): Calling file_cache_write(%p, NULL, "
+		TRACE("Inode::FillGapWithZeros(): Calling unified_cache_write(%p, NULL, "
 			"%" B_PRIdOFF ", NULL, &(%" B_PRIuSIZE ") = %p)\n", fCache, start,
 			size, &size);
-		status_t status = file_cache_write(fCache, NULL, start, NULL,
+		status_t status = unified_cache_write(fCache, NULL, start, NULL,
 			&size);
 		if (status != B_OK)
 			return status;
@@ -383,7 +383,7 @@ Inode::Resize(Transaction& transaction, off_t size)
 	if (status != B_OK)
 		return status;
 
-	file_cache_set_size(FileCache(), size);
+	unified_cache_set_size(FileCache(), size);
 	file_map_set_size(Map(), size);
 
 	TRACE("Inode::Resize(): Writing back inode changes. Size: %" B_PRIdOFF
@@ -730,7 +730,7 @@ Inode::CreateFileCache()
 	TRACE("Inode::CreateFileCache(): Creating file cache: %" B_PRIu32 ", %"
 		B_PRIdINO ", %" B_PRIdOFF "\n", fVolume->ID(), ID(), Size());
 
-	fCache = file_cache_create(fVolume->ID(), ID(), Size());
+	fCache = unified_cache_create(fVolume->ID(), ID(), Size());
 	if (fCache == NULL) {
 		ERROR("Inode::CreateFileCache(): Failed to create file cache\n");
 		return B_ERROR;
@@ -739,7 +739,7 @@ Inode::CreateFileCache()
 	fMap = file_map_create(fVolume->ID(), ID(), Size());
 	if (fMap == NULL) {
 		ERROR("Inode::CreateFileCache(): Failed to create file map\n");
-		file_cache_delete(fCache);
+		unified_cache_delete(fCache);
 		fCache = NULL;
 		return B_ERROR;
 	}
@@ -758,7 +758,7 @@ Inode::DeleteFileCache()
 	if (fCache == NULL)
 		return;
 
-	file_cache_delete(fCache);
+	unified_cache_delete(fCache);
 	file_map_delete(fMap);
 
 	fCache = NULL;
@@ -772,7 +772,7 @@ Inode::EnableFileCache()
 	if (fCache == NULL)
 		return B_BAD_VALUE;
 
-	file_cache_enable(fCache);
+	// TODO: unified_cache_enable(fCache);
 	return B_OK;
 }
 
@@ -780,9 +780,9 @@ Inode::EnableFileCache()
 status_t
 Inode::DisableFileCache()
 {
-	status_t error = file_cache_disable(fCache);
-	if (error != B_OK)
-		return error;
+	// TODO: status_t error = unified_cache_disable(fCache);
+	//if (error != B_OK)
+	//	return error;
 
 	return B_OK;
 }
@@ -792,7 +792,7 @@ status_t
 Inode::Sync()
 {
 	if (HasFileCache())
-		return file_cache_sync(fCache);
+		return unified_cache_sync(fCache);
 
 	return B_OK;
 }

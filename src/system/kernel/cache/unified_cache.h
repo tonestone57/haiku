@@ -23,7 +23,13 @@ status_t unified_cache_write(void* cache_ref, void* cookie, off_t offset,
 
 status_t unified_cache_set_size(void* cache_ref, off_t size);
 status_t unified_cache_sync(void* cache_ref);
+status_t unified_cache_sync_etc(void* cache_ref, off_t block_number, size_t num_blocks);
 
+status_t unified_cache_get_writable_etc(void* cache_ref, off_t block_number,
+    int32 transaction, void** _block);
+
+status_t unified_cache_set_dirty(void* cache_ref, off_t block_number,
+    bool dirty, int32 transaction);
 }
 
 #endif /* UNIFIED_CACHE_H */

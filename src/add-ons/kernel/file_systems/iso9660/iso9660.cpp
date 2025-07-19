@@ -692,7 +692,7 @@ ISOMount(const char *path, uint32 flags, iso9660_volume **_newVolume,
 
 				/* Initialize access to the cache so that we can do cached i/o */
 				TRACE(("ISO9660: cache init: dev %d, max blocks %lld\n", volume->fd, maxBlocks));
-				volume->fBlockCache = block_cache_create(volume->fd, maxBlocks,
+				volume->fBlockCache = unified_cache_create(volume->fd, maxBlocks,
 					volume->logicalBlkSize[FS_DATA_FORMAT], true);
 				isISO = true;
 			} else if (*buffer == 0x02 && isISO && allowJoliet) {
@@ -763,10 +763,10 @@ ISOReadDirEnt(iso9660_volume *volume, dircookie *cookie, struct dirent *dirent,
 		char *blockData;
 		while (true) {
 			blockData
-				= (char*)block_cache_get(volume->fBlockCache, cookie->block);
+				= (char*)unified_cache_get(volume->fBlockCache, cookie->block);
 			if (blockData != NULL && *(blockData + cookie->pos) == 0) {
 				// NULL data, move to next block.
-				block_cache_put(volume->fBlockCache, cookie->block);
+				unified_cache_put(volume->fBlockCache, cookie->block);
 				blockData = NULL;
 				totalRead
 					+= volume->logicalBlkSize[FS_DATA_FORMAT] - cookie->pos;
@@ -831,7 +831,7 @@ ISOReadDirEnt(iso9660_volume *volume, dircookie *cookie, struct dirent *dirent,
 		}
 
 		if (blockData != NULL)
-			block_cache_put(volume->fBlockCache, cacheBlock);
+			unified_cache_put(volume->fBlockCache, cacheBlock);
 	}
 
 	TRACE(("ISOReadDirEnt - EXIT, result is %s, vnid is %Lu\n",

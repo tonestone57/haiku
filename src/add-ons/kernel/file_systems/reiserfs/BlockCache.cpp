@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 #include <fs_cache.h>
-#include "../src/add-ons/kernel/cache/unified_cache.h"
+#include "src/system/kernel/cache/unified_cache.h"
 
 #include "Block.h"
 #include "Debug.h"

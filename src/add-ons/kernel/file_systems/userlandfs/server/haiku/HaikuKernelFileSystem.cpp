@@ -121,9 +121,9 @@ HaikuKernelFileSystem::Init()
 		RETURN_ERROR(error);
 
 	// init file map
-	//error = file_map_init();
-	//if (error != B_OK)
-	//	RETURN_ERROR(error);
+	error = file_map_init();
+	if (error != B_OK)
+		RETURN_ERROR(error);
 
 	// create I/O request map
 	fIORequests = new(std::nothrow) IORequestTable;

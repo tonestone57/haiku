@@ -4211,9 +4211,8 @@ vm_page_get_stats(system_info *info)
 	// as used but as cached pages.
 	// TODO: We should subtract the blocks that are in use ATM, since those
 	// can't really be freed in a low memory situation.
-	//page_num_t blockCachePages = unified_cache_used_memory() / B_PAGE_SIZE;
-	//info->block_cache_pages = blockCachePages;
-	info->block_cache_pages = 0;
+	page_num_t blockCachePages = unified_cache_used_memory() / B_PAGE_SIZE;
+	info->block_cache_pages = blockCachePages;
 
 	// Non-temporary modified pages are special as they represent pages that
 	// can be written back, so they could be freed if necessary, for us

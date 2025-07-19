@@ -5349,7 +5349,7 @@ vfs_init(kernel_args* args)
 		0);
 
 	fifo_init();
-	//file_map_init();
+	file_map_init();
 
 	return unified_cache_init();
 }

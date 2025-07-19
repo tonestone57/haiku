@@ -15,27 +15,41 @@
 #include <unordered_map>
 
 
+enum cache_entry_type {
+	CACHE_ENTRY_TYPE_BLOCK,
+	CACHE_ENTRY_TYPE_FILE
+};
+
+
 struct CacheEntry {
 	DoublyLinkedListLink<CacheEntry> link;
 	void* data;
 	off_t block_number;
 	bool is_dirty;
 	uint8 hand;
+	cache_entry_type type;
+	void* cookie;
 };
+
+
+typedef status_t (*write_func)(CacheEntry* entry);
+typedef status_t (*read_func)(CacheEntry* entry);
 
 
 class UnifiedCache {
 public:
-	UnifiedCache(size_t capacity);
+	UnifiedCache(size_t capacity, read_func readFunc, write_func writeFunc);
 	~UnifiedCache();
 
 	status_t Init();
 
 	void* Get(off_t blockNumber);
-	void Put(off_t blockNumber, void* data);
+	void Put(off_t blockNumber, void* data, cache_entry_type type, void* cookie);
 	void SetDirty(off_t blockNumber, bool dirty);
 
 private:
+	status_t _Read(CacheEntry* entry);
+	void _WriteBack(CacheEntry* entry);
 	void _Evict();
 
 	size_t fCapacity;
@@ -45,13 +59,18 @@ private:
 			&CacheEntry::link> > fLRUList;
 	CacheEntry* fHand;
 	mutex fLock;
+	read_func fReadFunc;
+	write_func fWriteFunc;
 };
 
 
-UnifiedCache::UnifiedCache(size_t capacity)
+UnifiedCache::UnifiedCache(size_t capacity, read_func readFunc,
+	write_func writeFunc)
 	:
 	fCapacity(capacity),
-	fHand(NULL)
+	fHand(NULL),
+	fReadFunc(readFunc),
+	fWriteFunc(writeFunc)
 {
 	mutex_init(&fLock, "unified cache");
 }
@@ -76,11 +95,30 @@ UnifiedCache::Get(off_t blockNumber)
 	MutexLocker locker(&fLock);
 
 	auto it = fMap.find(blockNumber);
-	if (it == fMap.end())
+	if (it != fMap.end()) {
+		CacheEntry* entry = it->second;
+		fLRUList.Remove(entry);
+		fLRUList.Add(entry);
+		entry->hand = 1;
+		return entry->data;
+	}
+
+	// The data is not in the cache, so we need to read it from disk.
+	CacheEntry* entry = new(std::nothrow) CacheEntry;
+	if (entry == NULL)
 		return NULL;
 
-	CacheEntry* entry = it->second;
-	fLRUList.Remove(entry);
+	entry->block_number = blockNumber;
+
+	if (_Read(entry) != B_OK) {
+		delete entry;
+		return NULL;
+	}
+
+	if (fMap.size() >= fCapacity)
+		_Evict();
+
+	fMap[blockNumber] = entry;
 	fLRUList.Add(entry);
 	entry->hand = 1;
 
@@ -89,7 +127,8 @@ UnifiedCache::Get(off_t blockNumber)
 
 
 void
-UnifiedCache::Put(off_t blockNumber, void* data)
+UnifiedCache::Put(off_t blockNumber, void* data, cache_entry_type type,
+	void* cookie)
 {
 	MutexLocker locker(&fLock);
 
@@ -104,6 +143,8 @@ UnifiedCache::Put(off_t blockNumber, void* data)
 	entry->block_number = blockNumber;
 	entry->is_dirty = false;
 	entry->hand = 0;
+	entry->type = type;
+	entry->cookie = cookie;
 
 	fMap[blockNumber] = entry;
 	fLRUList.Add(entry);
@@ -123,6 +164,24 @@ UnifiedCache::SetDirty(off_t blockNumber, bool dirty)
 }
 
 
+status_t
+UnifiedCache::_Read(CacheEntry* entry)
+{
+	if (fReadFunc != NULL)
+		return fReadFunc(entry);
+
+	return B_ERROR;
+}
+
+
+void
+UnifiedCache::_WriteBack(CacheEntry* entry)
+{
+	if (fWriteFunc != NULL)
+		fWriteFunc(entry);
+}
+
+
 void
 UnifiedCache::_Evict()
 {
@@ -135,7 +194,7 @@ UnifiedCache::_Evict()
 			fHand = fLRUList.GetNext(hand);
 
 			if (hand->is_dirty) {
-				// TODO: write back dirty block
+				_WriteBack(hand);
 			}
 
 			fMap.erase(hand->block_number);
@@ -172,6 +231,10 @@ unified_cache_init(void)
 size_t
 unified_cache_used_memory()
 {
-	// TODO: implement
-	return 0;
+	if (sUnifiedCache == NULL)
+		return 0;
+
+	// TODO: This is not accurate. We need to take into account the size of the
+	// cache entries themselves, not just the data they hold.
+	return sUnifiedCache->fMap.size() * B_PAGE_SIZE;
 }

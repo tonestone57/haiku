@@ -107,6 +107,53 @@ unified_cache_init(void)
 }
 
 void*
+unified_cache_get(void* cache_ref, off_t block_number)
+{
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return NULL;
+
+    unified_cache_entry* entry = unified_cache_lookup(block_number);
+    if (entry != NULL) {
+        entry->referenced = true;
+        return entry->data;
+    }
+
+    if (sCache->count >= sCache->size)
+        unified_cache_evict();
+
+    entry = (unified_cache_entry*)object_cache_alloc(sUnifiedCacheEntryCache, 0);
+    if (entry == NULL)
+        return NULL;
+
+    entry->data = malloc(sCache->size);
+    if (entry->data == NULL) {
+        object_cache_free(sUnifiedCacheEntryCache, entry, 0);
+        return NULL;
+    }
+
+    entry->block_number = block_number;
+    entry->referenced = true;
+    unified_cache_insert(entry);
+
+    // TODO: Read from disk
+
+    return entry->data;
+}
+
+void
+unified_cache_put(void* cache_ref, off_t block_number)
+{
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return;
+
+    unified_cache_entry* entry = unified_cache_lookup(block_number);
+    if (entry != NULL)
+        entry->referenced = false;
+}
+
+void*
 unified_cache_create(dev_t mountID, ino_t vnodeID, off_t size)
 {
     unified_cache_ref* ref = new unified_cache_ref;
@@ -144,7 +191,10 @@ status_t
 unified_cache_read(void* cache_ref, void* cookie, off_t offset,
     void* buffer, size_t* size)
 {
-    // TODO: Implement
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return B_BAD_VALUE;
+
     return B_OK;
 }
 
@@ -175,20 +225,29 @@ status_t
 unified_cache_write(void* cache_ref, void* cookie, off_t offset,
     const void* buffer, size_t* size)
 {
-    // TODO: Implement
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return B_BAD_VALUE;
+
     return B_OK;
 }
 
 status_t
 unified_cache_set_size(void* cache_ref, off_t size)
 {
-    // TODO: Implement
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return B_BAD_VALUE;
+
     return B_OK;
 }
 
 status_t
 unified_cache_sync(void* cache_ref)
 {
-    // TODO: Implement
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return B_BAD_VALUE;
+
     return B_OK;
 }

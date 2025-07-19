@@ -11,7 +11,7 @@
 #include <util/AutoLock.h>
 #include <NodeMonitor.h>
 
-#include "system/kernel/cache/unified_cache.h"
+#include <kernel/cache/unified_cache.h>
 #include "CachedBlock.h"
 #include "CRCTable.h"
 #include "DataStream.h"

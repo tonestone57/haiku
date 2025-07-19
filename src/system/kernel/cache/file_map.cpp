@@ -20,7 +20,7 @@ using namespace FSShell;
 #	include <fs_cache.h>
 
 #	include <condition_variable.h>
-#	include <file_cache.h>
+#	include "unified_cache.h"
 #	include <generic_syscall.h>
 #	include <util/AutoLock.h>
 #	include <util/DoublyLinkedList.h>

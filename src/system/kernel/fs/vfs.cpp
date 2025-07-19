@@ -33,7 +33,7 @@
 
 #include <AutoDeleter.h>
 #include <AutoDeleterDrivers.h>
-#include <unified_cache.h>
+#include <UnifiedCache.h>
 #include <boot/kernel_args.h>
 #include <debug_heap.h>
 #include <disk_device_manager/KDiskDevice.h>

@@ -220,11 +220,64 @@ static UnifiedCache* sUnifiedCache;
 status_t
 unified_cache_init(void)
 {
-	sUnifiedCache = new(std::nothrow) UnifiedCache(1024);
-	if (sUnifiedCache == NULL)
-		return B_NO_MEMORY;
+	// The unified cache is created on demand by the first file system that
+	// needs it.
+	sUnifiedCache = NULL;
+	return B_OK;
+}
 
-	return sUnifiedCache->Init();
+
+unified_cache_ref
+unified_cache_create(size_t capacity,
+	status_t (*read_func)(void* cookie, off_t block_number, void* data, size_t size),
+	status_t (*write_func)(void* cookie, off_t block_number, const void* data, size_t size))
+{
+	if (sUnifiedCache == NULL) {
+		sUnifiedCache = new(std::nothrow) UnifiedCache(capacity,
+			(read_func)read_func, (write_func)write_func);
+		if (sUnifiedCache == NULL)
+			return NULL;
+
+		if (sUnifiedCache->Init() != B_OK) {
+			delete sUnifiedCache;
+			sUnifiedCache = NULL;
+			return NULL;
+		}
+	}
+
+	return sUnifiedCache;
+}
+
+
+void
+unified_cache_delete(unified_cache_ref ref)
+{
+	// The unified cache is never deleted.
+}
+
+
+void*
+unified_cache_get(unified_cache_ref ref, off_t block_number)
+{
+	UnifiedCache* cache = (UnifiedCache*)ref;
+	return cache->Get(block_number);
+}
+
+
+void
+unified_cache_put(unified_cache_ref ref, off_t block_number)
+{
+	// This function is a no-op, since the unified cache automatically
+	// handles putting blocks back into the cache.
+}
+
+
+void
+unified_cache_set_dirty(unified_cache_ref ref, off_t block_number,
+	bool dirty)
+{
+	UnifiedCache* cache = (UnifiedCache*)ref;
+	cache->SetDirty(block_number, dirty);
 }
 
 

@@ -13,6 +13,8 @@
 
 #include <new>
 #include <unordered_map>
+#include <cstdlib>
+#include <ctime>
 
 
 enum cache_entry_type {
@@ -26,9 +28,12 @@ struct CacheEntry {
 	void* data;
 	off_t block_number;
 	bool is_dirty;
-	uint8 hand;
+	bool visited;  // SIEVE bit - marks if entry was accessed recently
 	cache_entry_type type;
 	void* cookie;
+	
+	CacheEntry() : data(nullptr), block_number(0), is_dirty(false), 
+		visited(false), type(CACHE_ENTRY_TYPE_BLOCK), cookie(nullptr) {}
 };
 
 
@@ -53,6 +58,7 @@ private:
 	void _Evict();
 
 	size_t fCapacity;
+	double fInsertProb;  // SIEVE insertion probability
 	std::unordered_map<off_t, CacheEntry*> fMap;
 	DoublyLinkedList<CacheEntry,
 		DoublyLinkedListMemberGetLink<CacheEntry,
@@ -68,16 +74,31 @@ UnifiedCache::UnifiedCache(size_t capacity, read_func readFunc,
 	write_func writeFunc)
 	:
 	fCapacity(capacity),
+	fInsertProb(0.75),  // 75% insertion probability for SIEVE1
 	fHand(NULL),
 	fReadFunc(readFunc),
 	fWriteFunc(writeFunc)
 {
 	mutex_init(&fLock, "unified cache");
+	srand(static_cast<unsigned int>(time(0)));
 }
 
 
 UnifiedCache::~UnifiedCache()
 {
+	MutexLocker locker(&fLock);
+	
+	// Clean up all cache entries
+	CacheEntry* entry = fLRUList.Head();
+	while (entry) {
+		CacheEntry* next = fLRUList.GetNext(entry);
+		if (entry->is_dirty) {
+			_WriteBack(entry);
+		}
+		delete entry;
+		entry = next;
+	}
+	
 	mutex_destroy(&fLock);
 }
 
@@ -97,10 +118,29 @@ UnifiedCache::Get(off_t blockNumber)
 	auto it = fMap.find(blockNumber);
 	if (it != fMap.end()) {
 		CacheEntry* entry = it->second;
+		// Mark as visited (SIEVE bit) and move to front (LRU)
+		entry->visited = true;
 		fLRUList.Remove(entry);
 		fLRUList.Add(entry);
-		entry->hand = 1;
 		return entry->data;
+	}
+
+	// SIEVE1: Apply insertion probability for new reads
+	if ((rand() / static_cast<double>(RAND_MAX)) > fInsertProb) {
+		// Don't cache this entry, just read directly
+		CacheEntry* tempEntry = new(std::nothrow) CacheEntry;
+		if (tempEntry == NULL)
+			return NULL;
+			
+		tempEntry->block_number = blockNumber;
+		if (_Read(tempEntry) != B_OK) {
+			delete tempEntry;
+			return NULL;
+		}
+		
+		void* result = tempEntry->data;
+		delete tempEntry;
+		return result;
 	}
 
 	// The data is not in the cache, so we need to read it from disk.
@@ -118,9 +158,9 @@ UnifiedCache::Get(off_t blockNumber)
 	if (fMap.size() >= fCapacity)
 		_Evict();
 
+	entry->visited = true;  // Mark as visited since it's being accessed
 	fMap[blockNumber] = entry;
 	fLRUList.Add(entry);
-	entry->hand = 1;
 
 	return entry->data;
 }
@@ -132,6 +172,24 @@ UnifiedCache::Put(off_t blockNumber, void* data, cache_entry_type type,
 {
 	MutexLocker locker(&fLock);
 
+	// SIEVE1: Apply insertion probability
+	if ((rand() / static_cast<double>(RAND_MAX)) > fInsertProb) {
+		return;  // Don't insert this entry
+	}
+
+	auto it = fMap.find(blockNumber);
+	if (it != fMap.end()) {
+		// Update existing entry
+		CacheEntry* entry = it->second;
+		entry->data = data;
+		entry->type = type;
+		entry->cookie = cookie;
+		entry->visited = true;  // Mark as visited
+		fLRUList.Remove(entry);
+		fLRUList.Add(entry);
+		return;
+	}
+
 	if (fMap.size() >= fCapacity)
 		_Evict();
 
@@ -142,7 +200,7 @@ UnifiedCache::Put(off_t blockNumber, void* data, cache_entry_type type,
 	entry->data = data;
 	entry->block_number = blockNumber;
 	entry->is_dirty = false;
-	entry->hand = 0;
+	entry->visited = false;  // New entries start unvisited
 	entry->type = type;
 	entry->cookie = cookie;
 
@@ -187,12 +245,20 @@ UnifiedCache::_Evict()
 {
 	CacheEntry* hand = fHand;
 	if (hand == NULL)
-		hand = fLRUList.Head();
+		hand = fLRUList.Tail();  // Start from LRU end for SIEVE
 
-	while (hand != NULL) {
-		if (hand->hand == 0) {
-			fHand = fLRUList.GetNext(hand);
-
+	// SIEVE: Scan for unvisited entries
+	int scanned = 0;
+	int totalEntries = fMap.size();
+	
+	while (hand != NULL && scanned < totalEntries) {
+		if (!hand->visited) {
+			// Found unvisited entry, evict it
+			CacheEntry* next = fLRUList.GetPrevious(hand);
+			if (next == NULL)
+				next = fLRUList.Tail();
+			fHand = next;
+			
 			if (hand->is_dirty) {
 				_WriteBack(hand);
 			}
@@ -203,10 +269,29 @@ UnifiedCache::_Evict()
 			return;
 		}
 
-		hand->hand = 0;
-		hand = fLRUList.GetNext(hand);
-		if (hand == NULL)
-			hand = fLRUList.Head();
+		// Clear visited bit and move to next (towards MRU)
+		hand->visited = false;
+		hand = fLRUList.GetPrevious(hand);
+		scanned++;
+		
+		// Wrap around if we reach the end
+		if (hand == NULL) {
+			hand = fLRUList.Tail();
+		}
+	}
+	
+	// If all entries were visited, fall back to LRU eviction
+	CacheEntry* victim = fLRUList.Tail();
+	if (victim != NULL) {
+		fHand = fLRUList.GetPrevious(victim);
+		
+		if (victim->is_dirty) {
+			_WriteBack(victim);
+		}
+
+		fMap.erase(victim->block_number);
+		fLRUList.Remove(victim);
+		delete victim;
 	}
 }
 

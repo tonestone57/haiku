@@ -1,6 +1,7 @@
 SubDir HAIKU_TOP src add-ons kernel file_systems iso9660 ;
 
 UsePrivateKernelHeaders ;
+UsePrivateHeaders [ FDirName kernel cache ] ;
 
 # set some additional defines
 SubDirC++Flags -fno-rtti ;

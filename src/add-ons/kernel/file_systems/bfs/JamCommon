@@ -23,7 +23,7 @@
 }
 
 UsePrivateKernelHeaders ;
-UsePrivateHeaders [ FDirName kernel disk_device_manager ] ;
+UsePrivateHeaders [ FDirName kernel disk_device_manager cache ] ;
 UsePrivateHeaders shared storage ;
 
 local bfsSources =

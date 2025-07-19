@@ -4,7 +4,7 @@ local commonSource ;
 include [ FDirName $(HAIKU_TOP) src add-ons kernel file_systems fat JamCommon ] ;
 
 UsePrivateKernelHeaders ;
-UsePrivateHeaders shared storage file_systems ;
+UsePrivateHeaders shared storage file_systems [ FDirName kernel cache ] ;
 UseHeaders [ FDirName $(HAIKU_TOP) headers compatibility bsd ] : true ;
 
 KernelAddon fat :

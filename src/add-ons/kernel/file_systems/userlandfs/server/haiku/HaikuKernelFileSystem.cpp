@@ -13,7 +13,7 @@
 
 #include <AutoLocker.h>
 
-#include <UnifiedCache.h>
+#include <unified_cache.h>
 #include <condition_variable.h>
 
 #include "HaikuKernelIORequest.h"

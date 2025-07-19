@@ -33,7 +33,7 @@
 #include <condition_variable.h>
 #include <console.h>
 #include <debug.h>
-#include <UnifiedCache.h>
+#include <unified_cache.h>
 #include <fs/fd.h>
 #include <heap.h>
 #include <kernel.h>

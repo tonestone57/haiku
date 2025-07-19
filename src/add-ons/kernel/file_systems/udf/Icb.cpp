@@ -13,8 +13,7 @@
 #include "Utils.h"
 #include "Volume.h"
 
-#include <SupportDefs.h>
-#include <UnifiedCache.h>
+#include <unified_cache.h>
 
 
 status_t
@@ -146,7 +145,6 @@ Icb::Icb(Volume *volume, long_address address)
 
 	if (IsFile()) {
 		fFileCache = unified_cache_create(1024, NULL, NULL);
-		fFileMap = file_map_create(fVolume->ID(), fId, Length());
 	}
 
 	fInitStatus = status;
@@ -159,7 +157,6 @@ Icb::~Icb()
 {
 	if (fFileCache != NULL) {
 		unified_cache_delete(fFileCache);
-		//file_map_delete(fFileMap);
 	}
 }
 

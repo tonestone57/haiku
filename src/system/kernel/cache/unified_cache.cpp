@@ -212,6 +212,26 @@ unified_cache_read(void* cache_ref, void* cookie, off_t offset,
     if (ref == NULL)
         return B_BAD_VALUE;
 
+    size_t length = *size;
+    uint8* current_buffer = (uint8*)buffer;
+
+    while (length > 0) {
+        off_t block_number = offset / sCache->size;
+        off_t block_offset = offset % sCache->size;
+        size_t to_read = min_c(length, sCache->size - block_offset);
+
+        void* data = unified_cache_get(ref, block_number);
+        if (data == NULL)
+            return B_NO_MEMORY;
+
+        memcpy(current_buffer, (uint8*)data + block_offset, to_read);
+        unified_cache_put(ref, block_number);
+
+        current_buffer += to_read;
+        offset += to_read;
+        length -= to_read;
+    }
+
     return B_OK;
 }
 
@@ -219,7 +239,10 @@ status_t
 unified_cache_set_dirty(void* cache_ref, off_t block_number,
     bool dirty, int32 transaction)
 {
-    // TODO: Implement
+    unified_cache_entry* entry = unified_cache_lookup(block_number);
+    if (entry != NULL)
+        entry->dirty = dirty;
+
     return B_OK;
 }
 
@@ -227,14 +250,32 @@ status_t
 unified_cache_get_writable_etc(void* cache_ref, off_t block_number,
     int32 transaction, void** _block)
 {
-    // TODO: Implement
+    void* data = unified_cache_get(cache_ref, block_number);
+    if (data == NULL)
+        return B_NO_MEMORY;
+
+    *_block = data;
     return B_OK;
 }
 
 status_t
 unified_cache_sync_etc(void* cache_ref, off_t block_number, size_t num_blocks)
 {
-    // TODO: Implement
+    unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
+    if (ref == NULL)
+        return B_BAD_VALUE;
+
+    for (size_t i = 0; i < num_blocks; i++) {
+        unified_cache_entry* entry = unified_cache_lookup(block_number + i);
+        if (entry != NULL && entry->dirty) {
+            generic_io_vec vec;
+            vec.base = (addr_t)entry->data;
+            vec.length = sCache->size;
+            vfs_write_pages(entry->vnode, NULL, entry->block_number * sCache->size, &vec, 1, 0, &vec.length);
+            entry->dirty = false;
+        }
+    }
+
     return B_OK;
 }
 
@@ -246,6 +287,31 @@ unified_cache_write(void* cache_ref, void* cookie, off_t offset,
     if (ref == NULL)
         return B_BAD_VALUE;
 
+    size_t length = *size;
+    const uint8* current_buffer = (const uint8*)buffer;
+
+    while (length > 0) {
+        off_t block_number = offset / sCache->size;
+        off_t block_offset = offset % sCache->size;
+        size_t to_write = min_c(length, sCache->size - block_offset);
+
+        void* data = unified_cache_get(ref, block_number);
+        if (data == NULL)
+            return B_NO_MEMORY;
+
+        memcpy((uint8*)data + block_offset, current_buffer, to_write);
+
+        unified_cache_entry* entry = unified_cache_lookup(block_number);
+        if (entry != NULL)
+            entry->dirty = true;
+
+        unified_cache_put(ref, block_number);
+
+        current_buffer += to_write;
+        offset += to_write;
+        length -= to_write;
+    }
+
     return B_OK;
 }
 
@@ -256,6 +322,7 @@ unified_cache_set_size(void* cache_ref, off_t size)
     if (ref == NULL)
         return B_BAD_VALUE;
 
+    ref->cache->virtual_end = size;
     return B_OK;
 }
 
@@ -265,6 +332,21 @@ unified_cache_sync(void* cache_ref)
     unified_cache_ref* ref = (unified_cache_ref*)cache_ref;
     if (ref == NULL)
         return B_BAD_VALUE;
+
+    unified_cache_entry* entry = sCache->hand;
+    if (entry == NULL)
+        return B_OK;
+
+    do {
+        if (entry->dirty) {
+            generic_io_vec vec;
+            vec.base = (addr_t)entry->data;
+            vec.length = sCache->size;
+            vfs_write_pages(entry->vnode, NULL, entry->block_number * sCache->size, &vec, 1, 0, &vec.length);
+            entry->dirty = false;
+        }
+        entry = entry->next;
+    } while (entry != sCache->hand);
 
     return B_OK;
 }

@@ -359,7 +359,7 @@ fs_init_vnode(fs_volume* _volume, ino_t parent, ino_t nid, vnode** _vnode, bool 
 	}
 
 	if ((node->mode & S_IFDIR) == 0) {
-		node->file_cache = file_cache_create(_volume->id, nid, node->size);
+		node->file_cache = unified_cache_create(_volume->id, nid, node->size);
 		if (node->file_cache == NULL)
 			return B_NO_INIT;
 	}
@@ -400,7 +400,7 @@ fs_put_vnode(fs_volume* _volume, fs_vnode* _node, bool reenter)
 	MutexLocker lock(reenter ? NULL : &volume->lock);
 	vnode* node = (vnode*)_node->private_node;
 
-	file_cache_delete(node->file_cache);
+	unified_cache_delete(node->file_cache);
 	delete node;
 	return B_OK;
 }
@@ -418,7 +418,7 @@ fs_remove_vnode(fs_volume* _volume, fs_vnode* _node, bool reenter)
 			node->lowntfs_close_state, node->lowntfs_ghost) != 0)
 		return errno;
 
-	file_cache_delete(node->file_cache);
+	unified_cache_delete(node->file_cache);
 	delete node;
 	return B_OK;
 }
@@ -664,7 +664,7 @@ fs_write_stat(fs_volume* _volume, fs_vnode* _node, const struct stat* stat, uint
 		if (ntfs_attr_truncate(na, stat->st_size) != 0)
 			return errno;
 		node->size = na->data_size;
-		file_cache_set_size(node->file_cache, node->size);
+		unified_cache_set_size(node->file_cache, node->size);
 
 		updateTime = true;
 	}
@@ -837,7 +837,7 @@ fs_open(fs_volume* _volume, fs_vnode* _node, int openMode, void** _cookie)
 	// passing user buffers to libntfs, among other things.
 #if 0
 	if ((openMode & O_NOCACHE) != 0 && node->file_cache != NULL) {
-		status_t status = file_cache_disable(node->file_cache);
+		status_t status = unified_cache_disable(node->file_cache);
 		if (status != B_OK)
 			return status;
 	}
@@ -858,7 +858,7 @@ fs_open(fs_volume* _volume, fs_vnode* _node, int openMode, void** _cookie)
 		if (ntfs_attr_truncate(na, 0) != 0)
 			return errno;
 		node->size = na->data_size;
-		file_cache_set_size(node->file_cache, node->size);
+		unified_cache_set_size(node->file_cache, node->size);
 	}
 
 	cookieDeleter.Detach();
@@ -879,7 +879,7 @@ fs_read(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
 
 	ASSERT((cookie->open_mode & O_RWMASK) == O_RDONLY || (cookie->open_mode & O_RDWR) != 0);
 
-	return file_cache_read(node->file_cache, cookie, pos, buffer, length);
+	return unified_cache_read(node->file_cache, cookie, pos, buffer, length);
 }
 
 
@@ -917,12 +917,12 @@ fs_write(fs_volume* _volume, fs_vnode* _node, void* _cookie, off_t pos,
 		if (ntfs_attr_truncate(na, pos + *_length) != 0)
 			return errno;
 		node->size = na->data_size;
-		file_cache_set_size(node->file_cache, node->size);
+		unified_cache_set_size(node->file_cache, node->size);
 	}
 
 	lock.Unlock();
 
-	status_t status = file_cache_write(node->file_cache, cookie, pos, buffer, _length);
+	status_t status = unified_cache_write(node->file_cache, cookie, pos, buffer, _length);
 	if (status != B_OK)
 		return status;
 
@@ -947,7 +947,7 @@ fs_fsync(fs_volume* _volume, fs_vnode* _node)
 	CALLED();
 	vnode* node = (vnode*)_node->private_node;
 
-	return file_cache_sync(node->file_cache);
+	return unified_cache_sync(node->file_cache);
 }
 
 

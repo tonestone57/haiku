@@ -38,7 +38,7 @@ Inode::Inode(Volume* volume, ino_t id)
 	fInitStatus = UpdateNodeFromDisk();
 	if (fInitStatus == B_OK) {
 		if (!IsDirectory() && !IsSymLink()) {
-			fCache = file_cache_create(fVolume->ID(), ID(), Size());
+			fCache = unified_cache_create(fVolume->ID(), ID(), Size());
 			fMap = file_map_create(fVolume->ID(), ID(), Size());
 		}
 	}
@@ -55,7 +55,7 @@ Inode::Inode(Volume* volume, ino_t id, const btrfs_inode& item)
 	fNode(item)
 {
 	if (!IsDirectory() && !IsSymLink()) {
-		fCache = file_cache_create(fVolume->ID(), ID(), Size());
+		fCache = unified_cache_create(fVolume->ID(), ID(), Size());
 		fMap = file_map_create(fVolume->ID(), ID(), Size());
 	}
 }
@@ -76,7 +76,7 @@ Inode::Inode(Volume* volume)
 Inode::~Inode()
 {
 	TRACE("Inode destructor\n");
-	file_cache_delete(FileCache());
+	unified_cache_delete(FileCache());
 	file_map_delete(Map());
 	TRACE("Inode destructor: Done\n");
 }
@@ -253,7 +253,7 @@ Inode::ReadAt(off_t pos, uint8* buffer, size_t* _length)
 		TRACE("inode %" B_PRIdINO ": ReadAt cache (pos %" B_PRIdOFF ", length %lu)\n",
 			ID(), pos, length);
 		if (compression == BTRFS_EXTENT_COMPRESS_NONE)
-			return file_cache_read(FileCache(), NULL, pos, buffer, _length);
+			return unified_cache_read(FileCache(), NULL, pos, buffer, _length);
 		else if (compression == BTRFS_EXTENT_COMPRESS_ZLIB)
 			panic("zlib isn't unsupported for regular extent\n");
 		else

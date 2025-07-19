@@ -48,7 +48,7 @@ Inode::Inode(Volume* volume, cluster_t cluster, uint32 offset)
 	} else {
 		fInitStatus = UpdateNodeFromDisk();
 		if (fInitStatus == B_OK && !IsDirectory() && !IsSymLink()) {
-			fCache = file_cache_create(fVolume->ID(), ID(), Size());
+		fCache = unified_cache_create(fVolume->ID(), ID(), Size());
 			fMap = file_map_create(fVolume->ID(), ID(), Size());
 		}
 	}
@@ -79,7 +79,7 @@ Inode::Inode(Volume* volume, ino_t ino)
 	if (fInitStatus == B_OK && ID() != 1) {
 		fInitStatus = UpdateNodeFromDisk();
 		if (!IsDirectory() && !IsSymLink()) {
-			fCache = file_cache_create(fVolume->ID(), ID(), Size());
+			fCache = unified_cache_create(fVolume->ID(), ID(), Size());
 			fMap = file_map_create(fVolume->ID(), ID(), Size());
 		}
 	} else if (fInitStatus == B_OK && ID() == 1) {
@@ -105,7 +105,7 @@ Inode::Inode(Volume* volume)
 Inode::~Inode()
 {
 	TRACE("Inode destructor\n");
-	file_cache_delete(FileCache());
+	unified_cache_delete(FileCache());
 	file_map_delete(Map());
 	TRACE("Inode destructor: Done\n");
 }
@@ -173,7 +173,7 @@ Inode::FindBlock(off_t pos, off_t& physical, off_t *_length)
 status_t
 Inode::ReadAt(off_t pos, uint8* buffer, size_t* _length)
 {
-	return file_cache_read(FileCache(), NULL, pos, buffer, _length);
+	return unified_cache_read(FileCache(), NULL, pos, buffer, _length);
 }
 
 

@@ -66,7 +66,7 @@ struct PackageFile::DataAccessor {
 
 	~DataAccessor()
 	{
-		file_cache_delete(fFileCache);
+		unified_cache_delete(fFileCache);
 		delete fReader;
 	}
 
@@ -78,7 +78,7 @@ struct PackageFile::DataAccessor {
 			return error;
 
 		// create a file cache
-		fFileCache = file_cache_create(deviceID, nodeID,
+		fFileCache = unified_cache_create(deviceID, nodeID,
 			fData->UncompressedSize());
 		if (fFileCache == NULL)
 			RETURN_ERROR(B_NO_MEMORY);
@@ -88,7 +88,7 @@ struct PackageFile::DataAccessor {
 
 	status_t ReadData(off_t offset, void* buffer, size_t* bufferSize)
 	{
-		return file_cache_read(fFileCache, NULL, offset, buffer, bufferSize);
+		return unified_cache_read(fFileCache, NULL, offset, buffer, bufferSize);
 	}
 
 	status_t ReadData(io_request* request)

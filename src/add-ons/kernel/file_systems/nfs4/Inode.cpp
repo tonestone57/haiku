@@ -129,7 +129,7 @@ Inode::CreateInode(FileSystem* fs, const FileInfo& fi, Inode** _inode)
 	} while (true);
 
 	if (inode->fType == NF4REG)
-		inode->fFileCache = file_cache_create(fs->DevId(), inode->ID(), size);
+		inode->fFileCache = unified_cache_create(fs->DevId(), inode->ID(), size);
 
 	return B_OK;
 }
@@ -141,7 +141,7 @@ Inode::~Inode()
 		RecallDelegation();
 
 	if (fFileCache != NULL)
-		file_cache_delete(fFileCache);
+		unified_cache_delete(fFileCache);
 
 	delete fCache;
 	delete fAttrCache;
@@ -173,14 +173,14 @@ Inode::RevalidateFileCache()
 		return B_OK;
 	SyncAndCommit(true);
 
-	file_cache_delete(fFileCache);
+	unified_cache_delete(fFileCache);
 
 	struct stat st;
 	fMetaCache.InvalidateStat();
 	result = Stat(&st);
 	if (result == B_OK)
 		fMaxFileSize = st.st_size;
-	fFileCache = file_cache_create(fFileSystem->DevId(), ID(), fMaxFileSize);
+	fFileCache = unified_cache_create(fFileSystem->DevId(), ID(), fMaxFileSize);
 
 	fChange = change;
 	return B_OK;
@@ -653,7 +653,7 @@ Inode::WriteStat(const struct stat* st, uint32 mask, OpenAttrCookie* cookie)
 
 	if ((mask & B_STAT_SIZE) != 0) {
 		fMaxFileSize = st->st_size;
-		file_cache_set_size(fFileCache, st->st_size);
+		unified_cache_set_size(fFileCache, st->st_size);
 
 		attr[i].fAttribute = FATTR4_SIZE;
 		attr[i].fFreePointer = false;

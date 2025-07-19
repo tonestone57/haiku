@@ -21,9 +21,11 @@
 struct unified_cache_entry {
     unified_cache_entry* next;
     unified_cache_entry* prev;
+    struct vnode* vnode;
     void* data;
     off_t block_number;
     bool referenced;
+    bool dirty;
 };
 
 struct unified_cache {
@@ -52,7 +54,12 @@ unified_cache_evict()
     }
     sCache->hand = entry->next;
 
-    // TODO: Write back if dirty
+    if (entry->dirty) {
+        generic_io_vec vec;
+        vec.base = (addr_t)entry->data;
+        vec.length = sCache->size;
+        vfs_write_pages(entry->vnode, NULL, entry->block_number * sCache->size, &vec, 1, 0, &vec.length);
+    }
     object_cache_free(sUnifiedCacheEntryCache, entry, 0);
     sCache->count--;
 }
@@ -87,6 +94,12 @@ unified_cache_insert(unified_cache_entry* entry)
     sCache->count++;
 }
 
+void
+unified_cache_set_max_size(size_t size)
+{
+    sCache->size = size;
+}
+
 status_t
 unified_cache_init(void)
 {
@@ -101,7 +114,7 @@ unified_cache_init(void)
 
     sCache->hand = NULL;
     sCache->count = 0;
-    sCache->size = 1024; // TODO: Make this configurable
+    sCache->size = 1024;
 
     return B_OK;
 }
@@ -126,7 +139,7 @@ unified_cache_get(void* cache_ref, off_t block_number)
     if (entry == NULL)
         return NULL;
 
-    entry->data = malloc(sCache->size);
+    entry->data = malloc(ref->cache->virtual_end);
     if (entry->data == NULL) {
         object_cache_free(sUnifiedCacheEntryCache, entry, 0);
         return NULL;
@@ -134,9 +147,13 @@ unified_cache_get(void* cache_ref, off_t block_number)
 
     entry->block_number = block_number;
     entry->referenced = true;
+    entry->vnode = ref->vnode;
     unified_cache_insert(entry);
 
-    // TODO: Read from disk
+    generic_io_vec vec;
+    vec.base = (addr_t)entry->data;
+    vec.length = ref->cache->virtual_end;
+    vfs_read_pages(entry->vnode, NULL, entry->block_number * ref->cache->virtual_end, &vec, 1, 0, &vec.length);
 
     return entry->data;
 }

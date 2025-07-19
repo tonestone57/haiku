@@ -33,6 +33,8 @@ status_t unified_cache_set_dirty(void* cache_ref, off_t block_number,
 
 void* unified_cache_get(void* cache_ref, off_t block_number);
 void unified_cache_put(void* cache_ref, off_t block_number);
+
+void unified_cache_set_max_size(size_t size);
 }
 
 #endif /* UNIFIED_CACHE_H */

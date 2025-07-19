@@ -12,8 +12,6 @@
 #include "BPlusTree.h"
 #include "Index.h"
 
-#include <unified_cache.h>
-
 
 #if BFS_TRACING && !defined(FS_SHELL) && !defined(_BOOT_MODE)
 namespace BFSInodeTracing {
@@ -140,22 +138,6 @@ private:
 	of an inode creation in progress.
 	This class will make sure everything is cleaned up properly.
 */
-static status_t
-bfs_read_hook(void* cookie, off_t block_number, void* data, size_t size)
-{
-	Inode* inode = (Inode*)cookie;
-	return inode->ReadAt(block_number << inode->GetVolume()->BlockShift(),
-		(uint8*)data, &size);
-}
-
-
-static status_t
-bfs_write_hook(void* cookie, off_t block_number, const void* data, size_t size)
-{
-	return B_UNSUPPORTED;
-}
-
-
 class InodeAllocator {
 public:
 							InodeAllocator(Transaction& transaction);
@@ -382,8 +364,7 @@ Inode::Inode(Volume* volume, ino_t id)
 	if (IsContainer())
 		fTree = new(std::nothrow) BPlusTree(this);
 	if (NeedsFileCache()) {
-		SetFileCache(unified_cache_create(1024, (read_func)bfs_read_hook,
-			(write_func)bfs_write_hook));
+		SetFileCache(file_cache_create(fVolume->ID(), ID(), Size()));
 		SetMap(file_map_create(volume->ID(), ID(), Size()));
 	}
 }
@@ -439,7 +420,7 @@ Inode::~Inode()
 {
 	PRINT(("Inode::~Inode() @ %p\n", this));
 
-	unified_cache_delete(FileCache());
+	file_cache_delete(FileCache());
 	file_map_delete(Map());
 	delete fTree;
 
@@ -1593,8 +1574,7 @@ Inode::FindBlockRun(off_t pos, block_run& run, off_t& offset)
 status_t
 Inode::ReadAt(off_t pos, uint8* buffer, size_t* _length)
 {
-	return unified_cache_read((unified_cache_ref)FileCache(),
-		pos >> fVolume->BlockShift(), buffer, _length);
+	return file_cache_read(FileCache(), NULL, pos, buffer, _length);
 }
 
 
@@ -1670,8 +1650,7 @@ Inode::WriteAt(Transaction& transaction, off_t pos, const uint8* buffer,
 	if (length == 0)
 		return B_OK;
 
-	status_t status = unified_cache_write((unified_cache_ref)FileCache(),
-		pos, buffer, _length);
+	status_t status = file_cache_write(FileCache(), NULL, pos, buffer, _length);
 
 	if (transaction.IsStarted())
 		WriteLockInTransaction(transaction);
@@ -1696,8 +1675,7 @@ Inode::FillGapWithZeros(off_t pos, off_t newSize)
 		else
 			size = newSize - pos;
 
-		status_t status = unified_cache_write((unified_cache_ref)FileCache(),
-			pos, NULL, &size);
+		status_t status = file_cache_write(FileCache(), NULL, pos, NULL, &size);
 		if (status < B_OK)
 			return status;
 
@@ -2316,7 +2294,7 @@ Inode::SetFileSize(Transaction& transaction, off_t size)
 	if (status < B_OK)
 		return status;
 
-	unified_cache_set_size(FileCache(), size);
+	file_cache_set_size(FileCache(), size);
 	file_map_set_size(Map(), size);
 
 	return WriteBack(transaction);
@@ -2409,7 +2387,7 @@ status_t
 Inode::Sync()
 {
 	if (FileCache())
-		return unified_cache_sync(FileCache());
+		return file_cache_sync(FileCache());
 
 	// We may also want to flush the attribute's data stream to
 	// disk here... (do we?)
@@ -2832,8 +2810,8 @@ Inode::Create(Transaction& transaction, Inode* parent, const char* name,
 		index.InsertLastModified(transaction, inode);
 
 	if (inode->NeedsFileCache()) {
-		SetFileCache(unified_cache_create(1024, (read_func)bfs_read_hook,
-			(write_func)bfs_write_hook));
+		inode->SetFileCache(file_cache_create(volume->ID(), inode->ID(),
+			inode->Size()));
 		inode->SetMap(file_map_create(volume->ID(), inode->ID(),
 			inode->Size()));
 

@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <file_cache.h>
+#include "unified_cache.h"
 #include <slab/Slab.h>
 #include <vfs.h>
 #include <vm/vm.h>
@@ -25,7 +25,7 @@ VMVnodeCache::Init(struct vnode* vnode, uint32 allocationFlags)
 		return error;
 
 	fVnode = vnode;
-	fFileCacheRef = NULL;
+	fUnifiedCacheRef = NULL;
 	fVnodeDeleted = false;
 
 	vfs_vnode_to_node_ref(fVnode, &fDevice, &fInode);

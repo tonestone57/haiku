@@ -13,8 +13,9 @@
 
 #include <AutoLocker.h>
 
-#include <unified_cache.h>
+#include <block_cache.h>
 #include <condition_variable.h>
+#include <file_cache.h>
 
 #include "HaikuKernelIORequest.h"
 #include "HaikuKernelVolume.h"
@@ -116,7 +117,7 @@ HaikuKernelFileSystem::Init()
 // TODO: Call the cleanup methods, if something goes wrong!
 
 	// init block cache
-	error = unified_cache_init();
+	error = block_cache_init();
 	if (error != B_OK)
 		RETURN_ERROR(error);
 

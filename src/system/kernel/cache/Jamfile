@@ -6,6 +6,5 @@ KernelMergeObject kernel_cache.o :
 	unified_cache.cpp
 	file_map.cpp
 	vnode_store.cpp
-
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;

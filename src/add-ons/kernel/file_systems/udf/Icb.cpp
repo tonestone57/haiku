@@ -13,22 +13,7 @@
 #include "Utils.h"
 #include "Volume.h"
 
-#include <unified_cache.h>
-
-
-static status_t
-udf_read_hook(void* cookie, off_t block_number, void* data, size_t size)
-{
-	Icb* icb = (Icb*)cookie;
-	return icb->Read(block_number << icb->GetVolume()->BlockShift(), data, &size, NULL);
-}
-
-
-static status_t
-udf_write_hook(void* cookie, off_t block_number, const void* data, size_t size)
-{
-	return B_UNSUPPORTED;
-}
+#include <file_cache.h>
 
 
 status_t
@@ -159,8 +144,8 @@ Icb::Icb(Volume *volume, long_address address)
 	}
 
 	if (IsFile()) {
-		fFileCache = unified_cache_create(1024, (read_func)udf_read_hook,
-			(write_func)udf_write_hook);
+		fFileCache = file_cache_create(fVolume->ID(), fId, Length());
+		fFileMap = file_map_create(fVolume->ID(), fId, Length());
 	}
 
 	fInitStatus = status;
@@ -172,7 +157,8 @@ Icb::Icb(Volume *volume, long_address address)
 Icb::~Icb()
 {
 	if (fFileCache != NULL) {
-		unified_cache_delete(fFileCache);
+		file_cache_delete(fFileCache);
+		file_map_delete(fFileMap);
 	}
 }
 
@@ -319,10 +305,8 @@ Icb::Read(off_t pos, void *buffer, size_t *length, uint32 *block)
 
 	DEBUG_INIT_ETC("Icb", ("pos: %" B_PRIdOFF " , length: %ld", pos, *length));
 
-	if (fFileCache != NULL) {
-		return unified_cache_read((unified_cache_ref)fFileCache,
-			pos >> fVolume->BlockShift(), buffer, (size_t*)length);
-	}
+	if (fFileCache != NULL)
+		return file_cache_read(fFileCache, NULL, pos, buffer, length);
 
 	if (!buffer || !length || pos < 0)
 		return B_BAD_VALUE;

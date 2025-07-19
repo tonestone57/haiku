@@ -9,8 +9,7 @@
 
 #include <vm/VMCache.h>
 
-
-struct file_cache_ref;
+#include "unified_cache.h"
 
 
 class VMVnodeCache final : public VMCache {
@@ -42,10 +41,10 @@ public:
 
 	virtual	void				Dump(bool showPages) const;
 
-			void				SetFileCacheRef(file_cache_ref* ref)
-									{ fFileCacheRef = ref; }
-			file_cache_ref*		FileCacheRef() const
-									{ return fFileCacheRef; }
+			void				SetUnifiedCacheRef(unified_cache_ref* ref)
+									{ fUnifiedCacheRef = ref; }
+			unified_cache_ref*	UnifiedCacheRef() const
+									{ return fUnifiedCacheRef; }
 
 			void				VnodeDeleted()	{ fVnodeDeleted = true; }
 
@@ -59,7 +58,7 @@ protected:
 
 private:
 			struct vnode*		fVnode;
-			file_cache_ref*		fFileCacheRef;
+			unified_cache_ref*	fUnifiedCacheRef;
 			ino_t				fInode;
 			dev_t				fDevice;
 	volatile bool				fVnodeDeleted;

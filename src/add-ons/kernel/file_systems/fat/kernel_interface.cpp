@@ -91,6 +91,7 @@
 #include <syscalls.h>
 #include <util/AutoLock.h>
 #include <vfs.h>
+#include "unified_cache.h"
 #endif // !FS_SHELL
 
 // FreeBSD flag that turns on full implementation of ported code

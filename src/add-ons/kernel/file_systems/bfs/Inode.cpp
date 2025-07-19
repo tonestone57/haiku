@@ -11,6 +11,7 @@
 #include "Inode.h"
 #include "BPlusTree.h"
 #include "Index.h"
+#include "unified_cache.h"
 
 
 #if BFS_TRACING && !defined(FS_SHELL) && !defined(_BOOT_MODE)

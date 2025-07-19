@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <fs_cache.h>
+#include "unified_cache.h"
 
 #include "Block.h"
 #include "Debug.h"

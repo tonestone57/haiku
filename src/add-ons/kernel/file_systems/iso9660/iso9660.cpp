@@ -23,6 +23,7 @@
 #	include <Drivers.h>
 #	include <KernelExport.h>
 #	include <fs_cache.h>
+#	include "unified_cache.h"
 #endif
 
 #include "rock_ridge.h"

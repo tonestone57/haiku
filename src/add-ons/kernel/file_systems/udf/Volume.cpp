@@ -12,7 +12,7 @@
 #include "MetadataPartition.h"
 #include "PhysicalPartition.h"
 #include "Recognition.h"
-#include <kernel/cache/unified_cache.h>
+#include "../src/add-ons/kernel/cache/unified_cache.h"
 
 extern fs_volume_ops gUDFVolumeOps;
 extern fs_vnode_ops gUDFVnodeOps;

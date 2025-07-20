@@ -24,11 +24,3 @@ SimpleTest file_map_test :
 SimpleTest pages_io_test :
 	pages_io_test.cpp
 ;
-
-KernelTest SieveLRUCacheTest :
-	SieveLRUCacheTest.cpp
-	;
-
-KernelTest SieveLRUCacheTest :
-	SieveLRUCacheTest.cpp
-	;

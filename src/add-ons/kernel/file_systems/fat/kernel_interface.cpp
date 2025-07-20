@@ -124,6 +124,7 @@ extern "C"
 #include "mkdos.h"
 #include "support.h"
 #include "vcache.h"
+#include <cache/unified_cache.h>
 
 
 static status_t iterative_io_get_vecs_hook(void* cookie, io_request* request, off_t offset,
@@ -186,9 +187,11 @@ dosfs_mount(fs_volume* volume, const char* device, uint32 flags, const char* arg
 	ino_t* _rootVnodeID)
 {
 #ifdef FS_SHELL
-	FUNCTION_START("device %" B_PRIdDEV "\n", volume->id);
+	FUNCTION_START("device %" B_PRIdDEV "
+", volume->id);
 #else
-	FUNCTION_START("device %" B_PRIdDEV ", partition %" B_PRId32 "\n", volume->id,
+	FUNCTION_START("device %" B_PRIdDEV ", partition %" B_PRId32 "
+", volume->id,
 		volume->partition);
 #endif
 
@@ -219,7 +222,8 @@ dosfs_mount(fs_volume* volume, const char* device, uint32 flags, const char* arg
 
 	bool readOnly = (flags & B_MOUNT_READ_ONLY) != 0;
 	if ((flags & ~B_MOUNT_READ_ONLY) != 0) {
-		INFORM("unsupported mount flag(s) %" B_PRIx32 "\n", (flags & ~B_MOUNT_READ_ONLY));
+		INFORM("unsupported mount flag(s) %" B_PRIx32 "
+", (flags & ~B_MOUNT_READ_ONLY));
 		return B_UNSUPPORTED;
 	}
 
@@ -259,7 +263,8 @@ dosfs_mount(fs_volume* volume, const char* device, uint32 flags, const char* arg
 			// supposed to fall through
 
 		case 2:
-			PRINT("mounted with op sync enabled\n");
+			PRINT("mounted with op sync enabled
+");
 			bsdVolume->mnt_flag |= MNT_SYNCHRONOUS;
 			fatFlags |= MSDOSFSMNT_WAITONFAT;
 			break;
@@ -324,7 +329,8 @@ dosfs_mount(fs_volume* volume, const char* device, uint32 flags, const char* arg
 	if (status != B_OK)
 		RETURN_ERROR(status);
 
-	PRINT("root vnode id = %" B_PRIdINO ", @ %p\n", fatRootNode->de_inode, bsdRootNode);
+	PRINT("root vnode id = %" B_PRIdINO ", @ %p
+", fatRootNode->de_inode, bsdRootNode);
 
 	*_rootVnodeID = fatRootNode->de_inode;
 
@@ -349,7 +355,8 @@ dosfs_mount(fs_volume* volume, const char* device, uint32 flags, const char* arg
 static float
 dosfs_identify_partition(int fd, partition_data* partition, void** _cookie)
 {
-	FUNCTION_START("dosfs_identify_partition\n");
+	FUNCTION_START("dosfs_identify_partition
+");
 
 	// read in the boot sector
 	uint8 buf[512];
@@ -450,9 +457,11 @@ dosfs_unmount(fs_volume* volume)
 	cdev* bsdDevice = fatVolume->pm_dev;
 
 #ifdef FS_SHELL
-	FUNCTION_START("device %" B_PRIdDEV "\n", volume->id);
+	FUNCTION_START("device %" B_PRIdDEV "
+", volume->id);
 #else
-	FUNCTION_START("device %" B_PRIdDEV ", partition %" B_PRId32 "\n", volume->id,
+	FUNCTION_START("device %" B_PRIdDEV ", partition %" B_PRId32 "
+", volume->id,
 		volume->partition);
 #endif
 
@@ -528,7 +537,8 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 	mount* bsdVolume = reinterpret_cast<mount*>(volume->private_volume);
 	msdosfsmount* fatVolume = reinterpret_cast<msdosfsmount*>(bsdVolume->mnt_data);
 
-	FUNCTION_START("with mask %" B_PRIx32 "\n", mask);
+	FUNCTION_START("with mask %" B_PRIx32 "
+", mask);
 
 	MutexLocker locker(bsdVolume->mnt_mtx.haikuMutex);
 
@@ -539,7 +549,8 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 	if ((bsdVolume->mnt_flag & MNT_RDONLY) != 0)
 		return B_READ_ONLY_DEVICE;
 
-	PRINT("wfsstat: setting name to %s\n", info->volume_name);
+	PRINT("wfsstat: setting name to %s
+", info->volume_name);
 	char name[LABEL_CSTRING];
 	strlcpy(name, info->volume_name, LABEL_CSTRING);
 	status_t status = label_to_fat(name);
@@ -547,10 +558,10 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 		return status;
 
 	// update the BPB, unless the volume is too old to have a label field in the BPB
-	void* blockCache = bsdVolume->mnt_cache;
+	void* ucache = bsdVolume->mnt_cache;
 	u_char* buffer;
 	status
-		= block_cache_get_writable_etc(blockCache, 0, -1, reinterpret_cast<void**>(&buffer));
+		= unified_cache_get_writable_etc(ucache, 0, -1, reinterpret_cast<void**>(&buffer));
 	if (status != B_OK)
 		return status;
 	// check for the extended boot signature
@@ -565,12 +576,13 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 		if (strncmp(bpbLabel, memoryLabel, LABEL_LENGTH) == 0) {
 			memcpy(buffer + labelOffset, name, LABEL_LENGTH);
 		} else {
-			INFORM("wfsstat: BPB position check failed\n");
-			block_cache_set_dirty(blockCache, 0, false, -1);
+			INFORM("wfsstat: BPB position check failed
+");
+			unified_cache_set_dirty(ucache, 0, false, -1);
 			status = B_ERROR;
 		}
 	}
-	block_cache_put(blockCache, 0);
+	unified_cache_put(ucache, 0);
 
 	// update the label file if there is one
 	if (bsdVolume->mnt_volentry >= 0) {
@@ -581,7 +593,7 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 		daddr_t dirOffset = bsdVolume->mnt_volentry * sizeof(direntry);
 		rootDirBlock += dirOffset / DEV_BSIZE;
 
-		status = block_cache_get_writable_etc(blockCache, rootDirBlock, -1,
+		status = unified_cache_get_writable_etc(ucache, rootDirBlock, -1,
 			reinterpret_cast<void**>(&rootDirBuffer));
 		if (status == B_OK) {
 			direntry* label_direntry = reinterpret_cast<direntry*>(rootDirBuffer + dirOffset);
@@ -592,11 +604,12 @@ dosfs_write_fs_stat(fs_volume* volume, const struct fs_info* info, uint32 mask)
 			if (strncmp(rootLabel, memoryLabel, LABEL_LENGTH) == 0) {
 				memcpy(label_direntry->deName, name, LABEL_LENGTH);
 			} else {
-				INFORM("wfsstat: root directory position check failed\n");
-				block_cache_set_dirty(blockCache, rootDirBlock, false, -1);
+				INFORM("wfsstat: root directory position check failed
+");
+				unified_cache_set_dirty(ucache, rootDirBlock, false, -1);
 				status = B_ERROR;
 			}
-			block_cache_put(blockCache, rootDirBlock);
+			unified_cache_put(ucache, rootDirBlock);
 		}
 	} else {
 		// A future enhancement could be to create a label direntry if none exists already.
@@ -644,7 +657,7 @@ _dosfs_sync(struct mount* bsdVolume, bool data)
 		returnStatus = status;
 	}
 
-	status = block_cache_sync(bsdVolume->mnt_cache);
+	status = unified_cache_sync(bsdVolume->mnt_cache);
 	if (status != B_OK) {
 		REPORT_ERROR(status);
 		returnStatus = status;
@@ -669,7 +682,8 @@ dosfs_read_vnode(fs_volume* volume, ino_t id, fs_vnode* vnode, int* _type, uint3
 	mount* bsdVolume = reinterpret_cast<mount*>(volume->private_volume);
 	struct vnode* bsdNode;
 
-	FUNCTION_START("id %" B_PRIdINO ", type %d, flags %" B_PRIx32 "\n", id, *_type, *_flags);
+	FUNCTION_START("id %" B_PRIdINO ", type %d, flags %" B_PRIx32 "
+", id, *_type, *_flags);
 
 	MutexLocker locker(bsdVolume->mnt_mtx.haikuMutex);
 
@@ -691,7 +705,8 @@ dosfs_read_vnode(fs_volume* volume, ino_t id, fs_vnode* vnode, int* _type, uint3
 	else if (bsdNode->v_type == VREG)
 		*_type = S_IFREG;
 	else
-		panic("dosfs_read_vnode:  unknown type\n");
+		panic("dosfs_read_vnode:  unknown type
+");
 
 	*_flags = 0;
 
@@ -829,7 +844,8 @@ dosfs_release_vnode(fs_volume* volume, fs_vnode* vnode, bool reenter)
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("inode %" B_PRIdINO " @ %p\n", fatNode->de_inode, bsdNode);
+	FUNCTION_START("inode %" B_PRIdINO " @ %p
+", fatNode->de_inode, bsdNode);
 
 	status_t status = B_OK;
 
@@ -873,7 +889,8 @@ dosfs_remove_vnode(fs_volume* volume, fs_vnode* vnode, bool reenter)
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("%" B_PRIu64 " @ %p\n", fatNode->de_inode, bsdNode);
+	FUNCTION_START("%" B_PRIu64 " @ %p
+", fatNode->de_inode, bsdNode);
 
 	WriteLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -937,7 +954,8 @@ dosfs_read_pages(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, co
 	msdosfsmount* fatVolume = reinterpret_cast<msdosfsmount*>(bsdVolume->mnt_data);
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	if (bsdNode->v_cache == NULL)
 		return B_BAD_VALUE;
@@ -988,7 +1006,8 @@ dosfs_write_pages(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, c
 	size_t bytesLeft = *_numBytes;
 	status_t status;
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	if (bsdNode->v_cache == NULL)
 		return B_BAD_VALUE;
@@ -1047,7 +1066,8 @@ dosfs_io(fs_volume* volume, fs_vnode* vnode, void* cookie, io_request* request)
 #ifndef FS_SHELL
 		notify_io_request(request, B_BAD_VALUE);
 #endif
-		panic("dosfs_io:  no file cache\n");
+		panic("dosfs_io:  no file cache
+");
 		RETURN_ERROR(B_BAD_VALUE);
 	}
 
@@ -1073,7 +1093,8 @@ dosfs_get_file_map(fs_volume* volume, fs_vnode* vnode, off_t position, size_t le
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("%" B_PRIuSIZE " bytes at %" B_PRIdOFF " (vnode id %" B_PRIdINO " at %p)\n",
+	FUNCTION_START("%" B_PRIuSIZE " bytes at %" B_PRIdOFF " (vnode id %" B_PRIdINO " at %p)
+",
 		length, position, fatNode->de_inode, bsdNode);
 
 	size_t max = *_count;
@@ -1179,7 +1200,8 @@ dosfs_fsync(fs_volume* volume, fs_vnode* vnode)
 {
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	return _dosfs_fsync(bsdNode);
 }
@@ -1196,7 +1218,8 @@ _dosfs_fsync(struct vnode* bsdNode)
 
 	status_t status = B_OK;
 	if (bsdNode->v_cache != NULL) {
-		PRINT("fsync:  file_cache_sync\n");
+		PRINT("fsync:  file_cache_sync
+");
 		status = file_cache_sync(bsdNode->v_cache);
 	} else {
 		status = sync_clusters(bsdNode);
@@ -1209,13 +1232,13 @@ _dosfs_fsync(struct vnode* bsdNode)
 	status_t externStatus = B_OK;
 
 	if ((bsdVolume->mnt_flag & MNT_SYNCHRONOUS) != 0) {
-		externStatus = block_cache_sync(bsdVolume->mnt_cache);
+		externStatus = unified_cache_sync(bsdVolume->mnt_cache);
 		if (externStatus != B_OK)
 			REPORT_ERROR(externStatus);
 	} else {
 		size_t fatBlocks = (fatVolume->pm_fatsize * fatVolume->pm_FATs) / DEV_BSIZE;
 		status_t fatStatus
-			= block_cache_sync_etc(bsdVolume->mnt_cache, fatVolume->pm_fatblk, fatBlocks);
+			= unified_cache_sync_etc(bsdVolume->mnt_cache, fatVolume->pm_fatblk, fatBlocks);
 		if (fatStatus != B_OK) {
 			externStatus = fatStatus;
 			REPORT_ERROR(fatStatus);
@@ -1239,7 +1262,8 @@ _dosfs_fsync(struct vnode* bsdNode)
 static status_t
 dosfs_link(fs_volume* volume, fs_vnode* dir, const char* name, fs_vnode* vnode)
 {
-	FUNCTION_START("attempt to assign %s to %p in directory %p\n", name, vnode, dir);
+	FUNCTION_START("attempt to assign %s to %p in directory %p
+", name, vnode, dir);
 
 	return B_UNSUPPORTED;
 }
@@ -1254,7 +1278,8 @@ dosfs_unlink(fs_volume* volume, fs_vnode* dir, const char* name)
 	vnode* bsdNode = NULL;
 	denode* fatNode = NULL;
 
-	FUNCTION_START("%s in directory @ %p\n", name, bsdDir);
+	FUNCTION_START("%s in directory @ %p
+", name, bsdDir);
 
 	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
 		return B_NOT_ALLOWED;
@@ -1364,7 +1389,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 		return B_OK;
 
 	if (is_filename_legal(toName) == false) {
-		INFORM("file name '%s' is not permitted in the FAT filesystem\n", toName);
+		INFORM("file name '%s' is not permitted in the FAT filesystem
+", toName);
 		return B_BAD_VALUE;
 	}
 
@@ -1405,7 +1431,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 	status = B_FROM_POSIX_ERROR(
 		msdosfs_lookup_ino(fromDirBsdNode, NULL, fromBsdName.Data(), &fromCluster, &fromOffset));
 	if (status != B_OK) {
-		INFORM("dosfs_rename:  file no longer present\n");
+		INFORM("dosfs_rename:  file no longer present
+");
 		RETURN_ERROR(status);
 	}
 
@@ -1453,7 +1480,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 	denode* toDirFatNode = reinterpret_cast<denode*>(toDirBsdNode->v_data);
 	denode* toFatNode = toBsdNode != NULL ? reinterpret_cast<denode*>(toBsdNode->v_data) : NULL;
 
-	PRINT("dosfs_rename: %" B_PRIu64 "/%s->%" B_PRIu64 "/%s\n", fromDirFatNode->de_inode, fromName,
+	PRINT("dosfs_rename: %" B_PRIu64 "/%s->%" B_PRIu64 "/%s
+", fromDirFatNode->de_inode, fromName,
 		toDirFatNode->de_inode, toName);
 
 	u_long toDirOffset = toDirFatNode->de_fndoffset;
@@ -1570,7 +1598,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 		// which would cause it to return before it has found empty slots for the new dir entry.
 		status = B_FROM_POSIX_ERROR(removede(fromDirFatNode, fromFatNode));
 		if (status != B_OK) {
-			INFORM("rename removede error:  %" B_PRIu64 "/%" B_PRIu64 ": %s\n",
+			INFORM("rename removede error:  %" B_PRIu64 "/%" B_PRIu64 ": %s
+",
 				fromDirFatNode->de_inode, fromFatNode->de_inode, strerror(status));
 			msdosfs_integrity_error(fatVolume);
 			RETURN_ERROR(status);
@@ -1623,7 +1652,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 	if (caseChange == false) {
 		status = B_FROM_POSIX_ERROR(removede(fromDirFatNode, fromFatNode));
 		if (status != B_OK) {
-			INFORM("rename removede error:  %" B_PRIu64 "/%" B_PRIu64 ": %s\n",
+			INFORM("rename removede error:  %" B_PRIu64 "/%" B_PRIu64 ": %s
+",
 				fromDirFatNode->de_inode, fromFatNode->de_inode, strerror(status));
 			msdosfs_integrity_error(fatVolume);
 			RETURN_ERROR(status);
@@ -1659,7 +1689,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 		status = B_FROM_POSIX_ERROR(
 			bread(fatVolume->pm_devvp, blockNumber, fatVolume->pm_bpcluster, NOCRED, &dotDotBuf));
 		if (status != B_OK) {
-			INFORM("rename read error:  %" B_PRIu64 "/%" B_PRIu64 ": %s\n",
+			INFORM("rename read error:  %" B_PRIu64 "/%" B_PRIu64 ": %s
+",
 				fromDirFatNode->de_inode, fromFatNode->de_inode, strerror(status));
 			msdosfs_integrity_error(fatVolume);
 			RETURN_ERROR(status);
@@ -1674,7 +1705,8 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 		if (DOINGASYNC(fromBsdNode)) {
 			bdwrite(dotDotBuf);
 		} else if ((status = B_FROM_POSIX_ERROR(bwrite(dotDotBuf))) != B_OK) {
-			INFORM("rename write error:  %" B_PRIu64 "/%" B_PRIu64 ":  %s\n",
+			INFORM("rename write error:  %" B_PRIu64 "/%" B_PRIu64 ":  %s
+",
 				fromDirFatNode->de_inode, fromFatNode->de_inode, strerror(status));
 			msdosfs_integrity_error(fatVolume);
 			RETURN_ERROR(status);
@@ -1698,7 +1730,7 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 
 	if ((bsdVolume->mnt_flag & MNT_SYNCHRONOUS) != 0) {
 		// sync the directory entry changes
-		status = block_cache_sync(bsdVolume->mnt_cache);
+		status = unified_cache_sync(bsdVolume->mnt_cache);
 	}
 
 	RETURN_ERROR(status);
@@ -1708,7 +1740,7 @@ dosfs_rename(fs_volume* volume, fs_vnode* fromDir, const char* fromName, fs_vnod
 static status_t
 dosfs_access(fs_volume* vol, fs_vnode* node, int mode)
 {
-	mount* bsdVolume = reinterpret_cast<mount*>(vol->private_volume);
+	mount* bsdVolume = reinterpret_cast<mount*>(vol->private_node);
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(node->private_node);
 
 	ReadLocker locker(bsdNode->v_vnlock->haikuRW);
@@ -1792,7 +1824,8 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("inode %" B_PRIu64 ", @ %p\n", fatNode->de_inode, bsdNode);
+	FUNCTION_START("inode %" B_PRIu64 ", @ %p
+", fatNode->de_inode, bsdNode);
 
 	WriteLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -1847,7 +1880,8 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 			RETURN_ERROR(status);
 
 		PRINT("dosfs_wstat: inode %" B_PRIu64 ", @ %p size change from %" B_PRIdOFF " to %" B_PRIu64
-			"\n", fatNode->de_inode, bsdNode, previousSize, stat->st_size);
+			"
+", fatNode->de_inode, bsdNode, previousSize, stat->st_size);
 
 		locker.Unlock();
 			// avoid deadlock with dosfs_io
@@ -1871,7 +1905,8 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 	if ((statMask & B_STAT_MODE) != 0) {
 		if (!isOwnerOrRoot)
 			RETURN_ERROR(B_NOT_ALLOWED);
-		PRINT("setting file mode to %o\n", stat->st_mode);
+		PRINT("setting file mode to %o
+", stat->st_mode);
 		if (bsdNode->v_type != VDIR) {
 			if ((stat->st_mode & S_IWUSR) == 0)
 				fatNode->de_Attributes |= ATTR_READONLY;
@@ -1886,19 +1921,22 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 	}
 
 	if ((statMask & B_STAT_UID) != 0) {
-		PRINT("cannot set UID at file level\n");
+		PRINT("cannot set UID at file level
+");
 		if (stat->st_uid != fatVolume->pm_uid)
 			status = B_BAD_VALUE;
 	}
 
 	if ((statMask & B_STAT_GID) != 0) {
-		PRINT("cannot set GID at file level\n");
+		PRINT("cannot set GID at file level
+");
 		if (stat->st_gid != fatVolume->pm_gid)
 			status = B_BAD_VALUE;
 	}
 
 	if ((statMask & B_STAT_ACCESS_TIME) != 0) {
-		PRINT("setting access time\n");
+		PRINT("setting access time
+");
 		fatNode->de_flag &= ~DE_ACCESS;
 		struct timespec atimGMT;
 		local_to_GMT(&stat->st_atim, &atimGMT);
@@ -1912,7 +1950,8 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 		// the user or root can do that or any user with write access
 		if (!isOwnerOrRoot && !hasWriteAccess)
 			RETURN_ERROR(B_NOT_ALLOWED);
-		PRINT("setting modification time\n");
+		PRINT("setting modification time
+");
 		fatNode->de_flag &= ~DE_UPDATE;
 		struct timespec mtimGMT;
 		local_to_GMT(&stat->st_mtim, &mtimGMT);
@@ -1926,7 +1965,8 @@ dosfs_wstat(fs_volume* volume, fs_vnode* vnode, const struct stat* stat, uint32 
 		// the user or root can do that or any user with write access
 		if (!isOwnerOrRoot && !hasWriteAccess)
 			RETURN_ERROR(B_NOT_ALLOWED);
-		PRINT("setting creation time\n");
+		PRINT("setting creation time
+");
 		struct timespec crtimGMT;
 		local_to_GMT(&stat->st_crtim, &crtimGMT);
 		timespec2fattime(&crtimGMT, 0, &fatNode->de_CDate, &fatNode->de_CTime, NULL);
@@ -1952,7 +1992,8 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 	vnode* bsdDir = reinterpret_cast<vnode*>(dir->private_node);
 	denode* fatDir = reinterpret_cast<denode*>(bsdDir->v_data);
 
-	FUNCTION_START("create %s in %" B_PRIu64 ", perms = %o openMode =%o\n", name, fatDir->de_inode,
+	FUNCTION_START("create %s in %" B_PRIu64 ", perms = %o openMode =%o
+", name, fatDir->de_inode,
 		perms, openMode);
 
 	ComponentName bsdName(ISLASTCN | MAKEENTRY, NOCRED, CREATE, 0, name);
@@ -1966,7 +2007,8 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 		RETURN_ERROR(B_UNSUPPORTED);
 
 	if (is_filename_legal(name) != true) {
-		INFORM("invalid FAT file name '%s'\n", name);
+		INFORM("invalid FAT file name '%s'
+", name);
 		RETURN_ERROR(B_UNSUPPORTED);
 	}
 
@@ -2046,7 +2088,8 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 	// If this is the FAT12/16 root directory and there is no space left we can't do anything.
 	// This is because the root directory can not change size.
 	if (fatDir->de_StartCluster == MSDOSFSROOT && fatDir->de_fndoffset >= fatDir->de_FileSize) {
-		INFORM("root directory is full and cannot be expanded\n");
+		INFORM("root directory is full and cannot be expanded
+");
 		return B_UNSUPPORTED;
 	}
 
@@ -2057,7 +2100,8 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 	if (status != B_OK)
 		return status;
 	if (is_shortname_legal(newDirentry.de_Name) == false) {
-		INFORM("invalid FAT short file name '%s'\n", name);
+		INFORM("invalid FAT short file name '%s'
+", name);
 		RETURN_ERROR(B_UNSUPPORTED);
 	}
 	newDirentry.de_Attributes = ATTR_ARCHIVE;
@@ -2106,7 +2150,8 @@ dosfs_create(fs_volume* volume, fs_vnode* dir, const char* name, int openMode, i
 	else if (bsdNode->v_type == VREG)
 		nodeType = S_IFREG;
 	else
-		panic("dosfs_create:  unknown node type\n");
+		panic("dosfs_create:  unknown node type
+");
 
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
@@ -2149,7 +2194,8 @@ dosfs_open(fs_volume* volume, fs_vnode* vnode, int openMode, void** _cookie)
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("node %" B_PRIu64 " @ %p, omode %o\n", fatNode->de_inode, bsdNode, openMode);
+	FUNCTION_START("node %" B_PRIu64 " @ %p, omode %o
+", fatNode->de_inode, bsdNode, openMode);
 
 	*_cookie = NULL;
 
@@ -2157,7 +2203,8 @@ dosfs_open(fs_volume* volume, fs_vnode* vnode, int openMode, void** _cookie)
 		RETURN_ERROR(B_UNSUPPORTED);
 
 	if ((openMode & O_CREAT) != 0) {
-		PRINT("dosfs_open called with O_CREAT. call dosfs_create instead!\n");
+		PRINT("dosfs_open called with O_CREAT. call dosfs_create instead!
+");
 		return B_BAD_VALUE;
 	}
 
@@ -2215,7 +2262,8 @@ dosfs_open(fs_volume* volume, fs_vnode* vnode, int openMode, void** _cookie)
 static status_t
 dosfs_close(fs_volume* volume, fs_vnode* vnode, void* cookie)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	return B_OK;
 }
@@ -2227,7 +2275,8 @@ dosfs_free_cookie(fs_volume* volume, fs_vnode* vnode, void* cookie)
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("%s (inode %" B_PRIu64 " at %p)\n", fatNode->de_Name, fatNode->de_inode,
+	FUNCTION_START("%s (inode %" B_PRIu64 " at %p)
+", fatNode->de_Name, fatNode->de_inode,
 		bsdNode);
 
 	ReadLocker readLocker;
@@ -2282,7 +2331,8 @@ dosfs_read(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, void* bu
 
 	FileCookie* fatCookie = reinterpret_cast<FileCookie*>(cookie);
 
-	FUNCTION_START("%" B_PRIuSIZE " bytes at %" B_PRIdOFF " (node %" B_PRIu64 " @ %p)\n", *length,
+	FUNCTION_START("%" B_PRIuSIZE " bytes at %" B_PRIdOFF " (node %" B_PRIu64 " @ %p)
+", *length,
 		pos, reinterpret_cast<denode*>(bsdNode->v_data)->de_inode, bsdNode);
 
 	if ((bsdNode->v_type & VDIR) != 0) {
@@ -2328,7 +2378,8 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
 	WriteLocker locker(bsdNode->v_vnlock->haikuRW);
 
 	FUNCTION_START("%" B_PRIuSIZE " bytes at %" B_PRIdOFF " from buffer at %p (vnode id %" B_PRIu64
-		")\n", *length, pos, buffer, fatNode->de_inode);
+		")
+", *length, pos, buffer, fatNode->de_inode);
 
 	size_t origSize = fatNode->de_FileSize;
 
@@ -2353,7 +2404,8 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
 	// if we write beyond the end of the file, extend it
 	status_t status = B_OK;
 	if (pos + (*length) > fatNode->de_FileSize) {
-		PRINT("dosfs_write:  extending %" B_PRIu64 " to %" B_PRIdOFF " > file size %lu\n",
+		PRINT("dosfs_write:  extending %" B_PRIu64 " to %" B_PRIdOFF " > file size %lu
+",
 			fatNode->de_inode, pos + *length, fatNode->de_FileSize);
 
 		bsdNode->v_resizing = true;
@@ -2365,7 +2417,8 @@ dosfs_write(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const v
 		if (status != B_OK)
 			RETURN_ERROR(status);
 
-		PRINT("setting file size to %lu (%lu clusters)\n", fatNode->de_FileSize,
+		PRINT("setting file size to %lu (%lu clusters)
+", fatNode->de_FileSize,
 			de_clcount(fatVolume, fatNode->de_FileSize));
 		ASSERT(fatNode->de_FileSize == static_cast<unsigned long>(pos) + *length);
 	}
@@ -2431,7 +2484,8 @@ dosfs_mkdir(fs_volume* volume, fs_vnode* parent, const char* name, int perms)
 	vnode* bsdParent = reinterpret_cast<vnode*>(parent->private_node);
 	denode* fatParent = reinterpret_cast<denode*>(bsdParent->v_data);
 
-	FUNCTION_START("%" B_PRIu64 "/%s (perm %o)\n", fatParent->de_inode, name, perms);
+	FUNCTION_START("%" B_PRIu64 "/%s (perm %o)
+", fatParent->de_inode, name, perms);
 
 	if (is_filename_legal(name) == false)
 		RETURN_ERROR(B_BAD_VALUE);
@@ -2472,7 +2526,8 @@ dosfs_mkdir(fs_volume* volume, fs_vnode* parent, const char* name, int perms)
 	// This is because the root directory can not change size.
 	if (fatParent->de_StartCluster == MSDOSFSROOT
 		&& fatParent->de_fndoffset >= fatParent->de_FileSize) {
-		INFORM("root directory is full and cannot be expanded\n");
+		INFORM("root directory is full and cannot be expanded
+");
 		return B_UNSUPPORTED;
 	}
 
@@ -2602,7 +2657,8 @@ dosfs_rmdir(fs_volume* volume, fs_vnode* parent, const char* name)
 	vnode* bsdParent = reinterpret_cast<vnode*>(parent->private_node);
 	denode* fatParent = reinterpret_cast<denode*>(bsdParent->v_data);
 
-	FUNCTION_START("%s in %" B_PRIu64 " at %p\n", name, fatParent->de_inode, bsdParent);
+	FUNCTION_START("%s in %" B_PRIu64 " at %p
+", name, fatParent->de_inode, bsdParent);
 
 	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
 		return B_NOT_ALLOWED;
@@ -2672,7 +2728,8 @@ dosfs_opendir(fs_volume* volume, fs_vnode* vnode, void** _cookie)
 {
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	ReadLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -2696,7 +2753,8 @@ dosfs_opendir(fs_volume* volume, fs_vnode* vnode, void** _cookie)
 status_t
 dosfs_closedir(fs_volume* volume, fs_vnode* vnode, void* cookie)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	return B_OK;
 }
@@ -2720,7 +2778,8 @@ dosfs_readdir(fs_volume* volume, fs_vnode* vnode, void* cookie, struct dirent* b
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	denode* fatNode = reinterpret_cast<denode*>(bsdNode->v_data);
 
-	FUNCTION_START("vp %p(%" B_PRIu64 "), bufferSize %lu, entries to be read %" B_PRIu32 "\n",
+	FUNCTION_START("vp %p(%" B_PRIu64 "), bufferSize %lu, entries to be read %" B_PRIu32 "
+",
 		bsdNode, fatNode->de_inode, bufferSize, *_num);
 
 	WriteLocker locker(bsdNode->v_vnlock->haikuRW);
@@ -2762,12 +2821,12 @@ dosfs_readdir(fs_volume* volume, fs_vnode* vnode, void* cookie, struct dirent* b
 			switch (*entryIndex) {
 				case 0:
 					dirBuf->d_name[0] = '.';
-					dirBuf->d_name[1] = '\0';
+					dirBuf->d_name[1] = ' ';
 					break;
 				case 1:
 					dirBuf->d_name[0] = '.';
 					dirBuf->d_name[1] = '.';
-					dirBuf->d_name[2] = '\0';
+					dirBuf->d_name[2] = ' ';
 					break;
 			}
 			dirBuf->d_reclen = GENERIC_DIRSIZ(dirBuf);
@@ -2939,12 +2998,14 @@ dosfs_readdir(fs_volume* volume, fs_vnode* vnode, void* cookie, struct dirent* b
 	}
 
 #ifdef DEBUG
-	PRINT("dosfs_readdir returning %" B_PRIu32 " dirents:\n", *_num);
+	PRINT("dosfs_readdir returning %" B_PRIu32 " dirents:
+", *_num);
 	uint8* printCursor = reinterpret_cast<uint8*>(buffer);
 	for (uint32 i = 0; i < *_num; i++) {
 		dirent* bufferSlot = reinterpret_cast<dirent*>(printCursor);
 		PRINT("buffer offset: %ld, d_dev: %" B_PRIdDEV ", d_ino: %" B_PRIdINO
-			", d_name: %s, d_reclen: %d\n", bufferSlot - buffer, bufferSlot->d_dev,
+			", d_name: %s, d_reclen: %d
+", bufferSlot - buffer, bufferSlot->d_dev,
 			bufferSlot->d_ino, bufferSlot->d_name, bufferSlot->d_reclen);
 		printCursor += bufferSlot->d_reclen;
 	}
@@ -2960,7 +3021,8 @@ dosfs_rewinddir(fs_volume* volume, fs_vnode* vnode, void* cookie)
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	DirCookie* fatCookie = reinterpret_cast<DirCookie*>(cookie);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	WriteLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -2976,7 +3038,8 @@ dosfs_open_attrdir(fs_volume* volume, fs_vnode* vnode, void** _cookie)
 	mount* bsdVolume = reinterpret_cast<mount*>(volume->private_volume);
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	if (_dosfs_access(bsdVolume, bsdNode, O_RDONLY) != B_OK)
 		RETURN_ERROR(B_NOT_ALLOWED);
@@ -2993,7 +3056,8 @@ dosfs_open_attrdir(fs_volume* volume, fs_vnode* vnode, void** _cookie)
 static status_t
 dosfs_close_attrdir(fs_volume* volume, fs_vnode* vnode, void* cookie)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	*reinterpret_cast<int32*>(cookie) = 1;
 
@@ -3004,7 +3068,8 @@ dosfs_close_attrdir(fs_volume* volume, fs_vnode* vnode, void* cookie)
 static status_t
 dosfs_free_attrdir_cookie(fs_volume* volume, fs_vnode* vnode, void* cookie)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	if (cookie == NULL)
 		return B_BAD_VALUE;
@@ -3022,7 +3087,8 @@ dosfs_read_attrdir(fs_volume* volume, fs_vnode* vnode, void* cookie, struct dire
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 	int32* fatCookie = reinterpret_cast<int32*>(cookie);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	*_num = 0;
 
@@ -3043,7 +3109,8 @@ dosfs_read_attrdir(fs_volume* volume, fs_vnode* vnode, void* cookie, struct dire
 static status_t
 dosfs_rewind_attrdir(fs_volume* volume, fs_vnode* vnode, void* cookie)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	if (cookie == NULL)
 		return B_BAD_VALUE;
@@ -3061,7 +3128,8 @@ dosfs_create_attr(fs_volume* volume, fs_vnode* vnode, const char* name, uint32 t
 	mount* bsdVolume = reinterpret_cast<mount*>(volume->private_volume);
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	ReadLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -3089,7 +3157,8 @@ dosfs_open_attr(fs_volume* volume, fs_vnode* vnode, const char* name, int openMo
 	mount* bsdVolume = reinterpret_cast<mount*>(volume->private_volume);
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	ReadLocker locker(bsdNode->v_vnlock->haikuRW);
 
@@ -3133,7 +3202,8 @@ dosfs_read_attr(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, voi
 {
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	AttrCookie* fatCookie = reinterpret_cast<AttrCookie*>(cookie);
 	if (fatCookie->fType != FAT_ATTR_MIME)
@@ -3168,7 +3238,8 @@ static status_t
 dosfs_write_attr(fs_volume* volume, fs_vnode* vnode, void* cookie, off_t pos, const void* buffer,
 	size_t* length)
 {
-	FUNCTION_START("%p\n", vnode->private_node);
+	FUNCTION_START("%p
+", vnode->private_node);
 
 	AttrCookie* fatCookie = reinterpret_cast<AttrCookie*>(cookie);
 	if (fatCookie->fType != FAT_ATTR_MIME)
@@ -3185,7 +3256,8 @@ dosfs_read_attr_stat(fs_volume* volume, fs_vnode* vnode, void* cookie, struct st
 {
 	struct vnode* bsdNode = reinterpret_cast<struct vnode*>(vnode->private_node);
 
-	FUNCTION_START("%p\n", bsdNode);
+	FUNCTION_START("%p
+", bsdNode);
 
 	AttrCookie* fatCookie = reinterpret_cast<AttrCookie*>(cookie);
 	if (fatCookie->fType != FAT_ATTR_MIME)
@@ -3238,7 +3310,7 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 	device->si_fd = -1;
 	device->si_refcount = 0;
 	device->si_mountpt = bsdVolume;
-	device->si_name[0] = '\0';
+	device->si_name[0] = ' ';
 	strncpy(device->si_device, deviceFile, B_PATH_NAME_LENGTH - 1);
 	device->si_mediasize = 0;
 	device->si_id = devID;
@@ -3252,7 +3324,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 	device->si_fd = open(deviceFile, O_RDONLY | O_NOCACHE);
 	if (device->si_fd < 0) {
 		if (errno == B_BUSY)
-			INFORM("FAT driver does not permit multiple mount points at the same time\n");
+			INFORM("FAT driver does not permit multiple mount points at the same time
+");
 		RETURN_ERROR(B_FROM_POSIX_ERROR(errno));
 	}
 
@@ -3264,7 +3337,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 		if (fstat(device->si_fd, &imageStat) >= 0 && S_ISREG(imageStat.st_mode)) {
 			uint8 bootSector[512];
 			if (read_pos(device->si_fd, 0, bootSector, 512) != 512) {
-				INFORM("bsd_device_init: bootsector read failure\n");
+				INFORM("bsd_device_init: bootsector read failure
+");
 				close(device->si_fd);
 				return B_ERROR;
 			}
@@ -3280,7 +3354,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 			fs_info parentInfo;
 			status_t status = fs_stat_dev(imageParentDev, &parentInfo);
 			if (status != 0) {
-				INFORM("bsd_device_init: fs_stat failure\n");
+				INFORM("bsd_device_init: fs_stat failure
+");
 				close(device->si_fd);
 				return B_FROM_POSIX_ERROR(status);
 			}
@@ -3297,7 +3372,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 	}
 
 	if (geometry->read_only) {
-		PRINT("%s is read-only\n", deviceFile);
+		PRINT("%s is read-only
+", deviceFile);
 		*_readOnly = true;
 	}
 
@@ -3305,7 +3381,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 		2ULL * 1000 * 1000 * 1000 * 1000) {
 		// the driver has not been tested on volumes > 2 TB
 		INFORM("The FAT driver does not currently support write access to volumes larger than 2 "
-			"TB.\n");
+			"TB.
+");
 		*_readOnly = true;
 	}
 
@@ -3313,7 +3390,8 @@ bsd_device_init(mount* bsdVolume, const dev_t devID, const char* deviceFile, cde
 		// FAT is compatible with 0x400, 0x800, and 0x1000 as well, but this driver has not
 		// been tested with those values
 		INFORM("The FAT driver does not currently support write access to volumes with > 1 block "
-			"per sector\n");
+			"per sector
+");
 		*_readOnly = true;
 	}
 
@@ -3569,7 +3647,8 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 			fatVolume->pm_fatmask = FAT32_MASK;
 			break;
 		default:
-			panic("invalid FAT type\n");
+			panic("invalid FAT type
+");
 	}
 
 	fatVolume->pm_uid = geteuid();
@@ -3586,7 +3665,8 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	fatVolume->pm_BlkPerSec = fatVolume->pm_BytesPerSec / DEV_BSIZE;
 	if (static_cast<off_t>(fatVolume->pm_HugeSectors * fatVolume->pm_BlkPerSec) * DEV_BSIZE
 		> dev->si_mediasize) {
-		INFORM("sector count exceeds media size (%" B_PRIdOFF " > %" B_PRIdOFF ")\n",
+		INFORM("sector count exceeds media size (%" B_PRIdOFF " > %" B_PRIdOFF ")
+",
 			static_cast<off_t>(fatVolume->pm_HugeSectors) * fatVolume->pm_BlkPerSec * DEV_BSIZE,
 			dev->si_mediasize);
 		return B_BAD_VALUE;
@@ -3597,7 +3677,8 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	// rather then the device-dependent sector size
 	fatVolume->pm_fsinfo *= fatVolume->pm_BlkPerSec;
 	if (static_cast<uint64>(fatVolume->pm_HugeSectors) * fatVolume->pm_BlkPerSec > UINT_MAX) {
-		INFORM("pm_HugeSectors overflows when converting from sectors to 512-byte blocks\n");
+		INFORM("pm_HugeSectors overflows when converting from sectors to 512-byte blocks
+");
 		return B_ERROR;
 	}
 	fatVolume->pm_HugeSectors *= fatVolume->pm_BlkPerSec;
@@ -3644,7 +3725,8 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	uint32 fatCapacity = (fatVolume->pm_fatsize / fatVolume->pm_fatmult) * fatVolume->pm_fatdiv;
 	if (fatVolume->pm_maxcluster >= fatCapacity) {
 		INFORM("number of clusters (%ld) exceeds FAT capacity (%" B_PRIu32 ") "
-			"(some clusters are inaccessible)\n", fatVolume->pm_maxcluster + 1, fatCapacity);
+			"(some clusters are inaccessible)
+", fatVolume->pm_maxcluster + 1, fatCapacity);
 		fatVolume->pm_maxcluster = fatCapacity - 1;
 	}
 
@@ -3676,13 +3758,15 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 
 	// check that the partition is large enough to contain the file system
 	if (dev->si_geometry == NULL) {
-		INFORM("si_geometry not initialized\n");
+		INFORM("si_geometry not initialized
+");
 		return B_ERROR;
 	}
 	uint32 fsSectors = fatVolume->pm_HugeSectors / fatVolume->pm_BlkPerSec;
 		// convert back from 512-byte blocks to sectors
 	if (fsSectors > dev->si_mediasize / dev->si_geometry->bytes_per_sector) {
-		INFORM("dosfs: volume extends past end of partition, mounting read-only\n");
+		INFORM("dosfs: volume extends past end of partition, mounting read-only
+");
 		readOnly = true;
 	}
 
@@ -3703,7 +3787,8 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 			fatVolume->pm_FATsecs * fatVolume->pm_FATs + minDataSectors;
 		if (fsSectors < minTotalSectors) {
 			INFORM("possible sector count overflow (%" B_PRIu32 " vs. %" B_PRIu64 "), mounting "
-				"read-only\n", fsSectors, minTotalSectors);
+				"read-only
+", fsSectors, minTotalSectors);
 			readOnly = true;
 		}
 	}
@@ -3718,13 +3803,13 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	// (e.g. dosfs_fsync, read_fsinfo, write_fsinfo, sync_clusters, discard_clusters,
 	// dosfs_write_fs_stat, and the functions defined in vfs_bio.c).
 	bsdVolume->mnt_cache
-		= block_cache_create(dev->si_fd, fatVolume->pm_HugeSectors, CACHED_BLOCK_SIZE, readOnly);
+		= unified_cache_create(dev->si_fd, fatVolume->pm_HugeSectors, CACHED_BLOCK_SIZE, readOnly);
 	if (bsdVolume->mnt_cache == NULL)
 		return B_ERROR;
 
 	status = read_fsinfo(fatVolume, devvp);
 	if (status != B_OK) {
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		return status;
 	}
 
@@ -3734,7 +3819,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	fatVolume->pm_inusemap = reinterpret_cast<u_int*>(malloc(
 		howmany(fatVolume->pm_maxcluster + 1, N_INUSEBITS) * sizeof(*fatVolume->pm_inusemap)));
 	if (fatVolume->pm_inusemap == NULL) {
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		bsdVolume->mnt_data = NULL;
 		RETURN_ERROR(B_NO_MEMORY);
 	}
@@ -3751,7 +3836,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	// from doing a separate disk read for each block
 	if (fatVolume->pm_FATsecs > 4) {
 		size_t fatBlocks = fatVolume->pm_FATsecs;
-		block_cache_prefetch(bsdVolume->mnt_cache, static_cast<off_t>(fatVolume->pm_fatblk),
+		unified_cache_prefetch(bsdVolume->mnt_cache, static_cast<off_t>(fatVolume->pm_fatblk),
 			&fatBlocks);
 	}
 
@@ -3761,7 +3846,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	rw_lock_write_unlock(&fatVolume->pm_fatlock.haikuRW);
 	if (status != 0) {
 		rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		bsdVolume->mnt_data = NULL;
 		RETURN_ERROR(status);
 	}
@@ -3778,7 +3863,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 		status = B_FROM_POSIX_ERROR(markvoldirty(fatVolume, 1));
 		if (status != B_OK) {
 			rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-			block_cache_delete(bsdVolume->mnt_cache, false);
+			unified_cache_delete(bsdVolume->mnt_cache, false);
 			bsdVolume->mnt_data = NULL;
 			RETURN_ERROR(status);
 		}
@@ -3788,7 +3873,7 @@ fat_volume_init(vnode* devvp, mount* bsdVolume, const uint64_t fatFlags, const c
 	status = iconv_init(fatVolume, oemPref);
 	if (status != B_OK) {
 		rw_lock_destroy(&fatVolume->pm_fatlock.haikuRW);
-		block_cache_delete(bsdVolume->mnt_cache, false);
+		unified_cache_delete(bsdVolume->mnt_cache, false);
 		bsdVolume->mnt_data = NULL;
 		RETURN_ERROR(status);
 	}
@@ -3840,7 +3925,7 @@ fat_volume_uninit(msdosfsmount* volume)
 		REPORT_ERROR(status);
 
 	if (volume->pm_mountp->mnt_cache != NULL) {
-		block_cache_delete(volume->pm_mountp->mnt_cache,
+		unified_cache_delete(volume->pm_mountp->mnt_cache,
 			(volume->pm_flags & MSDOSFSMNT_RONLY) == 0);
 		volume->pm_mountp->mnt_cache = NULL;
 	}
@@ -3897,7 +3982,8 @@ dos_std_ops(int32 op, ...)
 {
 	switch (op) {
 		case B_MODULE_INIT:
-			FUNCTION_START("B_MODULE_INIT\n");
+			FUNCTION_START("B_MODULE_INIT
+");
 #ifdef _KERNEL_MODE
 			add_debugger_command("fat", kprintf_volume, "dump a FAT private volume");
 			add_debugger_command("fat_node", kprintf_node, "dump a FAT private node");
@@ -3905,7 +3991,8 @@ dos_std_ops(int32 op, ...)
 			break;
 
 		case B_MODULE_UNINIT:
-			FUNCTION_START("B_MODULE_UNINIT\n");
+			FUNCTION_START("B_MODULE_UNINIT
+");
 #ifdef _KERNEL_MODE
 			remove_debugger_command("fat", kprintf_volume);
 			remove_debugger_command("fat_node", kprintf_node);

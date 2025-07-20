@@ -40,7 +40,7 @@ using std::nothrow;
 
 /*!
 	\class BlockCache
-	\brief Implements a cache for disk blocks.
+	rief Implements a cache for disk blocks.
 
 	The central methods are GetBlock() and PutBlock(). The former one
 	requests a certain block and the latter tells the cache, that the caller
@@ -69,16 +69,20 @@ BlockCache::~BlockCache()
 	fLock.Lock();
 	for (int32 i = 0; Block *block = fBlocks.ItemAt(i); i++) {
 		if (block->_GetRefCount() > 0) {
-			INFORM(("WARNING: block not put: %p (ref count: %" B_PRId32 ")\n",
+			INFORM(("WARNING: block not put: %p (ref count: %" B_PRId32 ")
+",
 				block, block->_GetRefCount()));
 		}
 		delete block;
 	}
-	PRINT(("statistics: %" B_PRId64 " block reads\n", fReads));
-	PRINT(("statistics: %" B_PRId64 " block gets\n", fBlockGets));
-	PRINT(("statistics: %" B_PRId64 " block releases\n", fBlockReleases));
+	PRINT(("statistics: %" B_PRId64 " block reads
+", fReads));
+	PRINT(("statistics: %" B_PRId64 " block gets
+", fBlockGets));
+	PRINT(("statistics: %" B_PRId64 " block releases
+", fBlockReleases));
 	if (fCacheHandle)
-		block_cache_delete(fCacheHandle, false);
+		unified_cache_delete(fCacheHandle, false);
 	fLock.Unlock();
 }
 
@@ -94,7 +98,7 @@ BlockCache::Init(int device, uint64 blockCount, uint32 blockSize)
 	fBlockCount = blockCount;
 
 	// init block cache
-	fCacheHandle = block_cache_create(fDevice, blockCount, blockSize, true);
+	fCacheHandle = unified_cache_create(fDevice, blockCount, blockSize, true);
 	if (!fCacheHandle)
 		return B_ERROR;
 
@@ -198,7 +202,7 @@ void *
 BlockCache::_GetBlock(off_t number) const
 {
 	fBlockGets++;	// statistics
-	return const_cast<void*>(block_cache_get(fCacheHandle, number));
+	return const_cast<void*>(unified_cache_get(fCacheHandle, number));
 }
 
 // _ReleaseBlock
@@ -206,6 +210,5 @@ void
 BlockCache::_ReleaseBlock(off_t number, void *data) const
 {
 	fBlockReleases++;	// statistics
-	block_cache_put(fCacheHandle, number);
+	unified_cache_put(fCacheHandle, number);
 }
-

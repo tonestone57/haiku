@@ -83,7 +83,7 @@ DeviceOpener::Open(int fd, int mode)
 void*
 DeviceOpener::InitCache(off_t numBlocks, uint32 blockSize)
 {
-	return fBlockCache = block_cache_create(fDevice, numBlocks, blockSize,
+	return fBlockCache = unified_cache_create(fDevice, numBlocks, blockSize,
 		IsReadOnly());
 }
 
@@ -94,7 +94,7 @@ DeviceOpener::RemoveCache(bool allowWrites)
 	if (fBlockCache == NULL)
 		return;
 
-	block_cache_delete(fBlockCache, allowWrites);
+	unified_cache_delete(fBlockCache, allowWrites);
 	fBlockCache = NULL;
 }
 

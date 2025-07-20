@@ -16,7 +16,7 @@
 extern fs_volume_ops gUDFVolumeOps;
 extern fs_vnode_ops gUDFVnodeOps;
 
-/*! \brief Creates an unmounted volume with the given id. */
+/*! rief Creates an unmounted volume with the given id. */
 Volume::Volume(fs_volume *fsVolume)
 	:
 	fBlockCache(NULL),
@@ -40,7 +40,7 @@ Volume::~Volume()
 }
 
 
-/*! \brief Attempts to mount the given device.
+/*! rief Attempts to mount the given device.
 
 	\param lenght The length of the device in number of blocks
 */
@@ -49,7 +49,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 	uint32 blockSize, uint32 flags)
 {
 	TRACE(("Volume::Mount: deviceName = `%s', offset = %" B_PRIdOFF ", length "
-		"= %" B_PRIdOFF ", blockSize: %" B_PRIu32 ", flags: %" B_PRIu32 "\n",
+		"= %" B_PRIdOFF ", blockSize: %" B_PRIu32 ", flags: %" B_PRIu32 "
+",
 		deviceName, offset, length, blockSize, flags));
 	if (!deviceName)
 		return B_BAD_VALUE;
@@ -60,7 +61,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 	// Open the device read only
 	int device = open(deviceName, O_RDONLY);
 	if (device < B_OK) {
-		TRACE_ERROR(("Volume::Mount: failed to open device = %s\n", deviceName));
+		TRACE_ERROR(("Volume::Mount: failed to open device = %s
+", deviceName));
 		return device;
 	}
 
@@ -74,7 +76,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 	error = fstat(device, &stat) < 0 ? B_ERROR : B_OK;
 	if (!error) {
 		if (stat.st_mode & S_IFREG && ioctl(device, IOCTL_FILE_UNCACHED_IO, NULL) < 0) {
-			DIE(("Unable to disable cache of underlying file system.\n"));
+			DIE(("Unable to disable cache of underlying file system.
+"));
 		}
 	}
 #endif
@@ -92,10 +95,12 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 
 	// Set up the block cache
 	if (!status) {
-		TRACE(("Volume::Mount: partition recognized\n"));
-		fBlockCache = block_cache_create(device, length, blockSize, IsReadOnly());
+		TRACE(("Volume::Mount: partition recognized
+"));
+		fBlockCache = unified_cache_create(device, length, blockSize, IsReadOnly());
 	} else {
-		TRACE_ERROR(("Volume::Mount: failed to recognize partition\n"));
+		TRACE_ERROR(("Volume::Mount: failed to recognize partition
+"));
 		return status;
 	}
 
@@ -112,10 +117,12 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 	{
 		uint8 *maps = logicalVolumeDescriptor.partition_maps();
 		partition_map_header *header = (partition_map_header *)(maps + offset);
-		TRACE(("Volume::Mount: partition map %d (type %d):\n", i,
+		TRACE(("Volume::Mount: partition map %d (type %d):
+", i,
 			header->type()));
 		if (header->type() == 1) {
-			TRACE(("Volume::Mount: map type -> physical\n"));
+			TRACE(("Volume::Mount: map type -> physical
+"));
 			physical_partition_map* map = (physical_partition_map *)header;
 			// Find the corresponding partition descriptor
 			partition_descriptor *descriptor = NULL;
@@ -134,7 +141,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 				status = partition ? B_OK : B_NO_MEMORY;
 				if (!status) {
 					TRACE(("Volume::Mount: adding PhysicalPartition(number: %d, "
-						"start: %" B_PRIu32 ", length: %" B_PRIu32 ")\n",
+						"start: %" B_PRIu32 ", length: %" B_PRIu32 ")
+",
 						map->partition_number(), descriptor->start(),
 						descriptor->length()));
 					status = _SetPartition(i, partition);
@@ -142,7 +150,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 						physicalCount++;
 				}
 			} else {
-				TRACE_ERROR(("Volume::Mount: no matching partition descriptor found!\n"));
+				TRACE_ERROR(("Volume::Mount: no matching partition descriptor found!
+"));
 				status = B_ERROR;
 			}
 		} else if (header->type() == 2) {
@@ -152,19 +161,22 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 			DUMP(typeId);
 			DUMP(kSparablePartitionMapId);
 			if (typeId.matches(kVirtualPartitionMapId)) {
-				TRACE(("map type: virtual\n"));
+				TRACE(("map type: virtual
+"));
 				virtual_partition_map* map =
 					reinterpret_cast<virtual_partition_map*>(header);
 				virtualCount++;
 				(void)map;	// kill the warning for now
 			} else if (typeId.matches(kSparablePartitionMapId)) {
-				TRACE(("map type: sparable\n"));
+				TRACE(("map type: sparable
+"));
 				sparable_partition_map* map =
 					reinterpret_cast<sparable_partition_map*>(header);
 				sparableCount++;
 				(void)map;	// kill the warning for now
 			} else if (typeId.matches(kMetadataPartitionMapId)) {
-				TRACE(("map type: metadata\n"));
+				TRACE(("map type: metadata
+"));
 				metadata_partition_map* map =
 					reinterpret_cast<metadata_partition_map*>(header);
 				
@@ -198,19 +210,23 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 							metadataCount++;
 					} else {
 						TRACE_ERROR(("Volume::Mount: metadata partition "
-							"creation failed! 0x%" B_PRIx32 "\n", status));
+							"creation failed! 0x%" B_PRIx32 "
+", status));
 					}
 				} else {
-					TRACE_ERROR(("Volume::Mount: no matching partition descriptor found!\n"));
+					TRACE_ERROR(("Volume::Mount: no matching partition descriptor found!
+"));
 					status = B_ERROR;
 				}
 			} else {
-				TRACE(("map type: unrecognized (`%.23s')\n",
+				TRACE(("map type: unrecognized (`%.23s')
+",
 				       typeId.identifier()));
 				status = B_ERROR;				
 			}
 		} else {
-			TRACE(("Invalid partition type %d found!\n", header->type()));
+			TRACE(("Invalid partition type %d found!
+", header->type()));
 			status = B_ERROR;
 		}			    
 		offset += header->length();
@@ -224,11 +240,16 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 		           && sparableCount == 0)
 		        ? B_OK : B_ERROR;
 		if (status) {
-			TRACE(("Invalid partition layout found:\n"));
-			TRACE(("  physical partitions: %d\n", physicalCount));
-			TRACE(("  virtual partitions:  %d\n", virtualCount));
-			TRACE(("  sparable partitions: %d\n", sparableCount));
-			TRACE(("  metadata partitions: %d\n", metadataCount));
+			TRACE(("Invalid partition layout found:
+"));
+			TRACE(("  physical partitions: %d
+", physicalCount));
+			TRACE(("  virtual partitions:  %d
+", virtualCount));
+			TRACE(("  sparable partitions: %d
+", sparableCount));
+			TRACE(("  metadata partitions: %d
+", metadataCount));
 		}		                 
 	}
 	
@@ -243,13 +264,15 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 		fBlockShift = blockShift;
 	}
 	TRACE(("Volume::Mount: device = %d, offset = %" B_PRIdOFF ", length = %"
-		B_PRIdOFF ", blockSize = %" B_PRIu32 ", blockShift = %" B_PRIu32 "\n",
+		B_PRIdOFF ", blockSize = %" B_PRIu32 ", blockShift = %" B_PRIu32 "
+",
 		device, offset, length, blockSize, blockShift));
 	// At this point we've found a valid set of volume descriptors and
 	// our partitions are all set up. We now need to investigate the file
 	// set descriptor pointed to by the logical volume descriptor.
 	if (!status) {
-		TRACE(("Volume::Mount: Partition has been set up\n"));
+		TRACE(("Volume::Mount: Partition has been set up
+"));
 		MemoryChunk chunk(logicalVolumeDescriptor.file_set_address().length());
 	
 		status = chunk.InitCheck();
@@ -267,7 +290,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 				if (bytesRead != ssize_t(blockSize)) {
 					status = B_IO_ERROR;
 					TRACE_ERROR(("read_pos(pos:%" B_PRIdOFF ", len:%" B_PRIu32
-						") failed with: 0x%lx\n", address, blockSize,
+						") failed with: 0x%lx
+", address, blockSize,
 						bytesRead));
 				}
 			}
@@ -288,14 +312,16 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 						return B_NO_MEMORY;
 				}
 
-				TRACE(("Volume::Mount: Root Node id = %" B_PRIdINO "\n",
+				TRACE(("Volume::Mount: Root Node id = %" B_PRIdINO "
+",
 					fRootIcb->Id()));
 				if (!status) {
 					status = publish_vnode(fFSVolume, fRootIcb->Id(), fRootIcb,
 						&gUDFVnodeOps, fRootIcb->Mode(), 0);
 					if (status != B_OK) {
 						TRACE_ERROR(("Error creating vnode for root icb! "
-						       "status = 0x%" B_PRIx32 ", `%s'\n", status,
+						       "status = 0x%" B_PRIx32 ", `%s'
+", status,
 						       strerror(status)));
 						// Clean up the icb we created, since _Unset()
 						// won't do this for us.
@@ -303,7 +329,8 @@ Volume::Mount(const char *deviceName, off_t offset, off_t length,
 						fRootIcb = NULL;
 					}
 					TRACE(("Volume::Mount: Root vnode published. Id = %"
-						B_PRIdINO "\n", fRootIcb->Id()));
+						B_PRIdINO "
+", fRootIcb->Id()));
 				}
 			}
 		}
@@ -328,13 +355,14 @@ Volume::Name() const {
 	return fName.Utf8();
 }
 
-/*! \brief Maps the given logical block to a physical block.
+/*! rief Maps the given logical block to a physical block.
 */
 status_t
 Volume::MapBlock(long_address address, off_t *mappedBlock)
 {
 	TRACE(("Volume::MapBlock: partition = %d, block = %" B_PRIu32
-		", mappedBlock = %p\n", address.partition(), address.block(),
+		", mappedBlock = %p
+", address.partition(), address.block(),
 		mappedBlock));
 	DEBUG_INIT_ETC("Volume", ("partition = %d, block = %" B_PRIu32
 		", mappedBlock = %p", address.partition(), address.block(),
@@ -349,7 +377,7 @@ Volume::MapBlock(long_address address, off_t *mappedBlock)
 	RETURN(error);
 }
 
-/*! \brief Unsets the volume and deletes any partitions.
+/*! rief Unsets the volume and deletes any partitions.
 
 	Does *not* delete the root icb object.
 */
@@ -362,7 +390,7 @@ Volume::_Unset()
 		_SetPartition(i, NULL);
 	fFSVolume->id = 0;
 	if (fDevice >= 0) {
-		block_cache_delete(fBlockCache, true);	
+		unified_cache_delete(fBlockCache, true);
 		close(fDevice);
 	}
 	fBlockCache = NULL;
@@ -375,7 +403,7 @@ Volume::_Unset()
 	fName.SetTo("", 0);
 }
 
-/*! \brief Sets the partition associated with the given number after
+/*! rief Sets the partition associated with the given number after
 	deleting any previously associated partition.
 	
 	\param number The partition number (should be the same as the index
@@ -394,7 +422,7 @@ Volume::_SetPartition(uint number, Partition *partition)
 	return error;
 }
 
-/*! \brief Returns the partition associated with the given number, or
+/*! rief Returns the partition associated with the given number, or
 	NULL if no such partition exists or the number is invalid.
 */
 Partition*

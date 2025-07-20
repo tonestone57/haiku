@@ -18,25 +18,12 @@
 #define BLOCK_CHANGED_IN_SUB		(2L << 16)
 #define BLOCK_CHANGED_IN_PREVIOUS	(4L << 16)
 
-#define TEST_BLOCKS(number, count) \
-	test_blocks(number, count, __LINE__)
-#define TEST_TRANSACTION(id, num, mainNum, subNum) \
-	test_transaction(id, num, mainNum, subNum, __LINE__)
+#define TEST_BLOCKS(number, count) 	test_blocks(number, count, __LINE__)
+#define TEST_TRANSACTION(id, num, mainNum, subNum) 	test_transaction(id, num, mainNum, subNum, __LINE__)
 
-#define TEST_BLOCK_DATA(block, number, type) \
-	if ((block)->type ## _data != NULL && gBlocks[(number)]. type == 0) \
-		error(line, "Block %lld: " #type " should be NULL!", (number)); \
-	if ((block)->type ## _data != NULL && gBlocks[(number)]. type != 0 \
-		&& *(int32*)(block)->type ## _data != gBlocks[(number)]. type) { \
-		error(line, "Block %lld: " #type " wrong (0x%lx should be 0x%lx)!", \
-			(number), *(int32*)(block)->type ## _data, \
-			gBlocks[(number)]. type); \
-	}
+#define TEST_BLOCK_DATA(block, number, type) 	if ((block)->type ## _data != NULL && gBlocks[(number)]. type == 0) 		error(line, "Block %lld: " #type " should be NULL!", (number)); 	if ((block)->type ## _data != NULL && gBlocks[(number)]. type != 0 		&& *(int32*)(block)->type ## _data != gBlocks[(number)]. type) { 		error(line, "Block %lld: " #type " wrong (0x%lx should be 0x%lx)!", 			(number), *(int32*)(block)->type ## _data, 			gBlocks[(number)]. type); 	}
 
-#define TEST_ASSERT(statement) \
-	if (!(statement)) { \
-		error(__LINE__, "Assertion failed: " #statement); \
-	}
+#define TEST_ASSERT(statement) 	if (!(statement)) { 		error(__LINE__, "Assertion failed: " #statement); 	}
 
 
 struct test_block {
@@ -57,7 +44,7 @@ struct test_block {
 };
 
 test_block gBlocks[MAX_BLOCKS];
-block_cache* gCache;
+unified_cache_ref* gCache;
 size_t gBlockSize;
 int32 gTest;
 int32 gSubTest;
@@ -86,7 +73,8 @@ error(int32 line, const char* format, ...)
 
 	fprintf(stderr, "ERROR IN TEST LINE %ld: ", line);
 	vfprintf(stderr, format, args);
-	fprintf(stderr, "\n");
+	fprintf(stderr, "
+");
 
 	va_end(args);
 
@@ -127,7 +115,8 @@ block_cache_write_pos(int fd, off_t offset, const void* buffer, size_t size)
 
 	gBlocks[index].written = true;
 	if (!gBlocks[index].write)
-		error(__LINE__, "Block %ld should not be written!\n", index);
+		error(__LINE__, "Block %ld should not be written!
+", index);
 
 	return size;
 }
@@ -141,7 +130,8 @@ block_cache_read_pos(int fd, off_t offset, void* buffer, size_t size)
 	memset(buffer, 0xcc, size);
 	reset_block(buffer, index);
 	if (!gBlocks[index].read)
-		error(__LINE__, "Block %ld should not be read!\n", index);
+		error(__LINE__, "Block %ld should not be read!
+", index);
 
 	return size;
 }
@@ -184,7 +174,8 @@ test_transaction(int32 id, int32 numBlocks, int32 numMainBlocks,
 void
 test_blocks(off_t number, int32 count, int32 line)
 {
-	printf("  %ld\n", gSubTest++);
+	printf("  %ld
+", gSubTest++);
 
 	for (int32 i = 0; i < count; i++, number++) {
 		MutexLocker locker(&gCache->lock);
@@ -230,7 +221,7 @@ stop_test(void)
 	TEST_BLOCKS(0, MAX_BLOCKS);
 
 //	dump_cache();
-	block_cache_delete(gCache, true);
+	unified_cache_delete(gCache, true);
 }
 
 
@@ -241,7 +232,7 @@ start_test(const char* name, bool init = true)
 		stop_test();
 
 		gBlockSize = 2048;
-		gCache = (block_cache*)block_cache_create(-1, MAX_BLOCKS, gBlockSize,
+		gCache = (unified_cache_ref*)unified_cache_create(-1, MAX_BLOCKS, gBlockSize,
 			false);
 
 		init_test_blocks();
@@ -251,7 +242,8 @@ start_test(const char* name, bool init = true)
 	gTestName = name;
 	gSubTest = 1;
 
-	printf("----------- Test %ld%s%s -----------\n", gTest,
+	printf("----------- Test %ld%s%s -----------
+", gTest,
 		gTestName[0] ? " - " : "", gTestName);
 }
 
@@ -269,9 +261,9 @@ basic_test_discard_in_sub(int32 id, bool touchedInMain)
 	gBlocks[1].original = gBlocks[1].current;
 	gBlocks[1].current |= BLOCK_CHANGED_IN_MAIN;
 
-	void* block = block_cache_get_writable(gCache, 1, id);
+	void* block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_MAIN);
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 1);
 
 	TEST_BLOCKS(0, 2);
 
@@ -280,10 +272,10 @@ basic_test_discard_in_sub(int32 id, bool touchedInMain)
 		gBlocks[2].is_dirty = true;
 		gBlocks[2].current |= BLOCK_CHANGED_IN_MAIN;
 
-		block = block_cache_get_empty(gCache, 2, id);
+		block = unified_cache_get_empty(gCache, 2, id);
 		reset_block(block, 2);
 		or_block(block, BLOCK_CHANGED_IN_MAIN);
-		block_cache_put(gCache, 2);
+		unified_cache_put(gCache, 2);
 	}
 
 	cache_start_sub_transaction(gCache, id);
@@ -301,13 +293,13 @@ basic_test_discard_in_sub(int32 id, bool touchedInMain)
 	if (touchedInMain)
 		gBlocks[2].parent = gBlocks[2].current;
 
-	block = block_cache_get_writable(gCache, 0, id);
+	block = unified_cache_get_writable(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_SUB);
-	block_cache_put(gCache, 0);
+	unified_cache_put(gCache, 0);
 
 	gBlocks[2].discard = true;
 
-	block_cache_discard(gCache, 2, 1);
+	unified_cache_discard(gCache, 2, 1);
 
 	TEST_BLOCKS(0, 2);
 
@@ -340,31 +332,31 @@ test_abort_transaction()
 	gBlocks[1].write = false;
 	gBlocks[1].is_dirty = true;
 
-	void* block = block_cache_get_empty(gCache, 0, id);
+	void* block = unified_cache_get_empty(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_PREVIOUS);
 	gBlocks[0].current = BLOCK_CHANGED_IN_PREVIOUS;
 
-	block = block_cache_get_writable(gCache, 1, id);
+	block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_PREVIOUS);
 	gBlocks[1].original = gBlocks[1].current;
 	gBlocks[1].current |= BLOCK_CHANGED_IN_PREVIOUS;
 
-	block_cache_put(gCache, 0);
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 0);
+	unified_cache_put(gCache, 1);
 
 	cache_end_transaction(gCache, id, NULL, NULL);
 	TEST_BLOCKS(0, 2);
 
 	id = cache_start_transaction(gCache);
 
-	block = block_cache_get_writable(gCache, 0, id);
+	block = unified_cache_get_writable(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_MAIN);
 
-	block = block_cache_get_writable(gCache, 1, id);
+	block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_MAIN);
 
-	block_cache_put(gCache, 0);
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 0);
+	unified_cache_put(gCache, 1);
 
 	cache_abort_transaction(gCache, id);
 
@@ -392,17 +384,17 @@ test_abort_sub_transaction()
 	gBlocks[1].write = false;
 	gBlocks[1].is_dirty = true;
 
-	void* block = block_cache_get_empty(gCache, 0, id);
+	void* block = unified_cache_get_empty(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_PREVIOUS);
 	gBlocks[0].current = BLOCK_CHANGED_IN_PREVIOUS;
 
-	block = block_cache_get_writable(gCache, 1, id);
+	block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_PREVIOUS);
 	gBlocks[1].original = gBlocks[1].current;
 	gBlocks[1].current |= BLOCK_CHANGED_IN_PREVIOUS;
 
-	block_cache_put(gCache, 0);
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 0);
+	unified_cache_put(gCache, 1);
 
 	cache_start_sub_transaction(gCache, id);
 
@@ -410,10 +402,10 @@ test_abort_sub_transaction()
 	gBlocks[1].parent = gBlocks[1].current;
 	TEST_BLOCKS(0, 2);
 
-	block = block_cache_get_writable(gCache, 1, id);
+	block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_MAIN);
 
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 1);
 
 	TEST_TRANSACTION(id, 2, 2, 1);
 	cache_abort_sub_transaction(gCache, id);
@@ -433,12 +425,12 @@ test_abort_sub_transaction()
 	gBlocks[1].present = true;
 	gBlocks[1].read = true;
 
-	block = block_cache_get_writable(gCache, 1, id);
+	block = unified_cache_get_writable(gCache, 1, id);
 	or_block(block, BLOCK_CHANGED_IN_PREVIOUS);
 	gBlocks[1].original = gBlocks[1].current;
 	gBlocks[1].current |= BLOCK_CHANGED_IN_PREVIOUS;
 
-	block_cache_put(gCache, 1);
+	unified_cache_put(gCache, 1);
 
 	gBlocks[1].is_dirty = true;
 	TEST_BLOCKS(1, 1);
@@ -449,11 +441,11 @@ test_abort_sub_transaction()
 
 	gBlocks[0].present = true;
 
-	block = block_cache_get_empty(gCache, 0, id);
+	block = unified_cache_get_empty(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_SUB);
 	gBlocks[0].current = BLOCK_CHANGED_IN_SUB;
 
-	block_cache_put(gCache, 0);
+	unified_cache_put(gCache, 0);
 
 	TEST_TRANSACTION(id, 2, 1, 1);
 	cache_abort_sub_transaction(gCache, id);
@@ -484,23 +476,23 @@ test_block_cache_discard()
 	gBlocks[0].present = true;
 	gBlocks[0].read = true;
 
-	block_cache_get(gCache, 0);
-	block_cache_put(gCache, 0);
+	unified_cache_get(gCache, 0);
+	unified_cache_put(gCache, 0);
 
 	gBlocks[1].present = true;
 	gBlocks[1].read = true;
 	gBlocks[1].write = true;
 
-	void* block = block_cache_get_writable(gCache, 1, id);
-	block_cache_put(gCache, 1);
+	void* block = unified_cache_get_writable(gCache, 1, id);
+	unified_cache_put(gCache, 1);
 
 	gBlocks[2].present = false;
 
 	TEST_TRANSACTION(id, 1, 0, 0);
-	block = block_cache_get_empty(gCache, 2, id);
+	block = unified_cache_get_empty(gCache, 2, id);
 	TEST_TRANSACTION(id, 2, 0, 0);
-	block_cache_discard(gCache, 2, 1);
-	block_cache_put(gCache, 2);
+	unified_cache_discard(gCache, 2, 1);
+	unified_cache_put(gCache, 2);
 
 	cache_end_transaction(gCache, id, NULL, NULL);
 	TEST_TRANSACTION(id, 1, 0, 0);
@@ -600,9 +592,9 @@ test_block_cache_discard()
 	gBlocks[0].original = gBlocks[0].current;
 	gBlocks[0].current |= BLOCK_CHANGED_IN_MAIN;
 
-	block = block_cache_get_writable(gCache, 0, id);
+	block = unified_cache_get_writable(gCache, 0, id);
 	or_block(block, BLOCK_CHANGED_IN_MAIN);
-	block_cache_put(gCache, 0);
+	unified_cache_put(gCache, 0);
 
 	basic_test_discard_in_sub(id, true);
 

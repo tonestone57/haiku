@@ -7,8 +7,7 @@ KernelMergeObject kernel_cache.o :
 	file_cache.cpp
 	file_map.cpp
 	vnode_store.cpp
-	UnifiedCache.cpp
-	SieveLRUCache.h
+	unified_cache.cpp
 
 	: $(TARGET_KERNEL_PIC_CCFLAGS)
 ;

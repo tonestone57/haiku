@@ -537,10 +537,8 @@ block_cache::FreeBlock(cached_block* block)
 	Free(block->current_data);
 
 	if (block->original_data != NULL || block->parent_data != NULL) {
-		fssh_panic("block_cache::FreeBlock(): %" FSSH_B_PRIdOFF
-			", original %p, parent %p
-", block->block_number,
-			block->original_data, block->parent_data);
+		fssh_panic("block_cache::FreeBlock(): %" FSSH_B_PRIdOFF ", original %p, parent %p\n",
+			block->block_number, block->original_data, block->parent_data);
 	}
 
 #ifdef DEBUG_CHANGED

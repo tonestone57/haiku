@@ -1,0 +1,14 @@
+Merge scheduler.o :
+	EevdfRunQueue.cpp
+	scheduler.cpp
+	scheduler_cpu.cpp
+	scheduler_load.cpp
+	scheduler_low_latency.cpp
+	scheduler_power_saving.cpp
+	scheduler_profiler.cpp
+	scheduler_team.cpp
+	scheduler_thread.cpp
+	scheduler_weights.cpp
+	scheduler_tracing.cpp
+	scheduling_analysis.cpp
+;

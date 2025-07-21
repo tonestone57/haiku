@@ -1,5 +1,6 @@
 /*
  * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
+ * Copyright 2023, Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  */
 #ifndef KERNEL_SCHEDULER_CPU_H
@@ -7,22 +8,39 @@
 
 
 #include <OS.h>
+#include <atomic>
+// #include <support/atomic.h> // For atomic_get64, etc. - Likely provided by OS.h or SupportDefs.h
+// If issues persist, consider <kernel/atomic.h> or arch-specific versions if available.
 
 #include <smp.h>
 #include <thread.h>
+#include <boot/kernel_args.h>
 #include <util/AutoLock.h>
 #include <util/Heap.h>
 #include <util/MinMaxHeap.h>
 
 #include <cpufreq.h>
 
-#include "RunQueue.h"
-#include "scheduler_common.h"
+#include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
+#include "EevdfRunQueue.h"
 #include "scheduler_profiler.h"
 
 
 namespace Scheduler {
+
+// Defines the type of a CPU core, relevant for heterogeneous systems (big.LITTLE)
+enum scheduler_core_type {
+	CORE_TYPE_UNKNOWN = 0,				// Type not determined or system is homogeneous (legacy default)
+	CORE_TYPE_UNIFORM_PERFORMANCE = 1,	// Known to be homogeneous performance cores
+	CORE_TYPE_LITTLE = 2,				// High-efficiency core
+	CORE_TYPE_BIG = 3					// High-performance core
+};
+
+// Nominal capacity reference for fPerformanceCapacity.
+// For example, a "standard" big core could be 1024.
+// LITTLE cores would be < 1024, future "bigger" big cores > 1024.
+#define SCHEDULER_NOMINAL_CAPACITY 1024
 
 
 class DebugDumper;
@@ -34,15 +52,6 @@ class CPUEntry;
 class CoreEntry;
 class PackageEntry;
 
-// The run queues. Holds the threads ready to run ordered by priority.
-// One queue per schedulable target per core. Additionally, each
-// logical processor has its sPinnedRunQueues used for scheduling
-// pinned threads.
-class ThreadRunQueue : public RunQueue<ThreadData, THREAD_MAX_SET_PRIORITY> {
-public:
-						void			Dump() const;
-};
-
 class CPUEntry : public HeapLinkImpl<CPUEntry, int32> {
 public:
 										CPUEntry();
@@ -51,43 +60,74 @@ public:
 
 	inline				int32			ID() const	{ return fCPUNumber; }
 	inline				CoreEntry*		Core() const	{ return fCore; }
+	inline				scheduler_core_type Type() const; // Forward to Core's type
+	inline				uint32			PerformanceCapacity() const; // Forward to Core's capacity
+	inline				uint32			EnergyEfficiency() const; // Forward to Core's efficiency
+
 
 						void			Start();
 						void			Stop();
 
-	inline				void			EnterScheduler();
-	inline				void			ExitScheduler();
-
-	inline				void			LockScheduler();
-	inline				void			UnlockScheduler();
-
 	inline				void			LockRunQueue();
 	inline				void			UnlockRunQueue();
 
-						void			PushFront(ThreadData* thread,
-											int32 priority);
-						void			PushBack(ThreadData* thread,
-											int32 priority);
-						void			Remove(ThreadData* thread);
-						ThreadData*		PeekThread() const;
+						void			AddThread(ThreadData* thread);
+						void			RemoveThread(ThreadData* thread);
+
+						ThreadData*		PeekEligibleNextThread();
+	inline				int32			GetTotalThreadCount() const { return fTotalThreadCount; }
+
+
 						ThreadData*		PeekIdleThread() const;
+						void			SetIdleThread(ThreadData* idleThread);
+
 
 						void			UpdatePriority(int32 priority);
 
+
 	inline				int32			GetLoad() const	{ return fLoad; }
 						void			ComputeLoad();
+	inline				float			GetInstantaneousLoad() const { return fInstantaneousLoad; }
+						void			UpdateInstantaneousLoad(bigtime_t now);
 
 						ThreadData*		ChooseNextThread(ThreadData* oldThread,
-											bool putAtBack);
+											bool putAtBack, int oldMlfqLevel);
 
 						void			TrackActivity(ThreadData* oldThreadData,
 											ThreadData* nextThreadData);
 
 						void			StartQuantumTimer(ThreadData* thread,
-											bool wasPreempted);
+											bool wasPreempted, bigtime_t dynamicQuantum);
 
 	static inline		CPUEntry*		GetCPU(int32 cpu);
 
+						int32			CalculateTotalIrqLoad() const;
+
+						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
+						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
+	inline				bigtime_t		MinVirtualRuntime();
+	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
+
+						bool			IsEffectivelyIdle() const; // Moved to .cpp
+
+	// Team Quota related
+	void				SetCurrentActiveTeam(TeamSchedulerData* teamData);
+	inline TeamSchedulerData* GetCurrentActiveTeam() const { return fCurrentActiveTeam; }
+
+	bigtime_t			fNextStealAttemptTime;
+	bigtime_t			fLastTimeTaskStolenFrom;
+
+public:
+						// Calculates a heap key for this CPU that is SMT-aware.
+						// The key reflects the CPU's own instantaneous load plus a penalty
+						// derived from the load of its active SMT siblings, using
+						// gSchedulerSMTConflictFactor. A higher key indicates a more
+						// desirable (less loaded from an SMT perspective) CPU.
+						// outEffectiveSmtLoad returns the calculated effective load (0.0 to ~1.0+).
+						int32			_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const;
+public:
+						bool			IsActiveSMT() const;
+						void			_UpdateMinVirtualRuntime();
 private:
 						void			_RequestPerformanceLevel(
 											ThreadData* threadData);
@@ -98,20 +138,36 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						rw_spinlock 	fSchedulerModeLock;
-
-						ThreadRunQueue	fRunQueue;
+						EevdfRunQueue	fEevdfRunQueue;
+						ThreadData*		fIdleThread;
+						bigtime_t		fMinVirtualRuntime;
 						spinlock		fQueueLock;
 
 						int32			fLoad;
+						float			fInstantaneousLoad;
+						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
+						bigtime_t		fInstLoadLastActiveTimeSnapshot;
+						int32			fTotalThreadCount;
+						std::atomic<int32> fEevdfRunQueueTaskCount;
+
 
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
-
 						bool			fUpdateLoadEvent;
+	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
 
 						friend class DebugDumper;
+						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
+
+public:
+	inline				int32			GetEevdfRunQueueTaskCount() const { return fEevdfRunQueueTaskCount.load(std::memory_order_relaxed); }
 } CACHE_LINE_ALIGN;
+
+
+CPUEntry* SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 irqLoadToMove,
+	float irqTargetFactor, float smtConflictFactor,
+	int32 baseMaxIrqLoadFromMode);
+
 
 class CPUPriorityHeap : public Heap<CPUEntry, int32> {
 public:
@@ -140,23 +196,15 @@ public:
 
 	inline				CPUPriorityHeap*	CPUHeap();
 
-	inline				int32			ThreadCount() const;
-
-	inline				void			LockRunQueue();
-	inline				void			UnlockRunQueue();
-
-						void			PushFront(ThreadData* thread,
-											int32 priority);
-						void			PushBack(ThreadData* thread,
-											int32 priority);
-						void			Remove(ThreadData* thread);
-						ThreadData*		PeekThread() const;
+						int32			ThreadCount();
 
 	inline				bigtime_t		GetActiveTime() const;
 	inline				void			IncreaseActiveTime(
 											bigtime_t activeTime);
 
 	inline				int32			GetLoad() const;
+	inline				float			GetInstantaneousLoad() const { return fInstantaneousLoad; }
+	inline				void			UpdateInstantaneousLoad();
 	inline				uint32			LoadMeasurementEpoch() const
 											{ return fLoadMeasurementEpoch; }
 
@@ -175,6 +223,16 @@ public:
 
 	static inline		CoreEntry*		GetCore(int32 cpu);
 
+	inline				bool			IsDefunct() const { return fDefunct; }
+
+	// Called by a CPUEntry when its instantaneous load changes.
+	// This method is responsible for ensuring that the SMT-aware heap keys
+	// of all CPUs on this core are updated, as a load change on one SMT sibling
+	// affects the SMT-aware desirability (and thus heap key) of other siblings.
+	// It iterates all CPUs on this core and triggers a recalculation of their
+	// SMT-aware heap key and updates their position in fCPUHeap.
+						void			CpuInstantaneousLoadChanged(CPUEntry* changedCpu);
+
 private:
 						void			_UpdateLoad(bool forceUpdate = false);
 
@@ -186,26 +244,55 @@ private:
 
 						int32			fCPUCount;
 						CPUSet			fCPUSet;
-						int32			fIdleCPUCount;
+						int32			fIdleCPUCount; // Protected by fCPULock
 						CPUPriorityHeap	fCPUHeap;
 						spinlock		fCPULock;
-
-						int32			fThreadCount;
-						ThreadRunQueue	fRunQueue;
-						spinlock		fQueueLock;
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
 
 						int32			fLoad;
+						float			fInstantaneousLoad;
 						int32			fCurrentLoad;
 						uint32			fLoadMeasurementEpoch;
 						bool			fHighLoad;
 						bigtime_t		fLastLoadUpdate;
+						bool			fDefunct;
 						rw_spinlock		fLoadLock;
+
+						// big.LITTLE / Heterogeneous properties
+private: // Make these private and add public getters
+						scheduler_core_type fCoreType;
+						uint32			fPerformanceCapacity;	// Relative to SCHEDULER_NOMINAL_CAPACITY
+						uint32			fEnergyEfficiency;		// Abstract scale, higher is more efficient
+public:
+	inline				scheduler_core_type Type() const { return fCoreType; }
+	inline				uint32			PerformanceCapacity() const { return fPerformanceCapacity; }
+	inline				uint32			EnergyEfficiency() const { return fEnergyEfficiency; }
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
+
+// Inline getters for CPUEntry to access its Core's heterogeneous properties
+// Definition needs to be after CoreEntry is fully defined.
+inline scheduler_core_type CPUEntry::Type() const {
+	// SCHEDULER_ENTER_FUNCTION(); // Optional for such simple forwarding
+	ASSERT(fCore != NULL);
+	return fCore->Type(); // Use the new public getter in CoreEntry
+}
+
+inline uint32 CPUEntry::PerformanceCapacity() const {
+	// SCHEDULER_ENTER_FUNCTION();
+	ASSERT(fCore != NULL);
+	return fCore->PerformanceCapacity(); // Use public getter
+}
+
+inline uint32 CPUEntry::EnergyEfficiency() const {
+	// SCHEDULER_ENTER_FUNCTION();
+	ASSERT(fCore != NULL);
+	return fCore->EnergyEfficiency(); // Use public getter
+}
+
 
 class CoreLoadHeap : public MinMaxHeap<CoreEntry, int32> {
 public:
@@ -215,20 +302,12 @@ public:
 						void			Dump();
 };
 
-// gPackageEntries are used to decide which core should be woken up from the
-// idle state. When aiming for performance we should use as many packages as
-// possible with as little cores active in each package as possible (so that the
-// package can enter any boost mode if it has one and the active core have more
-// of the shared cache for themselves. If power saving is the main priority we
-// should keep active cores on as little packages as possible (so that other
-// packages can go to the deep state of sleep). The heap stores only packages
-// with at least one core active and one core idle. The packages with all cores
-// idle are stored in gPackageIdleList (in LIFO manner).
 class PackageEntry : public DoublyLinkedListLinkImpl<PackageEntry> {
 public:
 											PackageEntry();
 
 						void				Init(int32 id);
+						void				_AddConfiguredCore();
 
 	inline				void				CoreGoesIdle(CoreEntry* core);
 	inline				void				CoreWakesUp(CoreEntry* core);
@@ -241,62 +320,56 @@ public:
 	static inline		PackageEntry*		GetMostIdlePackage();
 	static inline		PackageEntry*		GetLeastIdlePackage();
 
+	inline				int32				PackageID() const { return fPackageID; }
+	inline				int32				IdleCoreCountNoLock() const { return fIdleCoreCount; }
+	inline				int32				CoreCountNoLock() const { return fCoreCount; }
+	inline				rw_spinlock&		CoreLock() { return fCoreLock; }
+	inline const		rw_spinlock&		CoreLock() const { return fCoreLock; }
+
 private:
 						int32				fPackageID;
 
 						DoublyLinkedList<CoreEntry>	fIdleCores;
 						int32				fIdleCoreCount;
 						int32				fCoreCount;
-						rw_spinlock			fCoreLock;
+						mutable rw_spinlock	fCoreLock;
 
 						friend class DebugDumper;
 } CACHE_LINE_ALIGN;
+
 typedef DoublyLinkedList<PackageEntry> IdlePackageList;
+
+
+inline CoreEntry*
+PackageEntry::GetIdleCore(int32 index /* = 0 */) const
+{
+	SCHEDULER_ENTER_FUNCTION();
+	ReadSpinLocker lock(fCoreLock);
+	CoreEntry* element = fIdleCores.Last();
+	for (int32 i = 0; element != NULL && i < index; i++)
+		element = fIdleCores.GetPrevious(element);
+	return element;
+}
+
 
 extern CPUEntry* gCPUEntries;
 
 extern CoreEntry* gCoreEntries;
-extern CoreLoadHeap gCoreLoadHeap;
-extern CoreLoadHeap gCoreHighLoadHeap;
-extern rw_spinlock gCoreHeapsLock;
 extern int32 gCoreCount;
+
+const int32 kNumCoreLoadHeapShards = 8;
+extern CoreLoadHeap gCoreLoadHeapShards[kNumCoreLoadHeapShards];
+extern CoreLoadHeap gCoreHighLoadHeapShards[kNumCoreLoadHeapShards];
+extern rw_spinlock gCoreHeapsShardLock[kNumCoreLoadHeapShards];
 
 extern PackageEntry* gPackageEntries;
 extern IdlePackageList gIdlePackageList;
 extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
+extern int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
-
-inline void
-CPUEntry::EnterScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	acquire_read_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::ExitScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	release_read_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::LockScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	acquire_write_spinlock(&fSchedulerModeLock);
-}
-
-
-inline void
-CPUEntry::UnlockScheduler()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	release_write_spinlock(&fSchedulerModeLock);
-}
+int32 scheduler_reset_team_quotas_event(timer*);
+int32 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
 
 
 inline void
@@ -315,11 +388,27 @@ CPUEntry::UnlockRunQueue()
 }
 
 
+inline bigtime_t
+CPUEntry::MinVirtualRuntime()
+{
+	InterruptsSpinLocker _(fQueueLock);
+	_UpdateMinVirtualRuntime();
+	return fMinVirtualRuntime;
+}
+
+
 /* static */ inline CPUEntry*
 CPUEntry::GetCPU(int32 cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	return &gCPUEntries[cpu];
+}
+
+
+inline bigtime_t
+CPUEntry::GetCachedMinVirtualRuntime() const
+{
+	return atomic_get64(const_cast<int64*>(&fMinVirtualRuntime));
 }
 
 
@@ -344,30 +433,6 @@ CoreEntry::CPUHeap()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	return &fCPUHeap;
-}
-
-
-inline int32
-CoreEntry::ThreadCount() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	return fThreadCount + fCPUCount - fIdleCPUCount;
-}
-
-
-inline void
-CoreEntry::LockRunQueue()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	acquire_spinlock(&fQueueLock);
-}
-
-
-inline void
-CoreEntry::UnlockRunQueue()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	release_spinlock(&fQueueLock);
 }
 
 
@@ -399,9 +464,15 @@ inline int32
 CoreEntry::GetLoad() const
 {
 	SCHEDULER_ENTER_FUNCTION();
-
-	ASSERT(fCPUCount > 0);
-	return std::min(fLoad / fCPUCount, kMaxLoad);
+	int32 activeCPUsOnCore = 0;
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		if (fCPUSet.GetBit(i) && gCPUEnabled.GetBit(i)) {
+			activeCPUsOnCore++;
+		}
+	}
+	if (activeCPUsOnCore == 0)
+		return 0;
+	return std::min(fLoad / activeCPUsOnCore, kMaxLoad);
 }
 
 
@@ -413,11 +484,10 @@ CoreEntry::AddLoad(int32 load, uint32 epoch, bool updateLoad)
 	ASSERT(gTrackCoreLoad);
 	ASSERT(load >= 0 && load <= kMaxLoad);
 
-	ReadSpinLocker locker(fLoadLock);
+	WriteSpinLocker locker(fLoadLock);
 	atomic_add(&fCurrentLoad, load);
 	if (fLoadMeasurementEpoch != epoch)
 		atomic_add(&fLoad, load);
-	locker.Unlock();
 
 	if (updateLoad)
 		_UpdateLoad(true);
@@ -432,15 +502,20 @@ CoreEntry::RemoveLoad(int32 load, bool force)
 	ASSERT(gTrackCoreLoad);
 	ASSERT(load >= 0 && load <= kMaxLoad);
 
-	ReadSpinLocker locker(fLoadLock);
-	atomic_add(&fCurrentLoad, -load);
-	if (force) {
-		atomic_add(&fLoad, -load);
-		locker.Unlock();
-
-		_UpdateLoad(true);
+	uint32 epochToReturn;
+	{
+		WriteSpinLocker locker(fLoadLock);
+		atomic_add(&fCurrentLoad, -load);
+		if (force) {
+			atomic_add(&fLoad, -load);
+		}
+		epochToReturn = fLoadMeasurementEpoch;
 	}
-	return fLoadMeasurementEpoch;
+
+	if (force)
+		_UpdateLoad(true);
+
+	return epochToReturn;
 }
 
 
@@ -450,10 +525,9 @@ CoreEntry::ChangeLoad(int32 delta)
 	SCHEDULER_ENTER_FUNCTION();
 
 	ASSERT(gTrackCoreLoad);
-	ASSERT(delta >= -kMaxLoad && delta <= kMaxLoad);
 
 	if (delta != 0) {
-		ReadSpinLocker locker(fLoadLock);
+		WriteSpinLocker locker(fLoadLock);
 		atomic_add(&fCurrentLoad, delta);
 		atomic_add(&fLoad, delta);
 	}
@@ -462,28 +536,31 @@ CoreEntry::ChangeLoad(int32 delta)
 }
 
 
-/* PackageEntry::CoreGoesIdle and PackageEntry::CoreWakesUp have to be defined
-   before CoreEntry::CPUGoesIdle and CoreEntry::CPUWakesUp. If they weren't
-   GCC2 wouldn't inline them as, apparently, it doesn't do enough optimization
-   passes.
-*/
 inline void
 PackageEntry::CoreGoesIdle(CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
+	WriteSpinLocker lock(fCoreLock);
+	ASSERT(fIdleCoreCount >= 0 && fIdleCoreCount <= fCoreCount);
 
-	WriteSpinLocker _(fCoreLock);
+	if (fIdleCores.Contains(core)) {
+		if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
+			WriteSpinLocker listLock(gIdlePackageLock);
+			if (!gIdlePackageList.Contains(this))
+				gIdlePackageList.Add(this);
+		}
+		return;
+	}
 
-	ASSERT(fIdleCoreCount >= 0);
 	ASSERT(fIdleCoreCount < fCoreCount);
 
-	fIdleCoreCount++;
 	fIdleCores.Add(core);
+	fIdleCoreCount++;
 
-	if (fIdleCoreCount == fCoreCount) {
-		// package goes idle
-		WriteSpinLocker _(gIdlePackageLock);
-		gIdlePackageList.Add(this);
+	if (fIdleCoreCount == fCoreCount && fCoreCount > 0) {
+		WriteSpinLocker listLock(gIdlePackageLock);
+		if (!gIdlePackageList.Contains(this))
+			gIdlePackageList.Add(this);
 	}
 }
 
@@ -492,19 +569,16 @@ inline void
 PackageEntry::CoreWakesUp(CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-
+	bool packageWasFullyIdle = (fIdleCoreCount == fCoreCount && fCoreCount > 0);
 	WriteSpinLocker _(fCoreLock);
-
 	ASSERT(fIdleCoreCount > 0);
 	ASSERT(fIdleCoreCount <= fCoreCount);
-
-	fIdleCoreCount--;
 	fIdleCores.Remove(core);
-
-	if (fIdleCoreCount + 1 == fCoreCount) {
-		// package wakes up
-		WriteSpinLocker _(gIdlePackageLock);
-		gIdlePackageList.Remove(this);
+	fIdleCoreCount--;
+	if (packageWasFullyIdle && fIdleCoreCount < fCoreCount) {
+		WriteSpinLocker listLock(gIdlePackageLock);
+		if (gIdlePackageList.Contains(this))
+			gIdlePackageList.Remove(this);
 	}
 }
 
@@ -514,9 +588,8 @@ CoreEntry::CPUGoesIdle(CPUEntry* /* cpu */)
 {
 	if (gSingleCore)
 		return;
-
 	ASSERT(fIdleCPUCount < fCPUCount);
-	if (++fIdleCPUCount == fCPUCount)
+	if (atomic_add(&fIdleCPUCount, 1) + 1 == fCPUCount)
 		fPackage->CoreGoesIdle(this);
 }
 
@@ -526,10 +599,11 @@ CoreEntry::CPUWakesUp(CPUEntry* /* cpu */)
 {
 	if (gSingleCore)
 		return;
-
 	ASSERT(fIdleCPUCount > 0);
-	if (fIdleCPUCount-- == fCPUCount)
+	if (fIdleCPUCount == fCPUCount) {
 		fPackage->CoreWakesUp(this);
+	}
+	atomic_add(&fIdleCPUCount, -1);
 }
 
 
@@ -537,19 +611,8 @@ CoreEntry::CPUWakesUp(CPUEntry* /* cpu */)
 CoreEntry::GetCore(int32 cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
+	ASSERT(cpu >= 0 && cpu < smp_get_num_cpus());
 	return gCPUEntries[cpu].Core();
-}
-
-
-inline CoreEntry*
-PackageEntry::GetIdleCore(int32 index) const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	CoreEntry* element = fIdleCores.Last();
-	for (int32 i = 0; element != NULL && i < index; i++)
-		element = fIdleCores.GetPrevious(element);
-
-	return element;
 }
 
 
@@ -557,17 +620,17 @@ PackageEntry::GetIdleCore(int32 index) const
 PackageEntry::GetMostIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-
-	PackageEntry* current = &gPackageEntries[0];
-	for (int32 i = 1; i < gPackageCount; i++) {
-		if (gPackageEntries[i].fIdleCoreCount > current->fIdleCoreCount)
-			current = &gPackageEntries[i];
+	PackageEntry* mostIdle = NULL;
+	int32 maxIdleCores = -1;
+	for (int32 i = 0; i < gPackageCount; i++) {
+		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);
+		if (gPackageEntries[i].fIdleCoreCount > maxIdleCores) {
+			maxIdleCores = gPackageEntries[i].fIdleCoreCount;
+			mostIdle = &gPackageEntries[i];
+		}
 	}
-
-	if (current->fIdleCoreCount == 0)
-		return NULL;
-
-	return current;
+	if (maxIdleCores < 0) return NULL;
+	return mostIdle;
 }
 
 
@@ -575,20 +638,18 @@ PackageEntry::GetMostIdlePackage()
 PackageEntry::GetLeastIdlePackage()
 {
 	SCHEDULER_ENTER_FUNCTION();
-
-	PackageEntry* package = NULL;
+	ReadSpinLocker lock(gIdlePackageLock);
+	PackageEntry* leastIdleWithIdleCores = NULL;
+	int32 minIdleCores = 0x7fffffff;
 
 	for (int32 i = 0; i < gPackageCount; i++) {
-		PackageEntry* current = &gPackageEntries[i];
-
-		int32 currentIdleCoreCount = current->fIdleCoreCount;
-		if (currentIdleCoreCount != 0 && (package == NULL
-				|| currentIdleCoreCount < package->fIdleCoreCount)) {
-			package = current;
+		ReadSpinLocker coreLock(gPackageEntries[i].fCoreLock);
+		if (gPackageEntries[i].fIdleCoreCount > 0 && gPackageEntries[i].fIdleCoreCount < minIdleCores) {
+			minIdleCores = gPackageEntries[i].fIdleCoreCount;
+			leastIdleWithIdleCores = &gPackageEntries[i];
 		}
 	}
-
-	return package;
+	return leastIdleWithIdleCores;
 }
 
 
@@ -596,4 +657,3 @@ PackageEntry::GetLeastIdlePackage()
 
 
 #endif	// KERNEL_SCHEDULER_CPU_H
-

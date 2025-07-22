@@ -7,6 +7,7 @@
 
 
 #include <OS.h>
+#include <scheduler_defs.h>
 
 
 const bigtime_t kLoadMeasureInterval = 1000;

@@ -1739,36 +1739,17 @@ scheduler_irq_balance_event(timer* /* unused */)
 	}
 	SCHEDULER_ENTER_FUNCTION();
 	TRACE_SCHED_IRQ("Proactive IRQ Balance Check running\n");
+
+	// Find the most and least loaded CPUs
 	Scheduler::CPUEntry* sourceCpuMaxIrq = NULL;
 	Scheduler::CPUEntry* targetCandidateCpuMinIrq = NULL;
 	int32 maxIrqLoadFound = -1;
 	int32 minIrqLoadFound = 0x7fffffff;
-	int32 enabledCpuCount = 0;
-
-	CoreEntry* preferredTargetCoreForPS = NULL;
-	if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && Scheduler::sSmallTaskCore != NULL) {
-		CoreEntry* stc = Scheduler::sSmallTaskCore;
-		bool stcHasEnabledCpu = false;
-		if (!stc->IsDefunct()) {
-			CPUSet stcCPUs = stc->CPUMask();
-			for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
-				if (stcCPUs.GetBit(i) && gCPUEnabled.GetBit(i)) {
-					stcHasEnabledCpu = true;
-					break;
-				}
-			}
-		}
-		if (stcHasEnabledCpu) {
-			preferredTargetCoreForPS = stc;
-			TRACE_SCHED_IRQ("IRQBalance(PS): Preferred target core for IRQ consolidation is STC %" B_PRId32 " (Type %d)\n",
-				stc->ID(), stc->Type());
-		}
-	}
 
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!gCPUEnabled.GetBit(i))
 			continue;
-		enabledCpuCount++;
+
 		Scheduler::CPUEntry* currentCpu = Scheduler::CPUEntry::GetCPU(i);
 		int32 currentTotalIrqLoad = currentCpu->CalculateTotalIrqLoad();
 
@@ -1777,37 +1758,10 @@ scheduler_irq_balance_event(timer* /* unused */)
 			sourceCpuMaxIrq = currentCpu;
 		}
 
-		bool isPreferredTarget = (preferredTargetCoreForPS != NULL && currentCpu->Core() == preferredTargetCoreForPS);
-		int32 effectiveLoadForComparison = currentTotalIrqLoad;
-		if (isPreferredTarget) {
-			effectiveLoadForComparison -= kMaxLoad / 4;
-			if (effectiveLoadForComparison < 0) effectiveLoadForComparison = 0;
-		} else if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && preferredTargetCoreForPS != NULL && currentCpu->Core()->Type() != CORE_TYPE_LITTLE) {
-			effectiveLoadForComparison += kMaxLoad / 4;
+		if (targetCandidateCpuMinIrq == NULL || currentTotalIrqLoad < minIrqLoadFound) {
+			targetCandidateCpuMinIrq = currentCpu;
+			minIrqLoadFound = currentTotalIrqLoad;
 		}
-
-		if (targetCandidateCpuMinIrq == NULL || effectiveLoadForComparison < minIrqLoadFound) {
-			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) {
-				minIrqLoadFound = effectiveLoadForComparison;
-				targetCandidateCpuMinIrq = currentCpu;
-			}
-		}
-	}
-
-	if (targetCandidateCpuMinIrq == NULL || (targetCandidateCpuMinIrq == sourceCpuMaxIrq && enabledCpuCount > 1)) {
-		minIrqLoadFound = 0x7fffffff;
-		Scheduler::CPUEntry* generalFallbackTarget = NULL;
-		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (!gCPUEnabled.GetBit(i) || Scheduler::CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
-				continue;
-			Scheduler::CPUEntry* potentialTarget = Scheduler::CPUEntry::GetCPU(i);
-			int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
-			if (generalFallbackTarget == NULL || potentialTargetLoad < minIrqLoadFound) {
-				generalFallbackTarget = potentialTarget;
-				minIrqLoadFound = potentialTargetLoad;
-			}
-		}
-		targetCandidateCpuMinIrq = generalFallbackTarget;
 	}
 
 	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
@@ -1816,123 +1770,42 @@ scheduler_irq_balance_event(timer* /* unused */)
 		return B_HANDLED_INTERRUPT;
 	}
 
-	int32 actualTargetMinIrqLoad = targetCandidateCpuMinIrq->CalculateTotalIrqLoad();
-	if (maxIrqLoadFound > gHighAbsoluteIrqThreshold && maxIrqLoadFound > actualTargetMinIrqLoad + gSignificantIrqLoadDifference) {
+	// If the load difference is significant, move the most expensive IRQ
+	if (maxIrqLoadFound > gHighAbsoluteIrqThreshold && maxIrqLoadFound > minIrqLoadFound + gSignificantIrqLoadDifference) {
 		TRACE_SCHED_IRQ("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (Actual IRQ load %" B_PRId32 ")\n",
-			sourceCpuMaxIrq->ID(), maxIrqLoadFound, targetCandidateCpuMinIrq->ID(), actualTargetMinIrqLoad);
-		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
-		int32 candidateCount = 0;
+			sourceCpuMaxIrq->ID(), maxIrqLoadFound, targetCandidateCpuMinIrq->ID(), minIrqLoadFound);
+
+		irq_assignment* irqToMove = NULL;
+		int32 maxIrqToMoveLoad = -1;
+
 		{
 			cpu_ent* cpuSt = &gCPU[sourceCpuMaxIrq->ID()];
 			SpinLocker locker(cpuSt->irqs_lock);
 			irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
 			while (irq != NULL) {
-				if (candidateCount < gMaxIRQsToMoveProactively) {
-					candidateIRQs[candidateCount++] = irq;
-					for (int k = candidateCount - 1; k > 0; --k) {
-						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
-							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
-						} else break;
-					}
-				} else if (gMaxIRQsToMoveProactively > 0 && irq->load > candidateIRQs[gMaxIRQsToMoveProactively - 1]->load) {
-					candidateIRQs[gMaxIRQsToMoveProactively - 1] = irq;
-					for (int k = gMaxIRQsToMoveProactively - 1; k > 0; --k) {
-						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
-							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
-						} else break;
-					}
+				if (irq->load > maxIrqToMoveLoad) {
+					maxIrqToMoveLoad = irq->load;
+					irqToMove = irq;
 				}
 				irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
 			}
 		}
-		for (int32 i = 0; i < candidateCount; i++) {
-			irq_assignment* irqToMove = candidateIRQs[i];
-			if (irqToMove == NULL) continue;
 
-			CoreEntry* preferredTargetCore = targetCandidateCpuMinIrq->Core();
-			bool hasAffinity = false;
-
-			if (sIrqTaskAffinityMap != NULL) {
-				InterruptsSpinLocker affinityLocker(gIrqTaskAffinityLock);
-				thread_id affinitized_thid;
-				if (sIrqTaskAffinityMap->Lookup(irqToMove->irq) != NULL) {
-					affinitized_thid = *(sIrqTaskAffinityMap->Lookup(irqToMove->irq));
-					hasAffinity = true;
-					affinityLocker.Unlock();
-
-					Thread* task = Thread::Get(affinitized_thid);
-					if (task != NULL && task->state == B_THREAD_RUNNING && task->cpu != NULL) {
-						Scheduler::CPUEntry* taskCpu = Scheduler::CPUEntry::GetCPU(task->cpu->cpu_num);
-
-						if (taskCpu->Core() == sourceCpuMaxIrq->Core()) {
-							TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " on source core %" B_PRId32 ". Reluctant to move.\n",
-								irqToMove->irq, affinitized_thid, sourceCpuMaxIrq->Core()->ID());
-							continue;
-						} else {
-							preferredTargetCore = taskCpu->Core();
-							TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " on core %" B_PRId32 ". Preferred target.\n",
-								irqToMove->irq, affinitized_thid, preferredTargetCore->ID());
-						}
-					} else if (task != NULL) {
-						if (task->previous_cpu != NULL) {
-							Scheduler::CPUEntry* prevTaskCpu = Scheduler::CPUEntry::GetCPU(task->previous_cpu->cpu_num);
-							if (prevTaskCpu != NULL && prevTaskCpu->Core() != NULL) {
-								preferredTargetCore = prevTaskCpu->Core();
-								TRACE_SCHED_IRQ("IRQBalance: IRQ %d affinity with T %" B_PRId32 " (not running), prev core %" B_PRId32 ". Preferred target.\n",
-									irqToMove->irq, affinitized_thid, preferredTargetCore->ID());
-							}
-						}
-					} else {
-						affinityLocker.Lock();
-						sIrqTaskAffinityMap->Remove(sIrqTaskAffinityMap->Lookup(irqToMove->irq));
-						affinityLocker.Unlock();
-						hasAffinity = false;
-						TRACE_SCHED_IRQ("IRQBalance: IRQ %d had stale affinity for T %" B_PRId32 ". Cleared.\n",
-							irqToMove->irq, affinitized_thid);
-					}
-				} else {
-					affinityLocker.Unlock();
-				}
-			}
-
-			Scheduler::CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(preferredTargetCore, irqToMove->irq, irqToMove->load);
+		if (irqToMove != NULL) {
+			Scheduler::CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCandidateCpuMinIrq->Core(), irqToMove->irq, irqToMove->load);
 
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
-				bigtime_t now = system_time();
-				bigtime_t cooldownToRespect = kIrqFollowTaskCooldownPeriod;
-				bool proceedWithMove = false;
-				bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
-
-				if (now >= lastRecordedMoveTime + cooldownToRespect) {
-					if (atomic_test_and_set64(&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
-						proceedWithMove = true;
-					} else {
-						TRACE_SCHED_IRQ("Periodic IRQ Balance: CAS failed for IRQ %d, move deferred due to concurrent update.\n", irqToMove->irq);
-					}
-				} else {
-					TRACE_SCHED_IRQ("Periodic IRQ Balance: IRQ %d for T %" B_PRId32 " is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64 ", cooldown %" B_PRId64 "). Skipping move.\n",
-						irqToMove->irq, -1, lastRecordedMoveTime, now, cooldownToRespect);
-				}
-
-				if (proceedWithMove) {
-					TRACE_SCHED_IRQ("Periodic IRQ Balance: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")%s\n",
-						irqToMove->irq, irqToMove->load,
-						sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
-						finalTargetCpu->ID(), finalTargetCpu->Core()->ID(),
-						hasAffinity ? " (affinity considered)" : "");
-					if (hasAffinity) {
-						// do nothing
-					}
-					assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
-				}
-			} else {
-				TRACE_SCHED_IRQ("Periodic IRQ Balance: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source. IRQ remains on CPU %" B_PRId32 ".\n",
-					irqToMove->irq, preferredTargetCore->ID(), sourceCpuMaxIrq->ID());
+				TRACE_SCHED_IRQ("Periodic IRQ Balance: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
+					irqToMove->irq, irqToMove->load,
+					sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
+					finalTargetCpu->ID(), finalTargetCpu->Core()->ID());
+				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
 			}
 		}
 	} else {
-		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxLoadFound, minIrqLoadFound);
+		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoadFound, minIrqLoadFound);
 	}
+
 	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	return B_HANDLED_INTERRUPT;
 }

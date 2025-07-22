@@ -1,7 +1,7 @@
 #ifndef EEVDF_RUNQUEUE_H
 #define EEVDF_RUNQUEUE_H
 
-#include <atomic.h>
+#include <support/atomic.h>
 
 // Forward declarations
 class ThreadData;

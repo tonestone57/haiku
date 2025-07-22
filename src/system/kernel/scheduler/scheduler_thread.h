@@ -40,6 +40,7 @@
 #include "scheduler_cpu.h"     // Forward declares CoreEntry, CPUEntry
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
+#include "scheduler_spin_lock.h"
 #include <kernel/scheduler.h>
 #include "EevdfRunQueue.h"     // For EevdfRunQueueLink
 
@@ -79,187 +80,166 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 // class CPUEntry;
 
 struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData> {
-friend class Scheduler::EevdfGetLink; // Allow EevdfGetLink to access fEevdfLink
+    friend class Scheduler::EevdfGetLink;
 private:
-	inline	void		_InitBase();
+    mutable SpinLock fDataLock;
+    Thread* fThread;
+    CoreEntry* fCore;
+    bool fReady;
 
-	inline	CoreEntry*	_ChooseCore() const;
-	inline	CPUEntry*	_ChooseCPU(CoreEntry* core,
-							bool& rescheduleNeeded) const;
+    // EEVDF parameters (atomic for safe concurrent access)
+    std::atomic<bigtime_t> fVirtualDeadline{0};
+    std::atomic<bigtime_t> fLag{0};
+    std::atomic<bigtime_t> fEligibleTime{0};
+    std::atomic<bigtime_t> fSliceDuration{SCHEDULER_TARGET_LATENCY};
+    std::atomic<bigtime_t> fVirtualRuntime{0};
+
+    // I/O bound detection
+    std::atomic<uint32> fVoluntarySleepTransitions{0};
+    std::atomic<bigtime_t> fAverageRunBurstTimeEWMA{SCHEDULER_TARGET_LATENCY / 2};
+
+    // Other atomic members
+    mutable std::atomic<int32> fEffectivePriority{B_NORMAL_PRIORITY};
+    std::atomic<int32> fNeededLoad{0};
+    std::atomic<bigtime_t> fLastMeasureAvailableTime{0};
+    std::atomic<bigtime_t> fMeasureAvailableTime{0};
+    std::atomic<bigtime_t> fMeasureAvailableActiveTime{0};
+    std::atomic<bigtime_t> fCacheTimestamp{0};
+    mutable std::atomic<bigtime_t> fCachedSlice{0};
+
+    // Non-atomic members (protected by fDataLock or accessed only by owner thread)
+    bigtime_t fTimeUsedInCurrentQuantum;
+    bigtime_t fCurrentEffectiveQuantum;
+    bigtime_t fStolenTime;
+    bigtime_t fQuantumStartWallTime;
+    bigtime_t fLastInterruptTime;
+    bigtime_t fWentSleep;
+    bigtime_t fWentSleepActive;
+    bool fEnqueued;
+    uint32 fLoadMeasurementEpoch;
+    bigtime_t fLastMigrationTime;
+    uint32 fBurstCredits;
+    uint32 fLatencyViolations;
+    uint32 fInteractivityClass;
+    int32 fAffinitizedIrqs[MAX_AFFINITIZED_IRQS_PER_THREAD];
+    int8 fAffinitizedIrqCount;
+
+    // Deadline scheduling (less frequently accessed, protected by lock)
+    bigtime_t fDeadline;
+    bigtime_t fRuntime;
+    bigtime_t fPeriod;
 
 public:
-						ThreadData(Thread* thread)
-							:
-							fStolenTime(0),
-							fQuantumStartWallTime(0),
-							fLastInterruptTime(0),
-							fWentSleep(0),
-							fWentSleepActive(0),
-							fEnqueued(false),
-							fReady(false),
-							fThread(thread),
-							fEffectivePriority(0),
-							fTimeUsedInCurrentQuantum(0),
-							fCurrentEffectiveQuantum(0),
-							fMeasureAvailableActiveTime(0),
-							fMeasureAvailableTime(0),
-							fLastMeasureAvailableTime(0),
-							fNeededLoad(0),
-							fLoadMeasurementEpoch(0),
-							fLastMigrationTime(0),
-							fCore(NULL),
-							fVirtualDeadline(0),
-							fLag(0),
-							fEligibleTime(0),
-							fSliceDuration(SCHEDULER_TARGET_LATENCY),
-							fVirtualRuntime(0),
-							fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
-							fVoluntarySleepTransitions(0),
-							fBurstCredits(0),
-							fLatencyViolations(0),
-							fInteractivityClass(0),
-							fAffinitizedIrqCount(0)
-						{
-							// Initialize affinitized IRQ array
-							for (int8 i = 0; i < MAX_AFFINITIZED_IRQS_PER_THREAD; i++) {
-								fAffinitizedIrqs[i] = -1;
-							}
-						}
+    static const int8 MAX_AFFINITIZED_IRQS_PER_THREAD = 4;
+    static constexpr bigtime_t CACHE_VALIDITY_PERIOD = 1000; // 1ms
 
-			void		Init();
-			void		Init(CoreEntry* core);
+    ThreadData(Thread* thread);
+    ~ThreadData() = default;
 
-			void		Dump() const;
+    void Init();
+    void Init(CoreEntry* core);
+    void Dump() const;
 
-						// EEVDF parameter recalculation and update.
-						// Must be called with thread's scheduler_lock held.
-						void			UpdateEevdfParameters(CPUEntry* contextCpu,
-											bool isNewOrRelocated, bool isRequeue);
+    void UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, bool isRequeue);
 
-	inline	int32		GetBasePriority() const	{ return fThread ? fThread->priority : B_IDLE_PRIORITY; }
-	inline	Thread*		GetThread() const	{ return fThread; }
-	inline	CPUSet		GetCPUMask() const { 
-		if (fThread == NULL) return CPUSet(); // Return empty set for null thread
-		return fThread->cpumask.And(gCPUEnabled); 
-	}
+    int32 GetBasePriority() const { return fThread ? fThread->priority : B_IDLE_PRIORITY; }
+    Thread* GetThread() const { return fThread; }
+    CPUSet GetCPUMask() const {
+        if (fThread == NULL) return CPUSet();
+        return fThread->cpumask.And(gCPUEnabled);
+    }
 
-	inline	bool		IsRealTime() const;
-	inline	bool		IsIdle() const;
+    bool IsRealTime() const;
+    bool IsIdle() const;
+    int32 GetEffectivePriority() const;
 
-	inline	bool		HasCacheExpired() const;
+    void StartCPUTime();
+    void StopCPUTime();
 
-	inline	int32		GetEffectivePriority() const;
+    bool ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU);
 
-	inline	void		StartCPUTime();
-	inline	void		StopCPUTime();
+    void SetLastInterruptTime(bigtime_t interruptTime) { fLastInterruptTime = interruptTime; }
+    void SetStolenInterruptTime(bigtime_t interruptTime);
 
-	bool				ChooseCoreAndCPU(CoreEntry*& targetCore,
-							CPUEntry*& targetCPU);
+    bigtime_t CalculateDynamicQuantum(const CPUEntry* contextCpu) const;
+    bigtime_t GetEffectiveQuantum() const;
+    void SetEffectiveQuantum(bigtime_t quantum);
+    bigtime_t GetQuantumLeft();
+    void StartQuantum(bigtime_t effectiveQuantum);
+    bool HasQuantumEnded(bool wasPreempted, bool hasYielded);
 
-	inline	void		SetLastInterruptTime(bigtime_t interruptTime)
-							{ fLastInterruptTime = interruptTime; }
-	inline	void		SetStolenInterruptTime(bigtime_t interruptTime);
+    bigtime_t LastMigrationTime() const;
+    void SetLastMigrationTime(bigtime_t time);
 
-	// --- Quantum Management ---
-			bigtime_t	CalculateDynamicQuantum(const CPUEntry* contextCpu) const;
-	inline	bigtime_t	GetEffectiveQuantum() const;
-	inline	void		SetEffectiveQuantum(bigtime_t quantum);
-	inline	bigtime_t	GetQuantumLeft();
-	inline	void		StartQuantum(bigtime_t effectiveQuantum);
-	inline	bool		HasQuantumEnded(bool wasPreempted, bool hasYielded);
+    // EEVDF Specific (atomic getters/setters)
+    bigtime_t VirtualDeadline() const { return fVirtualDeadline.load(std::memory_order_relaxed); }
+    void SetVirtualDeadline(bigtime_t deadline) { fVirtualDeadline.store(deadline, std::memory_order_relaxed); }
+    bigtime_t Lag() const { return fLag.load(std::memory_order_relaxed); }
+    void SetLag(bigtime_t lag) { fLag.store(lag, std::memory_order_relaxed); }
+    void AddLag(bigtime_t lagAmount);
+    bigtime_t EligibleTime() const { return fEligibleTime.load(std::memory_order_relaxed); }
+    void SetEligibleTime(bigtime_t time) { fEligibleTime.store(time, std::memory_order_relaxed); }
+    bigtime_t SliceDuration() const { return fSliceDuration.load(std::memory_order_relaxed); }
+    void SetSliceDuration(bigtime_t duration) { fSliceDuration.store(duration, std::memory_order_relaxed); }
+    bigtime_t VirtualRuntime() const { return fVirtualRuntime.load(std::memory_order_relaxed); }
+    void SetVirtualRuntime(bigtime_t runtime) { fVirtualRuntime.store(runtime, std::memory_order_relaxed); }
+    void AddVirtualRuntime(bigtime_t runtimeAmount);
 
-	// --- Load Balancing Specific ---
-	inline	bigtime_t	LastMigrationTime() const;
-	inline	void		SetLastMigrationTime(bigtime_t time);
+    // State and Lifecycle
+    void Continues();
+    void GoesAway();
+    void Dies();
 
-	// --- EEVDF Specific ---
-	inline	bigtime_t	VirtualDeadline() const;
-	inline	void		SetVirtualDeadline(bigtime_t deadline);
-	inline	bigtime_t	Lag() const;
-	inline	void		SetLag(bigtime_t lag);
-	inline	void		AddLag(bigtime_t lagAmount);
-	inline	bigtime_t	EligibleTime() const;
-	inline	void		SetEligibleTime(bigtime_t time);
-	inline	bigtime_t	SliceDuration() const;
-	inline	void		SetSliceDuration(bigtime_t duration);
-	inline	bigtime_t	VirtualRuntime() const;
-	inline	void		SetVirtualRuntime(bigtime_t runtime);
-	inline	void		AddVirtualRuntime(bigtime_t runtimeAmount);
+    bigtime_t WentSleep() const { return fWentSleep; }
+    bigtime_t WentSleepActive() const { return fWentSleepActive; }
 
-	// --- State and Lifecycle ---
-	inline	void		Continues();
-	inline	void		GoesAway();
-	inline	void		Dies();
+    void MarkEnqueued(CoreEntry* core);
+    void MarkDequeued();
+    void UpdateActivity(bigtime_t active);
+    bool IsEnqueued() const { return fEnqueued; }
+    int32 GetLoad() const { return fNeededLoad.load(std::memory_order_relaxed); }
+    CoreEntry* Core() const { return fCore; }
+    void UnassignCore(bool running = false);
 
-	inline	bigtime_t	WentSleep() const	{ return fWentSleep; }
-	inline	bigtime_t	WentSleepActive() const	{ return fWentSleepActive; }
+    // IRQ affinity
+    bool AddAffinitizedIrq(int32 irq);
+    bool RemoveAffinitizedIrq(int32 irq);
+    void ClearAffinitizedIrqs();
+    const int32* GetAffinitizedIrqs(int8& count) const {
+        SpinLockGuard guard(fDataLock);
+        count = fAffinitizedIrqCount;
+        return fAffinitizedIrqs;
+    }
 
-	inline	void		MarkEnqueued(CoreEntry* core);
-	inline	void		MarkDequeued();
-	inline	void		UpdateActivity(bigtime_t active);
-	inline	bool		IsEnqueued() const	{ return fEnqueued; }
-	inline	int32		GetLoad() const	{ return fNeededLoad; }
-	inline	CoreEntry*	Core() const	{ return fCore; }
-			void		UnassignCore(bool running = false);
+    bool IsLikelyIOBound() const;
+    bool IsLikelyCPUBound() const;
+    void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
+
+    bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA.load(std::memory_order_relaxed); }
+    uint32 VoluntarySleepTransitions() const { return fVoluntarySleepTransitions.load(std::memory_order_relaxed); }
+    bigtime_t TimeUsedInCurrentQuantum() const { return fTimeUsedInCurrentQuantum; }
+    bool IsLowIntensity() const;
 
 private:
-	void		_ComputeNeededLoad();
-	void		_ComputeEffectivePriority() const;
+    void _InitBase();
+    CoreEntry* _ChooseCore() const;
+    CPUEntry* _ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const;
+    void _ComputeNeededLoad();
+    void _ComputeEffectivePriority() const;
 
-	bigtime_t	fStolenTime;
-	bigtime_t	fQuantumStartWallTime;
-	bigtime_t	fLastInterruptTime;
-	bigtime_t	fWentSleep;
-	bigtime_t	fWentSleepActive;
-	bool		fEnqueued;
-	bool		fReady;
-	Thread*		fThread;
-	mutable	int32		fEffectivePriority;
-	bigtime_t	fTimeUsedInCurrentQuantum;
-	bigtime_t	fCurrentEffectiveQuantum;
-	bigtime_t	fMeasureAvailableActiveTime;
-	bigtime_t	fMeasureAvailableTime;
-	bigtime_t	fLastMeasureAvailableTime;
-	int32		fNeededLoad;
-	uint32		fLoadMeasurementEpoch;
-	bigtime_t	fLastMigrationTime;
-	CoreEntry*	fCore;
-	bigtime_t	fVirtualDeadline;
-	bigtime_t	fLag;
-	bigtime_t	fEligibleTime;
-	bigtime_t	fSliceDuration;
-	bigtime_t	fVirtualRuntime;
-	Scheduler::EevdfRunQueueLink fEevdfLink;
-	bigtime_t	fAverageRunBurstTimeEWMA;
-	uint32		fVoluntarySleepTransitions;
-	uint32		fBurstCredits;
-	uint32		fLatencyViolations;
-	uint32		fInteractivityClass;
+    // Safe arithmetic helpers
+    template<typename T>
+    T SafeAdd(T a, T b, T max_val) const {
+        if (a > max_val - b) return max_val;
+        return a + b;
+    }
 
-public:
-	static const int8 MAX_AFFINITIZED_IRQS_PER_THREAD = 4;
-private:
-	int32		fAffinitizedIrqs[MAX_AFFINITIZED_IRQS_PER_THREAD];
-	int8		fAffinitizedIrqCount;
-public:
-	bool		AddAffinitizedIrq(int32 irq);
-	bool		RemoveAffinitizedIrq(int32 irq);
-	void		ClearAffinitizedIrqs();
-	const int32* GetAffinitizedIrqs(int8& count) const { count = fAffinitizedIrqCount; return fAffinitizedIrqs; }
-
-	bool IsLikelyIOBound() const;
-	bool IsLikelyCPUBound() const;
-	void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
-
-	inline bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA; }
-	inline uint32 VoluntarySleepTransitions() const { return fVoluntarySleepTransitions; }
-	inline bigtime_t TimeUsedInCurrentQuantum() const { return fTimeUsedInCurrentQuantum; }
-	bool IsLowIntensity() const;
-
-	// Deadline scheduling
-	bigtime_t fDeadline;
-	bigtime_t fRuntime;
-	bigtime_t fPeriod;
+    template<typename T>
+    T SafeMultiply(T a, T b, T max_val) const {
+        if (a == 0 || b == 0) return 0;
+        if (a > max_val / b) return max_val;
+        return a * b;
+    }
 };
 
 class ThreadProcessing {

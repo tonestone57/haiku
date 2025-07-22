@@ -998,7 +998,6 @@ reschedule(int32 nextState)
 	}
 	oldThread->has_yielded = false;
 
-	cpu->SetCurrentActiveTeam(NULL);
 
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue();

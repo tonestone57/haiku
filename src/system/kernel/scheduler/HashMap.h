@@ -63,7 +63,7 @@ public:
             fBucketCount = newBucketCount;
         }
 
-        uint32 hash = (uint32)key % fBucketCount;
+        uint32 hash = (uintptr_t)key % fBucketCount;
         while (fBuckets[hash].key != 0) {
             hash = (hash + 1) % fBucketCount;
         }

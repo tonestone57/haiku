@@ -48,39 +48,12 @@ namespace Scheduler {
 
 extern int32* gHaikuContinuousWeights;
 
-static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
-	if (thread == NULL)
-		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-
-	// Clamp priority to valid range
-    int32 priority = thread->priority;
-    if (thread->scheduler_data->fBurstCredits > 0) {
-        priority += thread->scheduler_data->fBurstCredits;
-        thread->scheduler_data->fBurstCredits--;
-    }
-    priority += thread->scheduler_data->fInteractivityClass;
-    priority += thread->scheduler_data->fLatencyViolations / 10;
-
-    if (thread->scheduler_data->fInteractivityClass == 2) {
-        priority += 5;
-    }
-    if (priority < 0) {
-        priority = 0;
-    } else if (priority > B_REAL_TIME_PRIORITY) {
-        priority = B_REAL_TIME_PRIORITY;
-    }
-
-    // Ensure we have valid weights array
-    ASSERT(gHaikuContinuousWeights != NULL);
-    return gHaikuContinuousWeights[priority];
-}
 
 // Forward declarations already in scheduler_cpu.h and scheduler_common.h
 // class CoreEntry;
 // class CPUEntry;
 
 struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData> {
-    friend class Scheduler::EevdfGetLink;
 private:
     mutable SpinLock fDataLock;
     Thread* fThread;
@@ -248,270 +221,22 @@ public:
 	virtual	void		operator()(ThreadData* thread) = 0;
 };
 
-// --- Inlined Method Implementations ---
-inline SchedulerHeapLink<ThreadData*, ThreadData*>*
-Scheduler::EevdfGetLink::operator()(ThreadData* element) const
-{
-	ASSERT(element != NULL);
-	return &element->fEevdfLink.fSchedulerHeapLink;
-}
-
-inline const SchedulerHeapLink<ThreadData*, ThreadData*>*
-Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
-{
-	ASSERT(element != NULL);
-	return &element->fEevdfLink.fSchedulerHeapLink;
-}
-
-inline bool
-ThreadData::IsRealTime() const
-{
-	return GetBasePriority() >= B_REAL_TIME_DISPLAY_PRIORITY;
-}
-
-inline bool
-ThreadData::IsIdle() const
-{
-	return GetBasePriority() == B_IDLE_PRIORITY;
-}
-
-inline bool
-ThreadData::HasCacheExpired() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (gCurrentMode == NULL) return true;
-	return gCurrentMode->has_cache_expired(this);
-}
-
-inline int32
-ThreadData::GetEffectivePriority() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-	return fEffectivePriority;
-}
-
-inline void
-ThreadData::StartCPUTime()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (fThread == NULL) return; // Guard against null thread
-
-	SpinLocker threadTimeLocker(fThread->time_lock);
-	fThread->last_time = system_time();
-}
-
-inline void
-ThreadData::StopCPUTime()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (fThread == NULL) return; // Guard against null thread
-
-	SpinLocker threadTimeLocker(fThread->time_lock);
-	bigtime_t currentTime = system_time();
-	if (fThread->last_time > 0 && currentTime >= fThread->last_time) {
-		fThread->kernel_time += currentTime - fThread->last_time;
-	}
-	fThread->last_time = 0;
-	threadTimeLocker.Unlock();
-
-}
-
-inline void
-ThreadData::SetStolenInterruptTime(bigtime_t interruptTime)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (IsIdle()) return;
-
-	if (interruptTime >= fLastInterruptTime) {
-		bigtime_t stolenAmount = interruptTime - fLastInterruptTime;
-		fStolenTime += stolenAmount;
-	}
-}
-
-inline bigtime_t
-ThreadData::GetEffectiveQuantum() const
-{
-	return fCurrentEffectiveQuantum;
-}
-
-inline void
-ThreadData::SetEffectiveQuantum(bigtime_t quantum)
-{
-	fCurrentEffectiveQuantum = quantum;
-}
-
-inline bigtime_t
-ThreadData::GetQuantumLeft()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum)
-		return 0;
-	return fCurrentEffectiveQuantum - fTimeUsedInCurrentQuantum;
-}
-
-inline void
-ThreadData::StartQuantum(bigtime_t effectiveQuantum)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	fQuantumStartWallTime = system_time();
-	fTimeUsedInCurrentQuantum = 0;
-	fStolenTime = 0;
-	fCurrentEffectiveQuantum = effectiveQuantum;
-}
-
-inline bool
-ThreadData::HasQuantumEnded(bool wasPreempted, bool hasYielded)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (IsIdle())
-		return false;
-	if (hasYielded) {
-		fTimeUsedInCurrentQuantum = fCurrentEffectiveQuantum;
-		return true;
-	}
-	return fTimeUsedInCurrentQuantum >= fCurrentEffectiveQuantum;
-}
-
-inline bigtime_t
-ThreadData::LastMigrationTime() const
-{
-	return fLastMigrationTime;
-}
-
-inline void
-ThreadData::SetLastMigrationTime(bigtime_t time)
-{
-	fLastMigrationTime = time;
-}
-
-inline bigtime_t ThreadData::VirtualDeadline() const { return fVirtualDeadline; }
-inline void ThreadData::SetVirtualDeadline(bigtime_t deadline) { fVirtualDeadline = deadline; }
-inline bigtime_t ThreadData::Lag() const { return fLag; }
-inline void ThreadData::SetLag(bigtime_t lag) { fLag = lag; }
-inline void ThreadData::AddLag(bigtime_t lagAmount) {
-	fLag += lagAmount;
-	scheduler_update_total_system_lag(lagAmount);
-}
-inline bigtime_t ThreadData::EligibleTime() const { return fEligibleTime; }
-inline void ThreadData::SetEligibleTime(bigtime_t time) { fEligibleTime = time; }
-inline bigtime_t ThreadData::SliceDuration() const { return fSliceDuration; }
-inline void ThreadData::SetSliceDuration(bigtime_t duration) { fSliceDuration = duration; }
-inline bigtime_t ThreadData::VirtualRuntime() const { return fVirtualRuntime; }
-inline void ThreadData::SetVirtualRuntime(bigtime_t runtime) { fVirtualRuntime = runtime; }
-inline void ThreadData::AddVirtualRuntime(bigtime_t runtimeAmount) { fVirtualRuntime += runtimeAmount; }
-
-inline void
-ThreadData::Continues()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady);
-	if (gTrackCoreLoad && !IsIdle()) {
-		_ComputeNeededLoad();
-	}
-}
-
-inline void
-ThreadData::GoesAway()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady);
-
-	fLastInterruptTime = 0;
-	fWentSleep = system_time();
-	if (fCore != NULL) {
-		fWentSleepActive = fCore->GetActiveTime();
-	} else {
-		fWentSleepActive = 0;
-	}
-
-	if (gTrackCoreLoad && !IsIdle()) {
-		bigtime_t currentTime = system_time();
-		if (currentTime >= fMeasureAvailableTime) {
-			fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
-		}
-		fMeasureAvailableTime = currentTime;
-
-		if (fCore != NULL) {
-			fLoadMeasurementEpoch = fCore->RemoveLoad(fNeededLoad, false);
-		}
-	}
-	fReady = false;
-}
-
-inline void
-ThreadData::Dies()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady || (fThread != NULL && (fThread->state == THREAD_STATE_FREE_ON_RESCHED || fThread->state == THREAD_STATE_ZOMBIE)));
-
-	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
-		if (fReady) {
-			fCore->RemoveLoad(fNeededLoad, true);
-		}
-	}
-	fReady = false;
-	fCore = NULL;
-}
-
-inline void
-ThreadData::MarkEnqueued(CoreEntry* core)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(core != NULL);
-	fCore = core;
-
-	if (!fReady) {
-		if (gTrackCoreLoad && !IsIdle()) {
-			bigtime_t currentTime = system_time();
-			bigtime_t timeSleptOrInactive = (fWentSleep > 0 && currentTime >= fWentSleep) ?
-				currentTime - fWentSleep : 0;
-			bool updateCoreLoad = (fWentSleep > 0 && timeSleptOrInactive > 0);
-			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, updateCoreLoad);
-			if (updateCoreLoad) {
-				fMeasureAvailableTime += timeSleptOrInactive;
-				_ComputeNeededLoad();
-			}
-		}
-		fReady = true;
-	}
-	if (fThread != NULL) {
-		fThread->state = B_THREAD_READY;
-	}
-	fEnqueued = true;
-}
-
-inline void
-ThreadData::MarkDequeued()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	fEnqueued = false;
-}
-
-inline void
-ThreadData::UpdateActivity(bigtime_t active)
-{
-	SCHEDULER_ENTER_FUNCTION();
-	if (IsIdle())
-		return;
-
-	// Prevent negative time usage
-	bigtime_t netActive = active - fStolenTime;
-	if (netActive < 0)
-		netActive = 0;
-
-	fTimeUsedInCurrentQuantum += netActive;
-	fStolenTime = 0;
-
-	// Ensure time used doesn't go negative
-	if (fTimeUsedInCurrentQuantum < 0)
-		fTimeUsedInCurrentQuantum = 0;
-
-	if (gTrackCoreLoad) {
-		fMeasureAvailableTime += active;
-		fMeasureAvailableActiveTime += active;
-	}
-}
 
 }	// namespace Scheduler
+
+class Scheduler::EevdfGetLink {
+public:
+	inline SchedulerHeapLink<Scheduler::ThreadData*, Scheduler::ThreadData*>*
+	operator()(Scheduler::ThreadData* element) const
+	{
+		return &element->fEevdfLink.fSchedulerHeapLink;
+	}
+
+	inline const SchedulerHeapLink<Scheduler::ThreadData*, Scheduler::ThreadData*>*
+	operator()(const Scheduler::ThreadData* element) const
+	{
+		return &element->fEevdfLink.fSchedulerHeapLink;
+	}
+};
 
 #endif	// KERNEL_SCHEDULER_THREAD_H

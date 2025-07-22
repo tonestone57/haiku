@@ -1610,6 +1610,32 @@ _scheduler_init_kdf_debug_commands()
 
 
 
+static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
+	if (thread == NULL)
+		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
+
+	// Clamp priority to valid range
+    int32 priority = thread->priority;
+    if (thread->scheduler_data->fBurstCredits > 0) {
+        priority += thread->scheduler_data->fBurstCredits;
+        thread->scheduler_data->fBurstCredits--;
+    }
+    priority += thread->scheduler_data->fInteractivityClass;
+    priority += thread->scheduler_data->fLatencyViolations / 10;
+
+    if (thread->scheduler_data->fInteractivityClass == 2) {
+        priority += 5;
+    }
+    if (priority < 0) {
+        priority = 0;
+    } else if (priority > B_REAL_TIME_PRIORITY) {
+        priority = B_REAL_TIME_PRIORITY;
+    }
+
+    // Ensure we have valid weights array
+    ASSERT(gHaikuContinuousWeights != NULL);
+    return gHaikuContinuousWeights[priority];
+}
 void
 scheduler_init()
 {

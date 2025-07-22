@@ -234,7 +234,6 @@ struct Thread : TeamThreadIteratorEntry<thread_id>, KernelReferenceable {
 	CPUSet			cpumask;
 	int32			pinned_to_cpu;	// only accessed by this thread or in the
 									// scheduler, when thread is not running
-	int32			shielded_cpu;	// -1 if not shielded
 	spinlock		scheduler_lock;
 
 	sigset_t		sig_block_mask;	// protected by team->signal_lock,

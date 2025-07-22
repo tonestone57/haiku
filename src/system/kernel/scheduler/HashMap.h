@@ -50,7 +50,7 @@ public:
 
             for (uint32 i = 0; i < fBucketCount; i++) {
                 if (fBuckets[i].key != 0) {
-                    uint32 newHash = (uint32)fBuckets[i].key % newBucketCount;
+                    uint32 newHash = (uintptr_t)fBuckets[i].key % newBucketCount;
                     while (newBuckets[newHash].key != 0) {
                         newHash = (newHash + 1) % newBucketCount;
                     }

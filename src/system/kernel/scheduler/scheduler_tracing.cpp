@@ -7,6 +7,7 @@
 #include "scheduler_tracing.h"
 
 #include <debug.h>
+#include <limits.h>
 
 
 #if SCHEDULER_TRACING
@@ -139,19 +140,19 @@ cmd_scheduler(int argc, char** argv)
 
 	int64 runs = 0;
 	bigtime_t totalRunTime = 0;
-	bigtime_t minRunTime = -1;
-	bigtime_t maxRunTime = -1;
+	bigtime_t minRunTime = LLONG_MAX;  // Fixed: Initialize to max value
+	bigtime_t maxRunTime = 0;
 
 	int64 latencies = 0;
 	bigtime_t totalLatency = 0;
-	bigtime_t minLatency = -1;
-	bigtime_t maxLatency = -1;
+	bigtime_t minLatency = LLONG_MAX;  // Fixed: Initialize to max value
+	bigtime_t maxLatency = 0;
 	int32 maxLatencyEntry = -1;
 
 	int64 reruns = 0;
 	bigtime_t totalRerunTime = 0;
-	bigtime_t minRerunTime = -1;
-	bigtime_t maxRerunTime = -1;
+	bigtime_t minRerunTime = LLONG_MAX;  // Fixed: Initialize to max value
+	bigtime_t maxRerunTime = 0;
 	int32 maxRerunEntry = -1;
 
 	int64 preemptions = 0;
@@ -164,23 +165,35 @@ cmd_scheduler(int argc, char** argv)
 		if (ScheduleThread* entry = dynamic_cast<ScheduleThread*>(_entry)) {
 			if (entry->ThreadID() == threadID) {
 				// thread scheduled
-				bigtime_t diffTime = entry->Time() - lastTime;
+				bigtime_t diffTime = 0;
+				
+				// Fixed: Only calculate diff if we have a valid lastTime
+				if (lastTime > 0) {
+					diffTime = entry->Time() - lastTime;
+					
+					// Fixed: Add bounds check to prevent negative time differences
+					if (diffTime < 0) {
+						kprintf("Warning: Negative time difference detected at entry %d\n", 
+							iterator.Index());
+						continue;
+					}
+				}
 
-				if (state == READY) {
+				if (state == READY && lastTime > 0) {
 					// thread scheduled after having been woken up
 					latencies++;
 					totalLatency += diffTime;
-					if (minLatency < 0 || diffTime < minLatency)
+					if (diffTime < minLatency)  // Fixed: Remove redundant check
 						minLatency = diffTime;
 					if (diffTime > maxLatency) {
 						maxLatency = diffTime;
 						maxLatencyEntry = iterator.Index();
 					}
-				} else if (state == PREEMPTED) {
+				} else if (state == PREEMPTED && lastTime > 0) {
 					// thread scheduled after having been preempted before
 					reruns++;
 					totalRerunTime += diffTime;
-					if (minRerunTime < 0 || diffTime < minRerunTime)
+					if (diffTime < minRerunTime)  // Fixed: Remove redundant check
 						minRerunTime = diffTime;
 					if (diffTime > maxRerunTime) {
 						maxRerunTime = diffTime;
@@ -199,27 +212,38 @@ cmd_scheduler(int argc, char** argv)
 				}
 			} else if (entry->PreviousThreadID() == threadID) {
 				// thread unscheduled
-				bigtime_t diffTime = entry->Time() - lastTime;
+				bigtime_t diffTime = 0;
+				
+				// Fixed: Only calculate diff if we have a valid lastTime
+				if (lastTime > 0) {
+					diffTime = entry->Time() - lastTime;
+					
+					// Fixed: Add bounds check to prevent negative time differences
+					if (diffTime < 0) {
+						kprintf("Warning: Negative time difference detected at entry %d\n", 
+							iterator.Index());
+						continue;
+					}
+				}
 
-				if (state == STILL_RUNNING) {
+				if (state == STILL_RUNNING && lastTime > 0) {
 					// thread preempted
 					runs++;
 					preemptions++;
 					totalRunTime += diffTime;
-					if (minRunTime < 0 || diffTime < minRunTime)
+					if (diffTime < minRunTime)  // Fixed: Remove redundant check
 						minRunTime = diffTime;
 					if (diffTime > maxRunTime)
 						maxRunTime = diffTime;
 
 					state = PREEMPTED;
 					lastTime = entry->Time();
-				} else if (state == RUNNING) {
+				} else if (state == RUNNING && lastTime > 0) {
 					// thread starts waiting (it hadn't been added to the run
 					// queue before being unscheduled)
-					bigtime_t diffTime = entry->Time() - lastTime;
 					runs++;
 					totalRunTime += diffTime;
-					if (minRunTime < 0 || diffTime < minRunTime)
+					if (diffTime < minRunTime)  // Fixed: Remove redundant check
 						minRunTime = diffTime;
 					if (diffTime > maxRunTime)
 						maxRunTime = diffTime;
@@ -253,15 +277,19 @@ cmd_scheduler(int argc, char** argv)
 			// This really only happens when the thread priority is changed
 			// while the thread is ready.
 
-			if (state == RUNNING) {
+			if (state == RUNNING && lastTime > 0) {
 				// This should never happen.
 				bigtime_t diffTime = entry->Time() - lastTime;
-				runs++;
-				totalRunTime += diffTime;
-				if (minRunTime < 0 || diffTime < minRunTime)
-					minRunTime = diffTime;
-				if (diffTime > maxRunTime)
-					maxRunTime = diffTime;
+				
+				// Fixed: Add bounds check
+				if (diffTime >= 0) {
+					runs++;
+					totalRunTime += diffTime;
+					if (diffTime < minRunTime)
+						minRunTime = diffTime;
+					if (diffTime > maxRunTime)
+						maxRunTime = diffTime;
+				}
 			}
 
 			state = WAITING;
@@ -279,16 +307,25 @@ cmd_scheduler(int argc, char** argv)
 	kprintf("  total #: %" B_PRId64 "\n", runs);
 	kprintf("  total:   %" B_PRIdBIGTIME " us\n", totalRunTime);
 	kprintf("  average: %#.2f us\n", (double)totalRunTime / runs);
-	kprintf("  min:     %" B_PRIdBIGTIME " us\n", minRunTime);
+	
+	// Fixed: Handle case where no valid measurements were taken
+	if (minRunTime == LLONG_MAX)
+		kprintf("  min:     N/A\n");
+	else
+		kprintf("  min:     %" B_PRIdBIGTIME " us\n", minRunTime);
 	kprintf("  max:     %" B_PRIdBIGTIME " us\n", maxRunTime);
 
 	if (latencies > 0) {
 		kprintf("scheduling latency after wake up:\n");
-		kprintf("  total #: %" B_PRIdBIGTIME "\n", latencies);
+		kprintf("  total #: %" B_PRId64 "\n", latencies);  // Fixed: Use correct format specifier
 		kprintf("  total:   %" B_PRIdBIGTIME " us\n", totalLatency);
 		kprintf("  average: %#.2f us\n", (double)totalLatency / latencies);
-		kprintf("  min:     %" B_PRIdBIGTIME " us\n", minLatency);
-		kprintf("  max:     %" B_PRIdBIGTIME " us\n", maxLatency);
+		
+		// Fixed: Handle case where no valid measurements were taken
+		if (minLatency == LLONG_MAX)
+			kprintf("  min:     N/A\n");
+		else
+			kprintf("  min:     %" B_PRIdBIGTIME " us\n", minLatency);
 		kprintf("  max:     %" B_PRIdBIGTIME " us (at tracing entry %" B_PRId32
 			")\n", maxLatency, maxLatencyEntry);
 	} else
@@ -299,7 +336,12 @@ cmd_scheduler(int argc, char** argv)
 		kprintf("  total #: %" B_PRId64 "\n", reruns);
 		kprintf("  total:   %" B_PRIdBIGTIME " us\n", totalRerunTime);
 		kprintf("  average: %#.2f us\n", (double)totalRerunTime / reruns);
-		kprintf("  min:     %" B_PRIdBIGTIME " us\n", minRerunTime);
+		
+		// Fixed: Handle case where no valid measurements were taken
+		if (minRerunTime == LLONG_MAX)
+			kprintf("  min:     N/A\n");
+		else
+			kprintf("  min:     %" B_PRIdBIGTIME " us\n", minRerunTime);
 		kprintf("  max:     %" B_PRIdBIGTIME " us (at tracing entry %" B_PRId32
 			")\n", maxRerunTime, maxRerunEntry);
 	} else

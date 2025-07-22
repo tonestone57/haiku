@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <string.h>
 #if defined (LWP)
 #include <sys/ucontext.h>
 #include <sys/lwp.h>

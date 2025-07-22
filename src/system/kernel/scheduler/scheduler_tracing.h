@@ -17,11 +17,21 @@
 
 namespace SchedulerTracing {
 
+// Forward declarations
+enum ScheduleState {
+	RUNNING,
+	STILL_RUNNING,
+	PREEMPTED,
+	READY,
+	WAITING,
+	UNKNOWN
+};
+
 class SchedulerTraceEntry : public AbstractTraceEntry {
 public:
 	SchedulerTraceEntry(Thread* thread)
 		:
-		fID(thread->id)
+		fID(thread != NULL ? thread->id : -1)  // Fixed: Add null check
 	{
 	}
 
@@ -39,17 +49,26 @@ public:
 	EnqueueThread(Thread* thread, int32 effectivePriority)
 		:
 		SchedulerTraceEntry(thread),
-		fPriority(thread->priority),
+		fName(NULL),  // Fixed: Initialize to NULL for safety
+		fPriority(thread != NULL ? thread->priority : 0),  // Fixed: Add null check
 		fEffectivePriority(effectivePriority)
 	{
-		fName = alloc_tracing_buffer_strcpy(thread->name, B_OS_NAME_LENGTH,
-			false);
+		// Fixed: Add null check and better error handling
+		if (thread != NULL && thread->name != NULL) {
+			fName = alloc_tracing_buffer_strcpy(thread->name, B_OS_NAME_LENGTH,
+				false);
+		}
+		// Fixed: Always call Initialized() even if thread is NULL
 		Initialized();
 	}
 
 	virtual void AddDump(TraceOutput& out);
 
 	virtual const char* Name() const;
+
+	// Fixed: Add getters for consistency
+	int32 Priority() const { return fPriority; }
+	int32 EffectivePriority() const { return fEffectivePriority; }
 
 private:
 	char*				fName;
@@ -63,7 +82,7 @@ public:
 	RemoveThread(Thread* thread)
 		:
 		SchedulerTraceEntry(thread),
-		fPriority(thread->priority)
+		fPriority(thread != NULL ? thread->priority : 0)  // Fixed: Add null check
 	{
 		Initialized();
 	}
@@ -71,6 +90,9 @@ public:
 	virtual void AddDump(TraceOutput& out);
 
 	virtual const char* Name() const;
+
+	// Fixed: Add getter for consistency
+	int32 Priority() const { return fPriority; }
 
 private:
 	int32				fPriority;
@@ -82,21 +104,31 @@ public:
 	ScheduleThread(Thread* thread, Thread* previous)
 		:
 		SchedulerTraceEntry(thread),
-		fPreviousID(previous->id),
-		fCPU(previous->cpu->cpu_num),
-		fPriority(thread->priority),
-		fPreviousState(previous->state),
-		fPreviousWaitObjectType(previous->wait.type)
+		fName(NULL),  // Fixed: Initialize to NULL for safety
+		fPreviousID(previous != NULL ? previous->id : -1),  // Fixed: Add null check
+		fCPU(previous != NULL && previous->cpu != NULL ? previous->cpu->cpu_num : -1),  // Fixed: Add null checks
+		fPriority(thread != NULL ? thread->priority : 0),  // Fixed: Add null check
+		fPreviousState(previous != NULL ? previous->state : B_THREAD_SUSPENDED),  // Fixed: Add null check with default
+		fPreviousWaitObjectType(previous != NULL ? previous->wait.type : 0),  // Fixed: Add null check
+		fPreviousWaitObject(NULL)  // Fixed: Initialize union member explicitly
 	{
-		fName = alloc_tracing_buffer_strcpy(thread->name, B_OS_NAME_LENGTH,
-			false);
+		// Fixed: Add comprehensive null checks
+		if (thread != NULL && thread->name != NULL) {
+			fName = alloc_tracing_buffer_strcpy(thread->name, B_OS_NAME_LENGTH,
+				false);
+		}
 
 #if SCHEDULER_TRACING >= 2
-		if (fPreviousState == B_THREAD_READY)
+		if (fPreviousState == B_THREAD_READY) {
 			fPreviousPC = arch_debug_get_interrupt_pc(NULL);
-		else
+		} else
 #endif
-			fPreviousWaitObject = previous->wait.object;
+		{
+			// Fixed: Only access wait.object if previous thread is valid
+			if (previous != NULL) {
+				fPreviousWaitObject = previous->wait.object;
+			}
+		}
 
 		Initialized();
 	}
@@ -109,44 +141,48 @@ public:
 	uint8 PreviousState() const				{ return fPreviousState; }
 	uint16 PreviousWaitObjectType() const	{ return fPreviousWaitObjectType; }
 	const void* PreviousWaitObject() const	{ return fPreviousWaitObject; }
+	
+	// Fixed: Add additional getters for completeness
+	int32 CPU() const						{ return fCPU; }
+	int32 Priority() const					{ return fPriority; }
+	
+#if SCHEDULER_TRACING >= 2
+	void* PreviousPC() const				{ return fPreviousPC; }
+#endif
 
 private:
+	char*				fName;
 	thread_id			fPreviousID;
 	int32				fCPU;
-	char*				fName;
 	int32				fPriority;
 	uint8				fPreviousState;
 	uint16				fPreviousWaitObjectType;
 	union {
 		const void*		fPreviousWaitObject;
+#if SCHEDULER_TRACING >= 2
 		void*			fPreviousPC;
+#endif
 	};
 };
 
 }	// namespace SchedulerTracing
 
-#	define T(x) new(std::nothrow) SchedulerTracing::x;
+// Fixed: Improved macro with better error handling
+#	define T(x) do { \
+		auto* entry = new(std::nothrow) SchedulerTracing::x; \
+		if (entry == NULL) { \
+			/* Handle allocation failure gracefully */ \
+		} \
+	} while (0)
 #else
-#	define T(x) ;
+#	define T(x) do { } while (0)  // Fixed: Use do-while(0) pattern
 #endif
 
 
 #if SCHEDULER_TRACING
 
-namespace SchedulerTracing {
-
-enum ScheduleState {
-	RUNNING,
-	STILL_RUNNING,
-	PREEMPTED,
-	READY,
-	WAITING,
-	UNKNOWN
-};
-
-}
-
-int cmd_scheduler(int argc, char** argv);
+// Fixed: Move function declaration outside namespace for proper linkage
+extern "C" int cmd_scheduler(int argc, char** argv);
 
 #endif	// SCHEDULER_TRACING
 

@@ -1,5 +1,5 @@
-#ifndef OPTIMIZED_SPINLOCK_EEVDF_RUNQUEUE_H
-#define OPTIMIZED_SPINLOCK_EEVDF_RUNQUEUE_H
+#ifndef EEVDF_RUNQUEUE_H
+#define EEVDF_RUNQUEUE_H
 
 #include <atomic>
 #include <vector>
@@ -85,4 +85,4 @@ private:
 
 } // namespace Scheduler
 
-#endif // OPTIMIZED_SPINLOCK_EEVDF_RUNQUEUE_H
+#endif // EEVDF_RUNQUEUE_H

@@ -6,24 +6,31 @@
 #ifndef KERNEL_SCHEDULER_COMMON_H
 #define KERNEL_SCHEDULER_COMMON_H
 
-
 #include <algorithm>
+#include <cstdint>
 
 #include <debug.h>
 #include <kscheduler.h>
 #include "scheduler_defs.h"
 #include <load_tracking.h>
-#include "scheduler_defs.h"
 #include <smp.h>
 #include <thread.h>
 #include <user_debugger.h>
 #include <util/MinMaxHeap.h>
 #include <util/MultiHashTable.h>
 
-// #include "RunQueue.h"
-// This file seems to be obsolete or replaced by EevdfRunQueue.h,
-// which is included where specifically needed.
+// Architecture-independent type definitions
+using sched_time_t = int64_t;  // Use consistent time type
+using sched_load_t = int32_t;  // Load value type
+using cpu_id_t = int32_t;      // CPU identifier type
 
+// Forward declarations to avoid circular dependencies
+namespace Scheduler {
+    class CPUEntry;
+    class CoreEntry;
+    class ThreadData;
+    class TeamSchedulerData;
+}
 
 // Kernel Scheduler Load Metrics Overview:
 // The scheduler uses several metrics to gauge CPU, core, and thread load.
@@ -111,19 +118,22 @@
 //      quickly to significant changes in thread demand on the core.
 
 
-//#define TRACE_SCHEDULER
+// --- Debugging and Tracing Macros ---
+// Conditional compilation based trace macros with proper do-while(0) idiom
+
+// #define TRACE_SCHEDULER
 #ifdef TRACE_SCHEDULER
 #	define TRACE(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE(...) do { } while (false)
+#	define TRACE(...) do { (void)0; } while (false)
 #endif
 
 // Specific trace for I/O bound heuristic debugging
-//#define TRACE_SCHEDULER_IO_BOUND
+// #define TRACE_SCHEDULER_IO_BOUND
 #ifdef TRACE_SCHEDULER_IO_BOUND
 #	define TRACE_SCHED_IO(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_IO(...) do { } while (false)
+#	define TRACE_SCHED_IO(...) do { (void)0; } while (false)
 #endif
 
 // Specific trace for Big.LITTLE / Balance debugging
@@ -131,277 +141,321 @@
 #ifdef TRACE_SCHEDULER_BIG_LITTLE
 #	define TRACE_SCHED_BL(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_BL(...) do { } while (false)
+#	define TRACE_SCHED_BL(...) do { (void)0; } while (false)
 #endif
 
+// SMT (Simultaneous Multi-Threading) debugging
+// #define TRACE_SCHEDULER_SMT
 #ifdef TRACE_SCHEDULER_SMT
 #	define TRACE_SCHED_SMT(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_SMT(...) do { } while (false)
+#	define TRACE_SCHED_SMT(...) do { (void)0; } while (false)
 #endif
 
+// CPU-specific debugging
+// #define TRACE_SCHEDULER_CPU
 #ifdef TRACE_SCHEDULER_CPU
 #	define TRACE_SCHED_CPU(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_CPU(...) do { } while (false)
+#	define TRACE_SCHED_CPU(...) do { (void)0; } while (false)
 #endif
 
+// Team/Process scheduling debugging
+// #define TRACE_SCHEDULER_TEAM
 #ifdef TRACE_SCHEDULER_TEAM
 #	define TRACE_SCHED_TEAM(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_TEAM(...) do { } while (false)
+#	define TRACE_SCHED_TEAM(...) do { (void)0; } while (false)
 #endif
 
+// Verbose team scheduling debugging
+// #define TRACE_SCHEDULER_TEAM_VERBOSE
 #ifdef TRACE_SCHEDULER_TEAM_VERBOSE
 #	define TRACE_SCHED_TEAM_VERBOSE(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_TEAM_VERBOSE(...) do { } while (false)
+#	define TRACE_SCHED_TEAM_VERBOSE(...) do { (void)0; } while (false)
 #endif
 
+// Team scheduling warnings
+// #define TRACE_SCHEDULER_TEAM_WARNING
 #ifdef TRACE_SCHEDULER_TEAM_WARNING
 #	define TRACE_SCHED_TEAM_WARNING(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_TEAM_WARNING(...) do { } while (false)
+#	define TRACE_SCHED_TEAM_WARNING(...) do { (void)0; } while (false)
 #endif
 
+// IRQ handling errors
+// #define TRACE_SCHEDULER_IRQ_ERR
 #ifdef TRACE_SCHEDULER_IRQ_ERR
 #	define TRACE_SCHED_IRQ_ERR(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_IRQ_ERR(...) do { } while (false)
+#	define TRACE_SCHED_IRQ_ERR(...) do { (void)0; } while (false)
 #endif
 
+// General scheduler warnings
+// #define TRACE_SCHEDULER_WARNING
 #ifdef TRACE_SCHEDULER_WARNING
 #	define TRACE_SCHED_WARNING(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_WARNING(...) do { } while (false)
+#	define TRACE_SCHED_WARNING(...) do { (void)0; } while (false)
 #endif
 
+// EEVDF parameter debugging
+// #define TRACE_SCHEDULER_EEVDF_PARAM
 #ifdef TRACE_SCHEDULER_EEVDF_PARAM
 #	define TRACE_SCHED_EEVDF_PARAM(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_EEVDF_PARAM(...) do { } while (false)
+#	define TRACE_SCHED_EEVDF_PARAM(...) do { (void)0; } while (false)
 #endif
 
+// Big.LITTLE work stealing debugging
+// #define TRACE_SCHEDULER_BL_STEAL
 #ifdef TRACE_SCHEDULER_BL_STEAL
 #	define TRACE_SCHED_BL_STEAL(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_BL_STEAL(...) do { } while (false)
+#	define TRACE_SCHED_BL_STEAL(...) do { (void)0; } while (false)
 #endif
 
+// IRQ debugging
+// #define TRACE_SCHEDULER_IRQ
 #ifdef TRACE_SCHEDULER_IRQ
 #	define TRACE_SCHED_IRQ(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_IRQ(...) do { } while (false)
+#	define TRACE_SCHED_IRQ(...) do { (void)0; } while (false)
 #endif
 
+// SMT work stealing debugging
+// #define TRACE_SCHEDULER_SMT_STEAL
 #ifdef TRACE_SCHEDULER_SMT_STEAL
 #	define TRACE_SCHED_SMT_STEAL(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_SMT_STEAL(...) do { } while (false)
+#	define TRACE_SCHED_SMT_STEAL(...) do { (void)0; } while (false)
 #endif
 
+// Dynamic IRQ debugging
+// #define TRACE_SCHEDULER_IRQ_DYNAMIC
 #ifdef TRACE_SCHEDULER_IRQ_DYNAMIC
 #	define TRACE_SCHED_IRQ_DYNAMIC(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_IRQ_DYNAMIC(...) do { } while (false)
+#	define TRACE_SCHED_IRQ_DYNAMIC(...) do { (void)0; } while (false)
 #endif
 
+// Load balancing debugging
+// #define TRACE_SCHEDULER_LB
 #ifdef TRACE_SCHEDULER_LB
 #	define TRACE_SCHED_LB(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_LB(...) do { } while (false)
+#	define TRACE_SCHED_LB(...) do { (void)0; } while (false)
 #endif
 
+// Adaptive scheduling debugging
+// #define TRACE_SCHEDULER_ADAPTIVE
 #ifdef TRACE_SCHEDULER_ADAPTIVE
 #	define TRACE_SCHED_ADAPTIVE(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_ADAPTIVE(...) do { } while (false)
+#	define TRACE_SCHED_ADAPTIVE(...) do { (void)0; } while (false)
 #endif
 
+// SMT tiebreaking debugging
+// #define TRACE_SCHEDULER_SMT_TIEBREAK
 #ifdef TRACE_SCHEDULER_SMT_TIEBREAK
 #	define TRACE_SCHED_SMT_TIEBREAK(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_SMT_TIEBREAK(...) do { } while (false)
+#	define TRACE_SCHED_SMT_TIEBREAK(...) do { (void)0; } while (false)
 #endif
 
-#ifdef TRACE_SCHEDULER
-#	define TRACE_SCHED(...) dprintf_no_syslog(__VA_ARGS__)
-#else
-#	define TRACE_SCHED(...) do { } while (false)
-#endif
-
+// General scheduler debugging (alternative name)
+// #define TRACE_SCHEDULER_CHOICE
 #ifdef TRACE_SCHEDULER_CHOICE
 #	define TRACE_SCHED_CHOICE(...) dprintf_no_syslog(__VA_ARGS__)
 #else
-#	define TRACE_SCHED_CHOICE(...) do { } while (false)
+#	define TRACE_SCHED_CHOICE(...) do { (void)0; } while (false)
 #endif
 
+// Catch-all scheduler debugging
+#ifndef TRACE_SCHED
+#	ifdef TRACE_SCHEDULER
+#		define TRACE_SCHED(...) dprintf_no_syslog(__VA_ARGS__)
+#	else
+#		define TRACE_SCHED(...) do { (void)0; } while (false)
+#	endif
+#endif
+
+// --- End Debugging and Tracing Macros ---
 
 namespace Scheduler {
 
+// --- SMT Conflict Factor Defaults ---
+// These values are hardware and workload dependent and may require tuning
+static constexpr float kDefaultSMTConflictFactorLowLatency = 0.60f;
+static constexpr float kDefaultSMTConflictFactorPowerSaving = 0.40f;
 
-class CPUEntry;
-class CoreEntry;
-class ThreadData; // Forward declaration
-
-// --- MLFQ and DTQ Definitions ---
-// #define DEFAULT_K_DIST_FACTOR 0.25f // REMOVED - Unused by EEVDF
-
-// SMT Conflict Factor Defaults
-#define DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY 0.60f
-#define DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING 0.40f
-
-// IRQ Balancing Parameter Defaults for specific modes
-// Low Latency Mode IRQ Parameters (can reuse global defaults if appropriate)
-// These are defined in scheduler.cpp and used as initial values.
-// #define DEFAULT_IRQ_TARGET_FACTOR_LOW_LATENCY 0.3f (Example, if different)
-// #define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_LOW_LATENCY 700 (Example, if different)
-
+// --- IRQ Balancing Parameter Defaults ---
 // Power Saving Mode IRQ Parameters
-#define DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING 0.5f
-#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING 500
+static constexpr float kDefaultIRQTargetFactorPowerSaving = 0.5f;
+static constexpr sched_load_t kDefaultMaxTargetCPUIRQLoadPowerSaving = 500;
 
-// Base time quanta for MLFQ (REMOVED - EEVDF uses kBaseQuanta from scheduler_defs.h)
-// static const bigtime_t kBaseQuanta[NUM_MLFQ_LEVELS] = { ... };
-// #define NUM_MLFQ_LEVELS 16 // REMOVED
+// --- Time Quantum Limits ---
+// Global minimum and maximum effective quantum for EEVDF slice duration limits
+static constexpr sched_time_t kMinEffectiveQuantum = 500;     // 0.5 ms
+static constexpr sched_time_t kMaxEffectiveQuantum = 100000;  // 100 ms
 
-// Aging thresholds (REMOVED - MLFQ specific)
-/*
-static const bigtime_t kAgingThresholds[NUM_MLFQ_LEVELS] = {
-	0,      // Level 0 doesn't age up (highest)
-	50000,  // Level 1
-	100000, // Level 2
-	150000, // Level 3
-	200000, // Level 4
-	250000, // Level 5
-	300000, // Level 6
-	400000, // Level 7
-	500000, // Level 8
-	600000, // Level 9
-	700000, // Level 10
-	800000, // Level 11
-	900000, // Level 12
-	1000000, // Level 13
-	1500000, // Level 14
-	2000000  // Level 15
-};
-*/
-
-// Global minimum and maximum effective quantum
-// These might be repurposed for EEVDF slice duration limits.
-static const bigtime_t kMinEffectiveQuantum = 500;     // 0.5 ms
-static const bigtime_t kMaxEffectiveQuantum = 100000;  // 100 ms
-
+// --- Load Calculation Constants ---
 // EWMA alpha for CPUEntry instantaneous load calculation
-static const float kInstantLoadEWMAAlpha = 0.4f;
+static constexpr float kInstantLoadEWMAAlpha = 0.4f;
 
-// --- End MLFQ and DTQ Definitions ---
+// --- Scheduler Operation Mode Enums ---
+enum class SchedulerLoadBalancePolicy : uint32_t {
+	SPREAD = 0,      // Spread load across cores
+	CONSOLIDATE = 1  // Consolidate load to fewer cores
+};
 
 // --- Mode-Settable Global Parameters ---
 // These are set by scheduler_set_operation_mode via mode's switch_to_mode
-// extern float gKernelKDistFactor; // REMOVED - Unused by EEVDF
-// extern float gSchedulerBaseQuantumMultiplier; // Directly used in ThreadData::GetBaseQuantumForLevel, not needed as extern here if modes don't set it.
-// extern float gSchedulerAgingThresholdMultiplier; // Aging is obsolete with EEVDF
-enum SchedulerLoadBalancePolicy {
-	SCHED_LOAD_BALANCE_SPREAD,
-	SCHED_LOAD_BALANCE_CONSOLIDATE
-};
+
+// Load balancing policy (spread vs consolidate)
 extern SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy;
 
-// Mode-specific IRQ balancing parameters.
-// Initialized with global defaults, then overridden by scheduler mode switch.
-extern float gModeIrqTargetFactor;
-extern int32 gModeMaxTargetCpuIrqLoad;
+// Mode-specific IRQ balancing parameters
+// Initialized with global defaults, then overridden by scheduler mode switch
+extern float gModeIRQTargetFactor;
+extern sched_load_t gModeMaxTargetCPUIRQLoad;
 
-// SMT (Simultaneous Multi-Threading) Conflict Factor.
-// This factor is set by scheduler modes and used in CPU selection logic
-// (e.g., Scheduler::SelectTargetCPUForIRQ, ThreadData::_ChooseCPU,
-// and CPUEntry::_scheduler_select_cpu_on_core) to quantify the
-// undesirability of placing a task on a CPU whose SMT sibling(s) are busy.
-// The instantaneous load of an SMT sibling is multiplied by this
-// factor to calculate a penalty.
-// - A higher factor means stronger avoidance of busy SMT contexts.
-// - A lower factor means more willingness to utilize SMT siblings.
-// The optimal value is hardware and workload dependent and requires empirical tuning.
-//
-// Future Testing/Tuning Considerations for SMT Factor:
-// - Workload Types for Testing:
-//   - CPU-bound, SMT-friendly parallel tasks (e.g., compilation, some rendering):
-//     Measure throughput scaling.
-//   - CPU-bound, SMT-unfriendly tasks (e.g., heavy FPU, cache-thrashing):
-//     Measure impact of contention.
-//   - Mixed workloads: Latency-sensitive interactive tasks alongside CPU-bound SMT tasks.
-//   - IRQ-intensive workloads: Observe IRQ latency and system responsiveness.
-// - Key Metrics:
-//   - Application/benchmark completion times.
-//   - Interactive task responsiveness (latency).
-//   - IRQ handling latencies.
-//   - CPU utilization (per logical and physical core).
-//   - Power consumption (especially for Power Saving mode).
-// - Methodology: Vary factor in small increments for each mode and observe metrics.
-extern float gSchedulerSMTConflictFactor; // Value set by current scheduler mode.
+// SMT (Simultaneous Multi-Threading) Conflict Factor
+// This factor quantifies the undesirability of placing a task on a CPU 
+// whose SMT sibling(s) are busy. Used in CPU selection algorithms.
+// - Higher factor = stronger avoidance of busy SMT contexts
+// - Lower factor = more willingness to utilize SMT siblings
+// The optimal value requires empirical tuning for specific hardware/workloads.
+extern float gSchedulerSMTConflictFactor;
+
+// Elastic quota mode and team quota policies
 extern bool gSchedulerElasticQuotaMode;
 extern TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy;
+
+// Global team scheduler data management
 extern DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
 extern spinlock gTeamSchedulerListLock;
 
-// --- End Mode-Settable Global Parameters ---
+// --- Load Threshold Constants ---
+// Define load constants based on kMaxLoad (assumed to be defined in scheduler_defs.h)
+static constexpr sched_load_t kLowLoad = kMaxLoad * 20 / 100;      // 20%
+static constexpr sched_load_t kTargetLoad = kMaxLoad * 55 / 100;   // 55%
+static constexpr sched_load_t kMediumLoad = kMaxLoad * 62 / 100;   // 62% (avg of target and high)
+static constexpr sched_load_t kHighLoad = kMaxLoad * 70 / 100;     // 70%
+static constexpr sched_load_t kVeryHighLoad = kMaxLoad * 85 / 100; // 85% (avg of max and high)
 
-// Define load constants first as they are used by kMaxLoadForWarmCorePreference
-const int kLowLoad = kMaxLoad * 20 / 100;
-const int kTargetLoad = kMaxLoad * 55 / 100;
-const int kHighLoad = kMaxLoad * 70 / 100;
-const int kMediumLoad = (kHighLoad + kTargetLoad) / 2;
-const int kVeryHighLoad = (kMaxLoad + kHighLoad) / 2;
+// Load difference threshold for balancing decisions
+static constexpr sched_load_t kLoadDifference = kMaxLoad * 20 / 100;
 
-const int kLoadDifference = kMaxLoad * 20 / 100;
+// --- Cache-Aware Task Placement Constants ---
+// Allowance for how much more loaded a cache-warm core can be vs alternatives
+static constexpr sched_load_t kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15%
+// Maximum load threshold for strongly preferring cache-warm cores
+static constexpr sched_load_t kMaxLoadForWarmCorePreference = kHighLoad;
 
-// --- Constants for Cache-Aware Task Placement Bonus ---
-// Allowance for how much more loaded a cache-warm core can be compared to an alternative.
-const int32 kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15% load allowance
-// Maximum load a cache-warm core can have to still be strongly preferred over a cold one.
-const int32 kMaxLoadForWarmCorePreference = kHighLoad;
-// --- End Constants for Cache-Aware Task Placement Bonus ---
+// --- System Configuration Flags ---
+extern bool gSingleCore;       // System has only one core
+extern bool gTrackCoreLoad;    // Enable core load tracking
+extern bool gTrackCPULoad;     // Enable CPU load tracking
 
-extern bool gSingleCore;
-extern bool gTrackCoreLoad;
-extern bool gTrackCPULoad;
+// --- IRQ Affinity Management ---
+extern BOpenHashTable<struct IntHashDefinition>* sIRQTaskAffinityMap;
+extern spinlock gIRQTaskAffinityLock;
 
-extern BOpenHashTable<struct IntHashDefinition>* sIrqTaskAffinityMap;
-extern spinlock gIrqTaskAffinityLock;
-// extern float gKernelKDistFactor; // REMOVED - Unused by EEVDF
-
-// Defined in power_saving.cpp, used by scheduler_thread.cpp for DTQ refinement
+// --- Power Saving Mode Globals ---
+// Defined in power_saving.cpp, used for small task optimization
 extern CoreEntry* sSmallTaskCore;
 extern spinlock sSmallTaskCoreLock;
-extern bigtime_t sSmallTaskCoreDesignationTime;
-extern bigtime_t gIRQBalanceCheckInterval;
-extern float gModeIrqTargetFactor;
-extern int32 gModeMaxTargetCpuIrqLoad;
-extern int32 gHighAbsoluteIrqThreshold;
-extern int32 gSignificantIrqLoadDifference;
-extern int32 gMaxIRQsToMoveProactively;
+extern sched_time_t sSmallTaskCoreDesignationTime;
 
+// --- IRQ Balancing Configuration ---
+extern sched_time_t gIRQBalanceCheckInterval;
+extern sched_load_t gHighAbsoluteIRQThreshold;
+extern sched_load_t gSignificantIRQLoadDifference;
+extern int32_t gMaxIRQsToMoveProactively;
 
+// --- RAII Lock Helper for Small Task Core ---
 class SmallTaskCoreLocker {
 public:
-	SmallTaskCoreLocker()
+	SmallTaskCoreLocker() noexcept
 	{
 		acquire_spinlock(&sSmallTaskCoreLock);
 	}
 
-
-	~SmallTaskCoreLocker()
+	~SmallTaskCoreLocker() noexcept
 	{
 		release_spinlock(&sSmallTaskCoreLock);
 	}
+
+	// Delete copy constructor and assignment operator
+	SmallTaskCoreLocker(const SmallTaskCoreLocker&) = delete;
+	SmallTaskCoreLocker& operator=(const SmallTaskCoreLocker&) = delete;
+	
+	// Delete move constructor and assignment operator
+	SmallTaskCoreLocker(SmallTaskCoreLocker&&) = delete;
+	SmallTaskCoreLocker& operator=(SmallTaskCoreLocker&&) = delete;
 };
 
+// --- Function Declarations ---
+void init_debug_commands() noexcept;
 
-void init_debug_commands();
+// --- Architecture-Independent Utility Functions ---
+// These provide a consistent interface across different architectures
 
+// Get the number of logical CPUs in the system
+inline cpu_id_t get_logical_cpu_count() noexcept {
+	return smp_get_num_cpus();
+}
+
+// Get the number of physical cores in the system  
+inline cpu_id_t get_physical_core_count() noexcept {
+	// This should be implemented per-architecture
+	// For now, assume logical CPU count (can be overridden)
+	return smp_get_num_cpus();
+}
+
+// Check if SMT/Hyperthreading is available
+inline bool has_smt_support() noexcept {
+	return get_logical_cpu_count() > get_physical_core_count();
+}
+
+// Validate CPU ID is within valid range
+inline bool is_valid_cpu_id(cpu_id_t cpu) noexcept {
+	return cpu >= 0 && cpu < get_logical_cpu_count();
+}
+
+// Safe load value clamping
+inline sched_load_t clamp_load(sched_load_t load) noexcept {
+	if (load < 0) return 0;
+	if (load > kMaxLoad) return kMaxLoad;
+	return load;
+}
+
+// Safe time value validation
+inline sched_time_t clamp_quantum(sched_time_t quantum) noexcept {
+	if (quantum < kMinEffectiveQuantum) return kMinEffectiveQuantum;
+	if (quantum > kMaxEffectiveQuantum) return kMaxEffectiveQuantum;
+	return quantum;
+}
+
+// Load category classification
+enum class LoadCategory : uint8_t {
+	VERY_LOW = 0,  // Below kLowLoad
+	LOW = 1,       // kLowLoad to kTargetLoad
+	MEDIUM = 2,    // kTargetLoad to kHighLoad  
+	HIGH = 3,      // kHighLoad to kVeryHighLoad
+	VERY_HIGH = 4  // Above kVeryHighLoad
+};
+
+inline LoadCategory classify_load(sched_load_t load) noexcept {
+	if (load < kLowLoad) return LoadCategory::VERY_LOW;
+	if (load < kTargetLoad) return LoadCategory::LOW;
+	if (load < kHighLoad) return LoadCategory::MEDIUM;
+	if (load < kVeryHighLoad) return LoadCategory::HIGH;
+	return LoadCategory::VERY_HIGH;
+}
 
 }	// namespace Scheduler
-
 
 #endif	// KERNEL_SCHEDULER_COMMON_H

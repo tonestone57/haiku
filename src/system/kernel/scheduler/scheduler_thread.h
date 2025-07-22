@@ -49,33 +49,43 @@ extern int32* gHaikuContinuousWeights;
 
 static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
     const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);
+	
+	// Handle null thread case
 	if (thread == NULL) {
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
 	}
 
+	// Handle real-time threads
 	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
 		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
 			thread->id, thread->team ? thread->team->id : -1, thread->priority);
 	}
+	// Handle team quota exhaustion for non-RT threads
 	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		bool isTeamExhausted;
+		Scheduler::TeamSchedulerData* tsd = static_cast<Scheduler::TeamSchedulerData*>(thread->team->team_scheduler_data);
+		bool isTeamExhausted = false;
 		bool isBorrowing = false;
 
-		InterruptsSpinLocker locker(tsd->lock);
-		isTeamExhausted = tsd->quota_exhausted;
-		locker.Unlock();
+		// Check if team quota is exhausted (with proper locking)
+		{
+			InterruptsSpinLocker locker(tsd->lock);
+			isTeamExhausted = tsd->quota_exhausted;
+		}
 
 		if (isTeamExhausted) {
-			if (Scheduler::gSchedulerElasticQuotaMode && contextCpu != NULL) {
-				if (contextCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-				}
-			} else if (Scheduler::gSchedulerElasticQuotaMode && contextCpu == NULL && thread->cpu != NULL) {
-				Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-				if (threadActualCpu->GetCurrentActiveTeam() == tsd) {
-					isBorrowing = true;
-					TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
+			// Check if thread can borrow quota in elastic mode
+			if (Scheduler::gSchedulerElasticQuotaMode) {
+				if (contextCpu != NULL) {
+					if (contextCpu->GetCurrentActiveTeam() == tsd) {
+						isBorrowing = true;
+					}
+				} else if (thread->cpu != NULL) {
+					// Fallback: use thread's current CPU
+					Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
+					if (threadActualCpu != NULL && threadActualCpu->GetCurrentActiveTeam() == tsd) {
+						isBorrowing = true;
+						TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
+					}
 				}
 			}
 
@@ -95,13 +105,16 @@ static inline int32 scheduler_priority_to_weight(const Thread* thread, const voi
 		}
 	}
 
+	// Clamp priority to valid range
     int32 priority = thread->priority;
     if (priority < 0) {
         priority = 0;
-    } else if (priority > B_REAL_TIME_PRIORITY) { // Ensure we don't go out of bounds
+    } else if (priority > B_REAL_TIME_PRIORITY) {
         priority = B_REAL_TIME_PRIORITY;
     }
-    // Array is indexed 0 to B_REAL_TIME_PRIORITY, so direct use is fine now.
+    
+    // Ensure we have valid weights array
+    ASSERT(gHaikuContinuousWeights != NULL);
     return gHaikuContinuousWeights[priority];
 }
 
@@ -142,13 +155,16 @@ public:
 							fVirtualDeadline(0),
 							fLag(0),
 							fEligibleTime(0),
-							fSliceDuration(SCHEDULER_TARGET_LATENCY), // Default slice duration
+							fSliceDuration(SCHEDULER_TARGET_LATENCY),
 							fVirtualRuntime(0),
-							// fLatencyNice(LATENCY_NICE_DEFAULT), // Removed
 							fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
 							fVoluntarySleepTransitions(0),
 							fAffinitizedIrqCount(0)
 						{
+							// Initialize affinitized IRQ array
+							for (int8 i = 0; i < MAX_AFFINITIZED_IRQS_PER_THREAD; i++) {
+								fAffinitizedIrqs[i] = -1;
+							}
 						}
 
 			void		Init();
@@ -161,9 +177,12 @@ public:
 						void			UpdateEevdfParameters(CPUEntry* contextCpu,
 											bool isNewOrRelocated, bool isRequeue);
 
-	inline	int32		GetBasePriority() const	{ return fThread->priority; }
+	inline	int32		GetBasePriority() const	{ return fThread ? fThread->priority : B_IDLE_PRIORITY; }
 	inline	Thread*		GetThread() const	{ return fThread; }
-	inline	CPUSet		GetCPUMask() const { return fThread->cpumask.And(gCPUEnabled); }
+	inline	CPUSet		GetCPUMask() const { 
+		if (fThread == NULL) return CPUSet(); // Return empty set for null thread
+		return fThread->cpumask.And(gCPUEnabled); 
+	}
 
 	inline	bool		IsRealTime() const;
 	inline	bool		IsIdle() const;
@@ -285,12 +304,14 @@ public:
 inline SchedulerHeapLink<ThreadData*, ThreadData*>*
 Scheduler::EevdfGetLink::operator()(ThreadData* element) const
 {
+	ASSERT(element != NULL);
 	return &element->fEevdfLink.fSchedulerHeapLink;
 }
 
 inline const SchedulerHeapLink<ThreadData*, ThreadData*>*
 Scheduler::EevdfGetLink::operator()(const ThreadData* element) const
 {
+	ASSERT(element != NULL);
 	return &element->fEevdfLink.fSchedulerHeapLink;
 }
 
@@ -325,6 +346,8 @@ inline void
 ThreadData::StartCPUTime()
 {
 	SCHEDULER_ENTER_FUNCTION();
+	if (fThread == NULL) return; // Guard against null thread
+	
 	SpinLocker threadTimeLocker(fThread->time_lock);
 	fThread->last_time = system_time();
 }
@@ -333,15 +356,22 @@ inline void
 ThreadData::StopCPUTime()
 {
 	SCHEDULER_ENTER_FUNCTION();
+	if (fThread == NULL) return; // Guard against null thread
+	
 	SpinLocker threadTimeLocker(fThread->time_lock);
-	fThread->kernel_time += system_time() - fThread->last_time;
+	bigtime_t currentTime = system_time();
+	if (fThread->last_time > 0 && currentTime >= fThread->last_time) {
+		fThread->kernel_time += currentTime - fThread->last_time;
+	}
 	fThread->last_time = 0;
 	threadTimeLocker.Unlock();
 
 	Team* team = fThread->team;
-	SpinLocker teamTimeLocker(team->time_lock);
-	if (team->HasActiveUserTimeUserTimers())
-		user_timer_check_team_user_timers(team);
+	if (team != NULL) {
+		SpinLocker teamTimeLocker(team->time_lock);
+		if (team->HasActiveUserTimeUserTimers())
+			user_timer_check_team_user_timers(team);
+	}
 }
 
 inline void
@@ -349,8 +379,11 @@ ThreadData::SetStolenInterruptTime(bigtime_t interruptTime)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	if (IsIdle()) return;
-	interruptTime -= fLastInterruptTime;
-	fStolenTime += interruptTime;
+	
+	if (interruptTime >= fLastInterruptTime) {
+		bigtime_t stolenAmount = interruptTime - fLastInterruptTime;
+		fStolenTime += stolenAmount;
+	}
 }
 
 inline bigtime_t
@@ -442,12 +475,15 @@ ThreadData::GoesAway()
 	fWentSleep = system_time();
 	if (fCore != NULL) {
 		fWentSleepActive = fCore->GetActiveTime();
-	} else
+	} else {
 		fWentSleepActive = 0;
+	}
 
 	if (gTrackCoreLoad && !IsIdle()) {
 		bigtime_t currentTime = system_time();
-		fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
+		if (currentTime >= fMeasureAvailableTime) {
+			fMeasureAvailableActiveTime += currentTime - fMeasureAvailableTime;
+		}
 		fMeasureAvailableTime = currentTime;
 
 		if (fCore != NULL) {
@@ -461,7 +497,7 @@ inline void
 ThreadData::Dies()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(fReady || fThread->state == THREAD_STATE_FREE_ON_RESCHED || fThread->state == THREAD_STATE_ZOMBIE);
+	ASSERT(fReady || (fThread != NULL && (fThread->state == THREAD_STATE_FREE_ON_RESCHED || fThread->state == THREAD_STATE_ZOMBIE)));
 
 	if (gTrackCoreLoad && !IsIdle() && fCore != NULL) {
 		if (fReady) {
@@ -481,7 +517,9 @@ ThreadData::MarkEnqueued(CoreEntry* core)
 
 	if (!fReady) {
 		if (gTrackCoreLoad && !IsIdle()) {
-			bigtime_t timeSleptOrInactive = system_time() - fWentSleep;
+			bigtime_t currentTime = system_time();
+			bigtime_t timeSleptOrInactive = (fWentSleep > 0 && currentTime >= fWentSleep) ? 
+				currentTime - fWentSleep : 0;
 			bool updateCoreLoad = (fWentSleep > 0 && timeSleptOrInactive > 0);
 			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, updateCoreLoad);
 			if (updateCoreLoad) {
@@ -491,7 +529,9 @@ ThreadData::MarkEnqueued(CoreEntry* core)
 		}
 		fReady = true;
 	}
-	fThread->state = B_THREAD_READY;
+	if (fThread != NULL) {
+		fThread->state = B_THREAD_READY;
+	}
 	fEnqueued = true;
 }
 
@@ -509,10 +549,15 @@ ThreadData::UpdateActivity(bigtime_t active)
 	if (IsIdle())
 		return;
 
-	fTimeUsedInCurrentQuantum += active;
-	fTimeUsedInCurrentQuantum -= fStolenTime;
+	// Prevent negative time usage
+	bigtime_t netActive = active - fStolenTime;
+	if (netActive < 0)
+		netActive = 0;
+		
+	fTimeUsedInCurrentQuantum += netActive;
 	fStolenTime = 0;
 
+	// Ensure time used doesn't go negative
 	if (fTimeUsedInCurrentQuantum < 0)
 		fTimeUsedInCurrentQuantum = 0;
 

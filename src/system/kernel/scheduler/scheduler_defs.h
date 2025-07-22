@@ -136,7 +136,6 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
 // ============================================================================
 // IRQ Balancing Configuration
 // ============================================================================
-#define MAX_AFFINITIZED_IRQS_PER_THREAD 4
 
 #define DEFAULT_IRQ_BALANCE_CHECK_INTERVAL 500000        // 500ms
 #define DEFAULT_IRQ_TARGET_FACTOR 0.3f                   // 30% target factor

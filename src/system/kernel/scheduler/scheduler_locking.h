@@ -8,10 +8,8 @@
 
 
 #include <cpu.h>
-#include <memory>
 #include <stdint.h>
 #include <smp.h>
-#include <interrupts.h>
 
 #include "scheduler_cpu.h"
 
@@ -105,7 +103,7 @@ public:
 	inline bool			IsLocked() const;
 
 private:
-			bool	fState;
+			cpu_status	fState;
 			bool		fLocked;
 
 	// Debug support - track lock acquisition for deadlock detection
@@ -124,7 +122,7 @@ thread_local int InterruptsBigSchedulerLocker::sLockDepth = 0;
 
 inline
 InterruptsBigSchedulerLocker::InterruptsBigSchedulerLocker()
-	: fState(false), fLocked(false)
+	: fState(B_INTERRUPTS_DISABLED), fLocked(false)
 {
 #if SCHEDULER_LOCK_DEBUG
 	// Check for potential deadlock situations
@@ -136,9 +134,7 @@ InterruptsBigSchedulerLocker::InterruptsBigSchedulerLocker()
 #endif
 
 	// Disable interrupts and store previous state
-	fState = are_interrupts_enabled();
-	if (fState)
-		disable_interrupts();
+	fState = disable_interrupts();
 	fLocked = true;
 	
 	// This locker provides the highest level of scheduler protection by disabling
@@ -170,8 +166,7 @@ InterruptsBigSchedulerLocker::~InterruptsBigSchedulerLocker()
 		memory_full_barrier();
 		
 		// Previously, this destructor unlocked all CPUEntry::fSchedulerModeLock.
-		if (fState)
-			enable_interrupts();
+		restore_interrupts(fState);
 		fLocked = false;
 
 #if SCHEDULER_LOCK_DEBUG
@@ -188,7 +183,7 @@ InterruptsBigSchedulerLocker::~InterruptsBigSchedulerLocker()
 inline bool
 InterruptsBigSchedulerLocker::InterruptsWereEnabled() const
 {
-	return fState;
+	return (fState & B_INTERRUPTS_ENABLED) != 0;
 }
 
 
@@ -222,8 +217,9 @@ private:
 inline
 ConditionalInterruptsBigSchedulerLocker::ConditionalInterruptsBigSchedulerLocker(bool shouldLock)
 {
-	if (shouldLock)
-		fLocker.reset(new (std::nothrow) InterruptsBigSchedulerLocker());
+	if (shouldLock) {
+		fLocker = std::make_unique<InterruptsBigSchedulerLocker>();
+	}
 }
 
 
@@ -250,31 +246,28 @@ public:
 	inline bool			InterruptsWereEnabled() const;
 
 private:
-			bool	fState;
+			cpu_status	fState;
 };
 
 
 inline
 InterruptsLocker::InterruptsLocker()
 {
-	fState = are_interrupts_enabled();
-	if (fState)
-		disable_interrupts();
+	fState = disable_interrupts();
 }
 
 
 inline
 InterruptsLocker::~InterruptsLocker()
 {
-	if (fState)
-		enable_interrupts();
+	restore_interrupts(fState);
 }
 
 
 inline bool
 InterruptsLocker::InterruptsWereEnabled() const
 {
-	return fState;
+	return (fState & B_INTERRUPTS_ENABLED) != 0;
 }
 
 

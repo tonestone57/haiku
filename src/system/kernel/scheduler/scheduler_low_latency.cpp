@@ -9,7 +9,6 @@
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
 #include "scheduler_defs.h"
-#include "scheduler_defs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -60,8 +59,91 @@ is_cache_valid(const CPUCacheEntry* cache_entry, bigtime_t current_time)
 }
 
 
+static float
+get_cached_cpu_load(CPUEntry* cpu, bigtime_t current_time)
+{
+	if (cpu == nullptr || gCPUCache == nullptr)
+		return 1.0f; // Assume high load if invalid
+
+	int32 cpu_num = cpu->ID();
+	if (cpu_num < 0 || cpu_num >= smp_get_num_cpus())
+		return 1.0f;
+
+	CPUCacheEntry* cache_entry = &gCPUCache[cpu_num];
+
+	// Try lockless read first
+	memory_read_barrier();
+	if (is_cache_valid(cache_entry, current_time)) {
+		return cache_entry->cached_load;
+	}
+
+	// Need to update cache
+	cpu_status state = disable_interrupts();
+	if (try_acquire_spinlock(&cache_entry->cache_lock)) {
+		// Check again after acquiring lock
+		if (!is_cache_valid(cache_entry, current_time)) {
+			CoreEntry* core = cpu->Core();
+			if (core != nullptr) {
+				cache_entry->cached_load = core->GetInstantaneousLoad();
+				cache_entry->cached_defunct_state = core->IsDefunct();
+			} else {
+				cache_entry->cached_load = 1.0f;
+				cache_entry->cached_defunct_state = true;
+			}
+			cache_entry->last_update_time = current_time;
+			memory_write_barrier();
+		}
+		release_spinlock(&cache_entry->cache_lock);
+	}
+	restore_interrupts(state);
+
+	return cache_entry->cached_load;
+}
 
 
+static void
+low_latency_switch_to_mode()
+{
+	// Initialize CPU cache if not already done
+	if (gCPUCache == nullptr) {
+		int32 cpu_count = smp_get_num_cpus();
+		gCPUCache = new(std::nothrow) CPUCacheEntry[cpu_count];
+		if (gCPUCache == nullptr) {
+			panic("low_latency_switch_to_mode: Failed to allocate CPU cache");
+			return;
+		}
+
+		// Initialize cache entries
+		for (int32 i = 0; i < cpu_count; i++) {
+			new(&gCPUCache[i]) CPUCacheEntry();
+		}
+	}
+
+	// Reset statistics
+	gLowLatencyStats.cache_hits.store(0, std::memory_order_relaxed);
+	gLowLatencyStats.cache_misses.store(0, std::memory_order_relaxed);
+	gLowLatencyStats.package_migrations.store(0, std::memory_order_relaxed);
+	gLowLatencyStats.global_migrations.store(0, std::memory_order_relaxed);
+	gLowLatencyStats.fallback_selections.store(0, std::memory_order_relaxed);
+
+	// Low latency mode specific initialization
+	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+	gSchedulerSMTConflictFactor = 0.8f;
+
+	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
+	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
+	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
+	gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+	gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
+
+	// Reset any power-saving specific state like sSmallTaskCore
+	if (sSmallTaskCore != nullptr) {
+		SmallTaskCoreLocker locker;
+		sSmallTaskCore = nullptr;
+	}
+
+	dprintf("Scheduler: Switched to low latency mode with enhanced caching\n");
+}
 
 
 static bool
@@ -105,59 +187,6 @@ low_latency_has_cache_expired(const Scheduler::ThreadData* threadData)
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-static CoreEntry*
-low_latency_choose_core_fallback(const Scheduler::ThreadData* threadData, const CPUSet& affinity)
-{
-	// Improved fallback with better distribution
-	int32 start_index = 0;
-	if (threadData != nullptr && threadData->GetThread() != nullptr) {
-		// Use thread ID and current time for better randomization
-		uint32 seed = (uint32)(threadData->GetThread()->id ^ (system_time() >> 10));
-		start_index = seed % gCoreCount;
-	}
-
-	// First pass: find affinity-matching core
-	for (int32 i = 0; i < gCoreCount; i++) {
-		int32 idx = (start_index + i) % gCoreCount;
-		CoreEntry* core = &gCoreEntries[idx];
-
-		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
-			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
-			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (affinity match)\n",
-				threadData ? threadData->GetThread()->id : -1, core->ID());
-			return core;
-		}
-	}
-
-	// Second pass: any non-defunct core
-	for (int32 i = 0; i < gCoreCount; i++) {
-		if (!gCoreEntries[i].IsDefunct()) {
-			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
-			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (any available)\n",
-				threadData ? threadData->GetThread()->id : -1, gCoreEntries[i].ID());
-			return &gCoreEntries[i];
-		}
-	}
-
-	panic("low_latency_choose_core: No suitable core found!");
-	return nullptr;
-}
-
-
 static CoreEntry*
 low_latency_choose_core_previous(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
 {
@@ -197,6 +226,7 @@ low_latency_choose_core_previous(const Scheduler::ThreadData* threadData, const 
 
 	return previous_core;
 }
+
 
 static CoreEntry*
 low_latency_choose_core_same_package(const Scheduler::ThreadData* threadData, CoreEntry* previous_core,
@@ -258,6 +288,7 @@ low_latency_choose_core_same_package(const Scheduler::ThreadData* threadData, Co
 	return best_core;
 }
 
+
 static CoreEntry*
 low_latency_choose_core_global_search(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
 {
@@ -317,6 +348,46 @@ low_latency_choose_core_global_search(const Scheduler::ThreadData* threadData, c
 	return best_core;
 }
 
+
+static CoreEntry*
+low_latency_choose_core_fallback(const Scheduler::ThreadData* threadData, const CPUSet& affinity)
+{
+	// Improved fallback with better distribution
+	int32 start_index = 0;
+	if (threadData != nullptr && threadData->GetThread() != nullptr) {
+		// Use thread ID and current time for better randomization
+		uint32 seed = (uint32)(threadData->GetThread()->id ^ (system_time() >> 10));
+		start_index = seed % gCoreCount;
+	}
+
+	// First pass: find affinity-matching core
+	for (int32 i = 0; i < gCoreCount; i++) {
+		int32 idx = (start_index + i) % gCoreCount;
+		CoreEntry* core = &gCoreEntries[idx];
+
+		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
+			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
+			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (affinity match)\n",
+				threadData ? threadData->GetThread()->id : -1, core->ID());
+			return core;
+		}
+	}
+
+	// Second pass: any non-defunct core
+	for (int32 i = 0; i < gCoreCount; i++) {
+		if (!gCoreEntries[i].IsDefunct()) {
+			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
+			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (any available)\n",
+				threadData ? threadData->GetThread()->id : -1, gCoreEntries[i].ID());
+			return &gCoreEntries[i];
+		}
+	}
+
+	panic("low_latency_choose_core: No suitable core found!");
+	return nullptr;
+}
+
+
 static CoreEntry*
 low_latency_choose_core(const Scheduler::ThreadData* threadData)
 {
@@ -367,59 +438,6 @@ low_latency_cleanup()
 }
 
 
-static void
-low_latency_switch_to_mode()
-{
-	// Initialize CPU cache if not already done
-	if (gCPUCache == nullptr) {
-		int32 cpu_count = smp_get_num_cpus();
-		gCPUCache = new(std::nothrow) CPUCacheEntry[cpu_count];
-		if (gCPUCache == nullptr) {
-			panic("low_latency_switch_to_mode: Failed to allocate CPU cache");
-			return;
-		}
-
-		// Initialize cache entries
-		for (int32 i = 0; i < cpu_count; i++) {
-			new(&gCPUCache[i]) CPUCacheEntry();
-		}
-	}
-
-	// Reset statistics
-	gLowLatencyStats.cache_hits.store(0, std::memory_order_relaxed);
-	gLowLatencyStats.cache_misses.store(0, std::memory_order_relaxed);
-	gLowLatencyStats.package_migrations.store(0, std::memory_order_relaxed);
-	gLowLatencyStats.global_migrations.store(0, std::memory_order_relaxed);
-	gLowLatencyStats.fallback_selections.store(0, std::memory_order_relaxed);
-
-	// Low latency mode specific initialization
-	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
-
-	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
-	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
-	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
-	gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
-	gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
-
-	// Reset any power-saving specific state like sSmallTaskCore
-	if (sSmallTaskCore != nullptr) {
-		SmallTaskCoreLocker locker;
-		sSmallTaskCore = nullptr;
-	}
-
-	dprintf("Scheduler: Switched to low latency mode with enhanced caching\n");
-}
-
-static void
-low_latency_cleanup()
-{
-	if (gCPUCache != nullptr) {
-		delete[] gCPUCache;
-		gCPUCache = nullptr;
-	}
-}
-
 // Enhanced mode operations with cleanup
 scheduler_mode_operations gSchedulerLowLatencyMode = {
 	"low latency",										// name
@@ -429,7 +447,7 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_has_cache_expired,						// has_cache_expired
 	low_latency_choose_core,							// choose_core
 	nullptr,											// rebalance_irqs (use generic)
-	low_latency_cleanup									// cleanup function
+	(scheduler_mode_get_consolidation_target_func_t)low_latency_cleanup									// cleanup function
 };
 
 

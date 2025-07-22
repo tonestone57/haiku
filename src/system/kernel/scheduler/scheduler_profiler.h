@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 // Forward declarations for C compatibility
+struct spinlock;
 
 #ifdef __cplusplus
 }

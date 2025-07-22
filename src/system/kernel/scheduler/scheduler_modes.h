@@ -32,6 +32,7 @@ typedef Scheduler::CoreEntry* (*scheduler_mode_designate_consolidation_func_t)(c
 typedef bool (*scheduler_mode_should_wake_core_func_t)(Scheduler::CoreEntry* core, int32 thread_load_estimate);
 typedef Scheduler::CoreEntry* (*scheduler_mode_attempt_proactive_stc_func_t)();
 typedef bool (*scheduler_mode_is_cpu_parked_func_t)(Scheduler::CPUEntry* cpu);
+typedef void (*scheduler_mode_cleanup_func_t)();
 
 // Scheduler mode operations structure
 struct scheduler_mode_operations {
@@ -55,6 +56,9 @@ struct scheduler_mode_operations {
 	scheduler_mode_should_wake_core_func_t			should_wake_core_for_load;
 	scheduler_mode_attempt_proactive_stc_func_t		attempt_proactive_stc_designation;
 	scheduler_mode_is_cpu_parked_func_t				is_cpu_effectively_parked;
+
+	// Cleanup
+	scheduler_mode_cleanup_func_t					cleanup;
 
 	// Validation function to check if all required operations are implemented
 	bool IsValid() const {

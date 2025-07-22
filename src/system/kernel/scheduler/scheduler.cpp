@@ -1249,6 +1249,11 @@ scheduler_set_operation_mode(scheduler_mode mode)
 
 	if (gCurrentModeID == mode && gCurrentMode != NULL) {
 		dprintf("scheduler: Mode %d (%s) already set.\n", mode, gCurrentMode->name);
+		return B_OK;
+	}
+
+	if (gCurrentMode != NULL && gCurrentMode->cleanup != NULL) {
+		gCurrentMode->cleanup();
 	}
 
 	dprintf("scheduler: switching to %s mode\n", sSchedulerModes[mode]->name);

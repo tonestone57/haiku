@@ -19,7 +19,16 @@
 using namespace Scheduler;
 
 static CoreEntry* low_latency_choose_core(const Scheduler::ThreadData* threadData);
-static void low_latency_cleanup();
+
+static void
+low_latency_cleanup()
+{
+	if (gCPUCache == nullptr)
+		return;
+
+	delete[] gCPUCache;
+	gCPUCache = nullptr;
+}
 
 // Defines the threshold for considering a core's cache affinity "expired" or "cold"
 // for a thread in low latency mode. Reduced from 20ms to 10ms for better responsiveness.
@@ -131,13 +140,13 @@ low_latency_switch_to_mode()
 	gLowLatencyStats.fallback_selections.store(0, std::memory_order_relaxed);
 
 	// Low latency mode specific initialization
-	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+	gSchedulerLoadBalancePolicy = Scheduler::SchedulerLoadBalancePolicy::SPREAD;
 	gSchedulerSMTConflictFactor = 0.8f;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
-	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
-	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
-	gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+	gModeIRQTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
+	gModeMaxTargetCPUIRQLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
+	gSignificantIRQLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
 	gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
 
 	// Reset any power-saving specific state like sSmallTaskCore
@@ -443,7 +452,12 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_has_cache_expired,						// has_cache_expired
 	low_latency_choose_core,							// choose_core
 	nullptr,											// rebalance_irqs (use generic)
-	low_latency_cleanup									// cleanup function
+	nullptr,											// get_consolidation_target_core
+	nullptr,											// designate_consolidation_core
+	nullptr,											// should_wake_core_for_load
+	nullptr,											// attempt_proactive_stc_designation
+	nullptr,											// is_cpu_effectively_parked
+	low_latency_cleanup,								// cleanup
 };
 
 

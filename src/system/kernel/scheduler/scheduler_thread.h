@@ -255,6 +255,11 @@ public:
 	inline uint32 VoluntarySleepTransitions() const { return fVoluntarySleepTransitions; }
 	inline bigtime_t TimeUsedInCurrentQuantum() const { return fTimeUsedInCurrentQuantum; }
 	bool IsLowIntensity() const;
+
+	// Deadline scheduling
+	bigtime_t fDeadline;
+	bigtime_t fRuntime;
+	bigtime_t fPeriod;
 };
 
 class ThreadProcessing {

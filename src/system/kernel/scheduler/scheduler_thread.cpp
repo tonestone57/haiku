@@ -135,6 +135,11 @@ private:
 void
 ThreadData::_InitBase()
 {
+	// Deadline scheduling
+	fDeadline = 0;
+	fRuntime = 0;
+	fPeriod = 0;
+
 	// I/O-bound heuristic
 	// Initialize to a value that doesn't immediately classify as I/O bound.
 	// A typical slice duration might be a good start.

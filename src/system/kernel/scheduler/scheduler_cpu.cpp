@@ -412,7 +412,40 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 		_UpdateMinVirtualRuntime();
 	}
 
-	ThreadData* nextThreadData = PeekEligibleNextThread();
+	ThreadData* nextThreadData = NULL;
+
+	// Check for deadline-scheduled threads
+	ThreadData* deadlineThread = NULL;
+	bigtime_t earliestDeadline = -1;
+
+	std::vector<ThreadData*> poppedThreads;
+	while (!fEevdfRunQueue.IsEmpty()) {
+		ThreadData* thread = fEevdfRunQueue.PopMinimum();
+		poppedThreads.push_back(thread);
+		if (thread->fDeadline > 0) {
+			if (deadlineThread == NULL || thread->fDeadline < earliestDeadline) {
+				deadlineThread = thread;
+				earliestDeadline = thread->fDeadline;
+			}
+		}
+	}
+
+	if (deadlineThread != NULL) {
+		nextThreadData = deadlineThread;
+		for (ThreadData* thread : poppedThreads) {
+			if (thread != nextThreadData) {
+				fEevdfRunQueue.Add(thread);
+			}
+		}
+		fEevdfRunQueueTaskCount.fetch_sub(1);
+		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
+		_UpdateMinVirtualRuntime();
+	} else {
+		for (ThreadData* thread : poppedThreads) {
+			fEevdfRunQueue.Add(thread);
+		}
+		nextThreadData = PeekEligibleNextThread();
+	}
 
 	if (nextThreadData == NULL)
 		nextThreadData = fIdleThread;

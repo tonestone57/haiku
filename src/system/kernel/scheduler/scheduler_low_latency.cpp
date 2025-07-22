@@ -9,6 +9,7 @@
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
 #include "scheduler_defs.h"
+#include "scheduler_defs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +17,9 @@
 #include <debug.h>
 
 using namespace Scheduler;
+
+static CoreEntry* low_latency_choose_core(const Scheduler::ThreadData* threadData);
+static void low_latency_cleanup();
 
 // Defines the threshold for considering a core's cache affinity "expired" or "cold"
 // for a thread in low latency mode. Reduced from 20ms to 10ms for better responsiveness.
@@ -65,7 +69,7 @@ get_cached_cpu_load(CPUEntry* cpu, bigtime_t current_time)
 	if (cpu == nullptr || gCPUCache == nullptr)
 		return 1.0f; // Assume high load if invalid
 
-	int32 cpu_num = cpu->CPUNumber();
+	int32 cpu_num = cpu->ID();
 	if (cpu_num < 0 || cpu_num >= smp_get_num_cpus())
 		return 1.0f;
 
@@ -147,7 +151,7 @@ low_latency_switch_to_mode()
 
 
 static bool
-low_latency_has_cache_expired(const ThreadData* threadData)
+low_latency_has_cache_expired(const Scheduler::ThreadData* threadData)
 {
 	if (threadData == nullptr) {
 		gLowLatencyStats.cache_misses.fetch_add(1, std::memory_order_relaxed);
@@ -188,7 +192,7 @@ low_latency_has_cache_expired(const ThreadData* threadData)
 
 
 static CoreEntry*
-low_latency_choose_core_previous(const ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
+low_latency_choose_core_previous(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
 {
 	if (threadData == nullptr)
 		return nullptr;
@@ -229,7 +233,7 @@ low_latency_choose_core_previous(const ThreadData* threadData, const CPUSet& aff
 
 
 static CoreEntry*
-low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* previous_core,
+low_latency_choose_core_same_package(const Scheduler::ThreadData* threadData, CoreEntry* previous_core,
 									const CPUSet& affinity, bigtime_t current_time)
 {
 	if (previous_core == nullptr)
@@ -256,7 +260,14 @@ low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* pr
 			continue;
 
 		// Get load information efficiently
-		CPUEntry* first_cpu = core->GetCPU(0);
+		int32 firstCPUId = -1;
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (core->CPUMask().GetBit(i)) {
+				firstCPUId = i;
+				break;
+			}
+		}
+		CPUEntry* first_cpu = CPUEntry::GetCPU(firstCPUId);
 		if (first_cpu == nullptr)
 			continue;
 
@@ -282,61 +293,10 @@ low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* pr
 }
 
 
-static CoreEntry*
-low_latency_choose_core_global_search(const ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
-{
-	CoreEntry* best_core = nullptr;
-	float best_load = kMaxInstantaneousLoadForGlobal;
-	int32 best_hist_load = INT32_MAX;
-
-	// Search through sharded heaps more efficiently
-	for (int32 shard_idx = 0; shard_idx < Scheduler::kNumCoreLoadHeapShards; shard_idx++) {
-		cpu_status state = disable_interrupts();
-		if (!try_acquire_read_spinlock(&Scheduler::gCoreHeapsShardLock[shard_idx])) {
-			restore_interrupts(state);
-			continue; // Skip this shard if locked
-		}
-
-		// Check low load heap first (more likely to find good candidates)
-		for (int32 i = 0; i < 8; i++) { // Limit search depth for latency
-			CoreEntry* core = Scheduler::gCoreLoadHeapShards[shard_idx].PeekMinimum(i);
-			if (core == nullptr)
-				break;
-
-			if (core->IsDefunct() || (!affinity.IsEmpty() && !affinity.Matches(core->CPUMask())))
-				continue;
-
-			CPUEntry* first_cpu = core->GetCPU(0);
-			if (first_cpu == nullptr)
-				continue;
-
-			float inst_load = get_cached_cpu_load(first_cpu, current_time);
-			int32 hist_load = core->GetLoad();
-
-			if (inst_load < best_load ||
-				(inst_load == best_load && hist_load < best_hist_load)) {
-				best_load = inst_load;
-				best_hist_load = hist_load;
-				best_core = core;
-			}
-		}
-
-		release_read_spinlock(&Scheduler::gCoreHeapsShardLock[shard_idx]);
-		restore_interrupts(state);
-	}
-
-	if (best_core != nullptr) {
-		gLowLatencyStats.global_migrations.fetch_add(1, std::memory_order_relaxed);
-		TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> global best core %" B_PRId32 " (load %.2f)\n",
-			threadData ? threadData->GetThread()->id : -1, best_core->ID(), best_load);
-	}
-
-	return best_core;
-}
 
 
 static CoreEntry*
-low_latency_choose_core_fallback(const ThreadData* threadData, const CPUSet& affinity)
+low_latency_choose_core_fallback(const Scheduler::ThreadData* threadData, const CPUSet& affinity)
 {
 	// Improved fallback with better distribution
 	int32 start_index = 0;
@@ -375,7 +335,7 @@ low_latency_choose_core_fallback(const ThreadData* threadData, const CPUSet& aff
 
 
 static CoreEntry*
-low_latency_choose_core(const ThreadData* threadData)
+low_latency_choose_core(const Scheduler::ThreadData* threadData)
 {
 	if (gCoreCount <= 0) {
 		panic("low_latency_choose_core: No cores available");
@@ -423,14 +383,6 @@ low_latency_is_cpu_effectively_parked(CPUEntry* cpu)
 }
 
 
-static void
-low_latency_cleanup()
-{
-	if (gCPUCache != nullptr) {
-		delete[] gCPUCache;
-		gCPUCache = nullptr;
-	}
-}
 
 
 // Enhanced mode operations with cleanup
@@ -446,7 +398,7 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	nullptr,											// designate_consolidation_core
 	nullptr,											// should_wake_core_for_load
 	nullptr,											// attempt_proactive_stc_designation
-	low_latency_is_cpu_effectively_parked,				// is_cpu_effectively_parked
+	nullptr,											// is_cpu_effectively_parked
 	low_latency_cleanup									// cleanup function
 };
 

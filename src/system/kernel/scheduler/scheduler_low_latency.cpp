@@ -9,6 +9,7 @@
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
 #include "scheduler_defs.h"
+#include "scheduler_common.h"
 
 #include <algorithm>
 #include <atomic>
@@ -431,14 +432,6 @@ low_latency_choose_core(const Scheduler::ThreadData* threadData)
 }
 
 
-static void
-low_latency_cleanup()
-{
-	if (gCPUCache != nullptr) {
-		delete[] gCPUCache;
-		gCPUCache = nullptr;
-	}
-}
 
 
 // Enhanced mode operations with cleanup
@@ -450,11 +443,6 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_has_cache_expired,						// has_cache_expired
 	low_latency_choose_core,							// choose_core
 	nullptr,											// rebalance_irqs (use generic)
-	nullptr,											// get_consolidation_target_core
-	nullptr,											// designate_consolidation_core
-	nullptr,											// should_wake_core_for_load
-	nullptr,											// attempt_proactive_stc_designation
-	nullptr,											// is_cpu_effectively_parked
 	low_latency_cleanup									// cleanup function
 };
 

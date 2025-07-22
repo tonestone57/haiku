@@ -13,6 +13,7 @@ EevdfRunQueue<MaxSize>::EevdfRunQueue()
 	:
 	fCount(0)
 {
+	fThreadMap.Init(MaxSize);
 }
 
 
@@ -32,6 +33,7 @@ EevdfRunQueue<MaxSize>::Add(ThreadData* thread)
 	fCount++;
 	fHeap[fCount].thread = thread;
 	fHeap[fCount].cachedDeadline = GetDeadline(thread);
+	fThreadMap.Put(thread, fCount);
 	HeapifyUp(fCount);
 	return true;
 }
@@ -41,15 +43,15 @@ template<int MaxSize>
 bool
 EevdfRunQueue<MaxSize>::Remove(ThreadData* thread)
 {
-	for (int32 i = 1; i <= fCount; i++) {
-		if (fHeap[i].thread == thread) {
-			fHeap[i] = fHeap[fCount];
-			fCount--;
-			HeapifyDown(i);
-			return true;
-		}
-	}
-	return false;
+	int32 index;
+	if (!fThreadMap.Get(thread, &index))
+		return false;
+
+	Swap(index, fCount);
+	fCount--;
+	fThreadMap.Remove(thread);
+	HeapifyDown(index);
+	return true;
 }
 
 
@@ -71,7 +73,11 @@ EevdfRunQueue<MaxSize>::PopMinimum()
 		return NULL;
 
 	ThreadData* thread = fHeap[1].thread;
-	fHeap[1] = fHeap[fCount];
+	fThreadMap.Remove(thread);
+	if (fCount > 1) {
+		fHeap[1] = fHeap[fCount];
+		fThreadMap.Put(fHeap[1].thread, 1);
+	}
 	fCount--;
 	HeapifyDown(1);
 	return thread;
@@ -99,6 +105,7 @@ void
 EevdfRunQueue<MaxSize>::Clear()
 {
 	fCount = 0;
+	fThreadMap.Init(MaxSize);
 }
 
 
@@ -106,20 +113,19 @@ template<int MaxSize>
 bool
 EevdfRunQueue<MaxSize>::Update(ThreadData* thread)
 {
-	for (int32 i = 1; i <= fCount; i++) {
-		if (fHeap[i].thread == thread) {
-			bigtime_t newDeadline = GetDeadline(thread);
-			if (newDeadline < fHeap[i].cachedDeadline) {
-				fHeap[i].cachedDeadline = newDeadline;
-				HeapifyUp(i);
-			} else if (newDeadline > fHeap[i].cachedDeadline) {
-				fHeap[i].cachedDeadline = newDeadline;
-				HeapifyDown(i);
-			}
-			return true;
-		}
+	int32 index;
+	if (!fThreadMap.Get(thread, &index))
+		return false;
+
+	bigtime_t newDeadline = GetDeadline(thread);
+	if (newDeadline < fHeap[index].cachedDeadline) {
+		fHeap[index].cachedDeadline = newDeadline;
+		HeapifyUp(index);
+	} else if (newDeadline > fHeap[index].cachedDeadline) {
+		fHeap[index].cachedDeadline = newDeadline;
+		HeapifyDown(index);
 	}
-	return false;
+	return true;
 }
 
 
@@ -138,9 +144,7 @@ EevdfRunQueue<MaxSize>::HeapifyUp(int32 index)
 	while (index > 1) {
 		int32 parentIndex = index / 2;
 		if (fHeap[index].cachedDeadline < fHeap[parentIndex].cachedDeadline) {
-			HeapNode temp = fHeap[index];
-			fHeap[index] = fHeap[parentIndex];
-			fHeap[parentIndex] = temp;
+			Swap(index, parentIndex);
 			index = parentIndex;
 		} else
 			break;
@@ -161,13 +165,23 @@ EevdfRunQueue<MaxSize>::HeapifyDown(int32 index)
 		}
 
 		if (fHeap[childIndex].cachedDeadline < fHeap[index].cachedDeadline) {
-			HeapNode temp = fHeap[index];
-			fHeap[index] = fHeap[childIndex];
-			fHeap[childIndex] = temp;
+			Swap(index, childIndex);
 			index = childIndex;
 		} else
 			break;
 	}
+}
+
+
+template<int MaxSize>
+void
+EevdfRunQueue<MaxSize>::Swap(int index1, int index2)
+{
+	HeapNode temp = fHeap[index1];
+	fHeap[index1] = fHeap[index2];
+	fHeap[index2] = temp;
+	fThreadMap.Put(fHeap[index1].thread, index1);
+	fThreadMap.Put(fHeap[index2].thread, index2);
 }
 
 

@@ -108,6 +108,8 @@ static const int MAX_PEEK_ELIGIBLE_CANDIDATES = 3;
 
 CPUEntry::CPUEntry()
 	:
+	fCPUNumber(-1),
+	fCore(NULL),
 	fIdleThread(NULL),
 	fMinVirtualRuntime(0),
 	fLoad(0),
@@ -115,21 +117,11 @@ CPUEntry::CPUEntry()
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
-	// fEevdfRunQueueTaskCount is initialized using atomic_init in C++11 style if possible,
-	// or direct initialization if the type supports it.
-	// For Haiku's C-style atomics, it's typically done in Init or by ensuring zero-init.
-	// Let's ensure it's zeroed. If atomic_int32 is a struct, it might need explicit {0}.
-	// Assuming it's a typedef for a type that zero-initializes or atomic_init in constructor.
-	// For safety, we will explicitly initialize in the member initializer list if possible,
-	// otherwise rely on Init() for atomic_store.
-	// atomic_init(&fEevdfRunQueueTaskCount, 0); // This is C11 style, might not be direct C++ init list
 	fEevdfRunQueueTaskCount(0),
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
-	fUpdateLoadEvent(false),
+	fUpdateLoadEvent(false)
 {
-	// fSchedulerModeLock was removed.
-	B_INITIALIZE_SPINLOCK(&fQueueLock);
 }
 
 
@@ -141,7 +133,7 @@ CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
 	// can affect the SMT-aware key of its SMT siblings.
 	SCHEDULER_ENTER_FUNCTION();
 
-	SpinLocker lock(fCPULock); // Protects fCPUHeap modifications
+	SpinLockGuard lock(fCPULock); // Protects fCPUHeap modifications
 
 	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
 		return;
@@ -991,7 +983,7 @@ void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	SpinLocker lock(fCPULock);
+	SpinLockGuard lock(fCPULock);
 
 	ASSERT_PRINT(cpu->Core() == this, "CPU %" B_PRId32 " belongs to core %" B_PRId32
 		", not %" B_PRId32, cpu->ID(), cpu->Core()->ID(), ID());
@@ -1033,7 +1025,7 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 void
 CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 {
-	SpinLocker lock(fCPULock);
+	SpinLockGuard lock(fCPULock);
 
 	ASSERT(fCPUCount > 0);
 
@@ -1076,13 +1068,6 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		// The fIdleCPUCount on the CoreEntry itself needs to be consistent.
 		// If the CPU was running its idle thread just before this RemoveCPU operation was initiated
 		// (perhaps checked by the caller or implied by disabling), then fIdleCPUCount needs update.
-		// The current logic in scheduler_set_cpu_enabled calls UpdatePriority(B_IDLE_PRIORITY)
-		// THEN RemoveCPU. If UpdatePriority caused CPUGoesIdle, fIdleCPUCount is up.
-		// So, if gCPU[cpu->ID()].disabled (meaning it's being disabled), and it *was* idle, decrement.
-		// This is still a bit circular.
-
-		// Safest: if the CPU's current running_thread is its idle_thread at the point of removal logic.
-		// This is hard to check perfectly without more context from the caller.
 		// For now, we'll assume that if gCPU[cpu->ID()].disabled is true (it's being disabled),
 		// and fIdleCPUCount > 0, we decrement fIdleCPUCount. This is a heuristic.
 		// A more robust solution might involve CPUGoesOffline/CPUComesOnline calls.
@@ -1168,7 +1153,7 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;
 	{
-		SpinLocker cpuListLock(fCPULock); // Protects fCPUSet iteration
+		SpinLockGuard cpuListLock(fCPULock); // Protects fCPUSet iteration
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1371,7 +1356,7 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
 
 	cpu->LockRunQueue();
 	// Use a non-const reference to be able to PopMinimum
-	EevdfRunQueue& queue = cpu->GetEevdfRunQueue();
+	EevdfRunQueue<>& queue = cpu->GetEevdfRunQueue();
 	if (queue.IsEmpty()) {
 		kprintf("  Run queue is empty.\n");
 	} else {
@@ -1436,7 +1421,7 @@ DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
 /* static */ void
 DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
-	SpinLocker coreCpuListLock(entry->fCPULock);
+	SpinLockGuard coreCpuListLock(entry->fCPULock);
 	int32 idleCpuCount = entry->fIdleCPUCount;
 	coreCpuListLock.Unlock();
 
@@ -1849,8 +1834,6 @@ void Scheduler::init_debug_commands()
 // For the provided code, I'll use `fQueueLock.IsOwnedByCurrentThread()` as per the previous diff.
 // If `IsOwnedByCurrentThread` is not a member of `spinlock`, this will fail to compile.
 // The previous diff used `ASSERT(fQueueLock.IsOwnedByCurrentThread());`
-// Let's assume `spinlock` in Haiku has a debug `IsOwnedByCurrentThread` or similar.
-// The previous tool output applied this: `ASSERT(fQueueLock.IsOwnedByCurrentThread()); // Replaced IsOwned()`
 // I will stick to this, assuming it's a valid Haiku debug feature for spinlocks.
 #endif // KDEBUG
 

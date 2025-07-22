@@ -25,6 +25,7 @@
 #include "scheduler_modes.h"
 #include "EevdfRunQueue.h"
 #include "scheduler_profiler.h"
+#include "scheduler_spin_lock.h"
 
 
 namespace Scheduler {
@@ -103,8 +104,8 @@ public:
 
 						int32			CalculateTotalIrqLoad() const;
 
-						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
-						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
+						const EevdfRunQueue<>& GetEevdfRunQueue() const { return fEevdfRunQueue; }
+						EevdfRunQueue<>& GetEevdfRunQueue() { return fEevdfRunQueue; }
 	inline				bigtime_t		MinVirtualRuntime();
 	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
 
@@ -136,10 +137,10 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						EevdfRunQueue	fEevdfRunQueue;
+						EevdfRunQueue<>	fEevdfRunQueue;
 						ThreadData*		fIdleThread;
 						bigtime_t		fMinVirtualRuntime;
-						spinlock		fQueueLock;
+						SpinLock		fQueueLock;
 
 						int32			fLoad;
 						float			fInstantaneousLoad;
@@ -243,7 +244,7 @@ private:
 						CPUSet			fCPUSet;
 						int32			fIdleCPUCount; // Protected by fCPULock
 						CPUPriorityHeap	fCPUHeap;
-						spinlock		fCPULock;
+						SpinLock		fCPULock;
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
@@ -372,7 +373,7 @@ inline void
 CPUEntry::LockRunQueue()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	acquire_spinlock(&fQueueLock);
+	fQueueLock.lock();
 }
 
 
@@ -380,14 +381,14 @@ inline void
 CPUEntry::UnlockRunQueue()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	release_spinlock(&fQueueLock);
+	fQueueLock.unlock();
 }
 
 
 inline bigtime_t
 CPUEntry::MinVirtualRuntime()
 {
-	InterruptsSpinLocker _(fQueueLock);
+	SpinLockGuard _(fQueueLock);
 	_UpdateMinVirtualRuntime();
 	return fMinVirtualRuntime;
 }
@@ -412,7 +413,7 @@ inline void
 CoreEntry::LockCPUHeap()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	acquire_spinlock(&fCPULock);
+	fCPULock.lock();
 }
 
 
@@ -420,7 +421,7 @@ inline void
 CoreEntry::UnlockCPUHeap()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	release_spinlock(&fCPULock);
+	fCPULock.unlock();
 }
 
 

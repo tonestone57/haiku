@@ -2,6 +2,7 @@
 #define EEVDF_RUNQUEUE_H
 
 #include <support/atomic.h>
+#include "HashMap.h"
 
 // Forward declarations
 class ThreadData;
@@ -36,10 +37,12 @@ private:
     bigtime_t GetDeadline(ThreadData* thread) const;
     void HeapifyUp(int index);
     void HeapifyDown(int index);
+    void Swap(int index1, int index2);
     
     // Member variables
     HeapNode fHeap[MaxSize + 1];
     int32 fCount;
+    HashMap<ThreadData*, int32> fThreadMap;
 };
 
 } // namespace Scheduler

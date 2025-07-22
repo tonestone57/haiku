@@ -332,7 +332,8 @@ static const int32 kBenefitScoreLagFactor = 2;
 // factor for eligibility improvement in benefit score
 static const int32 kBenefitScoreEligFactor = 1;
 // minimum unweighted normalized work to steal
-static const bigtime_t kMinUnweightedNormWorkToSteal = 1000;
+static bigtime_t kBaseStarvationThreshold = 1000;
+static bigtime_t kMigrationCostBase = 500;
 
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
@@ -672,6 +673,7 @@ switch_thread(Thread* fromThread, Thread* toThread)
 }
 
 
+// Implements the new work-stealing algorithm.
 static ThreadData*
 _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 {
@@ -711,84 +713,41 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 			if (candidateWeight <= 0) candidateWeight = 1;
 			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
 
-			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
+			float thiefLoad = thiefCPU->GetInstantaneousLoad();
+			float victimLoad = victimCPUEntry->GetInstantaneousLoad();
+			bigtime_t dynamicThreshold = kBaseStarvationThreshold * (1 + (thiefLoad - victimLoad));
+
+			int dist = 0;
+			if (thiefCPU->Core()->Package() != victimCPUEntry->Core()->Package()) {
+				dist = 2;
+			} else if (thiefCPU->Core() != victimCPUEntry->Core()) {
+				dist = 1;
+			}
+			bigtime_t migrationCost = kMigrationCostBase * dist;
+			bigtime_t adjustedThreshold = dynamicThreshold + migrationCost;
+
+			bool isStarved = unweightedNormWorkOwed > adjustedThreshold;
 
 			if (isStarved) {
 				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > effective_threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
 					candThread->id, unweightedNormWorkOwed,
-					(kMinUnweightedNormWorkToSteal),
+					adjustedThreshold,
 					candidateTask->Lag());
 			}
-
 
 			if (basicChecksPass && isStarved) {
 				bool allowStealByBLPolicy = false;
 				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
 				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
 
-				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
-					|| candidateTask->GetLoad() > (kMaxLoad * 7 / 10));
-
-				TRACE_SCHED_BL_STEAL("WorkSteal Eval: Thief C%d(T%d), Victim C%d(T%d), Task T% " B_PRId32 " (Pcrit %d, EPref %d, Load %" B_PRId32 ", Lag %" B_PRId64 ")\n",
-					thiefCPU->Core()->ID(), thiefCoreType, victimCPUEntry->Core()->ID(), victimCoreType,
-					candThread->id, isTaskPCritical, isTaskEPref, candidateTask->GetLoad(), candidateTask->Lag());
-
 				if (thiefCoreType == CORE_TYPE_BIG || thiefCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
-					if (isTaskPCritical) {
-						allowStealByBLPolicy = true;
-						TRACE_SCHED_BL_STEAL("  Decision: BIG thief, P-Critical task. ALLOW steal.\n");
-					} else {
-						uint32 victimCapacity = victimCPUEntry->Core()->PerformanceCapacity();
-						if (victimCapacity == 0) victimCapacity = SCHEDULER_NOMINAL_CAPACITY;
-						int32 victimEffectiveVeryHighLoad = (int32)((uint64)kVeryHighLoad * victimCapacity / SCHEDULER_NOMINAL_CAPACITY);
-						if (victimCPUEntry->GetLoad() > victimEffectiveVeryHighLoad) {
-							allowStealByBLPolicy = true;
-							TRACE_SCHED_BL_STEAL("  Decision: BIG thief, EPref/Flex task, victim C%d very overloaded. ALLOW steal.\n", victimCPUEntry->Core()->ID());
-						} else {
-							TRACE_SCHED_BL_STEAL("  Decision: BIG thief, EPref/Flex task, victim C%d not very overloaded. DENY steal.\n", victimCPUEntry->Core()->ID());
-						}
-					}
+					allowStealByBLPolicy = true;
 				} else {
-					if (isTaskPCritical) {
-						allowStealByBLPolicy = false;
-						if (victimCoreType == CORE_TYPE_LITTLE && victimCPUEntry->GetLoad() > thiefCPU->Core()->GetLoad() + kLoadDifference) {
-							allowStealByBLPolicy = true;
-							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task. Victim is overloaded LITTLE. ALLOW steal (rescue).\n");
-						} else if (victimCoreType == CORE_TYPE_BIG || victimCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
-							bool allBigCoresSaturated = true;
-							for (int32 coreIdx = 0; coreIdx < gCoreCount; coreIdx++) {
-								CoreEntry* core = &gCoreEntries[coreIdx];
-								if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE))
-									continue;
-								uint32 pCoreCapacity = core->PerformanceCapacity() > 0 ? core->PerformanceCapacity() : SCHEDULER_NOMINAL_CAPACITY;
-								int32 pCoreHighLoadThreshold = kHighLoad * pCoreCapacity / SCHEDULER_NOMINAL_CAPACITY;
-								if (core->GetLoad() < pCoreHighLoadThreshold) {
-									allBigCoresSaturated = false;
-									TRACE_SCHED_BL_STEAL("  Eval P-crit steal by E-core: P-Core %" B_PRId32 " (load %" B_PRId32 ") not saturated (threshold %" B_PRId32 ").\n",
-										core->ID(), core->GetLoad(), pCoreHighLoadThreshold);
-									break;
-								}
-							}
-
-							if (allBigCoresSaturated) {
-								uint32 thiefCapacity = thiefCPU->Core()->PerformanceCapacity();
-								if (thiefCapacity == 0) thiefCapacity = SCHEDULER_NOMINAL_CAPACITY;
-								int32 lightTaskLoadThreshold = (int32)((uint64)thiefCapacity * 20 / 100 * kMaxLoad / SCHEDULER_NOMINAL_CAPACITY);
-								if (candidateTask->GetLoad() < lightTaskLoadThreshold) {
-									allowStealByBLPolicy = true;
-									TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. All P-cores saturated AND task load %" B_PRId32 " is light for thief. ALLOW steal.\n", candidateTask->GetLoad());
-								} else {
-									TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. All P-cores saturated BUT task load %" B_PRId32 " too high for LITTLE. DENY steal.\n", candidateTask->GetLoad());
-								}
-							} else {
-								TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from P-core. Not all P-cores saturated. DENY steal.\n");
-							}
-						} else {
-							TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, P-Critical task from LITTLE victim. Conditions for rescue not met. DENY steal.\n");
-						}
-					} else {
+					if (victimCoreType == CORE_TYPE_LITTLE) {
 						allowStealByBLPolicy = true;
-						TRACE_SCHED_BL_STEAL("  Decision: LITTLE thief, EPref/Flex task. ALLOW steal.\n");
+					} else {
+						if (victimCPUEntry->GetLoad() > kHighLoad)
+							allowStealByBLPolicy = true;
 					}
 				}
 
@@ -1638,6 +1597,16 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
 	add_debugger_command_alias("get_smt_factor", "scheduler_get_smt_factor", "Alias for scheduler_get_smt_factor");
+	add_debugger_command_etc("scheduler_set_starvation_threshold", &cmd_scheduler_set_starvation_threshold, "Set the base starvation threshold.", "<threshold>\n...", 0);
+	add_debugger_command_alias("set_starvation_threshold", "scheduler_set_starvation_threshold", "Alias for scheduler_set_starvation_threshold");
+	add_debugger_command_etc("scheduler_get_starvation_threshold", &cmd_scheduler_get_starvation_threshold, "Get the base starvation threshold.", "...", 0);
+	add_debugger_command_alias("get_starvation_threshold", "scheduler_get_starvation_threshold", "Alias for scheduler_get_starvation_threshold");
+	add_debugger_command_etc("scheduler_set_migration_cost", &cmd_scheduler_set_migration_cost, "Set the base migration cost.", "<cost>\n...", 0);
+	add_debugger_command_alias("set_migration_cost", "scheduler_set_migration_cost", "Alias for scheduler_set_migration_cost");
+	add_debugger_command_etc("scheduler_get_migration_cost", &cmd_scheduler_get_migration_cost, "Get the base migration cost.", "...", 0);
+	add_debugger_command_alias("get_migration_cost", "scheduler_get_migration_cost", "Alias for scheduler_get_migration_cost");
+	add_debugger_command_etc("scheduler_dump_ws_stats", &cmd_scheduler_dump_ws_stats, "Dump work-stealing statistics.", "...", 0);
+	add_debugger_command_alias("dump_ws_stats", "scheduler_dump_ws_stats", "Alias for scheduler_dump_ws_stats");
 	// Removido: dump_eevdf_weights
 }
 
@@ -1718,6 +1687,64 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 {
 	if (argc != 1) { kprintf("Usage: scheduler_get_smt_factor\n"); return B_KDEBUG_ERROR; }
 	kprintf("Current scheduler gSchedulerSMTConflictFactor: %f\n", Scheduler::gSchedulerSMTConflictFactor);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_starvation_threshold(int argc, char** argv)
+{
+	if (argc != 2) { kprintf("Usage: scheduler_set_starvation_threshold <threshold>\n"); return B_KDEBUG_ERROR; }
+	char* endPtr;
+	long newThreshold = strtol(argv[1], &endPtr, 10);
+	if (argv[1] == endPtr || *endPtr != '\0') { kprintf("Error: Invalid integer value for threshold: %s\n", argv[1]); return B_KDEBUG_ERROR; }
+	if (newThreshold < 0) { kprintf("Error: Threshold must be non-negative.\n"); return B_KDEBUG_ERROR; }
+	kBaseStarvationThreshold = newThreshold;
+	kprintf("Scheduler kBaseStarvationThreshold set to: %ld\n", kBaseStarvationThreshold);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_get_starvation_threshold(int argc, char** argv)
+{
+	if (argc != 1) { kprintf("Usage: scheduler_get_starvation_threshold\n"); return B_KDEBUG_ERROR; }
+	kprintf("Current scheduler kBaseStarvationThreshold: %ld\n", kBaseStarvationThreshold);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_migration_cost(int argc, char** argv)
+{
+	if (argc != 2) { kprintf("Usage: scheduler_set_migration_cost <cost>\n"); return B_KDEBUG_ERROR; }
+	char* endPtr;
+	long newCost = strtol(argv[1], &endPtr, 10);
+	if (argv[1] == endPtr || *endPtr != '\0') { kprintf("Error: Invalid integer value for cost: %s\n", argv[1]); return B_KDEBUG_ERROR; }
+	if (newCost < 0) { kprintf("Error: Cost must be non-negative.\n"); return B_KDEBUG_ERROR; }
+	kMigrationCostBase = newCost;
+	kprintf("Scheduler kMigrationCostBase set to: %ld\n", kMigrationCostBase);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_get_migration_cost(int argc, char** argv)
+{
+	if (argc != 1) { kprintf("Usage: scheduler_get_migration_cost\n"); return B_KDEBUG_ERROR; }
+	kprintf("Current scheduler kMigrationCostBase: %ld\n", kMigrationCostBase);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_dump_ws_stats(int argc, char** argv)
+{
+	kprintf("Work-stealing statistics:\n");
+	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+		CPUEntry* cpu = CPUEntry::GetCPU(i);
+		kprintf("  CPU %" B_PRId32 ": %" B_PRId32 " steal failures\n", i, cpu->fStealFailures);
+	}
 	return 0;
 }
 

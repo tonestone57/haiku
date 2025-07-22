@@ -22,3 +22,8 @@ SimpleTest SchedulerTest :
 SEARCH on [ FGristFiles
 		scheduler.cpp
 	] = [ FDirName $(HAIKU_TOP) src system kernel ] ;
+
+SimpleTest SchedulerWsTest :
+	scheduler_ws_test.cpp
+	: libkernelland_emu.so be
+;

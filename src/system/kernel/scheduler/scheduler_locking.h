@@ -223,7 +223,7 @@ inline
 ConditionalInterruptsBigSchedulerLocker::ConditionalInterruptsBigSchedulerLocker(bool shouldLock)
 {
 	if (shouldLock)
-		fLocker = new (std::nothrow) InterruptsBigSchedulerLocker();
+		fLocker.reset(new (std::nothrow) InterruptsBigSchedulerLocker());
 }
 
 

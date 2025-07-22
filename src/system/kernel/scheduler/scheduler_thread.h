@@ -103,7 +103,6 @@ private:
     bigtime_t fPeriod;
 
 public:
-    static const int8 MAX_AFFINITIZED_IRQS_PER_THREAD = 4;
     static constexpr bigtime_t CACHE_VALIDITY_PERIOD = 1000; // 1ms
 
     ThreadData(Thread* thread);

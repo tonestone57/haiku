@@ -94,7 +94,7 @@ private:
     uint32 fBurstCredits;
     uint32 fLatencyViolations;
     uint32 fInteractivityClass;
-    int32 fAffinitizedIrqs[MAX_AFFINITIZED_IRQS_PER_THREAD];
+    int32 fAffinitizedIrqs[4];
     int8 fAffinitizedIrqCount;
 
     // Deadline scheduling (less frequently accessed, protected by lock)
@@ -224,19 +224,5 @@ public:
 
 }	// namespace Scheduler
 
-class Scheduler::EevdfGetLink {
-public:
-	inline SchedulerHeapLink<Scheduler::ThreadData*, Scheduler::ThreadData*>*
-	operator()(Scheduler::ThreadData* element) const
-	{
-		return &element->fEevdfLink.fSchedulerHeapLink;
-	}
-
-	inline const SchedulerHeapLink<Scheduler::ThreadData*, Scheduler::ThreadData*>*
-	operator()(const Scheduler::ThreadData* element) const
-	{
-		return &element->fEevdfLink.fSchedulerHeapLink;
-	}
-};
 
 #endif	// KERNEL_SCHEDULER_THREAD_H

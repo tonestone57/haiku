@@ -178,9 +178,9 @@ static_assert(POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR >= 1.0 && POWER_SAVING_DTQ_
 
 namespace SchedulerConstants {
     // Core scheduling parameters
-    constexpr int32 SCHEDULER_WEIGHT_SCALE_SAFE = ::SCHEDULER_WEIGHT_SCALE;
-    constexpr bigtime_t SCHEDULER_TARGET_LATENCY_SAFE = ::SCHEDULER_TARGET_LATENCY;
-    constexpr bigtime_t SCHEDULER_MIN_GRANULARITY_SAFE = ::SCHEDULER_MIN_GRANULARITY;
+    constexpr int32 SCHEDULER_WEIGHT_SCALE_SAFE = SCHEDULER_WEIGHT_SCALE;
+    constexpr bigtime_t SCHEDULER_TARGET_LATENCY_SAFE = SCHEDULER_TARGET_LATENCY;
+    constexpr bigtime_t SCHEDULER_MIN_GRANULARITY_SAFE = SCHEDULER_MIN_GRANULARITY;
     
     // Slice configuration
     constexpr bigtime_t MIN_SLICE_GRANULARITY = kMinSliceGranularity;

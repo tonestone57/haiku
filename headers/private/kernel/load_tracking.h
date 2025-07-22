@@ -9,7 +9,6 @@
 #include <OS.h>
 
 
-const int32 kMaxLoad = 1000;
 const bigtime_t kLoadMeasureInterval = 1000;
 const bigtime_t kIntervalInaccuracy = kLoadMeasureInterval / 4;
 

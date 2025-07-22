@@ -65,7 +65,7 @@ get_cached_cpu_load(CPUEntry* cpu, bigtime_t current_time)
 	if (cpu == nullptr || gCPUCache == nullptr)
 		return 1.0f; // Assume high load if invalid
 	
-	int32 cpu_num = cpu->CPUNumber();
+	int32 cpu_num = cpu->ID();
 	if (cpu_num < 0 || cpu_num >= smp_get_num_cpus())
 		return 1.0f;
 	
@@ -147,7 +147,7 @@ low_latency_switch_to_mode()
 
 
 static bool
-low_latency_has_cache_expired(const ThreadData* threadData)
+low_latency_has_cache_expired(const Scheduler::ThreadData* threadData)
 {
 	if (threadData == nullptr) {
 		gLowLatencyStats.cache_misses.fetch_add(1, std::memory_order_relaxed);
@@ -188,7 +188,7 @@ low_latency_has_cache_expired(const ThreadData* threadData)
 
 
 static CoreEntry*
-low_latency_choose_core_previous(const ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
+low_latency_choose_core_previous(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
 {
 	if (threadData == nullptr)
 		return nullptr;
@@ -229,7 +229,7 @@ low_latency_choose_core_previous(const ThreadData* threadData, const CPUSet& aff
 
 
 static CoreEntry*
-low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* previous_core, 
+low_latency_choose_core_same_package(const Scheduler::ThreadData* threadData, CoreEntry* previous_core,
 									const CPUSet& affinity, bigtime_t current_time)
 {
 	if (previous_core == nullptr)
@@ -256,7 +256,7 @@ low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* pr
 			continue;
 		
 		// Get load information efficiently
-		CPUEntry* first_cpu = core->GetCPU(0);
+		CPUEntry* first_cpu = CPUEntry::GetCPU(core->CPUMask().FirstSetBit());
 		if (first_cpu == nullptr)
 			continue;
 			
@@ -283,7 +283,7 @@ low_latency_choose_core_same_package(const ThreadData* threadData, CoreEntry* pr
 
 
 static CoreEntry*
-low_latency_choose_core_global_search(const ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
+low_latency_choose_core_global_search(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
 {
 	CoreEntry* best_core = nullptr;
 	float best_load = kMaxInstantaneousLoadForGlobal;
@@ -306,7 +306,7 @@ low_latency_choose_core_global_search(const ThreadData* threadData, const CPUSet
 			if (core->IsDefunct() || (!affinity.IsEmpty() && !affinity.Matches(core->CPUMask())))
 				continue;
 			
-			CPUEntry* first_cpu = core->GetCPU(0);
+			CPUEntry* first_cpu = CPUEntry::GetCPU(core->CPUMask().FirstSetBit());
 			if (first_cpu == nullptr)
 				continue;
 				
@@ -335,102 +335,12 @@ low_latency_choose_core_global_search(const ThreadData* threadData, const CPUSet
 }
 
 
-static CoreEntry*
-low_latency_choose_core_fallback(const ThreadData* threadData, const CPUSet& affinity)
-{
-	// Improved fallback with better distribution
-	int32 start_index = 0;
-	if (threadData != nullptr && threadData->GetThread() != nullptr) {
-		// Use thread ID and current time for better randomization
-		uint32 seed = (uint32)(threadData->GetThread()->id ^ (system_time() >> 10));
-		start_index = seed % gCoreCount;
-	}
-	
-	// First pass: find affinity-matching core
-	for (int32 i = 0; i < gCoreCount; i++) {
-		int32 idx = (start_index + i) % gCoreCount;
-		CoreEntry* core = &gCoreEntries[idx];
-		
-		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
-			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
-			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (affinity match)\n",
-				threadData ? threadData->GetThread()->id : -1, core->ID());
-			return core;
-		}
-	}
-	
-	// Second pass: any non-defunct core
-	for (int32 i = 0; i < gCoreCount; i++) {
-		if (!gCoreEntries[i].IsDefunct()) {
-			gLowLatencyStats.fallback_selections.fetch_add(1, std::memory_order_relaxed);
-			TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 " (any available)\n",
-				threadData ? threadData->GetThread()->id : -1, gCoreEntries[i].ID());
-			return &gCoreEntries[i];
-		}
-	}
-	
-	panic("low_latency_choose_core: No suitable core found!");
-	return nullptr;
-}
 
 
-static CoreEntry*
-low_latency_choose_core(const ThreadData* threadData)
-{
-	if (gCoreCount <= 0) {
-		panic("low_latency_choose_core: No cores available");
-		return nullptr;
-	}
-	
-	bigtime_t current_time = system_time();
-	const CPUSet& affinity = threadData != nullptr ? threadData->GetCPUMask() : CPUSet();
-	
-	// 1. Try previous core (cache affinity)
-	CoreEntry* chosen_core = low_latency_choose_core_previous(threadData, affinity, current_time);
-	if (chosen_core != nullptr)
-		return chosen_core;
-	
-	// Get previous core info for package search
-	CoreEntry* previous_core = nullptr;
-	if (threadData != nullptr && threadData->GetThread() != nullptr && 
-		threadData->GetThread()->previous_cpu != nullptr) {
-		CPUEntry* prev_cpu = CPUEntry::GetCPU(threadData->GetThread()->previous_cpu->cpu_num);
-		if (prev_cpu != nullptr)
-			previous_core = prev_cpu->Core();
-	}
-	
-	// 2. Try same package
-	chosen_core = low_latency_choose_core_same_package(threadData, previous_core, affinity, current_time);
-	if (chosen_core != nullptr)
-		return chosen_core;
-	
-	// 3. Global search
-	chosen_core = low_latency_choose_core_global_search(threadData, affinity, current_time);
-	if (chosen_core != nullptr)
-		return chosen_core;
-	
-	// 4. Fallback
-	return low_latency_choose_core_fallback(threadData, affinity);
-}
 
 
-static bool
-low_latency_is_cpu_effectively_parked(CPUEntry* cpu)
-{
-	// In low latency mode, no CPUs are considered "parked" for work-stealing purposes.
-	// All active CPUs should participate to minimize latency.
-	return false;
-}
 
 
-static void
-low_latency_cleanup()
-{
-	if (gCPUCache != nullptr) {
-		delete[] gCPUCache;
-		gCPUCache = nullptr;
-	}
-}
 
 
 // Enhanced mode operations with cleanup
@@ -442,18 +352,13 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	low_latency_has_cache_expired,						// has_cache_expired
 	low_latency_choose_core,							// choose_core
 	nullptr,											// rebalance_irqs (use generic)
-	nullptr,											// get_consolidation_target_core
-	nullptr,											// designate_consolidation_core
-	nullptr,											// should_wake_core_for_load
-	nullptr,											// attempt_proactive_stc_designation
-	low_latency_is_cpu_effectively_parked,				// is_cpu_effectively_parked
 	low_latency_cleanup									// cleanup function
 };
 
 
 // Debug function to get statistics
 status_t
-low_latency_get_stats(low_latency_stats_t* stats)
+low_latency_get_stats(LowLatencyStats* stats)
 {
 	if (stats == nullptr)
 		return B_BAD_VALUE;

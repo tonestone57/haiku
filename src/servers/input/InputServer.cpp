@@ -39,6 +39,7 @@
 	// this is an automatically generated file
 
 #include <ServerProtocol.h>
+#include <kernel/scheduler.h>
 
 using std::nothrow;
 
@@ -1982,6 +1983,10 @@ InputServer::_DispatchEvent(BMessage* event)
 
 	BMessenger reply;
 	BMessage::Private messagePrivate(event);
+	port_message_info info;
+	if (_get_port_message_info_etc(fAppServerPort, &info, sizeof(info), 0, 0) == B_OK) {
+		scheduler_thread_received_input(info.sender_team);
+	}
 	return messagePrivate.SendMessage(fAppServerPort, fAppServerTeam, 0, 0,
 		false, reply);
 }

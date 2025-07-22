@@ -29,7 +29,6 @@ namespace Scheduler {
     class CPUEntry;
     class CoreEntry;
     class ThreadData;
-    class TeamSchedulerData;
 }
 
 // Kernel Scheduler Load Metrics Overview:

@@ -16,7 +16,6 @@
 #include "scheduler_cpu.h"
 #include "scheduler_defs.h"
 #include "scheduler_thread.h"
-#include "scheduler_team.h"
 
 namespace Scheduler {
 

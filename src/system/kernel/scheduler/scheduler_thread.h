@@ -40,7 +40,7 @@
 #include "scheduler_cpu.h"     // Forward declares CoreEntry, CPUEntry
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
-#include "scheduler_team.h"
+#include <kernel/scheduler.h>
 #include "EevdfRunQueue.h"     // For EevdfRunQueueLink
 
 namespace Scheduler {
@@ -48,65 +48,21 @@ namespace Scheduler {
 extern int32* gHaikuContinuousWeights;
 
 static inline int32 scheduler_priority_to_weight(const Thread* thread, const void* contextCpuVoid) {
-    const Scheduler::CPUEntry* contextCpu = static_cast<const Scheduler::CPUEntry*>(contextCpuVoid);
-	
-	// Handle null thread case
-	if (thread == NULL) {
+	if (thread == NULL)
 		return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-	}
-
-	// Handle real-time threads
-	if (thread->priority >= B_REAL_TIME_DISPLAY_PRIORITY) {
-		TRACE_SCHED_TEAM_VERBOSE("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") RT prio %" B_PRId32 ", bypassing team quota for weight.\n",
-			thread->id, thread->team ? thread->team->id : -1, thread->priority);
-	}
-	// Handle team quota exhaustion for non-RT threads
-	else if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = static_cast<Scheduler::TeamSchedulerData*>(thread->team->team_scheduler_data);
-		bool isTeamExhausted = false;
-		bool isBorrowing = false;
-
-		// Check if team quota is exhausted (with proper locking)
-		{
-			InterruptsSpinLocker locker(tsd->lock);
-			isTeamExhausted = tsd->quota_exhausted;
-		}
-
-		if (isTeamExhausted) {
-			// Check if thread can borrow quota in elastic mode
-			if (Scheduler::gSchedulerElasticQuotaMode) {
-				if (contextCpu != NULL) {
-					if (contextCpu->GetCurrentActiveTeam() == tsd) {
-						isBorrowing = true;
-					}
-				} else if (thread->cpu != NULL) {
-					// Fallback: use thread's current CPU
-					Scheduler::CPUEntry* threadActualCpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-					if (threadActualCpu != NULL && threadActualCpu->GetCurrentActiveTeam() == tsd) {
-						isBorrowing = true;
-						TRACE_SCHED_TEAM_WARNING("scheduler_priority_to_weight: T %" B_PRId32 " used fallback context (thread->cpu) for borrowing check.\n", thread->id);
-					}
-				}
-			}
-
-			if (!isBorrowing) {
-				if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Starvation-Low). Applying idle weight. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-					return gHaikuContinuousWeights[B_IDLE_PRIORITY];
-				} else if (Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_HARD_STOP) {
-					TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") quota exhausted (Hard-Stop). Returning normal weight; selection logic should prevent running. ContextCPU: %" B_PRId32 "\n",
-						thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-				}
-			} else {
-				TRACE_SCHED_TEAM("scheduler_priority_to_weight: T %" B_PRId32 " (team %" B_PRId32 ") is exhausted but actively borrowing on ContextCPU %" B_PRId32 ". Using normal weight.\n",
-					thread->id, thread->team->id, contextCpu ? contextCpu->ID() : -1);
-			}
-		}
-	}
 
 	// Clamp priority to valid range
     int32 priority = thread->priority;
+    if (thread->scheduler_data->fBurstCredits > 0) {
+        priority += thread->scheduler_data->fBurstCredits;
+        thread->scheduler_data->fBurstCredits--;
+    }
+    priority += thread->scheduler_data->fInteractivityClass;
+    priority += thread->scheduler_data->fLatencyViolations / 10;
+
+    if (thread->scheduler_data->fInteractivityClass == 2) {
+        priority += 5;
+    }
     if (priority < 0) {
         priority = 0;
     } else if (priority > B_REAL_TIME_PRIORITY) {
@@ -159,6 +115,9 @@ public:
 							fVirtualRuntime(0),
 							fAverageRunBurstTimeEWMA(SCHEDULER_TARGET_LATENCY / 2),
 							fVoluntarySleepTransitions(0),
+							fBurstCredits(0),
+							fLatencyViolations(0),
+							fInteractivityClass(0),
 							fAffinitizedIrqCount(0)
 						{
 							// Initialize affinitized IRQ array
@@ -273,6 +232,9 @@ private:
 	Scheduler::EevdfRunQueueLink fEevdfLink;
 	bigtime_t	fAverageRunBurstTimeEWMA;
 	uint32		fVoluntarySleepTransitions;
+	uint32		fBurstCredits;
+	uint32		fLatencyViolations;
+	uint32		fInteractivityClass;
 
 public:
 	static const int8 MAX_AFFINITIZED_IRQS_PER_THREAD = 4;
@@ -446,7 +408,10 @@ inline bigtime_t ThreadData::VirtualDeadline() const { return fVirtualDeadline; 
 inline void ThreadData::SetVirtualDeadline(bigtime_t deadline) { fVirtualDeadline = deadline; }
 inline bigtime_t ThreadData::Lag() const { return fLag; }
 inline void ThreadData::SetLag(bigtime_t lag) { fLag = lag; }
-inline void ThreadData::AddLag(bigtime_t lagAmount) { fLag += lagAmount; }
+inline void ThreadData::AddLag(bigtime_t lagAmount) {
+	fLag += lagAmount;
+	scheduler_update_total_system_lag(lagAmount);
+}
 inline bigtime_t ThreadData::EligibleTime() const { return fEligibleTime; }
 inline void ThreadData::SetEligibleTime(bigtime_t time) { fEligibleTime = time; }
 inline bigtime_t ThreadData::SliceDuration() const { return fSliceDuration; }

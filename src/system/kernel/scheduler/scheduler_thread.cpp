@@ -362,6 +362,11 @@ ThreadData::_ChooseCore() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
+
+	if (system_time() - fLastMigrationTime < 10000) {
+		return fCore;
+	}
+
 	if (gCurrentMode == NULL) {
 		// Add bounds checking for core selection
 		if (gCoreCount <= 0) {
@@ -435,7 +440,9 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 		}
 	}
 
-	if (chosenCPU == NULL) {
+	if (fThread->pinned_to_cpu > 0) {
+		chosenCPU = CPUEntry::GetCPU(fThread->pinned_to_cpu - 1);
+	} else if (chosenCPU == NULL) {
 		// Previous CPU not suitable or not on this core.
 		// Iterate all enabled CPUs on the chosen core, select the one with the best SMT-aware effective load.
 		CPUEntry* bestCandidateOnCore = NULL;
@@ -923,6 +930,22 @@ ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlic
     TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " RecordVoluntarySleep: ran %" B_PRId64 
         "us, new avgBurst %" B_PRId64 "us, transitions %" B_PRIu32 "\n",
         fThread->id, actualRuntimeInSlice, newAverage, currentTransitions + 1);
+
+    if (actualRuntimeInSlice < SCHEDULER_TARGET_LATENCY / 2) {
+        fBurstCredits.store(fBurstCredits.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+
+    if (fSliceDuration < SCHEDULER_TARGET_LATENCY / 2) {
+        fSliceDuration = fSliceDuration * 9 / 10;
+    }
+
+    if (fAverageRunBurstTimeEWMA < 1000) {
+        fInteractivityClass = 2; // Interactive
+    } else if (fAverageRunBurstTimeEWMA < 10000) {
+        fInteractivityClass = 1; // Semi-interactive
+    } else {
+        fInteractivityClass = 0; // Batch
+    }
 }
 
 bool

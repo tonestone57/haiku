@@ -111,8 +111,8 @@ public:
 						bool			IsEffectivelyIdle() const; // Moved to .cpp
 
 	// Team Quota related
-	void				SetCurrentActiveTeam(TeamSchedulerData* teamData);
-	inline TeamSchedulerData* GetCurrentActiveTeam() const { return fCurrentActiveTeam; }
+	void				SetCurrentActiveTeam(void* teamData);
+	inline void* GetCurrentActiveTeam() const { return fCurrentActiveTeam; }
 
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
@@ -154,7 +154,7 @@ private:
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
 						bool			fUpdateLoadEvent;
-	TeamSchedulerData*	fCurrentActiveTeam;			// Team currently allocated to run on this CPU by Tier 1 scheduler (Moved before fUpdateLoadEvent)
+	void*	fCurrentActiveTeam;
 
 						friend class DebugDumper;
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey

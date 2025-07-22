@@ -17,7 +17,6 @@
 
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_thread.h"
-#include "scheduler_team.h"
 #include "EevdfRunQueue.h" // Make sure this is included
 
 #include <util/MultiHashTable.h>
@@ -136,23 +135,9 @@ CPUEntry::CPUEntry()
 
 
 void
-CPUEntry::SetCurrentActiveTeam(TeamSchedulerData* teamData)
+CPUEntry::SetCurrentActiveTeam(void* teamData)
 {
-	// This function would likely be called by the Tier 1 team scheduler.
-	// It might involve more complex logic later, e.g., if switching active
-	// teams requires flushing certain CPU-local caches or EEVDF state adjustments.
-	// For now, it's a simple assignment.
-	// Locking: The caller (Tier 1 scheduler) must ensure appropriate synchronization.
-	// If this is called from a context that also modifies run queues (like reschedule),
-	// then fQueueLock might need to be held, or a separate lock for fCurrentActiveTeam.
-	// For initial simplicity, assume direct assignment is okay and higher-level logic handles safety.
-	// TODO: Review locking implications.
-	fCurrentActiveTeam = teamData;
-	if (teamData != NULL) {
-		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team set to %" B_PRId32 "\n", ID(), teamData->teamID);
-	} else {
-		TRACE_SCHED_BL("CPU %" B_PRId32 ": Active team cleared.\n", ID());
-	}
+	// This function is now a no-op since team quotas are removed.
 }
 
 
@@ -345,109 +330,6 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 }
 */
 
-// Helper to find the best eligible thread from a specific team in the run queue.
-// Returns the thread data if found (and removes it from the queue), otherwise NULL.
-// The queue lock (fQueueLock) MUST be held by the caller.
-static ThreadData*
-_PeekEligibleThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
-	std::atomic<int32>& queueTaskCount)
-{
-	if (activeTeam == NULL)
-		return NULL;
-
-	ThreadData* eligibleCandidate = NULL;
-	DoublyLinkedList<ThreadData> temporarilyPoppedList;
-	bigtime_t now = system_time();
-
-	// Similar to PeekEligibleNextThread, but filters by team.
-	while (!queue.IsEmpty()) {
-		ThreadData* candidate = queue.PopMinimum();
-		queueTaskCount.fetch_sub(1);
-		ASSERT(queueTaskCount.load() >= 0);
-
-		if (candidate == NULL) break;
-
-		if (candidate->GetThread()->team->team_scheduler_data == activeTeam
-			&& now >= candidate->EligibleTime() && !candidate->IsIdle()) {
-			eligibleCandidate = candidate;
-			break;
-		} else {
-			temporarilyPoppedList.Add(candidate);
-			if (candidate->GetThread()->team->team_scheduler_data != activeTeam) {
-				TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 ", T %" B_PRId32 " (team %" B_PRId32 ") not in active team %" B_PRId32 ". Temp pop.\n",
-					cpuID, candidate->GetThread()->id,
-					candidate->GetThread()->team->id, activeTeam->teamID);
-			} else if (now < candidate->EligibleTime()) {
-				TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 ", T %" B_PRId32 " (team %" B_PRId32 ") not eligible (elig %" B_PRId64 ", now %" B_PRId64 "). Temp pop.\n",
-					cpuID, candidate->GetThread()->id, activeTeam->teamID,
-					candidate->EligibleTime(), now);
-			}
-		}
-	}
-
-	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
-		queue.Add(toReAdd);
-		queueTaskCount.fetch_add(1);
-	}
-
-	if (eligibleCandidate != NULL) {
-		TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 " chose T %" B_PRId32 " from active team %" B_PRId32 " (VD %" B_PRId64 ").\n",
-			cpuID, eligibleCandidate->GetThread()->id, activeTeam->teamID, eligibleCandidate->GetVirtualDeadline());
-	} else {
-		TRACE_SCHED_TEAM("ChooseNextThread(Team): CPU %" B_PRId32 " no eligible thread found in active team %" B_PRId32 ".\n",
-			cpuID, activeTeam->teamID);
-	}
-	return eligibleCandidate;
-}
-
-
-// Helper to find the best REAL-TIME eligible thread from a specific team.
-// Returns the thread data if found (and removes it from the queue), otherwise NULL.
-// The queue lock (fQueueLock) MUST be held by the caller.
-static ThreadData*
-_PeekEligibleRealtimeThreadFromTeam(EevdfRunQueue& queue, TeamSchedulerData* activeTeam, int32 cpuID,
-	std::atomic<int32>& queueTaskCount)
-{
-	if (activeTeam == NULL)
-		return NULL;
-
-	ThreadData* eligibleRTFound = NULL;
-	DoublyLinkedList<ThreadData> temporarilyPoppedList;
-	bigtime_t now = system_time();
-
-	while (!queue.IsEmpty()) {
-		ThreadData* candidate = queue.PopMinimum();
-		queueTaskCount.fetch_sub(1);
-		ASSERT(queueTaskCount.load() >= 0);
-
-		if (candidate == NULL) break;
-
-		if (candidate->GetThread()->team->team_scheduler_data == activeTeam
-			&& candidate->GetThread()->priority >= B_REAL_TIME_DISPLAY_PRIORITY
-			&& now >= candidate->EligibleTime() && !candidate->IsIdle()) {
-			eligibleRTFound = candidate;
-			break; // Found an eligible RT thread
-		} else {
-			temporarilyPoppedList.Add(candidate);
-			// Optional TRACE messages for why it was skipped (wrong team, not RT, not eligible)
-		}
-	}
-
-	// Re-add non-chosen threads
-	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
-		queue.Add(toReAdd);
-		queueTaskCount.fetch_add(1);
-	}
-
-	if (eligibleRTFound != NULL) {
-		TRACE_SCHED_TEAM("ChooseNextThread(RT-Team): CPU %" B_PRId32 " chose RT T %" B_PRId32 " from active team %" B_PRId32 " (VD %" B_PRId64 ").\n",
-			cpuID, eligibleRTFound->GetThread()->id, activeTeam->teamID, eligibleRTFound->GetVirtualDeadline());
-	} else {
-		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread(RT-Team): CPU %" B_PRId32 " no eligible RT thread found in active team %" B_PRId32 ".\n",
-			cpuID, activeTeam->teamID);
-	}
-	return eligibleRTFound;
-}
 
 
 ThreadData*
@@ -537,57 +419,12 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 		_UpdateMinVirtualRuntime();
 	}
 
-	ThreadData* nextThreadData = NULL;
+	ThreadData* nextThreadData = PeekEligibleNextThread();
 
-	// Phase 1: Check Real-Time threads from fCurrentActiveTeam (Bypass Quota Exhaustion)
-	if (fCurrentActiveTeam != NULL) {
-		nextThreadData = _PeekEligibleRealtimeThreadFromTeam(fEevdfRunQueue,
-			fCurrentActiveTeam, ID(), fEevdfRunQueueTaskCount);
-		if (nextThreadData != NULL) {
-			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (bypassing quota check).\n",
-				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);
-		}
-	}
-
-	// Phase 2: Check Non-Real-Time threads from fCurrentActiveTeam (Nominal Quota Check)
-	if (nextThreadData == NULL && fCurrentActiveTeam != NULL && !fCurrentActiveTeam->quota_exhausted) {
-		nextThreadData = _PeekEligibleThreadFromTeam(fEevdfRunQueue,
-			fCurrentActiveTeam, ID(), fEevdfRunQueueTaskCount);
-		if (nextThreadData != NULL) {
-			TRACE_SCHED_TEAM("ChooseNextThread: CPU %" B_PRId32 " selected non-RT thread %" B_PRId32 " from ActiveTeam %" B_PRId32 " (within quota).\n",
-				ID(), nextThreadData->GetThread()->id, fCurrentActiveTeam->teamID);
-		} else {
-			TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 ", ActiveTeam %" B_PRId32 " (within quota) has no eligible non-RT threads.\n",
-				ID(), fCurrentActiveTeam->teamID);
-		}
-	}
-
-	// Phase 3: General Fallback - Pick any eligible thread from any team.
-	// PeekEligibleNextThread needs to be RT-aware implicitly by virtue of
-	// scheduler_priority_to_weight correctly handling RT threads from exhausted teams.
-	if (nextThreadData == NULL) {
-		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " falling back to PeekEligibleNextThread (any team).\n", ID());
-		nextThreadData = PeekEligibleNextThread(); // This pops the thread if found
-		if (nextThreadData != NULL) {
-			TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " PeekEligibleNextThread found T %" B_PRId32 " (Team %" B_PRId32 ").\n",
-				ID(), nextThreadData->GetThread()->id,
-				nextThreadData->GetThread()->team ? nextThreadData->GetThread()->team->id : -1);
-		}
-	}
-
-	// Phase 4: Set idle thread if no other thread is found
-	if (nextThreadData != NULL) {
-		// A thread was found (RT, non-RT from active team, or general fallback).
-		// It has already been popped from the queue by the respective Peek function.
-		nextThreadData->MarkDequeued();
-	} else {
-		// No eligible, non-idle thread found by any means. Choose this CPU's idle thread.
-		TRACE_SCHED_TEAM_VERBOSE("ChooseNextThread: CPU %" B_PRId32 " no runnable thread found, selecting idle thread.\n", ID());
+	if (nextThreadData == NULL)
 		nextThreadData = fIdleThread;
-		if (nextThreadData == NULL) {
-			panic("CPUEntry::ChooseNextThread: CPU %" B_PRId32 " has no fIdleThread assigned!", ID());
-		}
-	}
+	else
+		nextThreadData->MarkDequeued();
 
 	ASSERT(nextThreadData != NULL);
 	return nextThreadData;
@@ -867,44 +704,6 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 		// This now also updates fTimeUsedInCurrentQuantum
 		oldThreadData->UpdateActivity(activeTime);
 
-		// Account for team quota usage
-		if (oldThread->team != NULL && oldThread->team->team_scheduler_data != NULL) {
-			Scheduler::TeamSchedulerData* teamSchedData = oldThread->team->team_scheduler_data;
-			InterruptsSpinLocker locker(teamSchedData->lock);
-			if (!teamSchedData->quota_exhausted) {
-				teamSchedData->quota_period_usage += activeTime;
-				if (teamSchedData->quota_period_usage >= teamSchedData->current_quota_allowance
-					&& teamSchedData->current_quota_allowance > 0) {
-					// Don't mark exhausted if allowance is 0 (e.g. 0% quota)
-					// unless specific policy dictates 0% means no run time.
-					teamSchedData->quota_exhausted = true;
-					TRACE_SCHED("Team %" B_PRId32 " quota EXHAUSTED. Usage: %" B_PRId64 ", Allowance: %" B_PRId64 "\n",
-						teamSchedData->teamID, teamSchedData->quota_period_usage, teamSchedData->current_quota_allowance);
-				}
-
-				// Update team virtual runtime
-				if (teamSchedData->cpu_quota_percent > 0) {
-					// activeTime is wall-clock time. For team vruntime, we should use
-					// the capacity-normalized work equivalent, similar to thread vruntime.
-					// uint32 coreCapacityForTeamVR = fCore != NULL && fCore->fPerformanceCapacity > 0
-					// 	? fCore->fPerformanceCapacity : SCHEDULER_NOMINAL_CAPACITY;
-					// uint64 normActiveTimeNum = (uint64)activeTime * coreCapacityForTeamVR;
-					// bigtime_t normActiveTime = normActiveTimeNum / SCHEDULER_NOMINAL_CAPACITY;
-					//
-					// For now, let's use raw activeTime for simplicity, can refine with normalization.
-					// The key is relative advancement. If all teams' time is accounted this way,
-					// the divisor (quota_percent) provides the fairness.
-					// If we normalize, then TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT might need to be scaled like SCHEDULER_WEIGHT_SCALE.
-					// Let's stick to simpler for now:
-					bigtime_t vRuntimeIncrease = (activeTime * TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT) / teamSchedData->cpu_quota_percent;
-					teamSchedData->team_virtual_runtime += vRuntimeIncrease;
-					// TRACE_SCHED_TEAM("Team %" B_PRId32 " VR advanced by %" B_PRId64 " (activeTime %" B_PRId64 ", quota %" B_PRIu32 ") to %" B_PRId64 "\n",
-					// 	teamSchedData->teamID, vRuntimeIncrease, activeTime, teamSchedData->cpu_quota_percent, teamSchedData->team_virtual_runtime);
-				}
-				// No unlock for tsd->lock here, it's already outside the if(!teamSchedData->quota_exhausted)
-			}
-			// locker for tsd->lock is released when it goes out of scope
-		}
 	}
 
 	// If CPU load tracking is enabled, update load metrics and potentially

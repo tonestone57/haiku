@@ -24,8 +24,10 @@ public:
             __asm__ volatile("" ::: "memory");
 #elif defined(__powerpc__) || defined(__powerpc64__)
             __asm__ volatile("or 27,27,27" ::: "memory");
-#elif defined(__riscv)
+#elif defined(__riscv) || defined(__riscv64)
             __asm__ volatile("pause" ::: "memory");
+#elif defined(__sparc64__)
+            __asm__ volatile("membar #LoadLoad" ::: "memory");
 #else
             // Generic fallback for other architectures
 #if __cplusplus >= 202002L

@@ -24,7 +24,6 @@
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
 #include "EevdfRunQueue.h"
-#include "scheduler_profiler.h"
 #include "scheduler_spin_lock.h"
 
 

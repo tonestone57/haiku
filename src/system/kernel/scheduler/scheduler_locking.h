@@ -222,9 +222,8 @@ private:
 inline
 ConditionalInterruptsBigSchedulerLocker::ConditionalInterruptsBigSchedulerLocker(bool shouldLock)
 {
-	if (shouldLock) {
-		fLocker = std::make_unique<InterruptsBigSchedulerLocker>();
-	}
+	if (shouldLock)
+		fLocker = new (std::nothrow) InterruptsBigSchedulerLocker();
 }
 
 

@@ -248,6 +248,7 @@ public:
 	const int32* GetAffinitizedIrqs(int8& count) const { count = fAffinitizedIrqCount; return fAffinitizedIrqs; }
 
 	bool IsLikelyIOBound() const;
+	bool IsLikelyCPUBound() const;
 	void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
 
 	inline bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA; }

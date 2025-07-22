@@ -43,6 +43,7 @@ public:
     // Batch operations
     std::vector<ThreadData*> PopMultiple(size_t maxCount);
     status_t AddBatch(const std::vector<ThreadData*>& threads);
+    void PopMultiple(std::vector<ThreadData*>& threads, size_t maxCount);
 
 #ifdef DEBUG
     void ValidateStructure() const;

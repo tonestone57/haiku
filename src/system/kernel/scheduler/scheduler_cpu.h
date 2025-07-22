@@ -113,6 +113,7 @@ public:
 
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
+	int32				fStealFailures;
 
 public:
 						// Calculates a heap key for this CPU that is SMT-aware.

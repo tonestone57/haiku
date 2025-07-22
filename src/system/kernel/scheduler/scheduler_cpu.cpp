@@ -194,6 +194,7 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
 	fLastTimeTaskStolenFrom = 0;
+	fStealFailures = 0;
 }
 
 

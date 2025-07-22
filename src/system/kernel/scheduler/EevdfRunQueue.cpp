@@ -337,6 +337,37 @@ std::vector<ThreadData*> OptimizedSpinlockEevdfRunQueue<MaxSize>::PopMultiple(si
 }
 
 template<int MaxSize>
+void OptimizedSpinlockEevdfRunQueue<MaxSize>::PopMultiple(std::vector<ThreadData*>& threads, size_t maxCount)
+{
+    AcquireSpinlock();
+
+    for (size_t i = 0; i < maxCount && fHeap.size() > 1; ++i) {
+        ThreadData* thread = fHeap[1].thread;
+        int lastIndex = static_cast<int>(fHeap.size()) - 1;
+
+        fThreadToIndex.erase(thread);
+
+        if (lastIndex == 1) {
+            fHeap.pop_back();
+        } else {
+            fHeap[1] = fHeap[lastIndex];
+            fThreadToIndex[fHeap[1].thread] = 1;
+            fHeap.pop_back();
+            HeapifyDown(1);
+        }
+
+        threads.push_back(thread);
+        fCount.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    if (!threads.empty()) {
+        fVersion.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    ReleaseSpinlock();
+}
+
+template<int MaxSize>
 status_t OptimizedSpinlockEevdfRunQueue<MaxSize>::AddBatch(const std::vector<ThreadData*>& threads)
 {
     if (threads.empty()) {

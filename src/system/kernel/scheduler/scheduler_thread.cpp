@@ -964,6 +964,9 @@ ThreadData::IsLikelyIOBound() const
 
     bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
     bool isIOBound = avgBurst < SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US;
+
+	if (GetBasePriority() < B_NORMAL_PRIORITY)
+		isIOBound = isIOBound || (avgBurst < SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US * 2);
     
     TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " IsLikelyIOBound: avgBurst %" B_PRId64 
         "us, threshold %" B_PRId64 "us => %s\n",
@@ -971,4 +974,25 @@ ThreadData::IsLikelyIOBound() const
         isIOBound ? "true" : "false");
     
     return isIOBound;
+}
+
+
+bool
+ThreadData::IsLikelyCPUBound() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+
+	if (IsIdle())
+		return false;
+
+	if (GetBasePriority() < B_NORMAL_PRIORITY)
+		return false;
+
+	uint32 transitions = fVoluntarySleepTransitions.load(std::memory_order_acquire);
+	if (transitions > SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
+		return false;
+	}
+
+	bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
+	return avgBurst > SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US * 2;
 }

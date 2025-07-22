@@ -159,29 +159,6 @@ namespace Scheduler {
 #	define TRACE_SCHED_CPU(...) do { (void)0; } while (false)
 #endif
 
-// Team/Process scheduling debugging
-// #define TRACE_SCHEDULER_TEAM
-#ifdef TRACE_SCHEDULER_TEAM
-#	define TRACE_SCHED_TEAM(...) dprintf_no_syslog(__VA_ARGS__)
-#else
-#	define TRACE_SCHED_TEAM(...) do { (void)0; } while (false)
-#endif
-
-// Verbose team scheduling debugging
-// #define TRACE_SCHEDULER_TEAM_VERBOSE
-#ifdef TRACE_SCHEDULER_TEAM_VERBOSE
-#	define TRACE_SCHED_TEAM_VERBOSE(...) dprintf_no_syslog(__VA_ARGS__)
-#else
-#	define TRACE_SCHED_TEAM_VERBOSE(...) do { (void)0; } while (false)
-#endif
-
-// Team scheduling warnings
-// #define TRACE_SCHEDULER_TEAM_WARNING
-#ifdef TRACE_SCHEDULER_TEAM_WARNING
-#	define TRACE_SCHED_TEAM_WARNING(...) dprintf_no_syslog(__VA_ARGS__)
-#else
-#	define TRACE_SCHED_TEAM_WARNING(...) do { (void)0; } while (false)
-#endif
 
 // IRQ handling errors
 // #define TRACE_SCHEDULER_IRQ_ERR

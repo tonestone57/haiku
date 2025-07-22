@@ -65,7 +65,6 @@
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
 namespace Scheduler {
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 bool gSchedulerElasticQuotaMode = true;
 }
 
@@ -154,10 +153,6 @@ cmd_thread_sched_info(int argc, char** argv)
 
 	schedulerLocker.Unlock();
 
-	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		kprintf("\nTeam Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
-		kprintf("  <Team quota information has been removed>\n");
-	}
 
 	thread->Unlock();
 
@@ -279,10 +274,6 @@ static int cmd_scheduler(int argc, char** argv);
 #endif
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
-static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
-static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
 
@@ -625,9 +616,8 @@ scheduler_reschedule_ici()
 static inline void
 stop_cpu_timers(Thread* fromThread, Thread* toThread)
 {
-	SpinLocker teamLocker(&fromThread->team->time_lock);
 	SpinLocker threadLocker(&fromThread->time_lock);
-	if (fromThread->HasActiveCPUTimeUserTimers() || fromThread->team->HasActiveCPUTimeUserTimers())
+	if (fromThread->HasActiveCPUTimeUserTimers())
 		user_timer_stop_cpu_timers(fromThread, toThread);
 }
 
@@ -635,9 +625,8 @@ stop_cpu_timers(Thread* fromThread, Thread* toThread)
 static inline void
 continue_cpu_timers(Thread* thread, cpu_ent* cpu)
 {
-	SpinLocker teamLocker(&thread->team->time_lock);
 	SpinLocker threadLocker(&thread->time_lock);
-	if (thread->HasActiveCPUTimeUserTimers() || thread->team->HasActiveCPUTimeUserTimers())
+	if (thread->HasActiveCPUTimeUserTimers())
 		user_timer_continue_cpu_timers(thread, cpu->previous_thread);
 }
 
@@ -1651,14 +1640,6 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
 	add_debugger_command_alias("get_smt_factor", "scheduler_get_smt_factor", "Alias for scheduler_get_smt_factor");
-	add_debugger_command_etc("scheduler_set_elastic_mode", &cmd_scheduler_set_elastic_quota_mode, "Set ... elastic team quota mode.", "<on|off|1|0>\n...", 0);
-	add_debugger_command_alias("set_elastic_quota", "scheduler_set_elastic_mode", "Alias for scheduler_set_elastic_mode");
-	add_debugger_command_etc("scheduler_get_elastic_mode", &cmd_scheduler_get_elastic_quota_mode, "Get ... elastic team quota mode.", "...", 0);
-	add_debugger_command_alias("get_elastic_quota", "scheduler_get_elastic_mode", "Alias for scheduler_get_elastic_mode");
-	add_debugger_command_etc("scheduler_set_exhaustion_policy", &cmd_scheduler_set_exhaustion_policy, "Set ... team quota exhaustion policy.", "<starvation|hardstop>\n...", 0);
-	add_debugger_command_alias("set_exhaustion_policy", "scheduler_set_exhaustion_policy", "Alias for scheduler_set_exhaustion_policy");
-	add_debugger_command_etc("scheduler_get_exhaustion_policy", &cmd_scheduler_get_exhaustion_policy, "Get ... team quota exhaustion policy.", "...", 0);
-	add_debugger_command_alias("get_exhaustion_policy", "scheduler_get_exhaustion_policy", "Alias for scheduler_get_exhaustion_policy");
 	// Removido: dump_eevdf_weights
 }
 
@@ -1743,73 +1724,6 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 }
 
 
-static int
-cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = true;
-		kprintf("Scheduler elastic team quota mode enabled.\n");
-	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = false;
-		kprintf("Scheduler elastic team quota mode disabled.\n");
-	} else {
-		kprintf("Invalid argument. Use 'on' or 'off'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_elastic_mode\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler elastic team quota mode: %s\n",
-		Scheduler::gSchedulerElasticQuotaMode ? "on" : "off");
-	return 0;
-}
-
-static int
-cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "starvation") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
-		kprintf("Scheduler team quota exhaustion policy set to: starvation\n");
-	} else if (strcmp(argv[1], "hardstop") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP;
-		kprintf("Scheduler team quota exhaustion policy set to: hardstop\n");
-	} else {
-		kprintf("Invalid argument. Use 'starvation' or 'hardstop'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_exhaustion_policy\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler team quota exhaustion policy: %s\n",
-		Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW ? "starvation" : "hardstop");
-	return 0;
-}
 
 static Scheduler::CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad)
@@ -2168,7 +2082,6 @@ static const int32 kWorkDifferenceThresholdAbsolute = 200;
 const bigtime_t MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION = 1000;
 static const bigtime_t TARGET_CPU_IDLE_BONUS_LB = SCHEDULER_TARGET_LATENCY;
 static const bigtime_t TARGET_QUEUE_PENALTY_FACTOR_LB = SCHEDULER_MIN_GRANULARITY / 2;
-static const bigtime_t kTeamQuotaAwarenessPenaltyLB = SCHEDULER_TARGET_LATENCY / 4;
 
 
 static int32

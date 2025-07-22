@@ -110,9 +110,6 @@ public:
 
 						bool			IsEffectivelyIdle() const; // Moved to .cpp
 
-	// Team Quota related
-	void				SetCurrentActiveTeam(void* teamData);
-	inline void* GetCurrentActiveTeam() const { return fCurrentActiveTeam; }
 
 	bigtime_t			fNextStealAttemptTime;
 	bigtime_t			fLastTimeTaskStolenFrom;
@@ -154,7 +151,6 @@ private:
 						bigtime_t		fMeasureActiveTime;
 						bigtime_t		fMeasureTime;
 						bool			fUpdateLoadEvent;
-	void*	fCurrentActiveTeam;
 
 						friend class DebugDumper;
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
@@ -368,7 +364,6 @@ extern rw_spinlock gIdlePackageLock;
 extern int32 gPackageCount;
 extern int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
-int32 scheduler_reset_team_quotas_event(timer*);
 int32 scheduler_get_dynamic_max_irq_target_load(CPUEntry* cpu, int32 baseMaxIrqLoadFromMode);
 
 

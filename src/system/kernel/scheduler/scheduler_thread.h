@@ -328,12 +328,6 @@ ThreadData::StopCPUTime()
 	fThread->last_time = 0;
 	threadTimeLocker.Unlock();
 
-	Team* team = fThread->team;
-	if (team != NULL) {
-		SpinLocker teamTimeLocker(team->time_lock);
-		if (team->HasActiveUserTimeUserTimers())
-			user_timer_check_team_user_timers(team);
-	}
 }
 
 inline void

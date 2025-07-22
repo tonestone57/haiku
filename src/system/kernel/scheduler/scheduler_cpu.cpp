@@ -127,17 +127,9 @@ CPUEntry::CPUEntry()
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false),
-	fCurrentActiveTeam(NULL) // Initialize new field
 {
 	// fSchedulerModeLock was removed.
 	B_INITIALIZE_SPINLOCK(&fQueueLock);
-}
-
-
-void
-CPUEntry::SetCurrentActiveTeam(void* teamData)
-{
-	// This function is now a no-op since team quotas are removed.
 }
 
 

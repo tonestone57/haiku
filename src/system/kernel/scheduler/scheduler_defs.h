@@ -94,7 +94,6 @@ static_assert(HIGH_CONTENTION_MIN_SLICE_FACTOR <= 10.0, "Contention slice factor
 
 // Load threshold (0-kMaxLoad) below which a task might be considered low intensity.
 // kMaxLoad represents 100% of nominal core capacity.
-static constexpr int32 kMaxLoad = 1000; // Standard load scale (0-1000)
 static constexpr int32 LOW_INTENSITY_LOAD_THRESHOLD = kMaxLoad / 10; // 10% of nominal capacity
 
 // Validate load parameters

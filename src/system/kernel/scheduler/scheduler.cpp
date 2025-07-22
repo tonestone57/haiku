@@ -334,6 +334,8 @@ static const int32 kBenefitScoreEligFactor = 1;
 // minimum unweighted normalized work to steal
 static bigtime_t kBaseStarvationThreshold = 1000;
 static bigtime_t kMigrationCostBase = 500;
+static int32 kWorkStealingLagWeight = 1;
+static int32 kWorkStealingVdWeight = 1;
 
 void
 ThreadEnqueuer::operator()(ThreadData* thread)
@@ -673,7 +675,7 @@ switch_thread(Thread* fromThread, Thread* toThread)
 }
 
 
-// Implements the new work-stealing algorithm.
+// Implements the EEVDF-aware work-stealing algorithm.
 static ThreadData*
 _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 {
@@ -693,77 +695,61 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 	EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
 
 	if (!victimQueue.IsEmpty()) {
-		ThreadData* candidateTask = victimQueue.PeekMinimum();
-		if (candidateTask != NULL && !candidateTask->IsIdle()) {
-			bool basicChecksPass = true;
-			Thread* candThread = candidateTask->GetThread();
+		ThreadData* bestCandidate = NULL;
+		bigtime_t bestScore = -1;
 
-			if (candThread->pinned_to_cpu != 0) {
-				if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
-					basicChecksPass = false;
+		const int kMaxCandidates = 5;
+		ThreadData* candidates[kMaxCandidates];
+		int numCandidates = 0;
+		while (numCandidates < kMaxCandidates && !victimQueue.IsEmpty()) {
+			candidates[numCandidates++] = victimQueue.PopMinimum();
+		}
+
+		for (int i = 0; i < numCandidates; i++) {
+			ThreadData* candidateTask = candidates[i];
+			if (candidateTask != NULL && !candidateTask->IsIdle()) {
+				bool basicChecksPass = true;
+				Thread* candThread = candidateTask->GetThread();
+
+				if (candThread->pinned_to_cpu != 0) {
+					if ((candThread->pinned_to_cpu - 1) != thiefCPU->ID()) {
+						basicChecksPass = false;
+					}
 				}
-			}
-			if (basicChecksPass && !candidateTask->GetCPUMask().IsEmpty()) {
-				if (!candidateTask->GetCPUMask().GetBit(thiefCPU->ID())) {
-					basicChecksPass = false;
-				}
-			}
-
-			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetThread(), victimCPUEntry);
-			if (candidateWeight <= 0) candidateWeight = 1;
-			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
-
-			float thiefLoad = thiefCPU->GetInstantaneousLoad();
-			float victimLoad = victimCPUEntry->GetInstantaneousLoad();
-			bigtime_t dynamicThreshold = kBaseStarvationThreshold * (1 + (thiefLoad - victimLoad));
-
-			int dist = 0;
-			if (thiefCPU->Core()->Package() != victimCPUEntry->Core()->Package()) {
-				dist = 2;
-			} else if (thiefCPU->Core() != victimCPUEntry->Core()) {
-				dist = 1;
-			}
-			bigtime_t migrationCost = kMigrationCostBase * dist;
-			bigtime_t adjustedThreshold = dynamicThreshold + migrationCost;
-
-			bool isStarved = unweightedNormWorkOwed > adjustedThreshold;
-
-			if (isStarved) {
-				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > effective_threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
-					candThread->id, unweightedNormWorkOwed,
-					adjustedThreshold,
-					candidateTask->Lag());
-			}
-
-			if (basicChecksPass && isStarved) {
-				bool allowStealByBLPolicy = false;
-				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
-				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
-
-				if (thiefCoreType == CORE_TYPE_BIG || thiefCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
-					allowStealByBLPolicy = true;
-				} else {
-					if (victimCoreType == CORE_TYPE_LITTLE) {
-						allowStealByBLPolicy = true;
-					} else {
-						if (victimCPUEntry->GetLoad() > kHighLoad)
-							allowStealByBLPolicy = true;
+				if (basicChecksPass && !candidateTask->GetCPUMask().IsEmpty()) {
+					if (!candidateTask->GetCPUMask().GetBit(thiefCPU->ID())) {
+						basicChecksPass = false;
 					}
 				}
 
-				if (allowStealByBLPolicy) {
-					stolenTask = victimQueue.PopMinimum();
-					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
-					int32 threadCount = victimCPUEntry->GetTotalThreadCount();
-					atomic_add(&threadCount, -1);
-					ASSERT(victimCPUEntry->GetTotalThreadCount() >=0);
-					victimCPUEntry->MinVirtualRuntime();
-
-					TRACE_SCHED_BL_STEAL("  SUCCESS: CPU %" B_PRId32 "(C%d,T%d) STOLE T%" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d)\n",
-						thiefCPU->ID(), thiefCPU->Core()->ID(), thiefCoreType,
-						stolenTask->GetThread()->id, stolenTask->Lag(),
-						victimCpuID, victimCPUEntry->Core()->ID(), victimCoreType);
+				if (basicChecksPass) {
+					bigtime_t score = kWorkStealingLagWeight * candidateTask->Lag()
+						- kWorkStealingVdWeight * candidateTask->VirtualDeadline();
+					if (score > bestScore) {
+						bestScore = score;
+						bestCandidate = candidateTask;
+					}
 				}
+			}
+		}
+
+		if (bestCandidate != NULL) {
+			stolenTask = bestCandidate;
+			victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
+			int32 threadCount = victimCPUEntry->GetTotalThreadCount();
+			atomic_add(&threadCount, -1);
+			ASSERT(victimCPUEntry->GetTotalThreadCount() >=0);
+			victimCPUEntry->MinVirtualRuntime();
+
+			TRACE_SCHED_BL_STEAL("  SUCCESS: CPU %" B_PRId32 "(C%d,T%d) STOLE T%" B_PRId32 " (Lag %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d)\n",
+				thiefCPU->ID(), thiefCPU->Core()->ID(), thiefCPU->Core()->Type(),
+				stolenTask->GetThread()->id, stolenTask->Lag(),
+				victimCpuID, victimCPUEntry->Core()->ID(), victimCPUEntry->Core()->Type());
+		}
+
+		for (int i = 0; i < numCandidates; i++) {
+			if (candidates[i] != stolenTask) {
+				victimQueue.Add(candidates[i]);
 			}
 		}
 	}
@@ -1607,6 +1593,14 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("get_migration_cost", "scheduler_get_migration_cost", "Alias for scheduler_get_migration_cost");
 	add_debugger_command_etc("scheduler_dump_ws_stats", &cmd_scheduler_dump_ws_stats, "Dump work-stealing statistics.", "...", 0);
 	add_debugger_command_alias("dump_ws_stats", "scheduler_dump_ws_stats", "Alias for scheduler_dump_ws_stats");
+	add_debugger_command_etc("scheduler_set_ws_lag_weight", &cmd_scheduler_set_ws_lag_weight, "Set the work-stealing lag weight.", "<weight>\n...", 0);
+	add_debugger_command_alias("set_ws_lag_weight", "scheduler_set_ws_lag_weight", "Alias for scheduler_set_ws_lag_weight");
+	add_debugger_command_etc("scheduler_get_ws_lag_weight", &cmd_scheduler_get_ws_lag_weight, "Get the work-stealing lag weight.", "...", 0);
+	add_debugger_command_alias("get_ws_lag_weight", "scheduler_get_ws_lag_weight", "Alias for scheduler_get_ws_lag_weight");
+	add_debugger_command_etc("scheduler_set_ws_vd_weight", &cmd_scheduler_set_ws_vd_weight, "Set the work-stealing virtual deadline weight.", "<weight>\n...", 0);
+	add_debugger_command_alias("set_ws_vd_weight", "scheduler_set_ws_vd_weight", "Alias for scheduler_set_ws_vd_weight");
+	add_debugger_command_etc("scheduler_get_ws_vd_weight", &cmd_scheduler_get_ws_vd_weight, "Get the work-stealing virtual deadline weight.", "...", 0);
+	add_debugger_command_alias("get_ws_vd_weight", "scheduler_get_ws_vd_weight", "Alias for scheduler_get_ws_vd_weight");
 	// Removido: dump_eevdf_weights
 }
 
@@ -1733,6 +1727,52 @@ cmd_scheduler_get_migration_cost(int argc, char** argv)
 {
 	if (argc != 1) { kprintf("Usage: scheduler_get_migration_cost\n"); return B_KDEBUG_ERROR; }
 	kprintf("Current scheduler kMigrationCostBase: %ld\n", kMigrationCostBase);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_ws_lag_weight(int argc, char** argv)
+{
+	if (argc != 2) { kprintf("Usage: scheduler_set_ws_lag_weight <weight>\n"); return B_KDEBUG_ERROR; }
+	char* endPtr;
+	long newWeight = strtol(argv[1], &endPtr, 10);
+	if (argv[1] == endPtr || *endPtr != '\0') { kprintf("Error: Invalid integer value for weight: %s\n", argv[1]); return B_KDEBUG_ERROR; }
+	if (newWeight < 0) { kprintf("Error: Weight must be non-negative.\n"); return B_KDEBUG_ERROR; }
+	kWorkStealingLagWeight = newWeight;
+	kprintf("Scheduler kWorkStealingLagWeight set to: %ld\n", kWorkStealingLagWeight);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_get_ws_lag_weight(int argc, char** argv)
+{
+	if (argc != 1) { kprintf("Usage: scheduler_get_ws_lag_weight\n"); return B_KDEBUG_ERROR; }
+	kprintf("Current scheduler kWorkStealingLagWeight: %d\n", kWorkStealingLagWeight);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_set_ws_vd_weight(int argc, char** argv)
+{
+	if (argc != 2) { kprintf("Usage: scheduler_set_ws_vd_weight <weight>\n"); return B_KDEBUG_ERROR; }
+	char* endPtr;
+	long newWeight = strtol(argv[1], &endPtr, 10);
+	if (argv[1] == endPtr || *endPtr != '\0') { kprintf("Error: Invalid integer value for weight: %s\n", argv[1]); return B_KDEBUG_ERROR; }
+	if (newWeight < 0) { kprintf("Error: Weight must be non-negative.\n"); return B_KDEBUG_ERROR; }
+	kWorkStealingVdWeight = newWeight;
+	kprintf("Scheduler kWorkStealingVdWeight set to: %ld\n", kWorkStealingVdWeight);
+	return 0;
+}
+
+
+static int
+cmd_scheduler_get_ws_vd_weight(int argc, char** argv)
+{
+	if (argc != 1) { kprintf("Usage: scheduler_get_ws_vd_weight\n"); return B_KDEBUG_ERROR; }
+	kprintf("Current scheduler kWorkStealingVdWeight: %d\n", kWorkStealingVdWeight);
 	return 0;
 }
 

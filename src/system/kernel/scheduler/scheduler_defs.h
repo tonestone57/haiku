@@ -212,9 +212,6 @@ namespace SchedulerConstants {
     constexpr double LOAD_BALANCE_INCREASE_FACTOR = kLoadBalanceIntervalIncreaseFactor;
     constexpr double LOAD_BALANCE_DECREASE_FACTOR = kLoadBalanceIntervalDecreaseFactor;
     
-    // Team virtual runtime
-    constexpr int32 TEAM_VRUNTIME_BASE_WEIGHT = TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT;
-    
     // Power saving
     constexpr double POWER_IDLE_CPU_THRESHOLD = POWER_SAVING_DTQ_IDLE_CPU_THRESHOLD;
     constexpr double POWER_STC_BOOST_FACTOR = POWER_SAVING_DTQ_STC_BOOST_FACTOR;

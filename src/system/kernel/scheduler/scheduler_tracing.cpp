@@ -74,8 +74,8 @@ ScheduleThread::AddDump(TraceOutput& out)
 			case THREAD_BLOCK_TYPE_SIGNAL:
 				out.Print("signal");
 				break;
-			case THREAD_BLOCK_TYPE_MUTEX:
-				out.Print("mutex %p", fPreviousWaitObject);
+			case THREAD_BLOCK_TYPE_SPINLOCK:
+				out.Print("spinlock %p", fPreviousWaitObject);
 				break;
 			case THREAD_BLOCK_TYPE_RW_LOCK:
 				out.Print("rwlock %p", fPreviousWaitObject);

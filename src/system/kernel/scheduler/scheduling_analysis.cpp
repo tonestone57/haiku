@@ -660,22 +660,15 @@ private:
 				break;
 			}
 
-			case THREAD_BLOCK_TYPE_MUTEX:
+			case THREAD_BLOCK_TYPE_SPINLOCK:
 			{
-				// If the mutex object is in the kernel image, assume, it is
+				// If the spinlock object is in the kernel image, assume, it is
 				// still initialized.
-				mutex* lock = (mutex*)waitObject->object;
+				spinlock* lock = (spinlock*)waitObject->object;
 				if (!_IsInKernelImage(lock))
 					break;
 
-				if (lock->name != NULL) {
-					size_t nameLen = strlen(lock->name);
-					size_t maxLen = sizeof(waitObject->name) - 1;
-					if (nameLen > maxLen)
-						nameLen = maxLen;
-					memcpy(waitObject->name, lock->name, nameLen);
-					waitObject->name[nameLen] = '\0';
-				}
+				// spinlocks don't have names
 				break;
 			}
 
@@ -780,7 +773,7 @@ analyze_scheduling(bigtime_t from, bigtime_t until,
 						break;
 					case THREAD_BLOCK_TYPE_SEMAPHORE:
 					case THREAD_BLOCK_TYPE_CONDITION_VARIABLE:
-					case THREAD_BLOCK_TYPE_MUTEX:
+					case THREAD_BLOCK_TYPE_SPINLOCK:
 					case THREAD_BLOCK_TYPE_RW_LOCK:
 					case THREAD_BLOCK_TYPE_OTHER:
 					default:
@@ -890,7 +883,7 @@ analyze_scheduling(bigtime_t from, bigtime_t until,
 							break;
 						case THREAD_BLOCK_TYPE_SEMAPHORE:
 						case THREAD_BLOCK_TYPE_CONDITION_VARIABLE:
-						case THREAD_BLOCK_TYPE_MUTEX:
+						case THREAD_BLOCK_TYPE_SPINLOCK:
 						case THREAD_BLOCK_TYPE_RW_LOCK:
 						case THREAD_BLOCK_TYPE_OTHER:
 						default:

@@ -18,6 +18,14 @@ public:
             __builtin_ia32_pause();
 #elif defined(__aarch64__) || defined(__arm__)
             __asm__ volatile("yield" ::: "memory");
+#elif defined(__m68k__)
+            __asm__ volatile("nop" ::: "memory");
+#elif defined(__sparc__)
+            __asm__ volatile("" ::: "memory");
+#elif defined(__powerpc__) || defined(__powerpc64__)
+            __asm__ volatile("or 27,27,27" ::: "memory");
+#elif defined(__riscv)
+            __asm__ volatile("pause" ::: "memory");
 #else
             // Generic fallback for other architectures
 #if __cplusplus >= 202002L

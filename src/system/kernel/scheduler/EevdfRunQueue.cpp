@@ -1,7 +1,5 @@
 #include "EevdfRunQueue.h"
 
-#include <string.h>
-
 #include "scheduler_thread.h"
 
 

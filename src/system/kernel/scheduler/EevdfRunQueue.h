@@ -1,7 +1,7 @@
 #ifndef EEVDF_RUNQUEUE_H
 #define EEVDF_RUNQUEUE_H
 
-#include <support/atomic.h>
+#include <util/atomic.h>
 #include "HashMap.h"
 
 // Forward declarations

@@ -65,7 +65,6 @@
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
 namespace Scheduler {
-bool gSchedulerElasticQuotaMode = true;
 }
 
 // --- New Continuous Weight Calculation Logic ---

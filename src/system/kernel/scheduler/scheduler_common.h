@@ -305,13 +305,6 @@ extern sched_load_t gModeMaxTargetCPUIRQLoad;
 // The optimal value requires empirical tuning for specific hardware/workloads.
 extern float gSchedulerSMTConflictFactor;
 
-// Elastic quota mode and team quota policies
-extern bool gSchedulerElasticQuotaMode;
-extern TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy;
-
-// Global team scheduler data management
-extern DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
-extern spinlock gTeamSchedulerListLock;
 
 // --- Load Threshold Constants ---
 // Define load constants based on kMaxLoad (assumed to be defined in scheduler_defs.h)

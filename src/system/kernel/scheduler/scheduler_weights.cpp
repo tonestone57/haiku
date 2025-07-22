@@ -244,59 +244,6 @@ scheduler_priority_to_weight(Thread* thread, Scheduler::CPUEntry* cpu)
 	// Get base weight from cache
 	int32 weight = get_cached_weight(priority);
 	
-	// Apply team quota policy for non-RT threads
-	if (thread->team != NULL && 
-		thread->team->team_scheduler_data != NULL &&
-		priority < B_REAL_TIME_DISPLAY_PRIORITY) {
-		
-		TeamSchedulerData* teamData = 
-			static_cast<TeamSchedulerData*>(thread->team->team_scheduler_data);
-		
-		// Safe access to team data
-		cpu_status state = disable_interrupts();
-		if (try_acquire_spinlock(&teamData->lock)) {
-			bool quotaExhausted = teamData->quota_exhausted;
-			bool isBorrowing = false;
-			
-			// Check for elastic quota borrowing
-			if (quotaExhausted && 
-				Scheduler::gSchedulerElasticQuotaMode && 
-				cpu != NULL) {
-				
-				// Check if this team can borrow CPU time
-				TeamSchedulerData* activeTeam = cpu->GetCurrentActiveTeam();
-				if (activeTeam == teamData)
-					isBorrowing = true;
-			}
-			
-			release_spinlock(&teamData->lock);
-			restore_interrupts(state);
-			
-			// Apply quota exhaustion policy
-			if (quotaExhausted && !isBorrowing) {
-				switch (Scheduler::gTeamQuotaExhaustionPolicy) {
-					case TEAM_QUOTA_EXHAUST_STARVATION_LOW:
-						weight = get_cached_weight(B_IDLE_PRIORITY);
-						break;
-					
-					case TEAM_QUOTA_EXHAUST_STARVATION_MEDIUM:
-						weight = std::max(weight / 4, get_cached_weight(B_IDLE_PRIORITY));
-						break;
-					
-					case TEAM_QUOTA_EXHAUST_THROTTLE:
-						weight = std::max(weight / 2, kNewMinActiveWeight);
-						break;
-					
-					default:
-						// No change to weight
-						break;
-				}
-			}
-		} else {
-			restore_interrupts(state);
-			// Couldn't acquire lock, use original weight
-		}
-	}
 
 	// Ensure weight is always positive and reasonable
 	return std::max(weight, 1);

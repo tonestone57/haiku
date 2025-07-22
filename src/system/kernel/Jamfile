@@ -73,7 +73,6 @@ KernelMergeObject kernel_core.o :
 	scheduler_cpu.cpp
 	scheduler_thread.cpp
 	scheduler_load.cpp
-	scheduler_team.cpp
 	scheduler_weights.cpp
 	scheduling_analysis.cpp
 	scheduler_profiler.cpp

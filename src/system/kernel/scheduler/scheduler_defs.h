@@ -135,17 +135,6 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
               "Decrease factor must be between 0.0 and 1.0");
 
 // ============================================================================
-// Team Virtual Runtime Configuration
-// ============================================================================
-
-// Base weight for team-level virtual runtime calculation.
-// A team with 100% quota would effectively use this as its "weight".
-// Teams with lower quota percentages will have their vruntime advance faster.
-#define TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT 100
-
-static_assert(TEAM_VIRTUAL_RUNTIME_BASE_WEIGHT > 0, "Team base weight must be positive");
-
-// ============================================================================
 // IRQ Balancing Configuration
 // ============================================================================
 
@@ -329,26 +318,6 @@ namespace Scheduler {
     };
     
 } // namespace Scheduler
-
-// ============================================================================
-// Team Quota Exhaustion Policy
-// ============================================================================
-
-/*! \enum TeamQuotaExhaustionPolicy
-    \brief Defines how threads from a team are treated when its CPU quota is exhausted.
-    This policy is tunable via the KDL command `team_quota_policy`.
-*/
-enum TeamQuotaExhaustionPolicy {
-    TEAM_QUOTA_EXHAUST_STARVATION_LOW = 0, //!< Default: Threads from an exhausted team run at a very low (idle) priority. Allows progress but heavily deprioritized.
-    TEAM_QUOTA_EXHAUST_HARD_STOP = 1,      //!< Threads from an exhausted team are not scheduled at all (unless they are real-time or borrowing in elastic mode).
-    TEAM_QUOTA_EXHAUST_POLICY_COUNT        //!< Number of available policies (for validation)
-};
-
-// Validation function for team quota policy
-inline bool IsValidTeamQuotaPolicy(int policy) {
-    return policy >= TEAM_QUOTA_EXHAUST_STARVATION_LOW && 
-           policy < TEAM_QUOTA_EXHAUST_POLICY_COUNT;
-}
 
 // ============================================================================
 // Compile-time Configuration Validation

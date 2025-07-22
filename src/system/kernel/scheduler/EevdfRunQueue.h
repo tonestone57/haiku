@@ -13,8 +13,6 @@ typedef int32_t int32;
 typedef int32_t status_t;
 
 // Status codes
-#define B_OK 0
-#define B_ERROR -1
 
 // Constants
 static const bigtime_t kMinDeadline = 0;

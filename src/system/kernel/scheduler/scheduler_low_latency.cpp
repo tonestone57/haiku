@@ -9,7 +9,6 @@
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
 #include "scheduler_defs.h"
-#include "scheduler_defs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -132,7 +131,7 @@ low_latency_switch_to_mode()
 
 	// Low latency mode specific initialization
 	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+	gSchedulerSMTConflictFactor = 0.8f;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
@@ -293,6 +292,64 @@ low_latency_choose_core_same_package(const Scheduler::ThreadData* threadData, Co
 }
 
 
+static CoreEntry*
+low_latency_choose_core_global_search(const Scheduler::ThreadData* threadData, const CPUSet& affinity, bigtime_t current_time)
+{
+	CoreEntry* best_core = nullptr;
+	float best_load = kMaxInstantaneousLoadForGlobal;
+	int32 best_hist_load = INT32_MAX;
+
+	// Search through sharded heaps more efficiently
+	for (int32 shard_idx = 0; shard_idx < Scheduler::kNumCoreLoadHeapShards; shard_idx++) {
+		cpu_status state = disable_interrupts();
+		if (!try_acquire_read_spinlock(&Scheduler::gCoreHeapsShardLock[shard_idx])) {
+			restore_interrupts(state);
+			continue; // Skip this shard if locked
+		}
+
+		// Check low load heap first (more likely to find good candidates)
+		for (int32 i = 0; i < 8; i++) { // Limit search depth for latency
+			CoreEntry* core = Scheduler::gCoreLoadHeapShards[shard_idx].PeekMinimum(i);
+			if (core == nullptr)
+				break;
+
+			if (core->IsDefunct() || (!affinity.IsEmpty() && !affinity.Matches(core->CPUMask())))
+				continue;
+
+			int32 firstCPUId = -1;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (core->CPUMask().GetBit(i)) {
+					firstCPUId = i;
+					break;
+				}
+			}
+			CPUEntry* first_cpu = CPUEntry::GetCPU(firstCPUId);
+			if (first_cpu == nullptr)
+				continue;
+
+			float inst_load = get_cached_cpu_load(first_cpu, current_time);
+			int32 hist_load = core->GetLoad();
+
+			if (inst_load < best_load ||
+				(inst_load == best_load && hist_load < best_hist_load)) {
+				best_load = inst_load;
+				best_hist_load = hist_load;
+				best_core = core;
+			}
+		}
+
+		release_read_spinlock(&Scheduler::gCoreHeapsShardLock[shard_idx]);
+		restore_interrupts(state);
+	}
+
+	if (best_core != nullptr) {
+		gLowLatencyStats.global_migrations.fetch_add(1, std::memory_order_relaxed);
+		TRACE_SCHED_CHOICE("low_latency_choose_core: Thread %" B_PRId32 " -> global best core %" B_PRId32 " (load %.2f)\n",
+			threadData ? threadData->GetThread()->id : -1, best_core->ID(), best_load);
+	}
+
+	return best_core;
+}
 
 
 static CoreEntry*
@@ -374,15 +431,14 @@ low_latency_choose_core(const Scheduler::ThreadData* threadData)
 }
 
 
-static bool
-low_latency_is_cpu_effectively_parked(CPUEntry* cpu)
+static void
+low_latency_cleanup()
 {
-	// In low latency mode, no CPUs are considered "parked" for work-stealing purposes.
-	// All active CPUs should participate to minimize latency.
-	return false;
+	if (gCPUCache != nullptr) {
+		delete[] gCPUCache;
+		gCPUCache = nullptr;
+	}
 }
-
-
 
 
 // Enhanced mode operations with cleanup
@@ -405,7 +461,7 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 
 // Debug function to get statistics
 status_t
-low_latency_get_stats(low_latency_stats_t* stats)
+low_latency_get_stats(LowLatencyStats* stats)
 {
 	if (stats == nullptr)
 		return B_BAD_VALUE;

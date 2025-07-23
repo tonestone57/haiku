@@ -152,22 +152,6 @@ cmd_thread_sched_info(int argc, char** argv)
 
 	schedulerLocker.Unlock();
 
-	if (thread->team != NULL && thread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = thread->team->team_scheduler_data;
-		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
-		kprintf("  Quota Percent:      %" B_PRIu32 "%%\n", tsd->cpu_quota_percent);
-		kprintf("  Period Usage (us):  %" B_PRId64 "\n", tsd->quota_period_usage);
-		kprintf("  Current Allowance (us): %" B_PRId64 "\n", tsd->current_quota_allowance);
-		kprintf("  Quota Exhausted:    %s\n", tsd->quota_exhausted ? "yes" : "no");
-		kprintf("  Team VRuntime:      %" B_PRId64 "\n", tsd->team_virtual_runtime);
-	} else if (thread->team != NULL) {
-		kprintf("\nTeam Quota Information (Team ID: %" B_PRId32 "):\n", thread->team->id);
-		kprintf("  <No team scheduler data available>\n");
-	} else {
-		kprintf("\nTeam Quota Information:\n");
-		kprintf("  <Thread does not belong to a team>\n");
-	}
-
 	thread->Unlock();
 
 	kprintf("--------------------------------------------------\n");
@@ -603,7 +587,6 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 				= (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
 
 			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
-			bool teamQuotaAllowsSteal = true;
 
 			if (isStarved) {
 				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered"
@@ -614,7 +597,7 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 					candidateTask->Lag());
 			}
 
-			if (basicChecksPass && isStarved && teamQuotaAllowsSteal) {
+			if (basicChecksPass && isStarved) {
 				bool allowStealByBLPolicy = false;
 				scheduler_core_type thiefCoreType = thiefCPU->Core()->Type();
 				scheduler_core_type victimCoreType = victimCPUEntry->Core()->Type();
@@ -906,7 +889,6 @@ reschedule(int32 nextState)
 	bool shouldReEnqueueOldThread
 		= update_old_thread_state(oldThread, nextState, core);
 
-	cpu->SetCurrentActiveTeam(NULL);
 
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue();
@@ -1462,8 +1444,6 @@ scheduler_init()
 		atomic_set64(&gIrqLastFollowMoveTime[i], 0);
 	}
 
-	new(&gTeamSchedulerDataList) DoublyLinkedList<TeamSchedulerData>();
-	add_timer(&gQuotaResetTimer, &scheduler_reset_team_quotas_event, gQuotaPeriod, B_PERIODIC_TIMER);
 	scheduler_init_weights();
 	dprintf("scheduler_init: done\n");
 }
@@ -1857,7 +1837,6 @@ static const int32 kWorkDifferenceThresholdAbsolute = 200;
 const bigtime_t MIN_UNWEIGHTED_NORM_WORK_FOR_MIGRATION = 1000;
 static const bigtime_t TARGET_CPU_IDLE_BONUS_LB = SCHEDULER_TARGET_LATENCY;
 static const bigtime_t TARGET_QUEUE_PENALTY_FACTOR_LB = SCHEDULER_MIN_GRANULARITY / 2;
-static const bigtime_t kTeamQuotaAwarenessPenaltyLB = SCHEDULER_TARGET_LATENCY / 4;
 
 
 static int32

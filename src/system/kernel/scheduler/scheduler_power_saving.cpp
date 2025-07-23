@@ -55,8 +55,6 @@ power_saving_switch_to_mode()
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;
-	gIrqTargetFactor = 0.5f;
-	gMaxTargetCpuIrqLoad = 500;
 
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker;
@@ -199,7 +197,7 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 }
 
 static CoreEntry*
-power_saving_choose_core(const ThreadData* threadData)
+power_saving_choose_core(const Scheduler::ThreadData* threadData)
 {
 	// Chooses a core for a thread in power-saving mode. The strategy prioritizes
 	// consolidation to save power, while still considering cache affinity.

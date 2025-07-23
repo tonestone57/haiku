@@ -2,6 +2,7 @@
 #define SIMPLE_HASH_MAP_H
 
 #include <new>
+#include <cstddef>
 
 template<typename Key, typename Value>
 class SimpleHashMap {

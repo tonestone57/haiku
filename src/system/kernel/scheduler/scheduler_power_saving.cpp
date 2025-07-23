@@ -207,9 +207,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 	// 1. Check designated STC first
 	CoreEntry* stcTarget = power_saving_get_consolidation_target_core(threadData);
 	if (stcTarget != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> STC core %" B_PRId32 "\n",
-			threadId, stcTarget->ID());
 		return stcTarget;
 	}
 
@@ -237,8 +234,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 
 		if ((affinity.IsEmpty() || affinity.Matches(previousCore->CPUMask()))
 			&& cacheIsLikelyWarm && prevCoreNotTooBusy) {
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> previousCore %" B_PRId32 " (cache warm)\n",
-				threadData->GetThread()->id, previousCore->ID());
 			return previousCore;
 		}
 	}
@@ -286,9 +281,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 
 		if (bestCoreInPackage != NULL && (stcIsInThisPackageAndViable 
 			|| (bestPackageCoreInstLoad < kPowerSavingLightLoadThreshold && bestPackageCoreHistLoad < kHighLoad))) {
-			int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> same package core %" B_PRId32 "%s\n",
-				threadId, bestCoreInPackage->ID(), stcIsInThisPackageAndViable ? " (is STC)" : "");
 			return bestCoreInPackage;
 		}
 	}
@@ -296,9 +288,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 	// 4. Designate/Re-evaluate STC
 	CoreEntry* designatedSTC = power_saving_designate_consolidation_core(&affinity);
 	if (designatedSTC != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> designated STC %" B_PRId32 "\n",
-			threadId, designatedSTC->ID());
 		return designatedSTC;
 	}
 
@@ -335,9 +324,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 	}
 
 	if (bestFallbackCore != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 "\n",
-			threadId, bestFallbackCore->ID());
 		return bestFallbackCore;
 	}
 
@@ -351,9 +337,6 @@ power_saving_choose_core(const Scheduler::ThreadData* threadData)
 	for (int32 i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[(startIndex + i) % gCoreCount];
 		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
-			int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> absolute fallback core %" B_PRId32 "\n",
-				threadId, core->ID());
 			return core;
 		}
 	}

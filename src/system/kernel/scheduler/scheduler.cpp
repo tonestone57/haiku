@@ -245,9 +245,6 @@ static int32 scheduler_irq_balance_event(timer* unused);
 static Scheduler::CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
 static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
 
-#if SCHEDULER_TRACING
-static int cmd_scheduler(int argc, char** argv);
-#endif
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
@@ -1375,9 +1372,6 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 }
 
 
-#if SCHEDULER_TRACING
-static int cmd_scheduler(int argc, char** argv) { /* ... */ return 0;}
-#endif
 // static int cmd_scheduler_set_kdf(int argc, char** argv); // REMOVED
 // static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
@@ -1387,9 +1381,6 @@ static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 static void
 _scheduler_init_kdf_debug_commands()
 {
-#if SCHEDULER_TRACING
-	add_debugger_command_etc("scheduler", &cmd_scheduler, "Analyze scheduler tracing information", "<thread>\n...", 0);
-#endif
 	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor, "Set ... SMT conflict factor.", "<factor>\n...", 0);
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);

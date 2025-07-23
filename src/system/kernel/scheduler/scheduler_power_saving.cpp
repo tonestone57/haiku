@@ -421,12 +421,6 @@ power_saving_is_cpu_effectively_parked(CPUEntry* cpu)
 	return false;
 }
 
-static void
-power_saving_cleanup()
-{
-	// Nothing to do here for now
-}
-
 scheduler_mode_operations gSchedulerPowerSavingMode = {
 	"power saving",										// name
 	SCHEDULER_TARGET_LATENCY * 10,						// maximum_latency (allow higher latency)
@@ -440,5 +434,5 @@ scheduler_mode_operations gSchedulerPowerSavingMode = {
 	power_saving_should_wake_core_for_load,				// should_wake_core_for_load
 	power_saving_attempt_proactive_stc_designation,		// attempt_proactive_stc_designation
 	power_saving_is_cpu_effectively_parked,				// is_cpu_effectively_parked
-	power_saving_cleanup,								// cleanup
+	nullptr,								// cleanup
 };

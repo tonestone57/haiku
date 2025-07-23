@@ -32,16 +32,6 @@ static CPUCacheEntry* gCPUCache = nullptr;
 
 static CoreEntry* low_latency_choose_core(const Scheduler::ThreadData* threadData);
 
-static void
-low_latency_cleanup()
-{
-	if (gCPUCache == nullptr)
-		return;
-
-	delete[] gCPUCache;
-	gCPUCache = nullptr;
-}
-
 // Defines the threshold for considering a core's cache affinity "expired" or "cold"
 // for a thread in low latency mode. Reduced from 20ms to 10ms for better responsiveness.
 static const bigtime_t kLowLatencyCacheExpirationThreshold = 10000;
@@ -457,7 +447,7 @@ scheduler_mode_operations gSchedulerLowLatencyMode = {
 	nullptr,											// should_wake_core_for_load
 	nullptr,											// attempt_proactive_stc_designation
 	nullptr,											// is_cpu_effectively_parked
-	low_latency_cleanup,								// cleanup
+	nullptr,								// cleanup
 };
 
 

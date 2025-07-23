@@ -119,15 +119,15 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsAllSet()) {
+		if (affinityMask.IsEmpty() || affinityMask.IsFull()) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
 			kprintf("0x");
 			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
-				if (affinityMask.GetBits(i) != 0)
-					kprintf("%x", affinityMask.GetBits(i));
+				if (affinityMask.GetBit(i) != 0)
+					kprintf("%x", affinityMask.GetBit(i));
 			}
-			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.Count());
+			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.CountSetBits());
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
@@ -177,8 +177,8 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
@@ -331,7 +331,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 	if (currentThreadOnTarget == NULL || thread_is_idle_thread(currentThreadOnTarget)) {
 		invokeScheduler = true;
 	} else {
-		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
+		Scheduler::ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
 		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime());
 		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline()) {
 			TRACE_SCHED("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
@@ -359,7 +359,7 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 	SCHEDULER_ENTER_FUNCTION();
 
 	ASSERT(thread != NULL);
-	ThreadData* data = thread->scheduler_data;
+	Scheduler::ThreadData* data = thread->scheduler_data;
 	if (!data)
 		return;
 

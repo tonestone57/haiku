@@ -145,6 +145,9 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300      // 30% load difference
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3           // Max IRQs to move
 
+#define DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING 0.40f
+
+
 namespace Scheduler {
 	enum SchedulerLoadBalancePolicy : uint32_t {
 		SPREAD = 0,

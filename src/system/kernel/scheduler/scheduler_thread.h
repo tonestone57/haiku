@@ -103,6 +103,9 @@ private:
     bigtime_t fPeriod;
 
 public:
+	bigtime_t GetDeadline() const { return fDeadline; }
+
+public:
     static constexpr bigtime_t CACHE_VALIDITY_PERIOD = 1000; // 1ms
 
     ThreadData(Thread* thread);

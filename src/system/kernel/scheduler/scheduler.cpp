@@ -191,7 +191,7 @@ bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
 SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SPREAD;
-float gSchedulerSMTConflictFactor = 0.40f;
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
@@ -1145,7 +1145,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 
 	// gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 	gSchedulerLoadBalancePolicy = SPREAD;
-	gSchedulerSMTConflictFactor = 0.40f;
+	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	if (gCurrentMode->switch_to_mode != NULL) {
 		gCurrentMode->switch_to_mode();
@@ -1153,7 +1153,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 		if (mode == SCHEDULER_MODE_POWER_SAVING) {
 			// gKernelKDistFactor = 0.6f; // REMOVED
 			gSchedulerLoadBalancePolicy = CONSOLIDATE;
-			gSchedulerSMTConflictFactor = 0.40f;
+			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 		}
 	}
 

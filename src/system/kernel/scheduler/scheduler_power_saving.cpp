@@ -64,19 +64,17 @@ power_saving_switch_to_mode()
 	Scheduler::sSmallTaskCoreDesignationTime = 0;
 }
 
-#include "scheduler_thread.h"
-
 static bool
 power_saving_has_cache_expired(const Scheduler::ThreadData* threadData)
 {
 	if (threadData == NULL || threadData->Core() == NULL || threadData->GetThread() == NULL)
 		return true;
 
-	return system_time() - threadData->LastTime() > kPowerSavingCacheExpirationThreshold;
+	return system_time() - threadData->GetThread()->last_time > kPowerSavingCacheExpirationThreshold;
 }
 
 static CoreEntry*
-power_saving_get_consolidation_target_core(const ThreadData* threadToPlace)
+power_saving_get_consolidation_target_core(const Scheduler::ThreadData* threadToPlace)
 {
 	SmallTaskCoreLocker locker;
 	

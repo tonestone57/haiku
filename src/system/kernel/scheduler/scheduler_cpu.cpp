@@ -17,7 +17,7 @@
 
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_thread.h"
-#include "EevdfRunQueue.h" // Make sure this is included
+#include "EevdfScheduler.h"
 
 #include <util/MultiHashTable.h>
 
@@ -74,7 +74,6 @@ using namespace Scheduler;
 
 class Scheduler::DebugDumper {
 public:
-	static	void		DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump);
 	static	void		DumpCoreLoadHeapEntry(CoreEntry* core);
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 
@@ -117,7 +116,6 @@ CPUEntry::CPUEntry()
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
-	fEevdfRunQueueTaskCount(0),
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
 	fUpdateLoadEvent(false)
@@ -181,8 +179,6 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
-	fEevdfRunQueueTaskCount.store(0);
-
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
 	fLastTimeTaskStolenFrom = 0;
@@ -243,7 +239,7 @@ CPUEntry::_UpdateMinVirtualRuntime()
 	bigtime_t oldLocalMinVR = fMinVirtualRuntime; // For tracing and as the "sticky" value
 	bigtime_t localAnchorVR;
 
-	ThreadData* head = fEevdfRunQueue.PeekMinimum();
+	ThreadData* head = fEevdfScheduler.PeekMinThread();
 	if (head != NULL && !head->IsIdle()) {
 		localAnchorVR = head->VirtualRuntime();
 	} else {
@@ -278,10 +274,9 @@ CPUEntry::AddThread(ThreadData* thread)
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 	ASSERT(thread != fIdleThread); // Idle thread should not be added to the main run queue.
 
-	fEevdfRunQueue.Add(thread);
+	fEevdfScheduler.AddThread(thread);
 	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
-	fEevdfRunQueueTaskCount.fetch_add(1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
 }
 
@@ -290,16 +285,14 @@ void
 CPUEntry::RemoveThread(ThreadData* thread)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(thread->IsEnqueued() || thread == fIdleThread); // Idle thread might not be "enqueued" in fEevdfRunQueue
+	ASSERT(thread->IsEnqueued() || thread == fIdleThread); // Idle thread might not be "enqueued" in fEevdfScheduler
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 
 	if (thread != fIdleThread) {
-		fEevdfRunQueue.Remove(thread);
+		fEevdfScheduler.RemoveThread(thread);
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
 		ASSERT(atomic_get(&fTotalThreadCount) >= 0);
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
 	}
 }
@@ -336,10 +329,8 @@ CPUEntry::PeekEligibleNextThread()
 
 	// Iterate through the heap by popping.
 	// We are looking for the first eligible thread based on VirtualDeadline order.
-	while (!fEevdfRunQueue.IsEmpty()) {
-		ThreadData* candidate = fEevdfRunQueue.PopMinimum(); // Pop from actual queue
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
+	while (!fEevdfScheduler.IsEmpty()) {
+		ThreadData* candidate = fEevdfScheduler.PopMinThread(); // Pop from actual queue
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
@@ -360,13 +351,12 @@ CPUEntry::PeekEligibleNextThread()
 		}
 	}
 
-	// Re-add any threads that were popped from fEevdfRunQueue but found to be ineligible.
+	// Re-add any threads that were popped from fEevdfScheduler but found to be ineligible.
 	// They are re-added in the order they were popped, though Add will place them
 	// correctly by deadline.
 	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
-		fEevdfRunQueue.Add(toReAdd);
-		fEevdfRunQueueTaskCount.fetch_add(1);
-		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
+		fEevdfScheduler.AddThread(toReAdd);
+		// fEevdfScheduler.Add() calls _UpdateMinVirtualRuntime if the new item
 		// becomes the head or if the queue was empty. This should cover most cases.
 	}
 
@@ -399,8 +389,7 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	// re-inserted into the EEVDF run queue.
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
 		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
-		fEevdfRunQueue.Add(oldThread);
-		fEevdfRunQueueTaskCount.fetch_add(1); // Manually update count as Add doesn't do it here
+		fEevdfScheduler.AddThread(oldThread);
 		_UpdateMinVirtualRuntime();
 	}
 
@@ -411,8 +400,8 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	bigtime_t earliestDeadline = -1;
 
 	std::vector<ThreadData*> poppedThreads;
-	while (!fEevdfRunQueue.IsEmpty()) {
-		ThreadData* thread = fEevdfRunQueue.PopMinimum();
+	while (!fEevdfScheduler.IsEmpty()) {
+		ThreadData* thread = fEevdfScheduler.PopMinThread();
 		poppedThreads.push_back(thread);
 		if (thread->fDeadline > 0) {
 			if (deadlineThread == NULL || thread->fDeadline < earliestDeadline) {
@@ -426,15 +415,13 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 		nextThreadData = deadlineThread;
 		for (ThreadData* thread : poppedThreads) {
 			if (thread != nextThreadData) {
-				fEevdfRunQueue.Add(thread);
+				fEevdfScheduler.AddThread(thread);
 			}
 		}
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime();
 	} else {
 		for (ThreadData* thread : poppedThreads) {
-			fEevdfRunQueue.Add(thread);
+			fEevdfScheduler.AddThread(thread);
 		}
 		nextThreadData = PeekEligibleNextThread();
 	}
@@ -1336,86 +1323,6 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 }
 
 
-/* static */ void
-DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
-{
-	if (maxThreadsToDump <= 0) // Use default if invalid or "all" requested via 0/-1
-		maxThreadsToDump = 128; // Default internal limit
-	// Define an absolute maximum to prevent excessive KDL output/time
-	const int ABSOLUTE_MAX_DUMP = 512;
-	if (maxThreadsToDump > ABSOLUTE_MAX_DUMP)
-		maxThreadsToDump = ABSOLUTE_MAX_DUMP;
-
-	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInRunQueue: %" B_PRId32 ", MinVRuntime: %" B_PRId64 "):\n",
-		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetEevdfRunQueue().Count(),
-		cpu->MinVirtualRuntime());
-	kprintf("  (CPU TotalReportedThreads: %" B_PRId32 ", Idle Thread ID: %" B_PRId32 ", MaxDump: %" B_PRId32 ")\n",
-		cpu->GetTotalThreadCount(),
-		cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1,
-		maxThreadsToDump);
-
-	cpu->LockRunQueue();
-	// Use a non-const reference to be able to PopMinimum
-	EevdfRunQueue<>& queue = cpu->GetEevdfRunQueue();
-	if (queue.IsEmpty()) {
-		kprintf("  Run queue is empty.\n");
-	} else {
-		kprintf("  %-18s %-7s %-5s %-5s %-5s %-15s %-11s %-11s %-11s %-12s %-4s %-8s %s\n",
-			"Thread*", "ID", "Pri", "EPri", "LNice", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Load", "Aff", "Name");
-		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
-
-		ThreadData* dumpedThreads[ABSOLUTE_MAX_DUMP]; // Use absolute max for buffer
-		int numActuallyDumped = 0;
-		int totalInQueueOriginally = queue.Count();
-
-		for (int i = 0; i < maxThreadsToDump && !queue.IsEmpty(); ++i) {
-			ThreadData* td = queue.PopMinimum();
-			if (td == NULL) // Should not happen if IsEmpty() was false
-				break;
-
-			dumpedThreads[numActuallyDumped++] = td;
-
-			Thread* t = td->GetThread();
-			char affinityStr[10];
-			if (t->pinned_to_cpu > 0) {
-				snprintf(affinityStr, sizeof(affinityStr), "CPU%d", t->pinned_to_cpu - 1);
-			} else if (!td->GetCPUMask().IsEmpty() && !td->GetCPUMask().IsFull()) {
-				// Just show first bit of mask for brevity in this table. Full mask in thread_sched_info.
-				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", (uint64)td->GetCPUMask().Bits(0));
-			} else {
-				strcpy(affinityStr, "-");
-			}
-
-			kprintf("  %p  %-7" B_PRId32 " %-5" B_PRId32 " %-5" B_PRId32 " %-5d %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %-3" B_PRId32 "%% %-8s %s\n",
-				t, t->id, t->priority, td->GetEffectivePriority(), 0,
-				td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
-				td->SliceDuration(), td->VirtualRuntime(),
-				td->GetLoad() / (kMaxLoad / 100), affinityStr, t->name);
-		}
-
-		// Re-add all popped threads
-		for (int i = 0; i < numActuallyDumped; ++i) {
-			queue.Add(dumpedThreads[i]);
-		}
-
-		// After re-adding, ensure fMinVirtualRuntime is correct.
-		if (!queue.IsEmpty()) {
-			cpu->_UpdateMinVirtualRuntime();
-		}
-
-		if (totalInQueueOriginally > numActuallyDumped && numActuallyDumped == maxThreadsToDump) {
-			kprintf("  (... NOTE: Dumped top %d of %d threads as per limit. Use 'run_queue [cpu] [count]' for more ...)\n",
-				numActuallyDumped, totalInQueueOriginally);
-		} else if (totalInQueueOriginally > numActuallyDumped) {
-             kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
-                numActuallyDumped, totalInQueueOriginally);
-        }
-		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
-		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ". (Pri=BasePrio, EPri=EffectivePrio, LNice=LatencyNice, Load=NeededLoad%%)\n",
-			numActuallyDumped, queue.Count());
-	}
-	cpu->UnlockRunQueue();
-}
 
 
 /* static */ void
@@ -1490,9 +1397,9 @@ dump_run_queue(int argc, char** argv)
 		if (argc >= 3) {
 			maxThreads = strtol(argv[2], NULL, 0);
 			if (maxThreads <= 0) {
-				// Interpret 0 or negative as "default limit" (which DumpEevdfRunQueue handles)
+				// Interpret 0 or negative as "default limit"
 				// or a very large number to mean "all available within absolute KDL limits"
-				maxThreads = 0; // Pass 0 to indicate default/max behavior to DumpEevdfRunQueue
+				maxThreads = 0; // Pass 0 to indicate default/max behavior
 				kprintf("Interpreting count <= 0 as 'dump up to internal KDL limits'.\n");
 			}
 		}
@@ -1500,15 +1407,16 @@ dump_run_queue(int argc, char** argv)
 
 	if (specificCpu != -1) {
 		if (!gCPU[specificCpu].disabled) {
-			DebugDumper::DumpEevdfRunQueue(&gCPUEntries[specificCpu], maxThreads);
+			//DebugDumper::DumpEevdfRunQueue(&gCPUEntries[specificCpu], maxThreads);
 		} else {
 			kprintf("CPU %" B_PRId32 " is disabled.\n", specificCpu);
 		}
 	} else {
 		int32 cpuCount = smp_get_num_cpus();
 		for (int32 i = 0; i < cpuCount; i++) {
-			if (gCPUEnabled.GetBit(i))
-				DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i], maxThreads);
+			if (gCPUEnabled.GetBit(i)) {
+				//DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i], maxThreads);
+			}
 		}
 	}
 	return 0;

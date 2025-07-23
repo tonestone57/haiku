@@ -580,7 +580,7 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
     }
 
     // Dynamic floor adjustment for high CPU contention
-    if (contextCpu != nullptr && contextCpu->GetEevdfRunQueue().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD) {
+    if (contextCpu != nullptr && contextCpu->GetEevdfScheduler().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD) {
         finalSlice = std::max(finalSlice, (bigtime_t)(SchedulerConstants::kMinSliceGranularity * SchedulerConstants::HIGH_CONTENTION_MIN_SLICE_FACTOR));
     }
 

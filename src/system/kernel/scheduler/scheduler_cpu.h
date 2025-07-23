@@ -24,7 +24,7 @@
 #include "scheduler_profiler.h"
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
-#include "EevdfRunQueue.h"
+#include "EevdfScheduler.h"
 #include "scheduler_spin_lock.h"
 
 
@@ -104,8 +104,8 @@ public:
 
 						int32			CalculateTotalIrqLoad() const;
 
-						const EevdfRunQueue<>& GetEevdfRunQueue() const { return fEevdfRunQueue; }
-						EevdfRunQueue<>& GetEevdfRunQueue() { return fEevdfRunQueue; }
+						const EevdfScheduler& GetEevdfScheduler() const { return fEevdfScheduler; }
+						EevdfScheduler& GetEevdfScheduler() { return fEevdfScheduler; }
 	inline				bigtime_t		MinVirtualRuntime();
 	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
 
@@ -137,7 +137,7 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						EevdfRunQueue<>	fEevdfRunQueue;
+						EevdfScheduler	fEevdfScheduler;
 						ThreadData*		fIdleThread;
 						bigtime_t		fMinVirtualRuntime;
 						SpinLock		fQueueLock;
@@ -147,7 +147,6 @@ private:
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
 						int32			fTotalThreadCount;
-						std::atomic<int32> fEevdfRunQueueTaskCount;
 
 
 						bigtime_t		fMeasureActiveTime;
@@ -157,8 +156,6 @@ private:
 						friend class DebugDumper;
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 
-public:
-	inline				int32			GetEevdfRunQueueTaskCount() const { return fEevdfRunQueueTaskCount.load(std::memory_order_relaxed); }
 } CACHE_LINE_ALIGN;
 
 

@@ -42,7 +42,6 @@
 #include "scheduler_profiler.h"
 #include "scheduler_spin_lock.h"
 #include <kernel/scheduler.h>
-#include "EevdfRunQueue.h"     // For EevdfRunQueueLink
 
 namespace Scheduler {
 

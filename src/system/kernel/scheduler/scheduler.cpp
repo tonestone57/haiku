@@ -2635,7 +2635,7 @@ scheduler_perform_load_balance()
 
 		bigtime_t queueDepthPenalty = 0;
 		if (representativeTargetCPU != NULL) {
-			int32 targetQueueDepth = representativeTargetCPU->GetEevdfRunQueue().Count();
+			int32 targetQueueDepth = representativeTargetCPU->GetEevdfScheduler().Count();
 			if (targetQueueDepth > 0) {
 				queueDepthPenalty = - (targetQueueDepth * TARGET_QUEUE_PENALTY_FACTOR_LB);
 				currentBenefitScore += queueDepthPenalty;

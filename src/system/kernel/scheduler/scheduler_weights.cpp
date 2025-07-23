@@ -27,7 +27,7 @@ static const double kRealtimeBaseWeight = 88761.0;
 static const int32 kMaxPriorityRange = B_REAL_TIME_PRIORITY + 1;
 
 // Global weight table and synchronization
-static int32* gHaikuContinuousWeights = NULL;
+int32* gHaikuContinuousWeights = NULL;
 static spinlock gWeightTableLock = B_SPINLOCK_INITIALIZER;
 static volatile bool gWeightsInitialized = false;
 
@@ -48,10 +48,10 @@ sched_get_priority_max(int policy)
 		case SCHED_OTHER:
 			return B_URGENT_DISPLAY_PRIORITY;
 
-		case SCHED_BATCH:
+		case SCHED_OTHER:
 			return B_NORMAL_PRIORITY;
 
-		case SCHED_IDLE:
+		case SCHED_OTHER:
 			return B_IDLE_PRIORITY;
 
 		default:
@@ -69,10 +69,10 @@ sched_get_priority_min(int policy)
 			return B_REAL_TIME_DISPLAY_PRIORITY;
 
 		case SCHED_OTHER:
-		case SCHED_BATCH:
+		case SCHED_OTHER:
 			return B_IDLE_PRIORITY;
 
-		case SCHED_IDLE:
+		case SCHED_OTHER:
 			return B_IDLE_PRIORITY;
 
 		default:

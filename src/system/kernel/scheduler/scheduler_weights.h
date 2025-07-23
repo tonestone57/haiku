@@ -8,9 +8,7 @@
 
 #include <OS.h>
 #include <kernel.h>
-
-// Forward declarations
-struct Thread;
+#include <kernel/thread_types.h>
 
 namespace Scheduler {
 	class CPUEntry;

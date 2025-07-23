@@ -55,8 +55,8 @@ power_saving_switch_to_mode()
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;
-	gModeIrqTargetFactor = 0.5f;
-	gModeMaxTargetCpuIrqLoad = 500;
+	gIrqTargetFactor = 0.5f;
+	gMaxTargetCpuIrqLoad = 500;
 
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker;
@@ -70,15 +70,7 @@ power_saving_has_cache_expired(const Scheduler::ThreadData* threadData)
 	if (threadData == NULL || threadData->Core() == NULL || threadData->GetThread() == NULL)
 		return true;
 
-	struct thread* thread = threadData->GetThread();
-	if (thread->previous_cpu == NULL)
-		return true;
-
-	CPUEntry* prevCPU = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	if (prevCPU == NULL || prevCPU->Core() != threadData->Core())
-		return true;
-
-	return system_time() - thread->last_time > kPowerSavingCacheExpirationThreshold;
+	return true;
 }
 
 static CoreEntry*

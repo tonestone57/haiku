@@ -338,7 +338,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler:
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->GetEevdfScheduler().AddThread((ThreadData*)threadData);
+	cpu->GetEevdfScheduler().AddThread((::ThreadData*)threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -626,11 +626,10 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 
 				bool isTaskPCritical = (candidateTask->GetBasePriority() >= B_URGENT_DISPLAY_PRIORITY
 					|| candidateTask->GetLoad() > (kMaxLoad * 7 / 10));
-				bool isTaskEPref = false;
 
 				TRACE_SCHED_BL_STEAL("WorkSteal Eval: Thief C%d(T%d), Victim C%d(T%d), Task T% " B_PRId32 " (Pcrit %d, EPref %d, Load %" B_PRId32 ", Lag %" B_PRId64 ")\n",
 					thiefCPU->Core()->ID(), thiefCoreType, victimCPUEntry->Core()->ID(), victimCoreType,
-					candThread->id, isTaskPCritical, isTaskEPref, candidateTask->GetLoad(), candidateTask->Lag());
+					candThread->id, isTaskPCritical, false, candidateTask->GetLoad(), candidateTask->Lag());
 
 				if (thiefCoreType == CORE_TYPE_BIG || thiefCoreType == CORE_TYPE_UNIFORM_PERFORMANCE) {
 					if (isTaskPCritical) {
@@ -1114,7 +1113,7 @@ InterruptsSpinLocker lock(thread->scheduler_lock);
             InterruptsSpinLocker mapLock(gIrqTaskAffinityLock);
             thread_id* val = sIrqTaskAffinityMap->Lookup(irq);
             if (val && *val == thread->id) {
-                sIrqTaskAffinityMap->Remove(irq);
+                sIrqTaskAffinityMap->Remove(val);
             }
         }
     }
@@ -1357,7 +1356,7 @@ scheduler_update_global_min_vruntime()
 	bigtime_t calculatedNewGlobalMin = -1LL;
 
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (!gCPUEnabled.GetBit(i))
+		if (!Scheduler::gCPUEnabled.GetBit(i))
 			continue;
 		bigtime_t cpuReportedMin = atomic_get64(&Scheduler::gReportedCpuMinVR[i]);
 		if (calculatedNewGlobalMin == -1LL || cpuReportedMin < calculatedNewGlobalMin) {
@@ -1522,7 +1521,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 		if (!stc->IsDefunct()) {
 			CPUSet stcCPUs = stc->CPUMask();
 			for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
-				if (stcCPUs.GetBit(i) && gCPUEnabled.GetBit(i)) {
+				if (stcCPUs.GetBit(i) && Scheduler::gCPUEnabled.GetBit(i)) {
 					stcHasEnabledCpu = true;
 					break;
 				}
@@ -1536,7 +1535,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 	}
 
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (!gCPUEnabled.GetBit(i))
+		if (!Scheduler::gCPUEnabled.GetBit(i))
 			continue;
 		enabledCpuCount++;
 		Scheduler::CPUEntry* currentCpu = Scheduler::CPUEntry::GetCPU(i);
@@ -1568,7 +1567,7 @@ scheduler_irq_balance_event(timer* /* unused */)
 		minIrqLoadFound = 0x7fffffff;
 		Scheduler::CPUEntry* generalFallbackTarget = NULL;
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (!gCPUEnabled.GetBit(i) || Scheduler::CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
+			if (!Scheduler::gCPUEnabled.GetBit(i) || Scheduler::CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
 				continue;
 			Scheduler::CPUEntry* potentialTarget = Scheduler::CPUEntry::GetCPU(i);
 			int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
@@ -2225,7 +2224,7 @@ scheduler_perform_load_balance(void)
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread((::ThreadData*)threadToMove);
+	targetCPU->AddThread(threadToMove);
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(system_time());
@@ -2233,7 +2232,7 @@ scheduler_perform_load_balance(void)
 	migrationPerformed = true;
 
 	if (threadToMove->Core() != sourceCPU->Core()) {
-		int32 localIrqList[Scheduler::ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
+		int32 localIrqList[4];
 		int8 localIrqCount = 0;
 		thread_id migratedThId = threadToMove->GetThread()->id;
 

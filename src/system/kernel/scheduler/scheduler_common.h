@@ -281,10 +281,6 @@ static constexpr sched_time_t kMaxEffectiveQuantum = 100000;  // 100 ms
 static constexpr float kInstantLoadEWMAAlpha = 0.4f;
 
 // --- Scheduler Operation Mode Enums ---
-enum SchedulerLoadBalancePolicy : uint32_t {
-	SPREAD = 0,      // Spread load across cores
-	CONSOLIDATE = 1  // Consolidate load to fewer cores
-};
 
 // --- Mode-Settable Global Parameters ---
 // These are set by scheduler_set_operation_mode via mode's switch_to_mode

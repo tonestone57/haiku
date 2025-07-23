@@ -120,15 +120,27 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsAllSet()) {
+		bool allSet = true;
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (!affinityMask.GetBit(i)) {
+				allSet = false;
+				break;
+			}
+		}
+		if (affinityMask.IsEmpty() || allSet) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
 			kprintf("0x");
-			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
-				if (affinityMask.GetBits(i) != 0)
-					kprintf("%x", affinityMask.GetBits(i));
+			for (int32 i = (smp_get_num_cpus() + 31) / 32 - 1; i >= 0; i--) {
+				if (affinityMask.Bits(i) != 0)
+					kprintf("%x", affinityMask.Bits(i));
 			}
-			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.Count());
+			uint32 count = 0;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (affinityMask.GetBit(i))
+					count++;
+			}
+			kprintf(" (%" B_PRIu32 " bits set)\n", count);
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
@@ -321,7 +333,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->GetEevdfScheduler().AddThread(threadData);
+	cpu->GetEevdfScheduler().AddThread((ThreadData*)threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -388,7 +400,7 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 	if (!running || thread_is_idle_thread(running)) {
 		gCPU[cpu->ID()].invoke_scheduler = true;
 	} else {
-		ThreadData* runningData = running->scheduler_data;
+		Scheduler::ThreadData* runningData = running->scheduler_data;
 		if (system_time() >= data->EligibleTime() &&
 			data->VirtualDeadline() < runningData->VirtualDeadline()) {
 			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
@@ -425,7 +437,13 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			&& Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
 			cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
 		} else if (threadData->Core() != NULL && threadData->Core()->CPUCount() > 0) {
-			int32 firstCpuIdOnCore = threadData->Core()->CPUMask().FirstSetBit();
+			int32 firstCpuIdOnCore = -1;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (threadData->Core()->CPUMask().GetBit(i)) {
+					firstCpuIdOnCore = i;
+					break;
+				}
+			}
 			if (firstCpuIdOnCore >= 0)
 				cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(firstCpuIdOnCore);
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, using first CPU (%d) of its core (%d) as context for weight calc.\n",
@@ -493,7 +511,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (cpuContextForUpdate != NULL) {
 			cpuContextForUpdate->LockRunQueue();
-			cpuContextForUpdate->GetEevdfScheduler().UpdateThread(threadData);
+			cpuContextForUpdate->GetEevdfScheduler().UpdateThread((ThreadData*)threadData);
 			cpuContextForUpdate->UnlockRunQueue();
 			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
 			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
@@ -1170,10 +1188,10 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 		DoublyLinkedList<Scheduler::ThreadData> threadsToReenqueue;
 
 		while (true) {
-			Scheduler::ThreadData* threadData = runQueue.PopMinThread();
+			Scheduler::ThreadData* threadData = (Scheduler::ThreadData*)runQueue.PopMinThread();
 			if (threadData == NULL)
 				break;
-			cpuEntry->GetEevdfScheduler().RemoveThread(threadData);
+			cpuEntry->GetEevdfScheduler().RemoveThread((ThreadData*)threadData);
 			threadData->MarkDequeued();
 			if (threadData->Core() == core) {
 				threadData->UnassignCore(false);
@@ -1881,7 +1899,7 @@ select_thread_to_migrate(CPUEntry* sourceCPU, CoreEntry* finalTargetCore,
 	int checkedCount = 0;
 
 	for (int i = 0; i < MAX_LB_CANDIDATES_TO_CHECK && !sourceQueue.IsEmpty(); ++i) {
-		Scheduler::ThreadData* candidate = sourceQueue.PopMinThread();
+		Scheduler::ThreadData* candidate = (Scheduler::ThreadData*)sourceQueue.PopMinThread();
 		if (candidate == NULL) break;
 		tempStorage[checkedCount++] = candidate;
 
@@ -2059,7 +2077,7 @@ select_thread_to_migrate(CPUEntry* sourceCPU, CoreEntry* finalTargetCore,
 
 	for (int i = 0; i < checkedCount; ++i) {
 		if (tempStorage[i] != bestCandidateToMove) {
-			sourceQueue.AddThread(tempStorage[i]);
+			sourceQueue.AddThread((ThreadData*)tempStorage[i]);
 		}
 	}
 	threadToMove = bestCandidateToMove;
@@ -2185,7 +2203,7 @@ scheduler_perform_load_balance()
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove);
+	targetCPU->AddThread((ThreadData*)threadToMove);
 	targetCPU->UnlockRunQueue();
 
 	threadToMove->SetLastMigrationTime(system_time());

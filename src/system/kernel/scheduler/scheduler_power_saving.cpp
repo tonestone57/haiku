@@ -48,35 +48,15 @@ static const float kPowerSavingPrevCoreLoadThreshold = 0.90f;
 static const float kPowerSavingActiveThreshold = 0.05f;
 
 
-// RAII lock wrapper for Small Task Core operations
-class SmallTaskCoreLocker {
-public:
-	SmallTaskCoreLocker()
-	{
-		acquire_spinlock(&Scheduler::sSmallTaskCoreLock);
-	}
-
-	~SmallTaskCoreLocker()
-	{
-		release_spinlock(&Scheduler::sSmallTaskCoreLock);
-	}
-
-private:
-	// Non-copyable
-	SmallTaskCoreLocker(const SmallTaskCoreLocker&) = delete;
-	SmallTaskCoreLocker& operator=(const SmallTaskCoreLocker&) = delete;
-};
-
-
 static void
 power_saving_switch_to_mode()
 {
-	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
+	gSchedulerLoadBalancePolicy = CONSOLIDATE;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;
-	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
-	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
+	gModeIrqTargetFactor = 0.5f;
+	gModeMaxTargetCpuIrqLoad = 500;
 
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker;
@@ -85,7 +65,7 @@ power_saving_switch_to_mode()
 }
 
 static bool
-power_saving_has_cache_expired(const ThreadData* threadData)
+power_saving_has_cache_expired(const Scheduler::ThreadData* threadData)
 {
 	if (threadData == NULL || threadData->Core() == NULL || threadData->GetThread() == NULL)
 		return true;

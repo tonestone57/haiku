@@ -120,15 +120,15 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsFull()) {
+		if (affinityMask.IsEmpty() || affinityMask.IsAllSet()) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
 			kprintf("0x");
 			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
-				if (affinityMask.GetBit(i) != 0)
-					kprintf("%x", affinityMask.GetBit(i));
+				if (affinityMask.GetBits(i) != 0)
+					kprintf("%x", affinityMask.GetBits(i));
 			}
-			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.CountSetBits());
+			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.Count());
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
@@ -178,8 +178,8 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_SPREAD;
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
@@ -321,7 +321,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->AddThread(threadData);
+	cpu->GetEevdfScheduler().AddThread(threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -381,14 +381,14 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 	data->MarkEnqueued(core);
 
 	cpu->LockRunQueue();
-	cpu->AddThread(data);
+	cpu->GetEevdfScheduler().AddThread(data);
 	cpu->UnlockRunQueue();
 
 	Thread* running = gCPU[cpu->ID()].running_thread;
 	if (!running || thread_is_idle_thread(running)) {
 		gCPU[cpu->ID()].invoke_scheduler = true;
 	} else {
-		ThreadData* runningData = running->scheduler_data;
+		Scheduler::ThreadData* runningData = running->scheduler_data;
 		if (system_time() >= data->EligibleTime() &&
 			data->VirtualDeadline() < runningData->VirtualDeadline()) {
 			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
@@ -408,7 +408,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	InterruptsSpinLocker interruptLocker(thread->scheduler_lock);
 	SCHEDULER_ENTER_FUNCTION();
 
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 	int32 oldActualPriority = thread->priority;
 
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
@@ -542,7 +542,7 @@ scheduler_new_thread_entry(Thread* thread)
 
 
 
-static ThreadData*
+static Scheduler::ThreadData*
 _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 {
 	Scheduler::CPUEntry* victimCPUEntry = Scheduler::CPUEntry::GetCPU(victimCpuID);
@@ -556,12 +556,12 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 
 	TRACE_SCHED("WorkSteal: Thief CPU %" B_PRId32 " probing victim CPU %" B_PRId32 "\n", thiefCPU->ID(), victimCpuID);
 
-	ThreadData* stolenTask = NULL;
+	Scheduler::ThreadData* stolenTask = NULL;
 	victimCPUEntry->LockRunQueue();
 	EevdfScheduler& victimQueue = victimCPUEntry->GetEevdfScheduler();
 
 	if (!victimQueue.IsEmpty()) {
-		ThreadData* candidateTask = victimQueue.PeekMinimum();
+		Scheduler::ThreadData* candidateTask = victimQueue.PeekMinimum();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool basicChecksPass = true;
 			Thread* candThread = candidateTask->GetThread();
@@ -771,7 +771,7 @@ scheduler_try_work_steal(Scheduler::CPUEntry* thiefCPU)
 static bool
 update_old_thread_state(Thread* oldThread, int32 nextState, CoreEntry* core)
 {
-	ThreadData* oldThreadData = oldThread->scheduler_data;
+	Scheduler::ThreadData* oldThreadData = oldThread->scheduler_data;
 	bool shouldReEnqueueOldThread = false;
 	switch (nextState) {
 		case B_THREAD_RUNNING:
@@ -828,7 +828,7 @@ reschedule(int32 nextState)
 
 	Thread* oldThread = thread_get_current_thread();
 
-	ThreadData* oldThreadData = oldThread->scheduler_data;
+	Scheduler::ThreadData* oldThreadData = oldThread->scheduler_data;
 	if (oldThreadData != NULL)
 		oldThreadData->StopCPUTime();
 
@@ -888,7 +888,7 @@ reschedule(int32 nextState)
 		= update_old_thread_state(oldThread, nextState, core);
 
 
-	ThreadData* nextThreadData = NULL;
+	Scheduler::ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue();
 
 	if (gCPU[thisCPUId].disabled) {
@@ -896,7 +896,7 @@ reschedule(int32 nextState)
 			TRACE_SCHED("reschedule: CPU %" B_PRId32 " disabling, re-homing T %" B_PRId32 "\n", thisCPUId, oldThread->id);
 
 			if (oldThreadData->IsEnqueued() && oldThreadData->Core() == core) {
-				cpu->RemoveThread(oldThreadData);
+				cpu->GetEevdfScheduler().RemoveThread(oldThreadData);
 				oldThreadData->MarkDequeued();
 			}
             if (oldThreadData->Core() == core) {
@@ -914,7 +914,7 @@ reschedule(int32 nextState)
 		if (nextThreadData == NULL)
 			panic("reschedule: No idle thread on disabling CPU %" B_PRId32 "!", thisCPUId);
 	} else {
-		ThreadData* oldThreadToConsider = (shouldReEnqueueOldThread && !oldThreadData->IsIdle())
+		Scheduler::ThreadData* oldThreadToConsider = (shouldReEnqueueOldThread && !oldThreadData->IsIdle())
 			? oldThreadData : NULL;
 		nextThreadData = cpu->ChooseNextThread(oldThreadToConsider, false, 0);
 
@@ -930,7 +930,7 @@ reschedule(int32 nextState)
 
 			if (shouldAttemptSteal) {
 				cpu->UnlockRunQueue();
-				ThreadData* actuallyStolenThreadData = scheduler_try_work_steal(cpu);
+				Scheduler::ThreadData* actuallyStolenThreadData = scheduler_try_work_steal(cpu);
 				cpu->LockRunQueue();
 
 				if (actuallyStolenThreadData != NULL) {
@@ -1028,7 +1028,7 @@ reschedule(int32 nextState)
 status_t
 scheduler_on_thread_create(Thread* thread, bool idleThread)
 {
-	thread->scheduler_data = new(std::nothrow) ThreadData(thread);
+	thread->scheduler_data = new(std::nothrow) Scheduler::ThreadData(thread);
 	if (thread->scheduler_data == NULL) return B_NO_MEMORY;
 	return B_OK;
 }
@@ -1038,7 +1038,7 @@ void
 scheduler_on_thread_init(Thread* thread)
 {
 	ASSERT(thread->scheduler_data != NULL);
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 
 	if (thread_is_idle_thread(thread)) {
 		static int32 sIdleThreadsCPUIDCounter = 0;
@@ -1073,8 +1073,8 @@ scheduler_on_thread_destroy(Thread* thread)
 {
     if (!thread || !thread->scheduler_data) return;
 
-    ThreadData* data = thread->scheduler_data;
-    int32 irqs[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
+    Scheduler::ThreadData* data = thread->scheduler_data;
+    int32 irqs[Scheduler::ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
     int8 count = 0;
 
 InterruptsSpinLocker lock(thread->scheduler_lock);

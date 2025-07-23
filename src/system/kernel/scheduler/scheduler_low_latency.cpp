@@ -18,6 +18,9 @@
 
 using namespace Scheduler;
 
+struct CPUCacheEntry;
+static CPUCacheEntry* gCPUCache = nullptr;
+
 static CoreEntry* low_latency_choose_core(const Scheduler::ThreadData* threadData);
 
 static void
@@ -61,7 +64,6 @@ struct alignas(64) CPUCacheEntry {
 					  cached_defunct_state(true), cache_lock(B_SPINLOCK_INITIALIZER) {}
 };
 
-static CPUCacheEntry* gCPUCache = nullptr;
 static const bigtime_t kCacheValidityPeriod = 1000; // 1ms cache validity
 
 

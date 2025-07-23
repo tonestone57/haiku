@@ -67,6 +67,7 @@ KernelMergeObject kernel_core.o :
 
 	# scheduler
 	EevdfScheduler.cpp
+	ThreadPriorityQueue.cpp
 	scheduler_low_latency.cpp
 	scheduler_power_saving.cpp
 	scheduler.cpp

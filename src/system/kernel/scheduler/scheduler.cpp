@@ -65,7 +65,6 @@
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
 namespace Scheduler {
-bool gSchedulerElasticQuotaMode = true;
 }
 
 // --- New Continuous Weight Calculation Logic ---
@@ -177,13 +176,6 @@ cmd_thread_sched_info(int argc, char** argv)
 
 namespace Scheduler {
 
-// --- Team CPU Quota Management: Global Variables ---
-const bigtime_t kDefaultQuotaPeriod = 100000;
-bigtime_t gQuotaPeriod = kDefaultQuotaPeriod;
-DoublyLinkedList<TeamSchedulerData> gTeamSchedulerDataList;
-spinlock gTeamSchedulerListLock = B_SPINLOCK_INITIALIZER;
-static timer gQuotaResetTimer;
-bigtime_t gGlobalMinTeamVRuntime = 0;
 
 
 
@@ -214,32 +206,6 @@ int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
 static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
 static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
-// Adds a team's scheduler data to the global list.
-// This function must be called with interrupts disabled.
-void add_team_scheduler_data_to_global_list(TeamSchedulerData* tsd)
-{
-	if (tsd == NULL) return;
-	tsd->team_virtual_runtime = atomic_get64(&gGlobalMinTeamVRuntime);
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
-	gTeamSchedulerDataList.Add(tsd);
-	TRACE_SCHED_TEAM("Added TeamSchedulerData for team %" B_PRId32 " to global list. Initial VR: %" B_PRId64 "\n",
-		tsd->teamID, tsd->team_virtual_runtime);
-}
-
-// Removes a team's scheduler data from the global list.
-// This function must be called with interrupts disabled.
-void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
-{
-	if (tsd == NULL) return;
-	InterruptsSpinLocker locker(gTeamSchedulerListLock);
-	if (tsd->GetDoublyLinkedListLink()->previous != NULL || tsd->GetDoublyLinkedListLink()->next != NULL
-		|| gTeamSchedulerDataList.Head() == tsd) {
-		gTeamSchedulerDataList.Remove(tsd);
-		TRACE_SCHED("Removed TeamSchedulerData for team %" B_PRId32 " from global list.\n", tsd->teamID);
-	} else {
-		TRACE_SCHED_WARNING("remove_team_scheduler_data_from_global_list: TeamSchedulerData for team %" B_PRId32 " not found in list or already removed.\n", tsd->teamID);
-	}
-}
 
 }	// namespace Scheduler
 
@@ -300,8 +266,6 @@ static int cmd_scheduler(int argc, char** argv);
 #endif
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
-static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
 
 static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
 
@@ -595,81 +559,6 @@ scheduler_new_thread_entry(Thread* thread)
 }
 
 
-static bool
-check_starvation_and_quota(ThreadData* candidateTask,
-	Scheduler::CPUEntry* victimCPUEntry, Scheduler::CPUEntry* thiefCPU,
-	bool& isStarved, bool& teamQuotaAllowsSteal)
-{
-	int32 candidateWeight = scheduler_priority_to_weight(
-		candidateTask->GetThread(), victimCPUEntry);
-	if (candidateWeight <= 0)
-		candidateWeight = 1;
-	bigtime_t unweightedNormWorkOwed
-		= (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
-
-	isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
-	teamQuotaAllowsSteal = true;
-
-	Thread* candThread = candidateTask->GetThread();
-	if (candThread->team != NULL
-		&& candThread->team->team_scheduler_data != NULL) {
-		Scheduler::TeamSchedulerData* tsd = candThread->team->team_scheduler_data;
-		InterruptsSpinLocker teamLocker(tsd->lock);
-		bool isSourceExhausted = tsd->quota_exhausted;
-		bool isSourceBorrowing = false;
-		if (isSourceExhausted && gSchedulerElasticQuotaMode
-			&& victimCPUEntry != NULL
-			&& victimCPUEntry->GetCurrentActiveTeam() == tsd) {
-			isSourceBorrowing = true;
-		}
-		teamLocker.Unlock();
-
-		if (isSourceExhausted && !isSourceBorrowing) {
-			isStarved = unweightedNormWorkOwed > (kMinUnweightedNormWorkToSteal * 2);
-			if (!isStarved) {
-				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from"
-					" exhausted team, not starved enough (owed %" B_PRId64 ","
-					" need > %" B_PRId64 "). DENY steal.\n",
-					candThread->id, unweightedNormWorkOwed,
-					kMinUnweightedNormWorkToSteal * 2);
-				teamQuotaAllowsSteal = false;
-			} else {
-				if (!gSchedulerElasticQuotaMode
-					|| thiefCPU->Core()->Type() != CORE_TYPE_LITTLE) {
-					TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from"
-						" exhausted team, very starved, but thief CPU %"
-						B_PRId32 " (type %d) not ideal for quota. DENY"
-						" steal.\n",
-						candThread->id, thiefCPU->ID(),
-						thiefCPU->Core()->Type());
-					teamQuotaAllowsSteal = false;
-				} else {
-					TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " from"
-						" exhausted team, very starved. Thief CPU %" B_PRId32
-						" (type %d) might allow borrowing. PERMIT (pending"
-						" b.L).\n",
-						candThread->id, thiefCPU->ID(),
-						thiefCPU->Core()->Type());
-				}
-			}
-		}
-	}
-
-	if (isStarved) {
-		TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered"
-			" starved (unweighted_owed %" B_PRId64 " > effective_threshold %"
-			B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
-			candThread->id, unweightedNormWorkOwed,
-			(teamQuotaAllowsSteal && candThread->team
-					&& candThread->team->team_scheduler_data
-					&& candThread->team->team_scheduler_data->quota_exhausted)
-				? (kMinUnweightedNormWorkToSteal * 2)
-				: kMinUnweightedNormWorkToSteal,
-			candidateTask->Lag());
-	}
-
-	return true;
-}
 
 static ThreadData*
 _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
@@ -706,11 +595,23 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 				}
 			}
 
-			bool isStarved = false;
-			bool teamQuotaAllowsSteal = false;
-			if (!check_starvation_and_quota(candidateTask, victimCPUEntry,
-					thiefCPU, isStarved, teamQuotaAllowsSteal)) {
-				continue;
+			int32 candidateWeight = scheduler_priority_to_weight(
+				candidateTask->GetThread(), victimCPUEntry);
+			if (candidateWeight <= 0)
+				candidateWeight = 1;
+			bigtime_t unweightedNormWorkOwed
+				= (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
+
+			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
+			bool teamQuotaAllowsSteal = true;
+
+			if (isStarved) {
+				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered"
+					" starved (unweighted_owed %" B_PRId64 " > effective_threshold %"
+					B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
+					candidateTask->GetThread()->id, unweightedNormWorkOwed,
+					kMinUnweightedNormWorkToSteal,
+					candidateTask->Lag());
 			}
 
 			if (basicChecksPass && isStarved && teamQuotaAllowsSteal) {
@@ -1005,58 +906,7 @@ reschedule(int32 nextState)
 	bool shouldReEnqueueOldThread
 		= update_old_thread_state(oldThread, nextState, core);
 
-	TeamSchedulerData* selectedTeamForThisCpu = NULL;
-	bigtime_t minTeamVRuntime = B_INFINITE_TIMEOUT;
-	static TeamSchedulerData* sLastSelectedBorrowingTeam = NULL;
-
-	InterruptsSpinLocker listLocker(gTeamSchedulerListLock);
-	if (!gTeamSchedulerDataList.IsEmpty()) {
-		TeamSchedulerData* currentTeamIter = gTeamSchedulerDataList.Head();
-		TeamSchedulerData* bestNominalTeam = NULL;
-
-		while (currentTeamIter != NULL) {
-			InterruptsSpinLocker teamDataLocker(currentTeamIter->lock);
-			if (currentTeamIter->cpu_quota_percent > 0 && !currentTeamIter->quota_exhausted) {
-				if (currentTeamIter->team_virtual_runtime < minTeamVRuntime) {
-					minTeamVRuntime = currentTeamIter->team_virtual_runtime;
-					bestNominalTeam = currentTeamIter;
-				} else if (currentTeamIter->team_virtual_runtime == minTeamVRuntime) {
-					if (bestNominalTeam == NULL || currentTeamIter->teamID < bestNominalTeam->teamID) {
-						bestNominalTeam = currentTeamIter;
-					}
-				}
-			}
-			teamDataLocker.Unlock();
-			currentTeamIter = gTeamSchedulerDataList.GetNext(currentTeamIter);
-		}
-		selectedTeamForThisCpu = bestNominalTeam;
-	}
-
-	if (selectedTeamForThisCpu == NULL && Scheduler::gSchedulerElasticQuotaMode && !gTeamSchedulerDataList.IsEmpty()) {
-		TRACE_SCHED_TEAM_VERBOSE("Reschedule CPU %" B_PRId32 ": Pass 1 failed. Elastic mode ON. Trying Pass 2 (borrowing).\n", thisCPUId);
-		TeamSchedulerData* startNode = (sLastSelectedBorrowingTeam != NULL
-				&& gTeamSchedulerDataList.Contains(sLastSelectedBorrowingTeam))
-			? gTeamSchedulerDataList.GetNext(sLastSelectedBorrowingTeam)
-			: gTeamSchedulerDataList.Head();
-		if (startNode == NULL && !gTeamSchedulerDataList.IsEmpty())
-			startNode = gTeamSchedulerDataList.Head();
-
-		TeamSchedulerData* currentTeamIter = startNode;
-		if (currentTeamIter != NULL) {
-			do {
-				selectedTeamForThisCpu = currentTeamIter;
-				sLastSelectedBorrowingTeam = currentTeamIter;
-				break;
-			} while (false);
-		}
-		if (selectedTeamForThisCpu != NULL) {
-			TRACE_SCHED_TEAM("Reschedule CPU %" B_PRId32 ": Pass 2 (Elastic) selected Team %" B_PRId32 " to borrow (simple RR).\n",
-				thisCPUId, selectedTeamForThisCpu->teamID);
-		}
-	}
-	listLocker.Unlock();
-
-	cpu->SetCurrentActiveTeam(selectedTeamForThisCpu);
+	cpu->SetCurrentActiveTeam(NULL);
 
 	ThreadData* nextThreadData = NULL;
 	cpu->LockRunQueue();
@@ -1562,10 +1412,6 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
 	add_debugger_command_alias("get_smt_factor", "scheduler_get_smt_factor", "Alias for scheduler_get_smt_factor");
-	add_debugger_command_etc("scheduler_set_elastic_mode", &cmd_scheduler_set_elastic_quota_mode, "Set ... elastic team quota mode.", "<on|off|1|0>\n...", 0);
-	add_debugger_command_alias("set_elastic_quota", "scheduler_set_elastic_mode", "Alias for scheduler_set_elastic_mode");
-	add_debugger_command_etc("scheduler_get_elastic_mode", &cmd_scheduler_get_elastic_quota_mode, "Get ... elastic team quota mode.", "...", 0);
-	add_debugger_command_alias("get_elastic_quota", "scheduler_get_elastic_mode", "Alias for scheduler_get_elastic_mode");
 	// Removido: dump_eevdf_weights
 }
 
@@ -1652,39 +1498,6 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 }
 
 
-static int
-cmd_scheduler_set_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_elastic_mode <on|off|1|0>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = true;
-		kprintf("Scheduler elastic team quota mode enabled.\n");
-	} else if (strcmp(argv[1], "off") == 0 || strcmp(argv[1], "0") == 0) {
-		Scheduler::gSchedulerElasticQuotaMode = false;
-		kprintf("Scheduler elastic team quota mode disabled.\n");
-	} else {
-		kprintf("Invalid argument. Use 'on' or 'off'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_elastic_mode\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler elastic team quota mode: %s\n",
-		Scheduler::gSchedulerElasticQuotaMode ? "on" : "off");
-	return 0;
-}
 
 
 static Scheduler::CPUEntry*
@@ -2280,33 +2093,6 @@ select_thread_to_migrate(CPUEntry* sourceCPU, CoreEntry* finalTargetCore,
 									  + targetCpuIdleBonus
 									  - (0 > 0 ? 0 : 0);
 
-		bigtime_t teamQuotaPenalty = 0;
-		Thread* candidateThread = candidate->GetThread();
-		if (candidateThread->team != NULL && candidateThread->team->team_scheduler_data != NULL) {
-			Scheduler::TeamSchedulerData* tsd = candidateThread->team->team_scheduler_data;
-			InterruptsSpinLocker teamLocker(tsd->lock);
-			bool isSourceExhausted = tsd->quota_exhausted;
-			bool isSourceBorrowing = false;
-			if (isSourceExhausted && gSchedulerElasticQuotaMode && sourceCPU != NULL && sourceCPU->GetCurrentActiveTeam() == tsd) {
-				isSourceBorrowing = true;
-			}
-			teamLocker.Unlock();
-
-			if (isSourceExhausted && !isSourceBorrowing) {
-				teamQuotaPenalty -= kTeamQuotaAwarenessPenaltyLB / 2;
-				TRACE_SCHED_BL("LoadBalance: T %" B_PRId32 " from exhausted team (not borrowing), penalty %" B_PRId64 "\n",
-					candidateThread->id, kTeamQuotaAwarenessPenaltyLB / 2);
-			}
-
-			if (isSourceExhausted && !isSourceBorrowing) {
-				if (!gSchedulerElasticQuotaMode || (representativeTargetCPU != NULL && representativeTargetCPU->Core()->Type() != CORE_TYPE_LITTLE)) {
-					teamQuotaPenalty -= kTeamQuotaAwarenessPenaltyLB;
-					TRACE_SCHED_BL("LoadBalance: T %" B_PRId32 " from exhausted team, target non-ideal for quota, total penalty %" B_PRId64 "\n",
-						candidateThread->id, teamQuotaPenalty);
-				}
-			}
-		}
-		currentBenefitScore += teamQuotaPenalty;
 
 		bigtime_t queueDepthPenalty = 0;
 		if (representativeTargetCPU != NULL) {

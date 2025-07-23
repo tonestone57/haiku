@@ -902,7 +902,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	fCPULock = B_SPINLOCK_INITIALIZER;
+	B_INITIALIZE_SPINLOCK(&fCPULock);
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }
@@ -957,7 +957,7 @@ CoreEntry::ThreadCount()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	InterruptsSpinLocker lock(fCPULock);
+	SpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);

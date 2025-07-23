@@ -872,7 +872,7 @@ CPUPriorityHeap::Dump()
 			currentEffectiveSmtLoad * 100.0f, // Display as percentage
 			entry->GetInstantaneousLoad() * 100.0f, // Display as percentage
 			entry->GetCachedMinVirtualRuntime(), // Use cached to avoid lock in KDL
-			entry->GetEevdfRunQueue().Count(),
+			entry->GetEevdfScheduler().Count(),
 			entry->PeekIdleThread() ? entry->PeekIdleThread()->GetThread()->id : -1);
 	}
 

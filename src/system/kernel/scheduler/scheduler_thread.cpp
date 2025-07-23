@@ -5,11 +5,12 @@
  */
 
 #include "scheduler_thread.h"
-#include "scheduler_defs.h" // For latency_nice constants and factors
-#include <util/Random.h> // For get_random<T>()
+#include "ThreadData.h"
+
+#include <util/Random.h>
 #include <util/atomic.h>
+
 #include <algorithm>
-#include <atomic>
 
 namespace Scheduler {
 int32* gHaikuContinuousWeights = NULL;
@@ -18,163 +19,33 @@ int32* gHaikuContinuousWeights = NULL;
 using namespace Scheduler;
 
 
-// Architecture-independent spinlock implementation
-class SpinLock {
-private:
-    std::atomic_flag locked = ATOMIC_FLAG_INIT;
-    
-public:
-    void lock() {
-        while (locked.test_and_set(std::memory_order_acquire)) {
-            // Use architecture-specific pause/yield instruction
-            #if defined(__x86_64__) || defined(__i386__)
-                __builtin_ia32_pause();
-            #elif defined(__aarch64__) || defined(__arm__)
-                __asm__ volatile("yield" ::: "memory");
-            #else
-                std::this_thread::yield();
-            #endif
-        }
-    }
-    
-    void unlock() {
-        locked.clear(std::memory_order_release);
-    }
-    
-    bool try_lock() {
-        return !locked.test_and_set(std::memory_order_acquire);
-    }
-};
 
-// RAII lock guard for spinlock
-class SpinLockGuard {
-private:
-    SpinLock& lock_;
-    
-public:
-    explicit SpinLockGuard(SpinLock& lock) : lock_(lock) {
-        lock_.lock();
-    }
-    
-    ~SpinLockGuard() {
-        lock_.unlock();
-    }
-    
-    // Non-copyable
-    SpinLockGuard(const SpinLockGuard&) = delete;
-    SpinLockGuard& operator=(const SpinLockGuard&) = delete;
-};
-
-
-class ThreadData {
-private:
-    // Thread-specific spinlock for data protection
-    mutable SpinLock fDataLock;
-    
-    // Cached values to avoid repeated calculations
-    mutable std::atomic<bigtime_t> fCachedSlice{0};
-    mutable std::atomic<bigtime_t> fCacheTimestamp{0};
-    static constexpr bigtime_t CACHE_VALIDITY_PERIOD = 1000; // 1ms cache validity
-    
-    // I/O bound detection with atomic operations for thread safety
-    std::atomic<uint32> fVoluntarySleepTransitions{0};
-    std::atomic<bigtime_t> fAverageRunBurstTimeEWMA{0};
-    
-    // Load calculation with atomic operations
-    std::atomic<int32> fNeededLoad{0};
-    std::atomic<bigtime_t> fLastMeasureAvailableTime{0};
-    std::atomic<bigtime_t> fMeasureAvailableTime{0};
-    std::atomic<bigtime_t> fMeasureAvailableActiveTime{0};
-    
-    // Other atomic fields for thread safety
-    std::atomic<bigtime_t> fVirtualDeadline{0};
-    std::atomic<bigtime_t> fLag{0};
-    std::atomic<bigtime_t> fEligibleTime{0};
-    std::atomic<bigtime_t> fSliceDuration{SchedulerConstants::SCHEDULER_TARGET_LATENCY};
-    std::atomic<bigtime_t> fVirtualRuntime{0};
-    
-    mutable std::atomic<int32> fEffectivePriority{B_NORMAL_PRIORITY};
-    
-    // Non-atomic fields (assuming they're set once or protected externally)
-    Thread* fThread;
-    CPUEntry* fCore;
-    bool fReady;
-
-public:
-    bigtime_t CalculateDynamicQuantum(const CPUEntry* contextCpu) const;
-    void UnassignCore(bool running);
-    void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice);
-    bool IsLikelyIOBound() const;
-    
-    // Helper methods
-    bool IsIdle() const { return fThread && fThread->priority == B_IDLE_PRIORITY; }
-    bool IsRealTime() const { return fThread && fThread->priority >= B_FIRST_REAL_TIME_PRIORITY; }
-    int32 GetBasePriority() const { return fThread ? fThread->priority : B_NORMAL_PRIORITY; }
-    
-private:
-    void _ComputeNeededLoad();
-    void _ComputeEffectivePriority() const;
-    
-    // Safe arithmetic operations to prevent overflow/underflow
-    template<typename T>
-    T SafeAdd(T a, T b, T max_val) const {
-        if (a > max_val - b) return max_val;
-        return a + b;
-    }
-    
-    template<typename T>
-    T SafeMultiply(T a, T b, T max_val) const {
-        if (a == 0 || b == 0) return 0;
-        if (a > max_val / b) return max_val;
-        return a * b;
-    }
-};
-
-
-
-void
-ThreadData::_InitBase()
+ThreadData::ThreadData(Thread* thread)
+    :
+    fThread(thread),
+    fCore(NULL),
+    fReady(false),
+    fTimeUsedInCurrentQuantum(0),
+    fCurrentEffectiveQuantum(0),
+    fStolenTime(0),
+    fQuantumStartWallTime(0),
+    fLastInterruptTime(0),
+    fWentSleep(0),
+    fWentSleepActive(0),
+    fEnqueued(false),
+    fLoadMeasurementEpoch(0),
+    fLastMigrationTime(0),
+    fBurstCredits(0),
+    fLatencyViolations(0),
+    fInteractivityClass(0),
+    fAffinitizedIrqCount(0),
+    fDeadline(0),
+    fRuntime(0),
+    fPeriod(0)
 {
-	// Deadline scheduling
-	fDeadline = 0;
-	fRuntime = 0;
-	fPeriod = 0;
-
-	// I/O-bound heuristic
-	// Initialize to a value that doesn't immediately classify as I/O bound.
-	// A typical slice duration might be a good start.
-	fAverageRunBurstTimeEWMA = SCHEDULER_TARGET_LATENCY / 2;
-	fVoluntarySleepTransitions = 0;
-
-	// IRQ-Task Colocation
-	fAffinitizedIrqCount = 0;
-	// Clear the IRQ array to avoid undefined behavior
-	memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
-
-	// Fields related to a specific quantum slice, reset when a new quantum starts
-	fTimeUsedInCurrentQuantum = 0;
-	fCurrentEffectiveQuantum = 0;
-	fStolenTime = 0;
-	fQuantumStartWallTime = 0;
-	fLastInterruptTime = 0;
-
-	// Fields related to sleep/wake state
-	fWentSleep = 0;
-	fWentSleepActive = 0;
-
-	// Queueing state
-	fEnqueued = false;
-	fReady = false;
-
-	// Load estimation
-	fNeededLoad = 0;
-	fLoadMeasurementEpoch = 0;
-	fMeasureAvailableActiveTime = 0; // Will store normalized work
-	fMeasureAvailableTime = 0;       // Will store wall-clock available time
-	fLastMeasureAvailableTime = 0;
-
-	// Load balancing
-	fLastMigrationTime = 0;
+    for (int8 i = 0; i < MAX_AFFINITIZED_IRQS_PER_THREAD; i++) {
+        fAffinitizedIrqs[i] = -1;
+    }
 }
 
 // #pragma mark - IRQ-Task Colocation Methods for ThreadData
@@ -182,66 +53,43 @@ ThreadData::_InitBase()
 bool
 ThreadData::AddAffinitizedIrq(int32 irq)
 {
-	// This method should be called with appropriate locks held
-	// (e.g., thread's scheduler_lock or main fLock).
-	// The caller (_user_set_irq_task_colocation) will hold gIrqTaskAffinityLock,
-	// and should also ensure synchronization for ThreadData modification.
-
-	if (fAffinitizedIrqCount >= MAX_AFFINITIZED_IRQS_PER_THREAD) {
-		TRACE_SCHED_IRQ_ERR("ThreadData::AddAffinitizedIrq: T %" B_PRId32 " cannot add IRQ %" B_PRId32 ", list full (%d/%d).\n",
-			fThread->id, irq, fAffinitizedIrqCount, MAX_AFFINITIZED_IRQS_PER_THREAD);
-		return false; // List is full
-	}
-
-	// Check for duplicates - more efficient bounds checking
-	for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
-		if (fAffinitizedIrqs[i] == irq) {
-			// Already present, no action needed, report success.
-			return true;
-		}
-	}
-
-	fAffinitizedIrqs[fAffinitizedIrqCount++] = irq;
-	TRACE_SCHED_IRQ("ThreadData::AddAffinitizedIrq: T %" B_PRId32 " added IRQ %" B_PRId32 ". Count: %d.\n",
-		fThread->id, irq, fAffinitizedIrqCount);
-	return true;
+    SpinLockGuard guard(fDataLock);
+    if (fAffinitizedIrqCount >= MAX_AFFINITIZED_IRQS_PER_THREAD) {
+        return false;
+    }
+    for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
+        if (fAffinitizedIrqs[i] == irq) {
+            return true;
+        }
+    }
+    fAffinitizedIrqs[fAffinitizedIrqCount++] = irq;
+    return true;
 }
 
 bool
 ThreadData::RemoveAffinitizedIrq(int32 irq)
 {
-	// Similar synchronization considerations as AddAffinitizedIrq.
-
-	for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
-		if (fAffinitizedIrqs[i] == irq) {
-			// Found it, remove by shifting subsequent elements
-			fAffinitizedIrqCount--;
-			// Use memmove for safe overlapping memory copy
-			if (i < fAffinitizedIrqCount) {
-				memmove(&fAffinitizedIrqs[i], &fAffinitizedIrqs[i + 1], 
-					sizeof(int32) * (fAffinitizedIrqCount - i));
-			}
-			// Clear the last element for cleanliness
-			fAffinitizedIrqs[fAffinitizedIrqCount] = 0;
-			
-			TRACE_SCHED_IRQ("ThreadData::RemoveAffinitizedIrq: T %" B_PRId32 " removed IRQ %" B_PRId32 ". New count: %d.\n",
-				fThread->id, irq, fAffinitizedIrqCount);
-			return true;
-		}
-	}
-	// Not found is not an error for removal, just means no action taken.
-	TRACE_SCHED_IRQ("ThreadData::RemoveAffinitizedIrq: T %" B_PRId32 " IRQ %" B_PRId32 " not found in affinitized list.\n",
-		fThread->id, irq);
-	return false;
+    SpinLockGuard guard(fDataLock);
+    for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
+        if (fAffinitizedIrqs[i] == irq) {
+            fAffinitizedIrqCount--;
+            if (i < fAffinitizedIrqCount) {
+                memmove(&fAffinitizedIrqs[i], &fAffinitizedIrqs[i + 1],
+                    sizeof(int32) * (fAffinitizedIrqCount - i));
+            }
+            fAffinitizedIrqs[fAffinitizedIrqCount] = 0;
+            return true;
+        }
+    }
+    return false;
 }
 
 void
 ThreadData::ClearAffinitizedIrqs()
 {
-	// Clear both count and array contents for consistency
-	fAffinitizedIrqCount = 0;
-	memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
-	TRACE_SCHED_IRQ("ThreadData::ClearAffinitizedIrqs: T %" B_PRId32 " cleared all IRQ affinities.\n", fThread->id);
+    SpinLockGuard guard(fDataLock);
+    fAffinitizedIrqCount = 0;
+    memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
 }
 
 void
@@ -409,14 +257,14 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 
 	// Check previous CPU for cache affinity first, only if it's on the chosen core.
 	cpu_ent* previousCpuEnt = fThread->previous_cpu;
-	if (previousCpuEnt != NULL && previousCpuEnt->cpu_num >= 0 && 
-		previousCpuEnt->cpu_num < smp_get_num_cpus() && 
+	if (previousCpuEnt != NULL && previousCpuEnt->cpu_num >= 0 &&
+		previousCpuEnt->cpu_num < smp_get_num_cpus() &&
 		!gCPU[previousCpuEnt->cpu_num].disabled) {
-		
+
 		CPUEntry* previousCPUEntry = CPUEntry::GetCPU(previousCpuEnt->cpu_num);
-		if (previousCPUEntry != NULL && previousCPUEntry->Core() == core && 
+		if (previousCPUEntry != NULL && previousCPUEntry->Core() == core &&
 			(!useMask || mask.GetBit(previousCpuEnt->cpu_num))) {
-			
+
 			// Previous CPU is on the target core and matches affinity.
 			// Check its SMT-aware effective load.
 			float smtPenalty = 0.0f;
@@ -425,7 +273,7 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 				int32 prevSMTID = gCPU[prevCpuID].topology_id[CPU_TOPOLOGY_SMT];
 				if (prevSMTID != -1) {
 					for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-						if (k == prevCpuID || gCPU[k].disabled || 
+						if (k == prevCpuID || gCPU[k].disabled ||
 							CPUEntry::GetCPU(k)->Core() != core)
 							continue;
 						if (gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == prevSMTID) {
@@ -474,7 +322,7 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 
 				if (candidateSMTID != -1) {
 					for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-						if (k == candidateCpuID || gCPU[k].disabled || 
+						if (k == candidateCpuID || gCPU[k].disabled ||
 							CPUEntry::GetCPU(k)->Core() != core)
 							continue;
 						// Check if CPU 'k' is an SMT sibling of 'candidateCPU'
@@ -507,7 +355,7 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 		// Last resort: just pick the first available CPU on this core
 		CPUSet coreCPUs = core->CPUMask();
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-			if (coreCPUs.GetBit(i) && !gCPU[i].disabled && 
+			if (coreCPUs.GetBit(i) && !gCPU[i].disabled &&
 				(!useMask || mask.GetBit(i))) {
 				chosenCPU = CPUEntry::GetCPU(i);
 				TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "\n",
@@ -524,9 +372,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 		int32 cpuId = chosenCPU->ID();
 		if (cpuId >= 0 && cpuId < smp_get_num_cpus()) {
 			if (gCPU[cpuId].running_thread == NULL ||
-				thread_is_idle_thread(gCPU[cpuId].running_thread)) {
-				rescheduleNeeded = true;
-			} else if (fThread->cpu != &gCPU[cpuId]) {
+				thread_is_idle_thread(gCPU[cpuId].running_thread) ||
+				fThread->cpu != &gCPU[cpuId]) {
 				rescheduleNeeded = true;
 			}
 		}
@@ -544,9 +391,9 @@ ThreadData::Init()
 	Thread* currentThread = thread_get_current_thread();
 	if (currentThread != NULL && currentThread->scheduler_data != NULL && currentThread != fThread) {
 		ThreadData* currentThreadData = currentThread->scheduler_data;
-		fNeededLoad = currentThreadData->fNeededLoad;
+		fNeededLoad.store(currentThreadData->fNeededLoad.load(std::memory_order_relaxed), std::memory_order_relaxed);
 	} else {
-		fNeededLoad = kMaxLoad / 10;
+		fNeededLoad.store(kMaxLoad / 10, std::memory_order_relaxed);
 	}
 	_ComputeEffectivePriority();
 }
@@ -557,7 +404,7 @@ ThreadData::Init(CoreEntry* core)
 	_InitBase();
 	fCore = core;
 	fReady = true;
-	fNeededLoad = 0;
+	fNeededLoad.store(0, std::memory_order_relaxed);
 	_ComputeEffectivePriority();
 }
 
@@ -570,26 +417,25 @@ ThreadData::Dump() const
 	kprintf("\tstolen_time:\t\t%" B_PRId64 " us\n", fStolenTime);
 	kprintf("\tquantum_start_wall:\t%" B_PRId64 " us\n", fQuantumStartWallTime);
 	kprintf("\tlast_migration_time:\t%" B_PRId64 " us\n", fLastMigrationTime);
-	kprintf("\tneeded_load:\t\t%" B_PRId32 "%%\n", fNeededLoad / (kMaxLoad/100));
+	kprintf("\tneeded_load:\t\t%" B_PRId32 "%%\n", fNeededLoad.load(std::memory_order_relaxed) / (kMaxLoad/100));
 	kprintf("\twent_sleep:\t\t%" B_PRId64 "\n", fWentSleep);
 	kprintf("\twent_sleep_active:\t%" B_PRId64 "\n", fWentSleepActive);
 	kprintf("\tcore:\t\t\t%" B_PRId32 "\n",
 		fCore != NULL ? fCore->ID() : -1);
-	if (fCore != NULL && HasCacheExpired())
-		kprintf("\tcache affinity has expired\n");
 
 	kprintf("\tEEVDF specific:\n");
-	kprintf("\t  virtual_deadline:\t%" B_PRId64 "\n", fVirtualDeadline);
-	kprintf("\t  lag:\t\t\t%" B_PRId64 "\n", fLag);
-	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", fEligibleTime);
-	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", fSliceDuration);
-	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", fVirtualRuntime);
+	kprintf("\t  virtual_deadline:\t%" B_PRId64 "\n", VirtualDeadline());
+	kprintf("\t  lag:\t\t\t%" B_PRId64 "\n", Lag());
+	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", EligibleTime());
+	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", SliceDuration());
+	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", VirtualRuntime());
 	
 	kprintf("\tI/O Heuristics:\n");
-	kprintf("\t  avg_burst_time_ewma:\t%" B_PRId64 " us\n", fAverageRunBurstTimeEWMA);
-	kprintf("\t  voluntary_sleep_transitions:\t%" B_PRIu32 "\n", fVoluntarySleepTransitions);
+	kprintf("\t  avg_burst_time_ewma:\t%" B_PRId64 " us\n", AverageRunBurstTime());
+	kprintf("\t  voluntary_sleep_transitions:\t%" B_PRIu32 "\n", VoluntarySleepTransitions());
 	kprintf("\t  is_likely_io_bound:\t%s\n", IsLikelyIOBound() ? "true" : "false");
 	
+    SpinLockGuard guard(fDataLock);
 	if (fAffinitizedIrqCount > 0) {
 		kprintf("\tAffinitized IRQs (%d):\t", fAffinitizedIrqCount);
 		for (int8 i = 0; i < fAffinitizedIrqCount; i++) {
@@ -645,14 +491,14 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 	// Update core assignment if changed
 	if (fCore != chosenCore) {
 		if (fCore != NULL && fReady && !IsIdle()) {
-			fCore->RemoveLoad(fNeededLoad, true);
+			fCore->RemoveLoad(fNeededLoad.load(std::memory_order_relaxed), true);
 		}
 
 		fLoadMeasurementEpoch = chosenCore->LoadMeasurementEpoch() - 1;
 		fCore = chosenCore;
 
 		if (fReady && !IsIdle()) {
-			fCore->AddLoad(fNeededLoad, fLoadMeasurementEpoch, true);
+			fCore->AddLoad(fNeededLoad.load(std::memory_order_relaxed), fLoadMeasurementEpoch, true);
 		}
 	}
 
@@ -685,8 +531,7 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
 
     // Check cache validity first
     bigtime_t now = system_time();
-    bigtime_t cacheTime = fCacheTimestamp.load(std::memory_order_acquire);
-    if (now - cacheTime < SchedulerConstants::CACHE_VALIDITY_PERIOD) {
+    if (now - fCacheTimestamp.load(std::memory_order_acquire) < CACHE_VALIDITY_PERIOD) {
         bigtime_t cachedSlice = fCachedSlice.load(std::memory_order_acquire);
         if (cachedSlice > 0) {
             return cachedSlice;
@@ -696,8 +541,7 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
     SpinLockGuard guard(fDataLock);
     
     // Double-check cache after acquiring lock
-    cacheTime = fCacheTimestamp.load(std::memory_order_relaxed);
-    if (now - cacheTime < SchedulerConstants::CACHE_VALIDITY_PERIOD) {
+    if (now - fCacheTimestamp.load(std::memory_order_relaxed) < CACHE_VALIDITY_PERIOD) {
         bigtime_t cachedSlice = fCachedSlice.load(std::memory_order_relaxed);
         if (cachedSlice > 0) {
             return cachedSlice;
@@ -707,94 +551,46 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
     // Get thread weight with bounds checking
     int32 weight = scheduler_priority_to_weight(fThread, contextCpu);
     if (weight <= 0) {
-        TRACE_SCHED_WARNING("CalculateDynamicQuantum: T %" B_PRId32 " (prio %" B_PRId32 
-            ") has invalid weight %" B_PRId32 "! Using weight 1.\n",
-            fThread->id, GetBasePriority(), weight);
         weight = 1;
     }
 
     // Safe calculation to prevent division by zero and overflow
-    bigtime_t baseSlice;
-    bigtime_t numerator = SafeMultiply<bigtime_t>(
-        SchedulerConstants::SCHEDULER_TARGET_LATENCY,
-        SchedulerConstants::SCHEDULER_WEIGHT_SCALE,
+    bigtime_t baseSlice = SafeMultiply<bigtime_t>(
+        SchedulerConstants::SCHEDULER_TARGET_LATENCY_SAFE,
+        SchedulerConstants::SCHEDULER_WEIGHT_SCALE_SAFE,
         LLONG_MAX
-    );
-    baseSlice = numerator / weight;
+    ) / weight;
 
     // Ensure reasonable bounds on baseSlice
-    baseSlice = std::max(SchedulerConstants::kMinSliceGranularity, 
-                        std::min(baseSlice, SchedulerConstants::kMaxSliceDuration));
+    baseSlice = std::max(SchedulerConstants::MIN_SLICE_GRANULARITY,
+                        std::min(baseSlice, SchedulerConstants::MAX_SLICE_DURATION));
 
-    // Real-time thread minimum guarantee
     if (IsRealTime()) {
-        baseSlice = std::max(baseSlice, SchedulerConstants::RT_MIN_GUARANTEED_SLICE);
+        baseSlice = std::max(baseSlice, SchedulerConstants::RT_MIN_GUARANTEED_SLICE_SAFE);
     }
 
     bigtime_t finalSlice = baseSlice;
 
-    // Adaptive adjustment for I/O-bound threads (non-RT only)
-    if (!IsRealTime()) {
-        uint32 transitions = fVoluntarySleepTransitions.load(std::memory_order_acquire);
+    // Adaptive adjustment for I/O-bound threads
+    if (!IsRealTime() && IsLikelyIOBound()) {
         bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
-        
-        if (transitions >= SchedulerConstants::IO_BOUND_MIN_TRANSITIONS && avgBurst > 0) {
-            if (avgBurst < finalSlice) {
-                // Calculate adaptive buffer with overflow protection
-                bigtime_t adaptiveBuffer = std::max(
-                    avgBurst / 4,
-                    SchedulerConstants::kMinSliceGranularity / 2
-                );
-                
-                bigtime_t potentialSlice = SafeAdd(avgBurst, adaptiveBuffer, finalSlice);
-                
-                if (potentialSlice < finalSlice && 
-                    potentialSlice >= SchedulerConstants::kMinSliceGranularity) {
-                    
-                    TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 
-                        " adapting slice from %" B_PRId64 "us to %" B_PRId64 "us\n",
-                        fThread->id, finalSlice, potentialSlice);
-                    finalSlice = potentialSlice;
-                }
-            }
+        if (avgBurst > 0 && avgBurst < finalSlice) {
+            finalSlice = std::max(SchedulerConstants::MIN_SLICE_GRANULARITY, avgBurst + avgBurst / 4);
         }
     }
 
     // Dynamic floor adjustment for high CPU contention
-    if (contextCpu != nullptr) {
-        int32 numContenders = contextCpu->GetEevdfRunQueue().Count();
-        numContenders = std::max(1, numContenders); // Ensure at least 1
-        
-        if (numContenders > SchedulerConstants::HIGH_CONTENTION_THRESHOLD) {
-            bigtime_t dynamicFloor = static_cast<bigtime_t>(
-                SchedulerConstants::kMinSliceGranularity * 
-                SchedulerConstants::HIGH_CONTENTION_MIN_SLICE_FACTOR
-            );
-            
-            if (finalSlice < dynamicFloor) {
-                TRACE_SCHED_ADAPTIVE("CalculateDynamicQuantum: T %" B_PRId32 
-                    " CPU %" B_PRId32 " high contention (%d). Slice floored to %" B_PRId64 "us\n",
-                    fThread->id, contextCpu->ID(), numContenders, dynamicFloor);
-                finalSlice = dynamicFloor;
-            }
-        }
+    if (contextCpu != nullptr && contextCpu->GetEevdfScheduler().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD_SAFE) {
+        finalSlice = std::max(finalSlice, (bigtime_t)(SchedulerConstants::MIN_SLICE_GRANULARITY * SchedulerConstants::HIGH_CONTENTION_SLICE_FACTOR));
     }
 
-    // Final clamping with RT-aware minimum
-    bigtime_t minSlice = IsRealTime() ? 
-        SchedulerConstants::RT_MIN_GUARANTEED_SLICE : 
-        SchedulerConstants::kMinSliceGranularity;
-    
-    finalSlice = std::max(minSlice, 
-                         std::min(finalSlice, SchedulerConstants::kMaxSliceDuration));
+    // Final clamping
+    finalSlice = std::max(IsRealTime() ? SchedulerConstants::RT_MIN_GUARANTEED_SLICE_SAFE : SchedulerConstants::MIN_SLICE_GRANULARITY,
+                         std::min(finalSlice, SchedulerConstants::MAX_SLICE_DURATION));
 
     // Update cache
     fCachedSlice.store(finalSlice, std::memory_order_release);
     fCacheTimestamp.store(now, std::memory_order_release);
-
-    TRACE_SCHED("ThreadData::CalculateDynamicQuantum: T %" B_PRId32 ", prio %d, weight %" B_PRId32 
-        ", baseSlice %" B_PRId64 "us, finalSlice %" B_PRId64 "us\n",
-        fThread->id, GetBasePriority(), weight, baseSlice, finalSlice);
 
     return finalSlice;
 }
@@ -865,13 +661,6 @@ ThreadData::_ComputeNeededLoad()
     fNeededLoad.store(newNeededLoad, std::memory_order_relaxed);
     fLastMeasureAvailableTime.store(currentTime, std::memory_order_relaxed);
     fMeasureAvailableActiveTime.store(0, std::memory_order_relaxed);
-
-    // Reset scheduling parameters
-    fVirtualDeadline.store(0, std::memory_order_relaxed);
-    fLag.store(0, std::memory_order_relaxed);
-    fEligibleTime.store(0, std::memory_order_relaxed);
-    fSliceDuration.store(SchedulerConstants::SCHEDULER_TARGET_LATENCY, std::memory_order_relaxed);
-    fVirtualRuntime.store(0, std::memory_order_relaxed);
 }
 
 void
@@ -913,12 +702,12 @@ ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlic
     bigtime_t currentAverage = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
     
     bigtime_t newAverage;
-    if (currentTransitions == 0) {
+    if (currentTransitions < SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
         newAverage = actualRuntimeInSlice;
     } else {
         // EWMA calculation with bounds checking to prevent overflow
-        int64_t numerator = static_cast<int64_t>(actualRuntimeInSlice) + 
-            (SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL - 1) * 
+        int64_t numerator = static_cast<int64_t>(actualRuntimeInSlice) * 2 +
+            (SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL - 2) *
             static_cast<int64_t>(currentAverage);
         newAverage = static_cast<bigtime_t>(
             numerator / SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL
@@ -929,7 +718,7 @@ ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlic
     fAverageRunBurstTimeEWMA.store(newAverage, std::memory_order_release);
     
     if (currentTransitions < SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
-        fVoluntarySleepTransitions.store(currentTransitions + 1, std::memory_order_release);
+        fVoluntarySleepTransitions.fetch_add(1, std::memory_order_release);
     }
 
     TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " RecordVoluntarySleep: ran %" B_PRId64 
@@ -937,16 +726,16 @@ ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlic
         fThread->id, actualRuntimeInSlice, newAverage, currentTransitions + 1);
 
     if (actualRuntimeInSlice < SCHEDULER_TARGET_LATENCY / 2) {
-        fBurstCredits.store(fBurstCredits.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        fBurstCredits++;
     }
 
-    if (fSliceDuration < SCHEDULER_TARGET_LATENCY / 2) {
-        fSliceDuration = fSliceDuration * 9 / 10;
+    if (SliceDuration() < SCHEDULER_TARGET_LATENCY / 2) {
+        SetSliceDuration(SliceDuration() * 9 / 10);
     }
 
-    if (fAverageRunBurstTimeEWMA < 1000) {
+    if (AverageRunBurstTime() < 1000) {
         fInteractivityClass = 2; // Interactive
-    } else if (fAverageRunBurstTimeEWMA < 10000) {
+    } else if (AverageRunBurstTime() < 10000) {
         fInteractivityClass = 1; // Semi-interactive
     } else {
         fInteractivityClass = 0; // Batch
@@ -1000,4 +789,46 @@ ThreadData::IsLikelyCPUBound() const
 
 	bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
 	return avgBurst > SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US * 2;
+}
+
+void
+ThreadData::_InitBase()
+{
+	// Deadline scheduling
+	fDeadline = 0;
+	fRuntime = 0;
+	fPeriod = 0;
+
+	// I/O-bound heuristic
+	fAverageRunBurstTimeEWMA.store(SCHEDULER_TARGET_LATENCY / 2, std::memory_order_relaxed);
+	fVoluntarySleepTransitions.store(0, std::memory_order_relaxed);
+
+	// IRQ-Task Colocation
+	fAffinitizedIrqCount = 0;
+	memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
+
+	// Fields related to a specific quantum slice, reset when a new quantum starts
+	fTimeUsedInCurrentQuantum = 0;
+	fCurrentEffectiveQuantum = 0;
+	fStolenTime = 0;
+	fQuantumStartWallTime = 0;
+	fLastInterruptTime = 0;
+
+	// Fields related to sleep/wake state
+	fWentSleep = 0;
+	fWentSleepActive = 0;
+
+	// Queueing state
+	fEnqueued = false;
+	fReady = false;
+
+	// Load estimation
+	fNeededLoad.store(0, std::memory_order_relaxed);
+	fLoadMeasurementEpoch = 0;
+	fMeasureAvailableActiveTime.store(0, std::memory_order_relaxed);
+	fMeasureAvailableTime.store(0, std::memory_order_relaxed);
+	fLastMeasureAvailableTime.store(0, std::memory_order_relaxed);
+
+	// Load balancing
+	fLastMigrationTime = 0;
 }

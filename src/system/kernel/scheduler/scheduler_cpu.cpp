@@ -17,7 +17,7 @@
 
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_thread.h"
-#include "EevdfRunQueue.h" // Make sure this is included
+#include "EevdfScheduler.h"
 
 #include <util/MultiHashTable.h>
 
@@ -74,7 +74,6 @@ using namespace Scheduler;
 
 class Scheduler::DebugDumper {
 public:
-	static	void		DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump);
 	static	void		DumpCoreLoadHeapEntry(CoreEntry* core);
 	static	void		DumpIdleCoresInPackage(PackageEntry* package);
 
@@ -88,8 +87,10 @@ private:
 };
 
 
+#if KDEBUG
 static CPUPriorityHeap sDebugCPUHeap;
 static CoreLoadHeap sDebugCoreHeap;
+#endif
 
 
 // Threshold for CoreEntry load changes to trigger global heap updates.
@@ -108,6 +109,8 @@ static const int MAX_PEEK_ELIGIBLE_CANDIDATES = 3;
 
 CPUEntry::CPUEntry()
 	:
+	fCPUNumber(-1),
+	fCore(NULL),
 	fIdleThread(NULL),
 	fMinVirtualRuntime(0),
 	fLoad(0),
@@ -115,21 +118,10 @@ CPUEntry::CPUEntry()
 	fInstLoadLastUpdateTimeSnapshot(0),
 	fInstLoadLastActiveTimeSnapshot(0),
 	fTotalThreadCount(0),
-	// fEevdfRunQueueTaskCount is initialized using atomic_init in C++11 style if possible,
-	// or direct initialization if the type supports it.
-	// For Haiku's C-style atomics, it's typically done in Init or by ensuring zero-init.
-	// Let's ensure it's zeroed. If atomic_int32 is a struct, it might need explicit {0}.
-	// Assuming it's a typedef for a type that zero-initializes or atomic_init in constructor.
-	// For safety, we will explicitly initialize in the member initializer list if possible,
-	// otherwise rely on Init() for atomic_store.
-	// atomic_init(&fEevdfRunQueueTaskCount, 0); // This is C11 style, might not be direct C++ init list
-	fEevdfRunQueueTaskCount(0),
 	fMeasureActiveTime(0),
 	fMeasureTime(0),
-	fUpdateLoadEvent(false),
+	fUpdateLoadEvent(false)
 {
-	// fSchedulerModeLock was removed.
-	B_INITIALIZE_SPINLOCK(&fQueueLock);
 }
 
 
@@ -141,7 +133,7 @@ CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
 	// can affect the SMT-aware key of its SMT siblings.
 	SCHEDULER_ENTER_FUNCTION();
 
-	SpinLocker lock(fCPULock); // Protects fCPUHeap modifications
+	SpinLockGuard lock(fCPULock); // Protects fCPUHeap modifications
 
 	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
 		return;
@@ -189,8 +181,6 @@ CPUEntry::Init(int32 id, CoreEntry* core)
 	fInstLoadLastUpdateTimeSnapshot = system_time();
 	fInstLoadLastActiveTimeSnapshot = gCPU[fCPUNumber].active_time;
 	fTotalThreadCount = 0;
-	fEevdfRunQueueTaskCount.store(0);
-
 	// Initialize work-stealing fields
 	fNextStealAttemptTime = 0;
 	fLastTimeTaskStolenFrom = 0;
@@ -240,6 +230,24 @@ CPUEntry::Stop()
 		irq = (irq_assignment*)list_get_first_item(&entry->irqs);
 	}
 	locker.Unlock();
+
+	// Also migrate any threads that might still be in the run queue.
+	DoublyLinkedList<ThreadData> threadsToReenqueue;
+	LockRunQueue();
+	while (true) {
+		ThreadData* threadData = fEevdfScheduler.PopMinThread();
+		if (threadData == NULL)
+			break;
+		threadData->MarkDequeued();
+		if (threadData->Core() == fCore)
+			threadData->UnassignCore(false);
+		threadsToReenqueue.Add(threadData);
+	}
+	UnlockRunQueue();
+
+	while (ThreadData* threadData = threadsToReenqueue.RemoveHead()) {
+		scheduler_enqueue_in_run_queue(threadData->GetThread());
+	}
 }
 
 
@@ -251,7 +259,7 @@ CPUEntry::_UpdateMinVirtualRuntime()
 	bigtime_t oldLocalMinVR = fMinVirtualRuntime; // For tracing and as the "sticky" value
 	bigtime_t localAnchorVR;
 
-	ThreadData* head = fEevdfRunQueue.PeekMinimum();
+	Scheduler::ThreadData* head = (Scheduler::ThreadData*)fEevdfScheduler.PeekMinThread();
 	if (head != NULL && !head->IsIdle()) {
 		localAnchorVR = head->VirtualRuntime();
 	} else {
@@ -286,10 +294,9 @@ CPUEntry::AddThread(ThreadData* thread)
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 	ASSERT(thread != fIdleThread); // Idle thread should not be added to the main run queue.
 
-	fEevdfRunQueue.Add(thread);
+	fEevdfScheduler.AddThread((Scheduler::ThreadData*)thread);
 	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
-	fEevdfRunQueueTaskCount.fetch_add(1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
 }
 
@@ -298,16 +305,14 @@ void
 CPUEntry::RemoveThread(ThreadData* thread)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ASSERT(thread->IsEnqueued() || thread == fIdleThread); // Idle thread might not be "enqueued" in fEevdfRunQueue
+	ASSERT(thread->IsEnqueued() || thread == fIdleThread); // Idle thread might not be "enqueued" in fEevdfScheduler
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 
 	if (thread != fIdleThread) {
-		fEevdfRunQueue.Remove(thread);
+		fEevdfScheduler.RemoveThread((Scheduler::ThreadData*)thread);
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
 		ASSERT(atomic_get(&fTotalThreadCount) >= 0);
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime(); // Update min_vruntime
 	}
 }
@@ -325,7 +330,7 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 
 
 
-ThreadData*
+Scheduler::ThreadData*
 CPUEntry::PeekEligibleNextThread()
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -335,19 +340,17 @@ CPUEntry::PeekEligibleNextThread()
 	// not chosen) to find the first thread (by VirtualDeadline order) that is
 	// currently eligible (system_time() >= EligibleTime()).
 	// The chosen eligibleCandidate is *not* re-added to the queue.
-	ThreadData* eligibleCandidate = NULL;
+	Scheduler::ThreadData* eligibleCandidate = NULL;
 	// Use a DoublyLinkedList to temporarily store threads popped but not chosen.
 	// This is because we don't know how many we might pop before finding an eligible one.
-	DoublyLinkedList<ThreadData> temporarilyPoppedList;
+	DoublyLinkedList<Scheduler::ThreadData> temporarilyPoppedList;
 
 	bigtime_t now = system_time();
 
 	// Iterate through the heap by popping.
 	// We are looking for the first eligible thread based on VirtualDeadline order.
-	while (!fEevdfRunQueue.IsEmpty()) {
-		ThreadData* candidate = fEevdfRunQueue.PopMinimum(); // Pop from actual queue
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
+	while (!fEevdfScheduler.IsEmpty()) {
+		Scheduler::ThreadData* candidate = (Scheduler::ThreadData*)fEevdfScheduler.PopMinThread(); // Pop from actual queue
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
@@ -368,13 +371,12 @@ CPUEntry::PeekEligibleNextThread()
 		}
 	}
 
-	// Re-add any threads that were popped from fEevdfRunQueue but found to be ineligible.
+	// Re-add any threads that were popped from fEevdfScheduler but found to be ineligible.
 	// They are re-added in the order they were popped, though Add will place them
 	// correctly by deadline.
-	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
-		fEevdfRunQueue.Add(toReAdd);
-		fEevdfRunQueueTaskCount.fetch_add(1);
-		// fEevdfRunQueue.Add() calls _UpdateMinVirtualRuntime if the new item
+	while (Scheduler::ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
+		fEevdfScheduler.AddThread((ThreadData*)toReAdd);
+		// fEevdfScheduler.Add() calls _UpdateMinVirtualRuntime if the new item
 		// becomes the head or if the queue was empty. This should cover most cases.
 	}
 
@@ -396,8 +398,8 @@ CPUEntry::PeekEligibleNextThread()
 }
 
 
-ThreadData*
-CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
+Scheduler::ThreadData*
+CPUEntry::ChooseNextThread(Scheduler::ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(are_interrupts_enabled() == false); // Caller must hold the run queue lock.
@@ -407,20 +409,19 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	// re-inserted into the EEVDF run queue.
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
 		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
-		fEevdfRunQueue.Add(oldThread);
-		fEevdfRunQueueTaskCount.fetch_add(1); // Manually update count as Add doesn't do it here
+		fEevdfScheduler.AddThread((ThreadData*)oldThread);
 		_UpdateMinVirtualRuntime();
 	}
 
-	ThreadData* nextThreadData = NULL;
+	Scheduler::ThreadData* nextThreadData = NULL;
 
 	// Check for deadline-scheduled threads
-	ThreadData* deadlineThread = NULL;
+	Scheduler::ThreadData* deadlineThread = NULL;
 	bigtime_t earliestDeadline = -1;
 
-	std::vector<ThreadData*> poppedThreads;
-	while (!fEevdfRunQueue.IsEmpty()) {
-		ThreadData* thread = fEevdfRunQueue.PopMinimum();
+	std::vector<Scheduler::ThreadData*> poppedThreads;
+	while (!fEevdfScheduler.IsEmpty()) {
+		Scheduler::ThreadData* thread = (Scheduler::ThreadData*)fEevdfScheduler.PopMinThread();
 		poppedThreads.push_back(thread);
 		if (thread->fDeadline > 0) {
 			if (deadlineThread == NULL || thread->fDeadline < earliestDeadline) {
@@ -432,17 +433,15 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 
 	if (deadlineThread != NULL) {
 		nextThreadData = deadlineThread;
-		for (ThreadData* thread : poppedThreads) {
+		for (Scheduler::ThreadData* thread : poppedThreads) {
 			if (thread != nextThreadData) {
-				fEevdfRunQueue.Add(thread);
+				fEevdfScheduler.AddThread((ThreadData*)thread);
 			}
 		}
-		fEevdfRunQueueTaskCount.fetch_sub(1);
-		ASSERT(fEevdfRunQueueTaskCount.load() >= 0);
 		_UpdateMinVirtualRuntime();
 	} else {
-		for (ThreadData* thread : poppedThreads) {
-			fEevdfRunQueue.Add(thread);
+		for (Scheduler::ThreadData* thread : poppedThreads) {
+			fEevdfScheduler.AddThread((ThreadData*)thread);
 		}
 		nextThreadData = PeekEligibleNextThread();
 	}
@@ -477,7 +476,6 @@ CPUEntry::SetIdleThread(ThreadData* idleThread)
 	fIdleThread = idleThread;
 	// Typically, idle threads are not added to the main EEVDF run queue.
 	// They are special and picked when no other eligible thread is available.
-	// So, not modifying fTotalThreadCount or fEevdfRunQueue here.
 	// Their `thread->scheduler_data->fCore` should be set correctly.
 	if (fIdleThread->Core() == NULL) {
 		// This might happen if idle threads are initialized very early.
@@ -893,7 +891,7 @@ CPUPriorityHeap::Dump()
 			currentEffectiveSmtLoad * 100.0f, // Display as percentage
 			entry->GetInstantaneousLoad() * 100.0f, // Display as percentage
 			entry->GetCachedMinVirtualRuntime(), // Use cached to avoid lock in KDL
-			entry->GetEevdfRunQueue().Count(),
+			entry->GetEevdfScheduler().Count(),
 			entry->PeekIdleThread() ? entry->PeekIdleThread()->GetThread()->id : -1);
 	}
 
@@ -921,7 +919,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	B_INITIALIZE_SPINLOCK(&fCPULock);
+	fCPULock.Init("core cpu lock");
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }
@@ -991,7 +989,7 @@ void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	SpinLocker lock(fCPULock);
+	SpinLockGuard lock(fCPULock);
 
 	ASSERT_PRINT(cpu->Core() == this, "CPU %" B_PRId32 " belongs to core %" B_PRId32
 		", not %" B_PRId32, cpu->ID(), cpu->Core()->ID(), ID());
@@ -1033,7 +1031,7 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 void
 CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 {
-	SpinLocker lock(fCPULock);
+	SpinLockGuard lock(fCPULock);
 
 	ASSERT(fCPUCount > 0);
 
@@ -1076,13 +1074,6 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		// The fIdleCPUCount on the CoreEntry itself needs to be consistent.
 		// If the CPU was running its idle thread just before this RemoveCPU operation was initiated
 		// (perhaps checked by the caller or implied by disabling), then fIdleCPUCount needs update.
-		// The current logic in scheduler_set_cpu_enabled calls UpdatePriority(B_IDLE_PRIORITY)
-		// THEN RemoveCPU. If UpdatePriority caused CPUGoesIdle, fIdleCPUCount is up.
-		// So, if gCPU[cpu->ID()].disabled (meaning it's being disabled), and it *was* idle, decrement.
-		// This is still a bit circular.
-
-		// Safest: if the CPU's current running_thread is its idle_thread at the point of removal logic.
-		// This is hard to check perfectly without more context from the caller.
 		// For now, we'll assume that if gCPU[cpu->ID()].disabled is true (it's being disabled),
 		// and fIdleCPUCount > 0, we decrement fIdleCPUCount. This is a heuristic.
 		// A more robust solution might involve CPUGoesOffline/CPUComesOnline calls.
@@ -1122,10 +1113,27 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		{
 			WriteSpinLocker heapsLock(gCoreHeapsShardLock[this->ID() % kNumCoreLoadHeapShards]);
 			if (this->GetMinMaxHeapLink()->fIndex != -1) {
-				if (fHighLoad)
-					gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
-				else
-					gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
+				if (fHighLoad) {
+					CoreEntry* entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				} else {
+					CoreEntry* entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				}
 			}
 		}
 		if (fPackage != NULL) {
@@ -1168,7 +1176,7 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	int32 newAverageLoad = 0;
 	int32 activeCPUsOnCore = 0;
 	{
-		SpinLocker cpuListLock(fCPULock); // Protects fCPUSet iteration
+		SpinLockGuard cpuListLock(fCPULock); // Protects fCPUSet iteration
 		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 			if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 				CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1249,7 +1257,7 @@ CoreEntry::_UnassignThread(Thread* thread, void* data)
 {
 	CoreEntry* core = static_cast<CoreEntry*>(data);
 	ThreadData* threadData = thread->scheduler_data;
-	if (threadData != NULL && threadData->Core() == core && thread->pinned_to_cpu == 0)
+	if (threadData != NULL && threadData->Core() == core)
 		threadData->UnassignCore(thread->state == B_THREAD_RUNNING);
 }
 
@@ -1351,94 +1359,16 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 }
 
 
-/* static */ void
-DebugDumper::DumpEevdfRunQueue(CPUEntry* cpu, int32 maxThreadsToDump)
-{
-	if (maxThreadsToDump <= 0) // Use default if invalid or "all" requested via 0/-1
-		maxThreadsToDump = 128; // Default internal limit
-	// Define an absolute maximum to prevent excessive KDL output/time
-	const int ABSOLUTE_MAX_DUMP = 512;
-	if (maxThreadsToDump > ABSOLUTE_MAX_DUMP)
-		maxThreadsToDump = ABSOLUTE_MAX_DUMP;
-
-	kprintf("\nCPU %" B_PRId32 " EEVDF Run Queue (InstLoad: %.2f, TotalThreadsInRunQueue: %" B_PRId32 ", MinVRuntime: %" B_PRId64 "):\n",
-		cpu->ID(), cpu->GetInstantaneousLoad(), cpu->GetEevdfRunQueue().Count(),
-		cpu->MinVirtualRuntime());
-	kprintf("  (CPU TotalReportedThreads: %" B_PRId32 ", Idle Thread ID: %" B_PRId32 ", MaxDump: %" B_PRId32 ")\n",
-		cpu->GetTotalThreadCount(),
-		cpu->fIdleThread ? cpu->fIdleThread->GetThread()->id : -1,
-		maxThreadsToDump);
-
-	cpu->LockRunQueue();
-	// Use a non-const reference to be able to PopMinimum
-	EevdfRunQueue& queue = cpu->GetEevdfRunQueue();
-	if (queue.IsEmpty()) {
-		kprintf("  Run queue is empty.\n");
-	} else {
-		kprintf("  %-18s %-7s %-5s %-5s %-5s %-15s %-11s %-11s %-11s %-12s %-4s %-8s %s\n",
-			"Thread*", "ID", "Pri", "EPri", "LNice", "VirtDeadline", "Lag", "EligTime", "SliceDur", "VirtRuntime", "Load", "Aff", "Name");
-		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
-
-		ThreadData* dumpedThreads[ABSOLUTE_MAX_DUMP]; // Use absolute max for buffer
-		int numActuallyDumped = 0;
-		int totalInQueueOriginally = queue.Count();
-
-		for (int i = 0; i < maxThreadsToDump && !queue.IsEmpty(); ++i) {
-			ThreadData* td = queue.PopMinimum();
-			if (td == NULL) // Should not happen if IsEmpty() was false
-				break;
-
-			dumpedThreads[numActuallyDumped++] = td;
-
-			Thread* t = td->GetThread();
-			char affinityStr[10];
-			if (t->pinned_to_cpu > 0) {
-				snprintf(affinityStr, sizeof(affinityStr), "CPU%d", t->pinned_to_cpu - 1);
-			} else if (!td->GetCPUMask().IsEmpty() && !td->GetCPUMask().IsFull()) {
-				// Just show first bit of mask for brevity in this table. Full mask in thread_sched_info.
-				snprintf(affinityStr, sizeof(affinityStr), "m0x%lx", (uint64)td->GetCPUMask().Bits(0));
-			} else {
-				strcpy(affinityStr, "-");
-			}
-
-			kprintf("  %p  %-7" B_PRId32 " %-5" B_PRId32 " %-5" B_PRId32 " %-5d %-15" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-11" B_PRId64 " %-12" B_PRId64 " %-3" B_PRId32 "%% %-8s %s\n",
-				t, t->id, t->priority, td->GetEffectivePriority(), 0,
-				td->VirtualDeadline(), td->Lag(), td->EligibleTime(),
-				td->SliceDuration(), td->VirtualRuntime(),
-				td->GetLoad() / (kMaxLoad / 100), affinityStr, t->name);
-		}
-
-		// Re-add all popped threads
-		for (int i = 0; i < numActuallyDumped; ++i) {
-			queue.Add(dumpedThreads[i]);
-		}
-
-		// After re-adding, ensure fMinVirtualRuntime is correct.
-		if (!queue.IsEmpty()) {
-			cpu->_UpdateMinVirtualRuntime();
-		}
-
-		if (totalInQueueOriginally > numActuallyDumped && numActuallyDumped == maxThreadsToDump) {
-			kprintf("  (... NOTE: Dumped top %d of %d threads as per limit. Use 'run_queue [cpu] [count]' for more ...)\n",
-				numActuallyDumped, totalInQueueOriginally);
-		} else if (totalInQueueOriginally > numActuallyDumped) {
-             kprintf("  (... NOTE: Only dumped top %d of %d threads due to internal KDL buffer limit ...)\n",
-                numActuallyDumped, totalInQueueOriginally);
-        }
-		kprintf("  --------------------------------------------------------------------------------------------------------------------------------------\n");
-		kprintf("  Total threads printed: %d. Threads in queue after re-add: %" B_PRId32 ". (Pri=BasePrio, EPri=EffectivePrio, LNice=LatencyNice, Load=NeededLoad%%)\n",
-			numActuallyDumped, queue.Count());
-	}
-	cpu->UnlockRunQueue();
-}
 
 
 /* static */ void
 DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
-	SpinLocker coreCpuListLock(entry->fCPULock);
-	int32 idleCpuCount = entry->fIdleCPUCount;
-	coreCpuListLock.Unlock();
+	int32 idleCpuCount;
+	{
+		SpinLockGuard coreCpuListLock(entry->fCPULock);
+		idleCpuCount = entry->fIdleCPUCount;
+	}
 
 	const char* typeStr = "UNK";
 	switch (entry->fCoreType) {
@@ -1505,9 +1435,9 @@ dump_run_queue(int argc, char** argv)
 		if (argc >= 3) {
 			maxThreads = strtol(argv[2], NULL, 0);
 			if (maxThreads <= 0) {
-				// Interpret 0 or negative as "default limit" (which DumpEevdfRunQueue handles)
+				// Interpret 0 or negative as "default limit"
 				// or a very large number to mean "all available within absolute KDL limits"
-				maxThreads = 0; // Pass 0 to indicate default/max behavior to DumpEevdfRunQueue
+				maxThreads = 0; // Pass 0 to indicate default/max behavior
 				kprintf("Interpreting count <= 0 as 'dump up to internal KDL limits'.\n");
 			}
 		}
@@ -1515,15 +1445,14 @@ dump_run_queue(int argc, char** argv)
 
 	if (specificCpu != -1) {
 		if (!gCPU[specificCpu].disabled) {
-			DebugDumper::DumpEevdfRunQueue(&gCPUEntries[specificCpu], maxThreads);
 		} else {
 			kprintf("CPU %" B_PRId32 " is disabled.\n", specificCpu);
 		}
 	} else {
 		int32 cpuCount = smp_get_num_cpus();
 		for (int32 i = 0; i < cpuCount; i++) {
-			if (gCPUEnabled.GetBit(i))
-				DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i], maxThreads);
+			if (gCPUEnabled.GetBit(i)) {
+			}
 		}
 	}
 	return 0;
@@ -1539,7 +1468,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
 		kprintf("---- Shard %" B_PRId32 " (Low Load) ----\n", shardIdx);
 		WriteSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]); // Acquire lock for this shard
-		if (Scheduler::gCoreLoadHeapShards[shardIdx].Count() > 0) {
+		if (Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum() != NULL) {
 			Scheduler::gCoreLoadHeapShards[shardIdx].Dump(); // Calls DumpCoreLoadHeapEntry
 		} else {
 			kprintf("    (empty)\n");
@@ -1550,7 +1479,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 		// shardLocker is still held, no need to re-acquire for the same shard's other heap
 		// unless Dump() itself releases and re-acquires, which it shouldn't.
 		// For now, assume Dump() doesn't alter lock state.
-		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].Count() > 0) {
+		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum() != NULL) {
 			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump();
 		} else {
 			kprintf("    (empty)\n");
@@ -1791,9 +1720,9 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 
 void Scheduler::init_debug_commands()
 {
-	if (sDebugCPUHeap.Count() == 0)
+	if (sDebugCPUHeap.PeekRoot() == NULL)
 		new(&sDebugCPUHeap) CPUPriorityHeap(smp_get_num_cpus());
-	if (sDebugCoreHeap.Count() == 0)
+	if (sDebugCoreHeap.PeekMinimum() == NULL)
 		new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus());
 
 	add_debugger_command_etc("eevdf_run_queue", (debugger_command_hook)dump_run_queue,
@@ -1849,8 +1778,6 @@ void Scheduler::init_debug_commands()
 // For the provided code, I'll use `fQueueLock.IsOwnedByCurrentThread()` as per the previous diff.
 // If `IsOwnedByCurrentThread` is not a member of `spinlock`, this will fail to compile.
 // The previous diff used `ASSERT(fQueueLock.IsOwnedByCurrentThread());`
-// Let's assume `spinlock` in Haiku has a debug `IsOwnedByCurrentThread` or similar.
-// The previous tool output applied this: `ASSERT(fQueueLock.IsOwnedByCurrentThread()); // Replaced IsOwned()`
 // I will stick to this, assuming it's a valid Haiku debug feature for spinlocks.
 #endif // KDEBUG
 

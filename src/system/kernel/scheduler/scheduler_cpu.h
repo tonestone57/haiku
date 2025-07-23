@@ -21,10 +21,11 @@
 
 #include <cpufreq.h>
 
+#include "scheduler_profiler.h"
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
-#include "EevdfRunQueue.h"
-#include "scheduler_profiler.h"
+#include "EevdfScheduler.h"
+#include "scheduler_spin_lock.h"
 
 
 namespace Scheduler {
@@ -45,7 +46,8 @@ enum scheduler_core_type {
 
 class DebugDumper;
 
-struct ThreadData;
+#include "ThreadData.h"
+
 class ThreadProcessing;
 
 class CPUEntry;
@@ -103,8 +105,8 @@ public:
 
 						int32			CalculateTotalIrqLoad() const;
 
-						const EevdfRunQueue& GetEevdfRunQueue() const { return fEevdfRunQueue; }
-						EevdfRunQueue& GetEevdfRunQueue() { return fEevdfRunQueue; }
+						const EevdfScheduler& GetEevdfScheduler() const { return fEevdfScheduler; }
+						EevdfScheduler& GetEevdfScheduler() { return fEevdfScheduler; }
 	inline				bigtime_t		MinVirtualRuntime();
 	inline				bigtime_t		GetCachedMinVirtualRuntime() const;
 
@@ -136,17 +138,16 @@ private:
 						int32			fCPUNumber;
 						CoreEntry*		fCore;
 
-						EevdfRunQueue	fEevdfRunQueue;
+						EevdfScheduler	fEevdfScheduler;
 						ThreadData*		fIdleThread;
 						bigtime_t		fMinVirtualRuntime;
-						spinlock		fQueueLock;
+						SpinLock		fQueueLock;
 
 						int32			fLoad;
 						float			fInstantaneousLoad;
 						bigtime_t		fInstLoadLastUpdateTimeSnapshot;
 						bigtime_t		fInstLoadLastActiveTimeSnapshot;
 						int32			fTotalThreadCount;
-						std::atomic<int32> fEevdfRunQueueTaskCount;
 
 
 						bigtime_t		fMeasureActiveTime;
@@ -156,8 +157,6 @@ private:
 						friend class DebugDumper;
 						friend class CoreEntry; // Allow CoreEntry to call _CalculateSmtAwareKey
 
-public:
-	inline				int32			GetEevdfRunQueueTaskCount() const { return fEevdfRunQueueTaskCount.load(std::memory_order_relaxed); }
 } CACHE_LINE_ALIGN;
 
 
@@ -243,7 +242,7 @@ private:
 						CPUSet			fCPUSet;
 						int32			fIdleCPUCount; // Protected by fCPULock
 						CPUPriorityHeap	fCPUHeap;
-						spinlock		fCPULock;
+						SpinLock		fCPULock;
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
@@ -372,7 +371,7 @@ inline void
 CPUEntry::LockRunQueue()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	acquire_spinlock(&fQueueLock);
+	fQueueLock.lock();
 }
 
 
@@ -380,14 +379,14 @@ inline void
 CPUEntry::UnlockRunQueue()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	release_spinlock(&fQueueLock);
+	fQueueLock.unlock();
 }
 
 
 inline bigtime_t
 CPUEntry::MinVirtualRuntime()
 {
-	InterruptsSpinLocker _(fQueueLock);
+	SpinLockGuard _(fQueueLock);
 	_UpdateMinVirtualRuntime();
 	return fMinVirtualRuntime;
 }
@@ -412,7 +411,7 @@ inline void
 CoreEntry::LockCPUHeap()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	acquire_spinlock(&fCPULock);
+	fCPULock.lock();
 }
 
 
@@ -420,7 +419,7 @@ inline void
 CoreEntry::UnlockCPUHeap()
 {
 	SCHEDULER_ENTER_FUNCTION();
-	release_spinlock(&fCPULock);
+	fCPULock.unlock();
 }
 
 

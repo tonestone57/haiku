@@ -13,7 +13,6 @@ extern "C" {
 #endif
 
 // Forward declarations for C compatibility
-struct spinlock;
 
 #ifdef __cplusplus
 }
@@ -39,7 +38,7 @@ struct spinlock;
 extern "C" {
 #endif
 
-static inline int32 smp_get_current_cpu(void);
+inline int32 smp_get_current_cpu(void);
 
 #ifdef __cplusplus
 }

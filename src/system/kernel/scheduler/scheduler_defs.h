@@ -94,7 +94,6 @@ static_assert(HIGH_CONTENTION_MIN_SLICE_FACTOR <= 10.0, "Contention slice factor
 
 // Load threshold (0-kMaxLoad) below which a task might be considered low intensity.
 // kMaxLoad represents 100% of nominal core capacity.
-static constexpr int32 kMaxLoad = 1000; // Standard load scale (0-1000)
 static constexpr int32 LOW_INTENSITY_LOAD_THRESHOLD = kMaxLoad / 10; // 10% of nominal capacity
 
 // Validate load parameters
@@ -137,6 +136,7 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
 // ============================================================================
 // IRQ Balancing Configuration
 // ============================================================================
+#define MAX_AFFINITIZED_IRQS_PER_THREAD 4
 
 #define DEFAULT_IRQ_BALANCE_CHECK_INTERVAL 500000        // 500ms
 #define DEFAULT_IRQ_TARGET_FACTOR 0.3f                   // 30% target factor
@@ -144,6 +144,14 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
 #define DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD 1000         // High IRQ threshold
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300      // 30% load difference
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3           // Max IRQs to move
+
+namespace Scheduler {
+	enum SchedulerLoadBalancePolicy : uint32_t {
+		SPREAD = 0,
+		CONSOLIDATE = 1
+	};
+}
+
 
 // Validate IRQ balancing parameters at compile time
 static_assert(DEFAULT_IRQ_BALANCE_CHECK_INTERVAL > 0, "IRQ balance interval must be positive");
@@ -178,9 +186,9 @@ static_assert(POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR >= 1.0 && POWER_SAVING_DTQ_
 
 namespace SchedulerConstants {
     // Core scheduling parameters
-    constexpr int32 SCHEDULER_WEIGHT_SCALE_SAFE = ::SCHEDULER_WEIGHT_SCALE;
-    constexpr bigtime_t SCHEDULER_TARGET_LATENCY_SAFE = ::SCHEDULER_TARGET_LATENCY;
-    constexpr bigtime_t SCHEDULER_MIN_GRANULARITY_SAFE = ::SCHEDULER_MIN_GRANULARITY;
+    constexpr int32 SCHEDULER_WEIGHT_SCALE_SAFE = SCHEDULER_WEIGHT_SCALE;
+    constexpr bigtime_t SCHEDULER_TARGET_LATENCY_SAFE = SCHEDULER_TARGET_LATENCY;
+    constexpr bigtime_t SCHEDULER_MIN_GRANULARITY_SAFE = SCHEDULER_MIN_GRANULARITY;
     
     // Slice configuration
     constexpr bigtime_t MIN_SLICE_GRANULARITY = kMinSliceGranularity;

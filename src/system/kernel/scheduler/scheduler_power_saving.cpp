@@ -5,6 +5,7 @@
  */
 
 #include "scheduler_cpu.h"
+#include "scheduler_defs.h"
 #include "scheduler_modes.h"
 #include "scheduler_common.h"
 #include "scheduler_thread.h"
@@ -47,35 +48,13 @@ static const float kPowerSavingPrevCoreLoadThreshold = 0.90f;
 static const float kPowerSavingActiveThreshold = 0.05f;
 
 
-// RAII lock wrapper for Small Task Core operations
-class SmallTaskCoreLocker {
-public:
-	SmallTaskCoreLocker()
-	{
-		acquire_spinlock(&Scheduler::sSmallTaskCoreLock);
-	}
-
-	~SmallTaskCoreLocker()
-	{
-		release_spinlock(&Scheduler::sSmallTaskCoreLock);
-	}
-
-private:
-	// Non-copyable
-	SmallTaskCoreLocker(const SmallTaskCoreLocker&) = delete;
-	SmallTaskCoreLocker& operator=(const SmallTaskCoreLocker&) = delete;
-};
-
-
 static void
 power_saving_switch_to_mode()
 {
-	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
+	gSchedulerLoadBalancePolicy = CONSOLIDATE;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;
-	gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING;
-	gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING;
 
 	// Reset STC on mode switch, let it be re-designated if needed.
 	SmallTaskCoreLocker locker;
@@ -84,24 +63,16 @@ power_saving_switch_to_mode()
 }
 
 static bool
-power_saving_has_cache_expired(const ThreadData* threadData)
+power_saving_has_cache_expired(const Scheduler::ThreadData* threadData)
 {
 	if (threadData == NULL || threadData->Core() == NULL || threadData->GetThread() == NULL)
 		return true;
 
-	struct thread* thread = threadData->GetThread();
-	if (thread->previous_cpu == NULL)
-		return true;
-
-	CPUEntry* prevCPU = CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
-	if (prevCPU == NULL || prevCPU->Core() != threadData->Core())
-		return true;
-
-	return system_time() - thread->last_time > kPowerSavingCacheExpirationThreshold;
+	return system_time() - threadData->GetThread()->last_time > kPowerSavingCacheExpirationThreshold;
 }
 
 static CoreEntry*
-power_saving_get_consolidation_target_core(const ThreadData* threadToPlace)
+power_saving_get_consolidation_target_core(const Scheduler::ThreadData* threadToPlace)
 {
 	SmallTaskCoreLocker locker;
 	
@@ -226,7 +197,7 @@ power_saving_should_wake_core_for_load(CoreEntry* core, int32 thread_load_estima
 }
 
 static CoreEntry*
-power_saving_choose_core(const ThreadData* threadData)
+power_saving_choose_core(const Scheduler::ThreadData* threadData)
 {
 	// Chooses a core for a thread in power-saving mode. The strategy prioritizes
 	// consolidation to save power, while still considering cache affinity.
@@ -236,9 +207,6 @@ power_saving_choose_core(const ThreadData* threadData)
 	// 1. Check designated STC first
 	CoreEntry* stcTarget = power_saving_get_consolidation_target_core(threadData);
 	if (stcTarget != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> STC core %" B_PRId32 "\n",
-			threadId, stcTarget->ID());
 		return stcTarget;
 	}
 
@@ -266,8 +234,6 @@ power_saving_choose_core(const ThreadData* threadData)
 
 		if ((affinity.IsEmpty() || affinity.Matches(previousCore->CPUMask()))
 			&& cacheIsLikelyWarm && prevCoreNotTooBusy) {
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> previousCore %" B_PRId32 " (cache warm)\n",
-				threadData->GetThread()->id, previousCore->ID());
 			return previousCore;
 		}
 	}
@@ -315,9 +281,6 @@ power_saving_choose_core(const ThreadData* threadData)
 
 		if (bestCoreInPackage != NULL && (stcIsInThisPackageAndViable 
 			|| (bestPackageCoreInstLoad < kPowerSavingLightLoadThreshold && bestPackageCoreHistLoad < kHighLoad))) {
-			int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> same package core %" B_PRId32 "%s\n",
-				threadId, bestCoreInPackage->ID(), stcIsInThisPackageAndViable ? " (is STC)" : "");
 			return bestCoreInPackage;
 		}
 	}
@@ -325,9 +288,6 @@ power_saving_choose_core(const ThreadData* threadData)
 	// 4. Designate/Re-evaluate STC
 	CoreEntry* designatedSTC = power_saving_designate_consolidation_core(&affinity);
 	if (designatedSTC != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> designated STC %" B_PRId32 "\n",
-			threadId, designatedSTC->ID());
 		return designatedSTC;
 	}
 
@@ -364,9 +324,6 @@ power_saving_choose_core(const ThreadData* threadData)
 	}
 
 	if (bestFallbackCore != NULL) {
-		int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-		TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> fallback core %" B_PRId32 "\n",
-			threadId, bestFallbackCore->ID());
 		return bestFallbackCore;
 	}
 
@@ -380,9 +337,6 @@ power_saving_choose_core(const ThreadData* threadData)
 	for (int32 i = 0; i < gCoreCount; i++) {
 		CoreEntry* core = &gCoreEntries[(startIndex + i) % gCoreCount];
 		if (!core->IsDefunct() && (affinity.IsEmpty() || affinity.Matches(core->CPUMask()))) {
-			int32 threadId = (threadData && threadData->GetThread()) ? threadData->GetThread()->id : -1;
-			TRACE_SCHED_CHOICE("power_saving_choose_core: Thread %" B_PRId32 " -> absolute fallback core %" B_PRId32 "\n",
-				threadId, core->ID());
 			return core;
 		}
 	}
@@ -452,5 +406,6 @@ scheduler_mode_operations gSchedulerPowerSavingMode = {
 	power_saving_designate_consolidation_core,			// designate_consolidation_core
 	power_saving_should_wake_core_for_load,				// should_wake_core_for_load
 	power_saving_attempt_proactive_stc_designation,		// attempt_proactive_stc_designation
-	power_saving_is_cpu_effectively_parked				// is_cpu_effectively_parked
+	power_saving_is_cpu_effectively_parked,				// is_cpu_effectively_parked
+	nullptr,								// cleanup
 };

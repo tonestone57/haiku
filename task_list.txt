@@ -1,0 +1,19 @@
+- Correctness and Bug Fixes:
+  - In `scheduler_cpu.cpp`, the `CPUEntry::Stop()` function now migrates threads from the run queue of a disabled CPU.
+  - Corrected the logic in `ThreadData::_ChooseCPU` in `scheduler_thread.cpp` to ensure `rescheduleNeeded` is set correctly.
+  - Added null checks and proper locking in `scheduler_profiler.cpp` to prevent null pointer dereferences and race conditions.
+  - Added checks in `scheduling_analysis.cpp` to prevent division by zero and use of uninitialized variables.
+
+- Dead and Unused Code Removal:
+  - Removed unused `sDebugCPUHeap` and `sDebugCoreHeap` variables from `scheduler_cpu.cpp` in production builds.
+  - Simplified the `CoreEntry::_UnassignThread` function in `scheduler_cpu.cpp`.
+  - Removed the unused `DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING` macro from `scheduler_defs.h`.
+
+- Performance Optimizations:
+  - Optimized `ThreadData::CalculateDynamicQuantum` in `scheduler_thread.cpp` by caching the calculated quantum value.
+  - Refactored `scheduler_perform_load_balance` in `scheduler.cpp` for improved performance.
+  - Optimized `CoreEntry::_UpdateLoad` in `scheduler_cpu.cpp` to reduce the frequency of global heap updates.
+
+- Code Cleanup and Refactoring:
+  - Refactored the scheduler locking strategy in `scheduler_locking.h` for better consistency and clarity.
+  - Added more detailed comments to `scheduler_common.h` to explain complex algorithms and data structures.

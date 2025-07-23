@@ -127,7 +127,7 @@ struct Thread : HashObject, scheduling_analysis_thread {
 			return false;
 		return key->id == id;
 	}
-	
+
 	// Helper methods to safely update min/max values
 	void UpdateRunTime(bigtime_t time) {
 		if (runs == 1 || time < min_run_time)
@@ -135,14 +135,14 @@ struct Thread : HashObject, scheduling_analysis_thread {
 		if (time > max_run_time)
 			max_run_time = time;
 	}
-	
+
 	void UpdateLatency(bigtime_t time) {
 		if (latencies == 1 || time < min_latency)
 			min_latency = time;
 		if (time > max_latency)
 			max_latency = time;
 	}
-	
+
 	void UpdateRerunTime(bigtime_t time) {
 		if (reruns == 1 || time < min_rerun_time)
 			min_rerun_time = time;
@@ -863,16 +863,12 @@ analyze_scheduling(bigtime_t from, bigtime_t until,
 
 				thread->lastTime = entry->Time();
 				thread->state = PREEMPTED;
-														
-		       } else if (thread->state == RUNNING) {
+			} else if (thread->state == RUNNING) {
 				// thread starts waiting (it hadn't been added to the run
 				// queue before being unscheduled)
 				thread->runs++;
 				thread->total_run_time += diffTime;
-				if (thread->min_run_time < 0 || diffTime < thread->min_run_time)
-					thread->min_run_time = diffTime;
-				if (diffTime > thread->max_run_time)
-					thread->max_run_time = diffTime;
+				thread->UpdateRunTime(diffTime);
 
 				if (entry->PreviousState() == B_THREAD_WAITING) {
 					void* waitObject = (void*)entry->PreviousWaitObject();
@@ -1034,4 +1030,3 @@ _user_analyze_scheduling(bigtime_t from, bigtime_t until, void* buffer,
 	return B_BAD_VALUE;
 #endif
 }
-

@@ -41,7 +41,8 @@
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
 #include "scheduler_weights.h"
-#include "EevdfRunQueue.h"
+#include "EevdfScheduler.h"
+#include "ThreadData.h"
 #include <thread_defs.h>
 
 #include <util/MultiHashTable.h>
@@ -119,15 +120,27 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsFull()) {
+		bool allSet = true;
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (!affinityMask.GetBit(i)) {
+				allSet = false;
+				break;
+			}
+		}
+		if (affinityMask.IsEmpty() || allSet) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
 			kprintf("0x");
-			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
+			for (int32 i = (smp_get_num_cpus() + 31) / 32 - 1; i >= 0; i--) {
 				if (affinityMask.Bits(i) != 0)
 					kprintf("%x", affinityMask.Bits(i));
 			}
-			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.CountSetBits());
+			uint32 count = 0;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (affinityMask.GetBit(i))
+					count++;
+			}
+			kprintf(" (%" B_PRIu32 " bits set)\n", count);
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
@@ -151,7 +164,6 @@ cmd_thread_sched_info(int argc, char** argv)
 	}
 
 	schedulerLocker.Unlock();
-
 
 	thread->Unlock();
 
@@ -178,44 +190,22 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_SPREAD;
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
 int32 gModeMaxTargetCpuIrqLoad = DEFAULT_MAX_TARGET_CPU_IRQ_LOAD;
-int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD / 2;
-int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE / 2;
-int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY * 2;
+int32 gHighAbsoluteIrqThreshold = DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD;
+int32 gSignificantIrqLoadDifference = DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE;
+int32 gMaxIRQsToMoveProactively = DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY;
 
-static const bigtime_t kIrqFollowTaskCooldownPeriod = 25000;
+static const bigtime_t kIrqFollowTaskCooldownPeriod = 50000;
 static int64 gIrqLastFollowMoveTime[NUM_IO_VECTORS];
 
 
 }	// namespace Scheduler
 
-status_t
-_user_get_thread_nice_value(thread_id thid, int* niceValue)
-{
-	// TODO: implement
-	return B_OK;
-}
-
-
-status_t
-_user_set_thread_nice_value(thread_id thid, int niceValue)
-{
-	// TODO: implement
-	return B_OK;
-}
-
-
-bigtime_t
-_user_estimate_max_scheduling_latency(thread_id thid)
-{
-	// TODO: implement
-	return 0;
-}
 
 
 status_t
@@ -248,7 +238,7 @@ static int32* sCPUToCore;
 static int32* sCPUToPackage;
 
 static inline bigtime_t
-scheduler_calculate_eevdf_slice(ThreadData* threadData, const Scheduler::CPUEntry* cpu)
+scheduler_calculate_eevdf_slice(Scheduler::ThreadData* threadData, const Scheduler::CPUEntry* cpu)
 {
 	if (threadData == NULL) return kMinSliceGranularity;
 	return threadData->CalculateDynamicQuantum(cpu);
@@ -266,43 +256,13 @@ scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
 static Scheduler::CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
-static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
+static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const Scheduler::ThreadData* affinityCheckThread);
 
-#if SCHEDULER_TRACING
-static int cmd_scheduler(int argc, char** argv);
-#endif
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 
 static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
 
-void
-maybe_relocate_irqs(Thread* thread)
-{
-    if (!thread || thread_is_idle_thread(thread)) return;
-    if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;
-
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-    if (!cpu) return;
-
-    cpu_ent* cpuStruct = &gCPU[cpu->ID()];
-    SpinLocker irqLock(cpuStruct->irqs_lock);
-
-    irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuStruct->irqs);
-    while (irq) {
-        if (irq->load > IRQ_INTERFERENCE_LOAD_THRESHOLD) {
-            Scheduler::CPUEntry* alt = find_quiet_cpu_for_irq(irq, cpu);
-            if (alt && alt != cpu) {
-                bigtime_t now = system_time();
-                if (now - atomic_get64(&gIrqLastFollowMoveTime[irq->irq]) > DYNAMIC_IRQ_MOVE_COOLDOWN) {
-                    assign_io_interrupt_to_cpu(irq->irq, alt->ID());
-                    atomic_set64(&gIrqLastFollowMoveTime[irq->irq], now);
-                }
-            }
-        }
-        irq = (irq_assignment*)list_get_next_item(&cpuStruct->irqs, irq);
-    }
-}
 
 static Scheduler::CPUEntry*
 _find_idle_cpu_on_core(CoreEntry* core)
@@ -366,14 +326,14 @@ static void
 enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 
 	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
 	TRACE_SCHED("enqueue_thread_on_cpu_eevdf: T %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ") onto CPU %" B_PRId32 "\n",
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->AddThread(threadData);
+	cpu->GetEevdfScheduler().AddThread((ThreadData*)threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -384,9 +344,9 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 	if (currentThreadOnTarget == NULL || thread_is_idle_thread(currentThreadOnTarget)) {
 		invokeScheduler = true;
 	} else {
-		ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
+		Scheduler::ThreadData* currentThreadDataOnTarget = currentThreadOnTarget->scheduler_data;
 		bool newThreadIsEligible = (system_time() >= threadData->EligibleTime());
-		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline() - 1000) {
+		if (newThreadIsEligible && threadData->VirtualDeadline() < currentThreadDataOnTarget->VirtualDeadline()) {
 			TRACE_SCHED("enqueue_thread_on_cpu_eevdf: Thread %" B_PRId32 " (VD %" B_PRId64 ") preempts current %" B_PRId32 " (VD %" B_PRId64 ") on CPU %" B_PRId32 "\n",
 				thread->id, threadData->VirtualDeadline(),
 				currentThreadOnTarget->id, currentThreadDataOnTarget->VirtualDeadline(),
@@ -412,7 +372,7 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 	SCHEDULER_ENTER_FUNCTION();
 
 	ASSERT(thread != NULL);
-	ThreadData* data = thread->scheduler_data;
+	Scheduler::ThreadData* data = thread->scheduler_data;
 	if (!data)
 		return;
 
@@ -440,7 +400,7 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 	if (!running || thread_is_idle_thread(running)) {
 		gCPU[cpu->ID()].invoke_scheduler = true;
 	} else {
-		ThreadData* runningData = running->scheduler_data;
+		Scheduler::ThreadData* runningData = running->scheduler_data;
 		if (system_time() >= data->EligibleTime() &&
 			data->VirtualDeadline() < runningData->VirtualDeadline()) {
 			smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
@@ -449,44 +409,6 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 }
 
 
-void
-scheduler_enqueue(Thread* thread)
-{
-    ASSERT(thread != NULL);
-    ThreadData* data = thread->scheduler_data;
-    if (!data) return;
-
-    Scheduler::CPUEntry* cpu = NULL;
-    CoreEntry* core = NULL;
-    data->ChooseCoreAndCPU(core, cpu);
-    ASSERT(cpu != NULL && core != NULL);
-
-    InterruptsSpinLocker locker(thread->scheduler_lock);
-
-    if (data->IsIdle()) {
-        if (thread->state != B_THREAD_RUNNING)
-            thread->state = B_THREAD_READY;
-        return;
-    }
-
-    data->UpdateEevdfParameters(cpu, true, false);
-    data->MarkEnqueued(core);
-
-    cpu->LockRunQueue();
-    cpu->AddThread(data);
-    cpu->UnlockRunQueue();
-
-    Thread* running = gCPU[cpu->ID()].running_thread;
-    if (!running || thread_is_idle_thread(running)) {
-        gCPU[cpu->ID()].invoke_scheduler = true;
-    } else {
-        ThreadData* runningData = running->scheduler_data;
-        if (system_time() >= data->EligibleTime() &&
-            data->VirtualDeadline() < runningData->VirtualDeadline()) {
-            smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
-        }
-    }
-}
 
 
 // Sets the priority of a thread.
@@ -498,7 +420,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	InterruptsSpinLocker interruptLocker(thread->scheduler_lock);
 	SCHEDULER_ENTER_FUNCTION();
 
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 	int32 oldActualPriority = thread->priority;
 
 	TRACE_SCHED("scheduler_set_thread_priority (EEVDF): T %" B_PRId32 " from prio %" B_PRId32 " to %" B_PRId32 "\n",
@@ -515,7 +437,13 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 			&& Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num)->Core() == threadData->Core()) {
 			cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(thread->previous_cpu->cpu_num);
 		} else if (threadData->Core() != NULL && threadData->Core()->CPUCount() > 0) {
-			int32 firstCpuIdOnCore = threadData->Core()->CPUMask().FirstSetBit();
+			int32 firstCpuIdOnCore = -1;
+			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+				if (threadData->Core()->CPUMask().GetBit(i)) {
+					firstCpuIdOnCore = i;
+					break;
+				}
+			}
 			if (firstCpuIdOnCore >= 0)
 				cpuContextForUpdate = Scheduler::CPUEntry::GetCPU(firstCpuIdOnCore);
 			TRACE_SCHED("set_prio: T %" B_PRId32 " ready&enqueued, using first CPU (%d) of its core (%d) as context for weight calc.\n",
@@ -583,7 +511,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (cpuContextForUpdate != NULL) {
 			cpuContextForUpdate->LockRunQueue();
-			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
+			cpuContextForUpdate->GetEevdfScheduler().UpdateThread((ThreadData*)threadData);
 			cpuContextForUpdate->UnlockRunQueue();
 			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
 			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
@@ -612,30 +540,11 @@ scheduler_reschedule_ici()
 }
 
 
-static inline void
-stop_cpu_timers(Thread* fromThread, Thread* toThread)
-{
-	SpinLocker threadLocker(&fromThread->time_lock);
-	if (fromThread->HasActiveCPUTimeUserTimers())
-		user_timer_stop_cpu_timers(fromThread, toThread);
-}
-
-
-static inline void
-continue_cpu_timers(Thread* thread, cpu_ent* cpu)
-{
-	SpinLocker threadLocker(&thread->time_lock);
-	if (thread->HasActiveCPUTimeUserTimers())
-		user_timer_continue_cpu_timers(thread, cpu->previous_thread);
-}
-
-
 static void
 thread_resumes(Thread* thread)
 {
 	cpu_ent* cpu = thread->cpu;
 	release_spinlock(&cpu->previous_thread->scheduler_lock);
-	continue_cpu_timers(thread, cpu);
 	if ((thread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0)
 		user_debug_thread_scheduled(thread);
 }
@@ -650,29 +559,8 @@ scheduler_new_thread_entry(Thread* thread)
 }
 
 
-static inline void
-switch_thread(Thread* fromThread, Thread* toThread)
-{
-	if ((fromThread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0)
-		user_debug_thread_unscheduled(fromThread);
 
-	stop_cpu_timers(fromThread, toThread);
-
-	cpu_ent* cpu = fromThread->cpu;
-	toThread->previous_cpu = toThread->cpu = cpu;
-	fromThread->cpu = NULL;
-
-	cpu->running_thread = toThread;
-	cpu->previous_thread = fromThread;
-
-	arch_thread_set_current_thread(toThread);
-	arch_thread_context_switch(fromThread, toThread);
-
-	thread_resumes(fromThread);
-}
-
-
-static ThreadData*
+static Scheduler::ThreadData*
 _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 {
 	Scheduler::CPUEntry* victimCPUEntry = Scheduler::CPUEntry::GetCPU(victimCpuID);
@@ -686,12 +574,12 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 
 	TRACE_SCHED("WorkSteal: Thief CPU %" B_PRId32 " probing victim CPU %" B_PRId32 "\n", thiefCPU->ID(), victimCpuID);
 
-	ThreadData* stolenTask = NULL;
+	Scheduler::ThreadData* stolenTask = NULL;
 	victimCPUEntry->LockRunQueue();
-	EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
+	EevdfScheduler& victimQueue = victimCPUEntry->GetEevdfScheduler();
 
 	if (!victimQueue.IsEmpty()) {
-		ThreadData* candidateTask = victimQueue.PeekMinimum();
+		Scheduler::ThreadData* candidateTask = victimQueue.PeekMinThread();
 		if (candidateTask != NULL && !candidateTask->IsIdle()) {
 			bool basicChecksPass = true;
 			Thread* candThread = candidateTask->GetThread();
@@ -707,19 +595,23 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 				}
 			}
 
-			int32 candidateWeight = scheduler_priority_to_weight(candidateTask->GetThread(), victimCPUEntry);
-			if (candidateWeight <= 0) candidateWeight = 1;
-			bigtime_t unweightedNormWorkOwed = (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
+			int32 candidateWeight = scheduler_priority_to_weight(
+				candidateTask->GetThread(), victimCPUEntry);
+			if (candidateWeight <= 0)
+				candidateWeight = 1;
+			bigtime_t unweightedNormWorkOwed
+				= (candidateTask->Lag() * candidateWeight) / SCHEDULER_WEIGHT_SCALE;
 
 			bool isStarved = unweightedNormWorkOwed > kMinUnweightedNormWorkToSteal;
 
 			if (isStarved) {
-				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered starved (unweighted_owed %" B_PRId64 " > effective_threshold %" B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
-					candThread->id, unweightedNormWorkOwed,
-					(kMinUnweightedNormWorkToSteal),
+				TRACE_SCHED_BL_STEAL("  WorkSteal Eval: T%" B_PRId32 " considered"
+					" starved (unweighted_owed %" B_PRId64 " > effective_threshold %"
+					B_PRId64 "). Original Lag_weighted %" B_PRId64 ".\n",
+					candidateTask->GetThread()->id, unweightedNormWorkOwed,
+					kMinUnweightedNormWorkToSteal,
 					candidateTask->Lag());
 			}
-
 
 			if (basicChecksPass && isStarved) {
 				bool allowStealByBLPolicy = false;
@@ -793,7 +685,7 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 				}
 
 				if (allowStealByBLPolicy) {
-					stolenTask = victimQueue.PopMinimum();
+					stolenTask = victimQueue.PopMinThread();
 					victimCPUEntry->fLastTimeTaskStolenFrom = system_time();
 					int32 threadCount = victimCPUEntry->GetTotalThreadCount();
 					atomic_add(&threadCount, -1);
@@ -894,6 +786,52 @@ scheduler_try_work_steal(Scheduler::CPUEntry* thiefCPU)
 }
 
 
+static bool
+update_old_thread_state(Thread* oldThread, int32 nextState, CoreEntry* core)
+{
+	Scheduler::ThreadData* oldThreadData = oldThread->scheduler_data;
+	bool shouldReEnqueueOldThread = false;
+	switch (nextState) {
+		case B_THREAD_RUNNING:
+		case B_THREAD_READY:
+		{
+			shouldReEnqueueOldThread = true;
+			CPUSet oldThreadAffinity = oldThreadData->GetCPUMask();
+			bool useAffinity = !oldThreadAffinity.IsEmpty();
+
+			if (oldThreadData->IsIdle()
+				|| (useAffinity
+					&& !oldThreadAffinity.GetBit(smp_get_current_cpu()))) {
+				shouldReEnqueueOldThread = false;
+				if (!oldThreadData->IsIdle() && oldThreadData->Core() == core) {
+					oldThreadData->UnassignCore(false);
+				}
+			} else {
+				oldThreadData->Continues();
+				oldThreadData->UpdateEevdfParameters(
+					CPUEntry::GetCPU(smp_get_current_cpu()), false, true);
+				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q (after"
+					" UpdateEevdfParameters), new VD %" B_PRId64 ", new Lag %"
+					B_PRId64 "\n",
+					oldThread->id, oldThreadData->VirtualDeadline(),
+					oldThreadData->Lag());
+			}
+			break;
+		}
+		case THREAD_STATE_FREE_ON_RESCHED:
+			oldThreadData->Dies();
+			shouldReEnqueueOldThread = false;
+			break;
+		default:
+			oldThreadData->GoesAway();
+			shouldReEnqueueOldThread = false;
+			break;
+	}
+	oldThread->has_yielded = false;
+	return shouldReEnqueueOldThread;
+}
+
+
 static void
 reschedule(int32 nextState)
 {
@@ -908,7 +846,7 @@ reschedule(int32 nextState)
 
 	Thread* oldThread = thread_get_current_thread();
 
-	ThreadData* oldThreadData = oldThread->scheduler_data;
+	Scheduler::ThreadData* oldThreadData = oldThread->scheduler_data;
 	if (oldThreadData != NULL)
 		oldThreadData->StopCPUTime();
 
@@ -964,38 +902,8 @@ reschedule(int32 nextState)
 			oldThread->id, weightedRuntimeContribution, oldThreadData->Lag());
 	}
 
-	bool shouldReEnqueueOldThread = false;
-	switch (nextState) {
-		case B_THREAD_RUNNING:
-		case B_THREAD_READY:
-		{
-			shouldReEnqueueOldThread = true;
-			CPUSet oldThreadAffinity = oldThreadData->GetCPUMask();
-			bool useAffinity = !oldThreadAffinity.IsEmpty();
-
-			if (oldThreadData->IsIdle() || (useAffinity && !oldThreadAffinity.GetBit(thisCPUId))) {
-				shouldReEnqueueOldThread = false;
-				if (!oldThreadData->IsIdle() && oldThreadData->Core() == core) {
-					oldThreadData->UnassignCore(false);
-				}
-			} else {
-				oldThreadData->Continues();
-				oldThreadData->UpdateEevdfParameters(cpu, false, true);
-				TRACE_SCHED("reschedule: oldT %" B_PRId32 " re-q (after UpdateEevdfParameters), new VD %" B_PRId64 ", new Lag %" B_PRId64 "\n",
-					oldThread->id, oldThreadData->VirtualDeadline(), oldThreadData->Lag());
-			}
-			break;
-		}
-		case THREAD_STATE_FREE_ON_RESCHED:
-			oldThreadData->Dies();
-			shouldReEnqueueOldThread = false;
-			break;
-		default:
-			oldThreadData->GoesAway();
-			shouldReEnqueueOldThread = false;
-			break;
-	}
-	oldThread->has_yielded = false;
+	bool shouldReEnqueueOldThread
+		= update_old_thread_state(oldThread, nextState, core);
 
 
 	ThreadData* nextThreadData = NULL;
@@ -1093,9 +1001,6 @@ reschedule(int32 nextState)
 
 	if (!nextThreadData->IsIdle()) {
 		ASSERT(nextThreadData->Core() == core && "Scheduled non-idle EEVDF thread not on correct core!");
-		if (nextThreadData->VirtualDeadline() < system_time()) {
-			nextThreadData->fLatencyViolations++;
-		}
 	} else {
 		ASSERT(nextThreadData->Core() == core && "Idle EEVDF thread not on correct core!");
 	}
@@ -1138,83 +1043,10 @@ reschedule(int32 nextState)
 #define DYNAMIC_IRQ_MOVE_COOLDOWN (150000)          // 150ms
 
 
-
-void
-scheduler_reschedule(int32 nextState)
-{
-    ASSERT(!are_interrupts_enabled());
-
-    int32 cpuID = smp_get_current_cpu();
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(cpuID);
-    Thread* current = thread_get_current_thread();
-    ThreadData* currentData = current->scheduler_data;
-
-    gCPU[cpuID].invoke_scheduler = false;
-    current->state = nextState;
-
-    if (currentData && !currentData->IsIdle()) {
-        bigtime_t runtime = currentData->TimeUsedInCurrentQuantum();
-
-        int32 weight = scheduler_priority_to_weight(current, cpu);
-        if (weight <= 0) weight = 1;
-
-        uint32 coreCap = cpu->Core()->PerformanceCapacity() ?: SCHEDULER_NOMINAL_CAPACITY;
-        bigtime_t contribution = (runtime * coreCap * SCHEDULER_WEIGHT_SCALE) / (SCHEDULER_NOMINAL_CAPACITY * weight);
-
-        currentData->AddVirtualRuntime(contribution);
-        currentData->AddLag(-contribution);
-    }
-
-    bool shouldReEnqueue = false;
-    switch (nextState) {
-        case B_THREAD_RUNNING:
-        case B_THREAD_READY:
-            shouldReEnqueue = !currentData->IsIdle();
-            break;
-        case THREAD_STATE_FREE_ON_RESCHED:
-            currentData->Dies();
-            break;
-        default:
-            currentData->GoesAway();
-            break;
-    }
-
-    ThreadData* nextData = nullptr;
-    Thread* nextThread = nullptr;
-
-cpu->LockRunQueue();
-    if (gCPU[cpuID].disabled) {
-        nextData = cpu->PeekIdleThread();
-    } else {
-        if (shouldReEnqueue && currentData->Core() == cpu->Core()) {
-            currentData->Continues();
-            currentData->UpdateEevdfParameters(cpu, false, true);
-            cpu->AddThread(currentData);
-        }
-        nextData = cpu->ChooseNextThread(/*skip=*/nullptr, false, 0);
-    }
-    cpu->UnlockRunQueue();
-
-    if (!nextData) panic("scheduler_reschedule: No thread to switch to!");
-
-    nextThread = nextData->GetThread();
-    nextThread->state = B_THREAD_RUNNING;
-    nextData->StartCPUTime();
-    nextData->StartQuantum(nextData->SliceDuration());
-
-    gCPU[cpuID].running_thread = nextThread;
-    gCPU[cpuID].previous_thread = current;
-
-    if (nextThread != current) {
-        switch_thread(current, nextThread);
-    }
-}
-
-
 status_t
 scheduler_on_thread_create(Thread* thread, bool idleThread)
 {
-	thread->scheduler_data = new(std::nothrow) ThreadData(thread);
+	thread->scheduler_data = new(std::nothrow) Scheduler::ThreadData(thread);
 	if (thread->scheduler_data == NULL) return B_NO_MEMORY;
 	return B_OK;
 }
@@ -1224,7 +1056,7 @@ void
 scheduler_on_thread_init(Thread* thread)
 {
 	ASSERT(thread->scheduler_data != NULL);
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 
 	if (thread_is_idle_thread(thread)) {
 		static int32 sIdleThreadsCPUIDCounter = 0;
@@ -1259,8 +1091,8 @@ scheduler_on_thread_destroy(Thread* thread)
 {
     if (!thread || !thread->scheduler_data) return;
 
-    ThreadData* data = thread->scheduler_data;
-    int32 irqs[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
+    Scheduler::ThreadData* data = thread->scheduler_data;
+    int32 irqs[4];
     int8 count = 0;
 
 InterruptsSpinLocker lock(thread->scheduler_lock);
@@ -1312,15 +1144,15 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	gCurrentMode = sSchedulerModes[mode];
 
 	// gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
-	gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+	gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_SPREAD;
+	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	if (gCurrentMode->switch_to_mode != NULL) {
 		gCurrentMode->switch_to_mode();
 	} else {
 		if (mode == SCHEDULER_MODE_POWER_SAVING) {
 			// gKernelKDistFactor = 0.6f; // REMOVED
-			gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_CONSOLIDATE;
+			gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_CONSOLIDATE;
 			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 		}
 	}
@@ -1352,14 +1184,14 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 		TRACE_SCHED("scheduler_set_cpu_enabled: Disabling CPU %" B_PRId32 ". Migrating its queued threads.\n", cpuID);
 
 		cpuEntry->LockRunQueue();
-		EevdfRunQueue& runQueue = cpuEntry->GetEevdfRunQueue();
-		DoublyLinkedList<ThreadData> threadsToReenqueue;
+		EevdfScheduler& runQueue = cpuEntry->GetEevdfScheduler();
+		DoublyLinkedList<Scheduler::ThreadData> threadsToReenqueue;
 
 		while (true) {
-			ThreadData* threadData = runQueue.PopMinimum();
+			Scheduler::ThreadData* threadData = (Scheduler::ThreadData*)runQueue.PopMinThread();
 			if (threadData == NULL)
 				break;
-			cpuEntry->RemoveThread(threadData);
+			cpuEntry->GetEevdfScheduler().RemoveThread((ThreadData*)threadData);
 			threadData->MarkDequeued();
 			if (threadData->Core() == core) {
 				threadData->UnassignCore(false);
@@ -1368,7 +1200,7 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 		}
 		cpuEntry->UnlockRunQueue();
 
-		ThreadData* threadToReenqueue;
+		Scheduler::ThreadData* threadToReenqueue;
 		while ((threadToReenqueue = threadsToReenqueue.RemoveHead()) != NULL) {
 			TRACE_SCHED("scheduler_set_cpu_enabled: Re-homing T %" B_PRId32 " from disabled CPU %" B_PRId32 "\n",
 				threadToReenqueue->GetThread()->id, cpuID);
@@ -1504,31 +1336,6 @@ namespace Scheduler {
 bigtime_t gGlobalMinVirtualRuntime = 0;
 spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
 int64 gReportedCpuMinVR[SMP_MAX_CPUS];
-bigtime_t gTotalSystemLag = 0;
-spinlock gTotalSystemLagLock = B_SPINLOCK_INITIALIZER;
-}
-
-void
-scheduler_update_total_system_lag(bigtime_t lag_delta)
-{
-	InterruptsSpinLocker locker(gTotalSystemLagLock);
-	gTotalSystemLag += lag_delta;
-}
-
-void
-scheduler_thread_received_input(thread_id threadID)
-{
-	Thread* thread = Thread::Get(threadID);
-	if (thread == NULL)
-		return;
-
-	BReference<Thread> threadRef(thread, true);
-
-	InterruptsSpinLocker schedulerLocker(thread->scheduler_lock);
-	if (thread->scheduler_data != NULL) {
-		thread->scheduler_data->SetVirtualDeadline(
-			thread->scheduler_data->VirtualDeadline() - 1000);
-	}
 }
 
 
@@ -1560,17 +1367,6 @@ scheduler_update_global_min_vruntime()
 }
 
 
-static int32 get_total_thread_count()
-{
-	int32 total_threads = 0;
-	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		if (gCPUEnabled.GetBit(i)) {
-			total_threads += gCPUEntries[i].GetTotalThreadCount();
-		}
-	}
-	return total_threads;
-}
-
 static int32 scheduler_load_balance_event(timer* /*unused*/)
 {
 	if (!gSingleCore) {
@@ -1589,39 +1385,12 @@ static int32 scheduler_load_balance_event(timer* /*unused*/)
 				gDynamicLoadBalanceInterval = kMaxLoadBalanceInterval;
 			TRACE_SCHED("LoadBalanceEvent: No migration. New interval: %" B_PRId64 "us\n", gDynamicLoadBalanceInterval);
 		}
-
-		// Normalize lag
-		int32 total_threads = get_total_thread_count();
-		if (total_threads > 0) {
-			bigtime_t average_lag = gTotalSystemLag / total_threads;
-			for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-				if (gCPUEnabled.GetBit(i)) {
-					gCPUEntries[i].LockRunQueue();
-					EevdfRunQueue& queue = gCPUEntries[i].GetEevdfRunQueue();
-					if (!queue.IsEmpty()) {
-						ThreadData* thread = queue.PeekMinimum();
-						while (thread != NULL) {
-							thread->AddLag(-average_lag);
-							if (thread->GetThread()->state == B_THREAD_ASLEEP) {
-								thread->SetLag(thread->Lag() * 9 / 10);
-							}
-							thread = queue.PeekMinimum();
-						}
-					}
-					gCPUEntries[i].UnlockRunQueue();
-				}
-			}
-			gTotalSystemLag = 0;
-		}
 	}
     add_timer(&sLoadBalanceTimer, &scheduler_load_balance_event, gDynamicLoadBalanceInterval, B_ONE_SHOT_RELATIVE_TIMER);
     return B_HANDLED_INTERRUPT;
 }
 
 
-#if SCHEDULER_TRACING
-static int cmd_scheduler(int argc, char** argv) { /* ... */ return 0;}
-#endif
 // static int cmd_scheduler_set_kdf(int argc, char** argv); // REMOVED
 // static int cmd_scheduler_get_kdf(int argc, char** argv); // REMOVED
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
@@ -1631,9 +1400,6 @@ static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 static void
 _scheduler_init_kdf_debug_commands()
 {
-#if SCHEDULER_TRACING
-	add_debugger_command_etc("scheduler", &cmd_scheduler, "Analyze scheduler tracing information", "<thread>\n...", 0);
-#endif
 	add_debugger_command_etc("scheduler_set_smt_factor", &cmd_scheduler_set_smt_factor, "Set ... SMT conflict factor.", "<factor>\n...", 0);
 	add_debugger_command_alias("set_smt_factor", "scheduler_set_smt_factor", "Alias for scheduler_set_smt_factor");
 	add_debugger_command_etc("scheduler_get_smt_factor", &cmd_scheduler_get_smt_factor, "Get ... SMT conflict factor.", "...", 0);
@@ -1676,14 +1442,6 @@ scheduler_init()
 	add_debugger_command_etc("thread_sched_info", &cmd_thread_sched_info, "Dump detailed scheduler information for a specific thread", "<thread_id>\n...", 0);
 
 	sIrqTaskAffinityMap = new(std::nothrow) BOpenHashTable<IntHashDefinition>;
-	if (sIrqTaskAffinityMap == NULL) {
-		panic("scheduler_init: Failed to allocate IRQ-Task affinity map!");
-	} else if (sIrqTaskAffinityMap->Init() != B_OK) {
-		panic("scheduler_init: Failed to initialize IRQ-Task affinity map!");
-		delete sIrqTaskAffinityMap;
-		sIrqTaskAffinityMap = NULL;
-	}
-
 	for (int i = 0; i < NUM_IO_VECTORS; ++i) {
 		atomic_set64(&gIrqLastFollowMoveTime[i], 0);
 	}
@@ -1723,6 +1481,7 @@ cmd_scheduler_get_smt_factor(int argc, char** argv)
 
 
 
+
 static Scheduler::CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad)
 {
@@ -1739,17 +1498,36 @@ scheduler_irq_balance_event(timer* /* unused */)
 	}
 	SCHEDULER_ENTER_FUNCTION();
 	TRACE_SCHED_IRQ("Proactive IRQ Balance Check running\n");
-
-	// Find the most and least loaded CPUs
 	Scheduler::CPUEntry* sourceCpuMaxIrq = NULL;
 	Scheduler::CPUEntry* targetCandidateCpuMinIrq = NULL;
 	int32 maxIrqLoadFound = -1;
 	int32 minIrqLoadFound = 0x7fffffff;
+	int32 enabledCpuCount = 0;
+
+	CoreEntry* preferredTargetCoreForPS = NULL;
+	if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && Scheduler::sSmallTaskCore != NULL) {
+		CoreEntry* stc = Scheduler::sSmallTaskCore;
+		bool stcHasEnabledCpu = false;
+		if (!stc->IsDefunct()) {
+			CPUSet stcCPUs = stc->CPUMask();
+			for (int32 i = 0; i < smp_get_num_cpus(); ++i) {
+				if (stcCPUs.GetBit(i) && gCPUEnabled.GetBit(i)) {
+					stcHasEnabledCpu = true;
+					break;
+				}
+			}
+		}
+		if (stcHasEnabledCpu) {
+			preferredTargetCoreForPS = stc;
+			TRACE_SCHED_IRQ("IRQBalance(PS): Preferred target core for IRQ consolidation is STC %" B_PRId32 " (Type %d)\n",
+				stc->ID(), stc->Type());
+		}
+	}
 
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (!gCPUEnabled.GetBit(i))
 			continue;
-
+		enabledCpuCount++;
 		Scheduler::CPUEntry* currentCpu = Scheduler::CPUEntry::GetCPU(i);
 		int32 currentTotalIrqLoad = currentCpu->CalculateTotalIrqLoad();
 
@@ -1758,10 +1536,37 @@ scheduler_irq_balance_event(timer* /* unused */)
 			sourceCpuMaxIrq = currentCpu;
 		}
 
-		if (targetCandidateCpuMinIrq == NULL || currentTotalIrqLoad < minIrqLoadFound) {
-			targetCandidateCpuMinIrq = currentCpu;
-			minIrqLoadFound = currentTotalIrqLoad;
+		bool isPreferredTarget = (preferredTargetCoreForPS != NULL && currentCpu->Core() == preferredTargetCoreForPS);
+		int32 effectiveLoadForComparison = currentTotalIrqLoad;
+		if (isPreferredTarget) {
+			effectiveLoadForComparison -= kMaxLoad / 4;
+			if (effectiveLoadForComparison < 0) effectiveLoadForComparison = 0;
+		} else if (gCurrentModeID == SCHEDULER_MODE_POWER_SAVING && preferredTargetCoreForPS != NULL && currentCpu->Core()->Type() != CORE_TYPE_LITTLE) {
+			effectiveLoadForComparison += kMaxLoad / 4;
 		}
+
+		if (targetCandidateCpuMinIrq == NULL || effectiveLoadForComparison < minIrqLoadFound) {
+			if (currentCpu != sourceCpuMaxIrq || enabledCpuCount == 1) {
+				minIrqLoadFound = effectiveLoadForComparison;
+				targetCandidateCpuMinIrq = currentCpu;
+			}
+		}
+	}
+
+	if (targetCandidateCpuMinIrq == NULL || (targetCandidateCpuMinIrq == sourceCpuMaxIrq && enabledCpuCount > 1)) {
+		minIrqLoadFound = 0x7fffffff;
+		Scheduler::CPUEntry* generalFallbackTarget = NULL;
+		for (int32 i = 0; i < smp_get_num_cpus(); i++) {
+			if (!gCPUEnabled.GetBit(i) || Scheduler::CPUEntry::GetCPU(i) == sourceCpuMaxIrq)
+				continue;
+			Scheduler::CPUEntry* potentialTarget = Scheduler::CPUEntry::GetCPU(i);
+			int32 potentialTargetLoad = potentialTarget->CalculateTotalIrqLoad();
+			if (generalFallbackTarget == NULL || potentialTargetLoad < minIrqLoadFound) {
+				generalFallbackTarget = potentialTarget;
+				minIrqLoadFound = potentialTargetLoad;
+			}
+		}
+		targetCandidateCpuMinIrq = generalFallbackTarget;
 	}
 
 	if (sourceCpuMaxIrq == NULL || targetCandidateCpuMinIrq == NULL || sourceCpuMaxIrq == targetCandidateCpuMinIrq) {
@@ -1770,42 +1575,80 @@ scheduler_irq_balance_event(timer* /* unused */)
 		return B_HANDLED_INTERRUPT;
 	}
 
-	// If the load difference is significant, move the most expensive IRQ
-	if (maxIrqLoadFound > gHighAbsoluteIrqThreshold && maxIrqLoadFound > minIrqLoadFound + gSignificantIrqLoadDifference) {
+	int32 actualTargetMinIrqLoad = targetCandidateCpuMinIrq->CalculateTotalIrqLoad();
+	if (maxIrqLoadFound > gHighAbsoluteIrqThreshold && maxIrqLoadFound > actualTargetMinIrqLoad + gSignificantIrqLoadDifference) {
 		TRACE_SCHED_IRQ("Proactive IRQ: Imbalance detected. Source CPU %" B_PRId32 " (IRQ load %" B_PRId32 ") vs Target Cand. CPU %" B_PRId32 " (Actual IRQ load %" B_PRId32 ")\n",
-			sourceCpuMaxIrq->ID(), maxIrqLoadFound, targetCandidateCpuMinIrq->ID(), minIrqLoadFound);
-
-		irq_assignment* irqToMove = NULL;
-		int32 maxIrqToMoveLoad = -1;
-
+			sourceCpuMaxIrq->ID(), maxIrqLoadFound, targetCandidateCpuMinIrq->ID(), actualTargetMinIrqLoad);
+		irq_assignment* candidateIRQs[DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY];
+		int32 candidateCount = 0;
 		{
 			cpu_ent* cpuSt = &gCPU[sourceCpuMaxIrq->ID()];
 			SpinLocker locker(cpuSt->irqs_lock);
 			irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuSt->irqs);
 			while (irq != NULL) {
-				if (irq->load > maxIrqToMoveLoad) {
-					maxIrqToMoveLoad = irq->load;
-					irqToMove = irq;
+				if (candidateCount < gMaxIRQsToMoveProactively) {
+					candidateIRQs[candidateCount++] = irq;
+					for (int k = candidateCount - 1; k > 0; --k) {
+						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
+						} else break;
+					}
+				} else if (gMaxIRQsToMoveProactively > 0 && irq->load > candidateIRQs[gMaxIRQsToMoveProactively - 1]->load) {
+					candidateIRQs[gMaxIRQsToMoveProactively - 1] = irq;
+					for (int k = gMaxIRQsToMoveProactively - 1; k > 0; --k) {
+						if (candidateIRQs[k]->load > candidateIRQs[k-1]->load) {
+							std::swap(candidateIRQs[k], candidateIRQs[k-1]);
+						} else break;
+					}
 				}
 				irq = (irq_assignment*)list_get_next_item(&cpuSt->irqs, irq);
 			}
 		}
+		for (int32 i = 0; i < candidateCount; i++) {
+			irq_assignment* irqToMove = candidateIRQs[i];
+			if (irqToMove == NULL) continue;
 
-		if (irqToMove != NULL) {
-			Scheduler::CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(targetCandidateCpuMinIrq->Core(), irqToMove->irq, irqToMove->load);
+			CoreEntry* preferredTargetCore = targetCandidateCpuMinIrq->Core();
+			bool hasAffinity = false;
+
+			Scheduler::CPUEntry* finalTargetCpu = _scheduler_select_cpu_for_irq(preferredTargetCore, irqToMove->irq, irqToMove->load);
 
 			if (finalTargetCpu != NULL && finalTargetCpu != sourceCpuMaxIrq) {
-				TRACE_SCHED_IRQ("Periodic IRQ Balance: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")\n",
-					irqToMove->irq, irqToMove->load,
-					sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
-					finalTargetCpu->ID(), finalTargetCpu->Core()->ID());
-				assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+				bigtime_t now = system_time();
+				bigtime_t cooldownToRespect = kIrqFollowTaskCooldownPeriod;
+				bool proceedWithMove = false;
+				bigtime_t lastRecordedMoveTime = atomic_get64(&gIrqLastFollowMoveTime[irqToMove->irq]);
+
+				if (now >= lastRecordedMoveTime + cooldownToRespect) {
+					if (atomic_test_and_set64(&gIrqLastFollowMoveTime[irqToMove->irq], now, lastRecordedMoveTime)) {
+						proceedWithMove = true;
+					} else {
+						TRACE_SCHED_IRQ("Periodic IRQ Balance: CAS failed for IRQ %d, move deferred due to concurrent update.\n", irqToMove->irq);
+					}
+				} else {
+					TRACE_SCHED_IRQ("Periodic IRQ Balance: IRQ %d for T %" B_PRId32 " is in cooldown (last move at %" B_PRId64 ", now %" B_PRId64 ", cooldown %" B_PRId64 "). Skipping move.\n",
+						irqToMove->irq, -1, lastRecordedMoveTime, now, cooldownToRespect);
+				}
+
+				if (proceedWithMove) {
+					TRACE_SCHED_IRQ("Periodic IRQ Balance: Moving IRQ %d (load %" B_PRId32 ") from CPU %" B_PRId32 " (core %" B_PRId32 ") to CPU %" B_PRId32 " (core %" B_PRId32 ")%s\n",
+						irqToMove->irq, irqToMove->load,
+						sourceCpuMaxIrq->ID(), sourceCpuMaxIrq->Core()->ID(),
+						finalTargetCpu->ID(), finalTargetCpu->Core()->ID(),
+						hasAffinity ? " (affinity considered)" : "");
+					if (hasAffinity) {
+						// do nothing
+					}
+					assign_io_interrupt_to_cpu(irqToMove->irq, finalTargetCpu->ID());
+				}
+			} else {
+				TRACE_SCHED_IRQ("Periodic IRQ Balance: No suitable target CPU found for IRQ %d on core %" B_PRId32 " or target is source. IRQ remains on CPU %" B_PRId32 ".\n",
+					irqToMove->irq, preferredTargetCore->ID(), sourceCpuMaxIrq->ID());
 			}
 		}
 	} else {
-		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxIrqLoadFound, minIrqLoadFound);
+		TRACE("Proactive IRQ: No significant imbalance meeting thresholds (maxLoad: %" B_PRId32 ", minLoad: %" B_PRId32 ").\n", maxLoadFound, minIrqLoadFound);
 	}
-
 	add_timer(&sIRQBalanceTimer, &scheduler_irq_balance_event, gIRQBalanceCheckInterval, B_ONE_SHOT_RELATIVE_TIMER);
 	return B_HANDLED_INTERRUPT;
 }
@@ -1867,7 +1710,7 @@ scheduler_remove_listener(struct SchedulerListener* listener)
 
 static Scheduler::CPUEntry*
 _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
-	const ThreadData* affinityCheckThread)
+	const Scheduler::ThreadData* affinityCheckThread)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
@@ -1909,8 +1752,8 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (currentSmtScore > bestScore) {
 					isBetter = true;
 				} else if (currentSmtScore == bestScore) {
-					int32 currentQueueDepth = currentCPU->GetEevdfRunQueueTaskCount();
-					int32 bestQueueDepth = bestCPU->GetEevdfRunQueueTaskCount();
+					int32 currentQueueDepth = currentCPU->GetEevdfScheduler().Count();
+					int32 bestQueueDepth = bestCPU->GetEevdfScheduler().Count();
 					if (currentQueueDepth < bestQueueDepth) {
 						isBetter = true;
 						TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 ". CPU %" B_PRId32 " selected due to shallower run queue (%d vs %d).\n",
@@ -1944,8 +1787,8 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 }
 
 
-static const int32 kWorkDifferenceThresholdAbsolute = 100;
-#define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL (SCHEDULER_TARGET_LATENCY * 8)
+static const int32 kWorkDifferenceThresholdAbsolute = 200;
+#define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_LL (SCHEDULER_TARGET_LATENCY * 4)
 #define BL_TYPE_PENALTY_PPREF_BIG_TO_LITTLE_LL (SCHEDULER_TARGET_LATENCY * 10)
 #define BL_TYPE_BONUS_EPREF_BIG_TO_LITTLE_PS (SCHEDULER_TARGET_LATENCY * 2)
 #define BL_TYPE_BONUS_PPREF_LITTLE_TO_BIG_PS (SCHEDULER_TARGET_LATENCY * 1)
@@ -1968,14 +1811,14 @@ scheduler_get_bl_aware_load_difference_threshold(CoreEntry* sourceCore, CoreEntr
 	scheduler_core_type targetType = targetCore->Type();
 
 	if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
-		adjustedThreshold = baseThreshold / 2;
+		adjustedThreshold = baseThreshold * 3 / 4;
 	}
 	else if ((sourceType == CORE_TYPE_BIG || sourceType == CORE_TYPE_UNIFORM_PERFORMANCE) && targetType == CORE_TYPE_LITTLE) {
-		adjustedThreshold = baseThreshold * 2;
+		adjustedThreshold = baseThreshold * 5 / 4;
 	}
 
-	adjustedThreshold = max_c(baseThreshold / 4, adjustedThreshold);
-	adjustedThreshold = min_c(baseThreshold * 4, adjustedThreshold);
+	adjustedThreshold = max_c(baseThreshold / 2, adjustedThreshold);
+	adjustedThreshold = min_c(baseThreshold * 3 / 2, adjustedThreshold);
 
 	TRACE_SCHED_BL("BLDiffThreshold: Source (T%d, C%u) Target (T%d, C%u) -> Base: %d, Adjusted: %d\n",
 		sourceType, sourceCore->PerformanceCapacity(),
@@ -1987,96 +1830,10 @@ scheduler_get_bl_aware_load_difference_threshold(CoreEntry* sourceCore, CoreEntr
 
 
 static bool
-scheduler_perform_migration(CoreEntry* sourceCore, CoreEntry* targetCore)
+find_load_balance_cores(CoreEntry*& sourceCore, CoreEntry*& targetCore)
 {
-	// This is a simplified migration function. A real implementation would
-	// be more sophisticated.
-	CPUEntry* sourceCPU = _scheduler_select_cpu_on_core(sourceCore, true, NULL);
-	if (sourceCPU == NULL)
-		return false;
-
-	ThreadData* threadToMove = NULL;
-	sourceCPU->LockRunQueue();
-	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
-	if (!sourceQueue.IsEmpty()) {
-		threadToMove = sourceQueue.PopMinimum();
-	}
-	sourceCPU->UnlockRunQueue();
-
-	if (threadToMove == NULL)
-		return false;
-
-	CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCore, false, threadToMove);
-	if (targetCPU == NULL) {
-		sourceCPU->LockRunQueue();
-		sourceQueue.Add(threadToMove);
-		sourceCPU->UnlockRunQueue();
-		return false;
-	}
-
-	threadToMove->MarkDequeued();
-	if (threadToMove->Core() != NULL)
-		threadToMove->UnassignCore(false);
-
-	threadToMove->GetThread()->previous_cpu = &gCPU[targetCPU->ID()];
-	CoreEntry* actualFinalTargetCore = targetCPU->Core();
-	threadToMove->ChooseCoreAndCPU(actualFinalTargetCore, targetCPU);
-	ASSERT(threadToMove->Core() == actualFinalTargetCore);
-
-	{
-		InterruptsSpinLocker schedulerLocker(threadToMove->GetThread()->scheduler_lock);
-		threadToMove->UpdateEevdfParameters(targetCPU, true, false);
-	}
-
-	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove);
-	targetCPU->UnlockRunQueue();
-
-	threadToMove->SetLastMigrationTime(system_time());
-	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
-
-	Thread* currentOnTarget = gCPU[targetCPU->ID()].running_thread;
-	ThreadData* currentOnTargetData = currentOnTarget ? currentOnTarget->scheduler_data : NULL;
-	bool newThreadIsEligible = (system_time() >= threadToMove->EligibleTime());
-
-	if (newThreadIsEligible && (currentOnTarget == NULL || thread_is_idle_thread(currentOnTarget) ||
-		(currentOnTargetData != NULL && threadToMove->VirtualDeadline() < currentOnTargetData->VirtualDeadline()))) {
-		if (targetCPU->ID() == smp_get_current_cpu()) {
-			gCPU[targetCPU->ID()].invoke_scheduler = true;
-		} else {
-			smp_send_ici(targetCPU->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
-		}
-	}
-	return true;
-}
-
-static bool
-scheduler_perform_load_balance()
-{
-	SCHEDULER_ENTER_FUNCTION();
-	bool migrationPerformed = false;
-
-	if (gCurrentMode != NULL && gCurrentMode->attempt_proactive_stc_designation != NULL
-		&& Scheduler::sSmallTaskCore == NULL) {
-		ReadSpinLocker idlePackageLocker(gIdlePackageLock);
-		bool systemActive = gIdlePackageList.Count() < gPackageCount;
-		idlePackageLocker.Unlock();
-		if (systemActive) {
-			CoreEntry* designatedCore = gCurrentMode->attempt_proactive_stc_designation();
-			if (designatedCore != NULL) {
-				TRACE("scheduler_load_balance_event: Proactively designated core %" B_PRId32 " as STC.\n", designatedCore->ID());
-			} else {
-				TRACE("scheduler_load_balance_event: Proactive STC designation attempt did not set an STC.\n");
-			}
-		}
-	}
-
-	if (gSingleCore || gCoreCount < 2) {
-		return migrationPerformed;
-	}
-
-	CoreEntry* sourceCoreCandidate = NULL;
-	CoreEntry* targetCoreCandidate = NULL;
+	sourceCore = NULL;
+	targetCore = NULL;
 	int32 maxLoadFound = -1;
 	int32 minLoadFound = 0x7fffffff;
 
@@ -2085,199 +1842,64 @@ scheduler_perform_load_balance()
 		CoreEntry* shardBestSource = Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum();
 		if (shardBestSource != NULL && !shardBestSource->IsDefunct() && shardBestSource->GetLoad() > maxLoadFound) {
 			maxLoadFound = shardBestSource->GetLoad();
-			sourceCoreCandidate = shardBestSource;
+			sourceCore = shardBestSource;
 		}
 
 		CoreEntry* shardBestTarget = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum();
 		if (shardBestTarget != NULL && !shardBestTarget->IsDefunct() && shardBestTarget->GetLoad() < minLoadFound) {
-			if (sourceCoreCandidate != NULL && shardBestTarget == sourceCoreCandidate) {
+			if (sourceCore != NULL && shardBestTarget == sourceCore) {
 				CoreEntry* nextBestTarget = Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum(1);
 				if (nextBestTarget != NULL && !nextBestTarget->IsDefunct() && nextBestTarget->GetLoad() < minLoadFound) {
 					minLoadFound = nextBestTarget->GetLoad();
-					targetCoreCandidate = nextBestTarget;
+					targetCore = nextBestTarget;
 				}
 			} else {
 				minLoadFound = shardBestTarget->GetLoad();
-				targetCoreCandidate = shardBestTarget;
+				targetCore = shardBestTarget;
 			}
 		}
 		shardLocker.Unlock();
 	}
 
-	if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate) {
-		if (sourceCoreCandidate != NULL && targetCoreCandidate == sourceCoreCandidate) {
+	if (sourceCore == NULL || targetCore == NULL || sourceCore == targetCore) {
+		if (sourceCore != NULL && targetCore == sourceCore) {
 			minLoadFound = 0x7fffffff;
 			CoreEntry* alternativeTarget = NULL;
 			for (int32 i = 0; i < gCoreCount; ++i) {
 				CoreEntry* core = &gCoreEntries[i];
-				if (core->IsDefunct() || core == sourceCoreCandidate) continue;
+				if (core->IsDefunct() || core == sourceCore) continue;
 				if (core->GetLoad() < minLoadFound) {
 					minLoadFound = core->GetLoad();
 					alternativeTarget = core;
 				}
 			}
-			targetCoreCandidate = alternativeTarget;
+			targetCore = alternativeTarget;
 		}
-		if (sourceCoreCandidate == NULL || targetCoreCandidate == NULL || sourceCoreCandidate == targetCoreCandidate) {
-			if (gCoreCount > 1) {
-				for (int32 i = 0; i < gCoreCount; ++i) {
-					CoreEntry* core = &gCoreEntries[i];
-					if (core->IsDefunct())
-						continue;
-					if (core->GetLoad() == 0) {
-						for (int32 j = 0; j < gCoreCount; ++j) {
-							if (i == j)
-								continue;
-							CoreEntry* otherCore = &gCoreEntries[j];
-							if (otherCore->IsDefunct())
-								continue;
-							if (otherCore->GetLoad() > kHighLoad) {
-								scheduler_perform_migration(otherCore, core);
-								migrationPerformed = true;
-							}
-						}
-					}
-				}
-			}
-			return migrationPerformed;
-		}
+		if (sourceCore == NULL || targetCore == NULL || sourceCore == targetCore)
+			return false;
 	}
+	return true;
+}
 
-	TRACE_SCHED_BL("LoadBalance: Initial candidates: SourceCore %" B_PRId32 " (Type %d, Load %" B_PRId32 "), TargetCore %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
-		sourceCoreCandidate->ID(), sourceCoreCandidate->Type(), sourceCoreCandidate->GetLoad(),
-		targetCoreCandidate->ID(), targetCoreCandidate->Type(), targetCoreCandidate->GetLoad());
-
-	int32 blAwareLoadDifference = scheduler_get_bl_aware_load_difference_threshold(sourceCoreCandidate, targetCoreCandidate);
-	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + blAwareLoadDifference) {
-		TRACE_SCHED_BL("LoadBalance: No imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") vs TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
-			sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
-			targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
-		return migrationPerformed;
-	}
-
-	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
-		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
-		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
-
-	Scheduler::CPUEntry* sourceCPU = NULL;
-	Scheduler::CPUEntry* targetCPU = NULL;
-	CoreEntry* finalTargetCore = NULL;
-
-	Scheduler::CPUEntry* idleTargetCPUOnTargetCore = _find_idle_cpu_on_core(targetCoreCandidate);
-	if (idleTargetCPUOnTargetCore != NULL) {
-		TRACE_SCHED("LoadBalance: TargetCore %" B_PRId32 " has an idle CPU: %" B_PRId32 "\n",
-			targetCoreCandidate->ID(), idleTargetCPUOnTargetCore->ID());
-	}
-
-	if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_CONSOLIDATE) {
-		CoreEntry* consolidationCore = NULL;
-		if (gCurrentMode != NULL && gCurrentMode->get_consolidation_target_core != NULL)
-			consolidationCore = gCurrentMode->get_consolidation_target_core(NULL);
-		if (consolidationCore == NULL && gCurrentMode != NULL && gCurrentMode->designate_consolidation_core != NULL) {
-			consolidationCore = gCurrentMode->designate_consolidation_core(NULL);
-		}
-
-		if (consolidationCore != NULL) {
-			if (sourceCoreCandidate != consolidationCore &&
-				(consolidationCore->GetLoad() < (int32)(kHighLoad * consolidationCore->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)
-				|| consolidationCore->GetInstantaneousLoad() < 0.8f)) {
-				finalTargetCore = consolidationCore;
-				TRACE_SCHED_BL("LoadBalance (PS): Consolidating to STC %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
-					finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
-			} else if (sourceCoreCandidate == consolidationCore &&
-					   sourceCoreCandidate->GetLoad() > (int32)(kVeryHighLoad * sourceCoreCandidate->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
-				CoreEntry* spillTarget = NULL;
-				int32 minSpillLoad = 0x7fffffff;
-				for (int32 i = 0; i < gCoreCount; ++i) {
-					CoreEntry* core = &gCoreEntries[i];
-					if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
-					if (core->Type() == CORE_TYPE_LITTLE &&
-						core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
-						if (core->GetLoad() < minSpillLoad) {
-							minSpillLoad = core->GetLoad();
-							spillTarget = core;
-						}
-					}
-				}
-				if (spillTarget == NULL) {
-					for (int32 i = 0; i < gCoreCount; ++i) {
-						CoreEntry* core = &gCoreEntries[i];
-						if (core->IsDefunct() || core == consolidationCore || core->GetLoad() == 0) continue;
-						if (core->GetLoad() < (int32)(kHighLoad * core->PerformanceCapacity() / SCHEDULER_NOMINAL_CAPACITY)) {
-							if (core->GetLoad() < minSpillLoad) {
-								minSpillLoad = core->GetLoad();
-								spillTarget = core;
-							}
-						}
-					}
-				}
-				if (spillTarget != NULL) {
-					finalTargetCore = spillTarget;
-					TRACE_SCHED_BL("LoadBalance (PS): STC %" B_PRId32 " overloaded, spilling to Core %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
-						sourceCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->Type(), finalTargetCore->GetLoad());
-				} else {
-					finalTargetCore = targetCoreCandidate;
-					if (finalTargetCore == sourceCoreCandidate) finalTargetCore = NULL;
-					if (finalTargetCore != NULL && finalTargetCore->GetLoad() == 0
-						&& gCurrentMode->should_wake_core_for_load != NULL) {
-						if (!gCurrentMode->should_wake_core_for_load(finalTargetCore, kMaxLoad / 5 )) {
-							finalTargetCore = NULL;
-						}
-					}
-				}
-			} else {
-				return migrationPerformed;
-			}
-		} else {
-			return migrationPerformed;
-		}
-		if (finalTargetCore == NULL) { return migrationPerformed; }
-		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
-	} else {
-		finalTargetCore = targetCoreCandidate;
-		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD &&
-			sourceCoreCandidate->Type() == CORE_TYPE_LITTLE &&
-			finalTargetCore->Type() == CORE_TYPE_LITTLE) {
-			CoreEntry* bestBigTarget = NULL;
-			int32 bestBigTargetLoad = 0x7fffffff;
-			for (int32 i = 0; i < gCoreCount; ++i) {
-				CoreEntry* core = &gCoreEntries[i];
-				if (core->IsDefunct() || !(core->Type() == CORE_TYPE_BIG || core->Type() == CORE_TYPE_UNIFORM_PERFORMANCE)) continue;
-				if (core->GetLoad() < sourceCoreCandidate->GetLoad() && core->GetLoad() < bestBigTargetLoad) {
-					bestBigTargetLoad = core->GetLoad();
-					bestBigTarget = core;
-				}
-			}
-			if (bestBigTarget != NULL) {
-				finalTargetCore = bestBigTarget;
-				TRACE_SCHED_BL("LoadBalance (LL): Switched target from LITTLE %" B_PRId32 " to BIG/UNIFORM %" B_PRId32 " (Load %" B_PRId32 ")\n",
-					targetCoreCandidate->ID(), finalTargetCore->ID(), finalTargetCore->GetLoad());
-			}
-		}
-		sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
-	}
-
-	if (sourceCPU == NULL) {
-		TRACE("LoadBalance (EEVDF): Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
-		return false;
-	}
-
-	ThreadData* threadToMove = NULL;
+static bool
+select_thread_to_migrate(CPUEntry* sourceCPU, CoreEntry* finalTargetCore,
+	CPUEntry* idleTargetCPUOnTargetCore, Scheduler::ThreadData*& threadToMove)
+{
 	bigtime_t now = system_time();
 
 	sourceCPU->LockRunQueue();
-	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
+	EevdfScheduler& sourceQueue = sourceCPU->GetEevdfScheduler();
 
-	ThreadData* bestCandidateToMove = NULL;
+	Scheduler::ThreadData* bestCandidateToMove = NULL;
 	bigtime_t maxBenefitScore = -1;
 
 	const int MAX_LB_CANDIDATES_TO_CHECK = 10;
 
-	ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK] = { NULL };
+	Scheduler::ThreadData* tempStorage[MAX_LB_CANDIDATES_TO_CHECK] = { NULL };
 	int checkedCount = 0;
 
 	for (int i = 0; i < MAX_LB_CANDIDATES_TO_CHECK && !sourceQueue.IsEmpty(); ++i) {
-		ThreadData* candidate = sourceQueue.PopMinimum();
+		Scheduler::ThreadData* candidate = (Scheduler::ThreadData*)sourceQueue.PopMinThread();
 		if (candidate == NULL) break;
 		tempStorage[checkedCount++] = candidate;
 
@@ -2353,7 +1975,7 @@ scheduler_perform_load_balance()
 		const bigtime_t E_TO_P_BONUS_DEFAULT = SCHEDULER_TARGET_LATENCY * 2;
 		const bigtime_t P_TO_E_BONUS_EPREF_PS = SCHEDULER_TARGET_LATENCY * 4;
 
-		if (gSchedulerLoadBalancePolicy == SCHED_LOAD_BALANCE_SPREAD) {
+		if (gSchedulerLoadBalancePolicy == SCHEDULER_LOAD_BALANCE_SPREAD) {
 			if (taskIsPCritical) {
 				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
 					typeCompatibilityBonus += E_TO_P_BONUS_PCRITICAL;
@@ -2412,7 +2034,7 @@ scheduler_perform_load_balance()
 
 		bigtime_t queueDepthPenalty = 0;
 		if (representativeTargetCPU != NULL) {
-			int32 targetQueueDepth = representativeTargetCPU->GetEevdfRunQueue().Count();
+			int32 targetQueueDepth = representativeTargetCPU->GetEevdfScheduler().Count();
 			if (targetQueueDepth > 0) {
 				queueDepthPenalty = - (targetQueueDepth * TARGET_QUEUE_PENALTY_FACTOR_LB);
 				currentBenefitScore += queueDepthPenalty;
@@ -2422,11 +2044,11 @@ scheduler_perform_load_balance()
 		}
 
 		if (candidate->IsLikelyIOBound() && affinityBonusWallClock == 0 && targetCpuIdleBonus == 0) {
-			if (representativeTargetCPU != NULL && representativeTargetCPU->GetEevdfRunQueue().Count() > 1) {
+			if (representativeTargetCPU != NULL && representativeTargetCPU->GetEevdfScheduler().Count() > 1) {
 				currentBenefitScore /= kIOBoundScorePenaltyFactor;
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity/idle target, target queue > 1), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
 					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
-			} else if (representativeTargetCPU == NULL || representativeTargetCPU->GetEevdfRunQueue().Count() <=1) {
+			} else if (representativeTargetCPU == NULL || representativeTargetCPU->GetEevdfScheduler().Count() <=1) {
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but target queue is short or no other bonus, I/O penalty not applied this time.\n", candidate->GetThread()->id);
 			}
 		} else if (candidate->IsLikelyIOBound() && (affinityBonusWallClock != 0 || targetCpuIdleBonus != 0)) {
@@ -2455,7 +2077,7 @@ scheduler_perform_load_balance()
 
 	for (int i = 0; i < checkedCount; ++i) {
 		if (tempStorage[i] != bestCandidateToMove) {
-			sourceQueue.Add(tempStorage[i]);
+			sourceQueue.AddThread((ThreadData*)tempStorage[i]);
 		}
 	}
 	threadToMove = bestCandidateToMove;
@@ -2463,30 +2085,90 @@ scheduler_perform_load_balance()
 	if (threadToMove == NULL) {
 		sourceCPU->UnlockRunQueue();
 		TRACE("LoadBalance (EEVDF): No suitable thread found to migrate from CPU %" B_PRId32 "\n", sourceCPU->ID());
+		return false;
+	}
+	return true;
+}
+
+static bool
+scheduler_perform_load_balance()
+{
+	SCHEDULER_ENTER_FUNCTION();
+	bool migrationPerformed = false;
+
+	if (gCurrentMode != NULL && gCurrentMode->attempt_proactive_stc_designation != NULL
+		&& Scheduler::sSmallTaskCore == NULL) {
+		ReadSpinLocker idlePackageLocker(gIdlePackageLock);
+		bool systemActive = gIdlePackageList.Count() < gPackageCount;
+		idlePackageLocker.Unlock();
+		if (systemActive) {
+			CoreEntry* designatedCore = gCurrentMode->attempt_proactive_stc_designation();
+			if (designatedCore != NULL) {
+				TRACE("scheduler_load_balance_event: Proactively designated core %" B_PRId32 " as STC.\n", designatedCore->ID());
+			} else {
+				TRACE("scheduler_load_balance_event: Proactive STC designation attempt did not set an STC.\n");
+			}
+		}
+	}
+
+	if (gSingleCore || gCoreCount < 2) {
 		return migrationPerformed;
 	}
 
-	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
-	if (targetCPU == NULL || targetCPU == sourceCPU) {
-		if (threadToMove != NULL) {
-			sourceQueue.Add(threadToMove);
-		}
-		sourceCPU->UnlockRunQueue();
-		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 " or target is source.\n",
-			threadToMove->GetThread()->id, finalTargetCore->ID());
+	CoreEntry* sourceCoreCandidate = NULL;
+	CoreEntry* targetCoreCandidate = NULL;
+	if (!find_load_balance_cores(sourceCoreCandidate, targetCoreCandidate))
+		return migrationPerformed;
+
+	TRACE_SCHED_BL("LoadBalance: Initial candidates: SourceCore %" B_PRId32 " (Type %d, Load %" B_PRId32 "), TargetCore %" B_PRId32 " (Type %d, Load %" B_PRId32 ")\n",
+		sourceCoreCandidate->ID(), sourceCoreCandidate->Type(), sourceCoreCandidate->GetLoad(),
+		targetCoreCandidate->ID(), targetCoreCandidate->Type(), targetCoreCandidate->GetLoad());
+
+	int32 blAwareLoadDifference = scheduler_get_bl_aware_load_difference_threshold(sourceCoreCandidate, targetCoreCandidate);
+	if (sourceCoreCandidate->GetLoad() <= targetCoreCandidate->GetLoad() + blAwareLoadDifference) {
+		TRACE_SCHED_BL("LoadBalance: No imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") vs TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
+			sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
+			targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
+		return migrationPerformed;
+	}
+
+	TRACE("LoadBalance (EEVDF): Potential imbalance. SourceCore %" B_PRId32 " (load %" B_PRId32 ") TargetCore %" B_PRId32 " (load %" B_PRId32 "). Threshold: %" B_PRId32 "\n",
+		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
+		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
+
+	Scheduler::CPUEntry* sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
+	if (sourceCPU == NULL) {
+		TRACE("LoadBalance (EEVDF): Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
 		return false;
 	}
 
-		int32 threadCount = sourceCPU->GetTotalThreadCount();
-		atomic_add(&threadCount, -1);
-		ASSERT(sourceCPU->GetTotalThreadCount() >=0);
+	Scheduler::ThreadData* threadToMove = NULL;
+	if (!select_thread_to_migrate(sourceCPU, targetCoreCandidate,
+			_find_idle_cpu_on_core(targetCoreCandidate), threadToMove)) {
+		return migrationPerformed;
+	}
+
+	Scheduler::CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCoreCandidate, false, threadToMove);
+	if (targetCPU == NULL || targetCPU == sourceCPU) {
+		if (threadToMove != NULL) {
+			sourceCPU->GetEevdfScheduler().AddThread(threadToMove);
+		}
+		sourceCPU->UnlockRunQueue();
+		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 " or target is source.\n",
+			threadToMove->GetThread()->id, targetCoreCandidate->ID());
+		return false;
+	}
+
+	int32 threadCount = sourceCPU->GetTotalThreadCount();
+	atomic_add(&threadCount, -1);
+	ASSERT(sourceCPU->GetTotalThreadCount() >=0);
 	sourceCPU->_UpdateMinVirtualRuntime();
 
 	threadToMove->MarkDequeued();
 	sourceCPU->UnlockRunQueue();
 
 	TRACE_SCHED_BL("LoadBalance (EEVDF): Migrating T %" B_PRId32 " (Lag %" B_PRId64 ", Score %" B_PRId64 ") from CPU %" B_PRId32 "(C%d,T%d) to CPU %" B_PRId32 "(C%d,T%d)\n",
-		threadToMove->GetThread()->id, threadToMove->Lag(), maxBenefitScore,
+		threadToMove->GetThread()->id, threadToMove->Lag(), 0LL,
 		sourceCPU->ID(), sourceCPU->Core()->ID(), sourceCPU->Core()->Type(),
 		targetCPU->ID(), targetCPU->Core()->ID(), targetCPU->Core()->Type());
 
@@ -2507,15 +2189,15 @@ scheduler_perform_load_balance()
 		threadToMove->GetThread()->id, targetCPU->ID(), threadToMove->VirtualDeadline(), threadToMove->Lag(), threadToMove->VirtualRuntime(), threadToMove->EligibleTime());
 
 	targetCPU->LockRunQueue();
-	targetCPU->AddThread(threadToMove);
+	targetCPU->AddThread((ThreadData*)threadToMove);
 	targetCPU->UnlockRunQueue();
 
-	threadToMove->SetLastMigrationTime(now);
+	threadToMove->SetLastMigrationTime(system_time());
 	T(MigrateThread(threadToMove->GetThread(), sourceCPU->ID(), targetCPU->ID()));
 	migrationPerformed = true;
 
 	if (threadToMove->Core() != sourceCPU->Core()) {
-		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
+		int32 localIrqList[MAX_AFFINITIZED_IRQS_PER_THREAD];
 		int8 localIrqCount = 0;
 		thread_id migratedThId = threadToMove->GetThread()->id;
 
@@ -2552,57 +2234,3 @@ scheduler_perform_load_balance()
 	return migrationPerformed;
 }
 
-void
-static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
-{
-    Scheduler::CPUEntry* best = nullptr;
-    float bestScore = 1e9;
-    for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-        auto* cpu = Scheduler::CPUEntry::GetCPU(i);
-        if (!cpu || cpu == current || gCPU[i].disabled) continue;
-
-        Thread* t = gCPU[i].running_thread;
-        if (t && t->priority >= B_URGENT_DISPLAY_PRIORITY) continue;
-
-        int32 targetLoad = cpu->CalculateTotalIrqLoad();
-        int32 dynamicMax = Scheduler::scheduler_get_dynamic_max_irq_target_load(cpu, gModeMaxTargetCpuIrqLoad);
-
-        if (targetLoad + irq->load >= dynamicMax) continue;
-
-        float score = targetLoad * 0.7f + cpu->GetInstantaneousLoad() * 0.3f;
-        if (cpu->Core()->Type() == CORE_TYPE_LITTLE) score *= 0.8f;
-
-        if (score < bestScore) {
-            best = cpu;
-            bestScore = score;
-        }
-    }
-    return best;
-}
-
-void maybe_relocate_irqs(Thread* thread)
-{
-    if (!thread || thread_is_idle_thread(thread)) return;
-    if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;
-
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-    if (!cpu) return;
-
-    cpu_ent* cpuStruct = &gCPU[cpu->ID()];
-    SpinLocker irqLock(cpuStruct->irqs_lock);
-
-    irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuStruct->irqs);
-    while (irq) {
-        if (irq->load > IRQ_INTERFERENCE_LOAD_THRESHOLD) {
-            Scheduler::CPUEntry* alt = find_quiet_cpu_for_irq(irq, cpu);
-            if (alt && alt != cpu) {
-                bigtime_t now = system_time();
-                if (now - atomic_get64(&gIrqLastFollowMoveTime[irq->irq]) > DYNAMIC_IRQ_MOVE_COOLDOWN) {
-                    assign_io_interrupt_to_cpu(irq->irq, alt->ID());
-                    atomic_set64(&gIrqLastFollowMoveTime[irq->irq], now);
-                }
-            }
-        }
-        irq = (irq_assignment*)list_get_next_item(&cpuStruct->irqs, irq);
-    }
-}

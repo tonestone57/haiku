@@ -8,8 +8,10 @@
 
 
 #include <cpu.h>
+#include <memory>
 #include <stdint.h>
 #include <smp.h>
+#include <interrupts.h>
 
 #include "scheduler_cpu.h"
 
@@ -31,8 +33,7 @@
  *      individual thread's scheduler-specific data (ThreadData) and state during
  *      transitions. Typically held when a specific thread's state is being
  *      directly manipulated by the scheduler.
- *    - CPUEntry::fQueueLock (per-CPU spinlock): Protects the MLFQ run queues
- *      (fMlfq) and related counters (fMlfqHighestNonEmptyLevel, fTotalThreadCount)
+ *    - CPUEntry::fQueueLock (per-CPU spinlock): Protects the EEVDF run queue
  *      on a specific CPU. Acquired when threads are added/removed from run queues
  *      or when the queues are inspected.
  *    - CoreEntry::fCPULock (per-core spinlock): Protects the list/heap of CPUs
@@ -103,7 +104,7 @@ public:
 	inline bool			IsLocked() const;
 
 private:
-			cpu_status	fState;
+			bool	fState;
 			bool		fLocked;
 
 	// Debug support - track lock acquisition for deadlock detection
@@ -122,7 +123,7 @@ thread_local int InterruptsBigSchedulerLocker::sLockDepth = 0;
 
 inline
 InterruptsBigSchedulerLocker::InterruptsBigSchedulerLocker()
-	: fState(B_INTERRUPTS_DISABLED), fLocked(false)
+	: fState(false), fLocked(false)
 {
 #if SCHEDULER_LOCK_DEBUG
 	// Check for potential deadlock situations
@@ -134,7 +135,9 @@ InterruptsBigSchedulerLocker::InterruptsBigSchedulerLocker()
 #endif
 
 	// Disable interrupts and store previous state
-	fState = disable_interrupts();
+	fState = are_interrupts_enabled();
+	if (fState)
+		disable_interrupts();
 	fLocked = true;
 	
 	// This locker provides the highest level of scheduler protection by disabling
@@ -166,7 +169,8 @@ InterruptsBigSchedulerLocker::~InterruptsBigSchedulerLocker()
 		memory_full_barrier();
 		
 		// Previously, this destructor unlocked all CPUEntry::fSchedulerModeLock.
-		restore_interrupts(fState);
+		if (fState)
+			enable_interrupts();
 		fLocked = false;
 
 #if SCHEDULER_LOCK_DEBUG
@@ -183,7 +187,7 @@ InterruptsBigSchedulerLocker::~InterruptsBigSchedulerLocker()
 inline bool
 InterruptsBigSchedulerLocker::InterruptsWereEnabled() const
 {
-	return (fState & B_INTERRUPTS_ENABLED) != 0;
+	return fState;
 }
 
 
@@ -218,7 +222,7 @@ inline
 ConditionalInterruptsBigSchedulerLocker::ConditionalInterruptsBigSchedulerLocker(bool shouldLock)
 {
 	if (shouldLock) {
-		fLocker = std::make_unique<InterruptsBigSchedulerLocker>();
+		fLocker.reset(new (std::nothrow) InterruptsBigSchedulerLocker());
 	}
 }
 
@@ -246,28 +250,31 @@ public:
 	inline bool			InterruptsWereEnabled() const;
 
 private:
-			cpu_status	fState;
+			bool	fState;
 };
 
 
 inline
 InterruptsLocker::InterruptsLocker()
 {
-	fState = disable_interrupts();
+	fState = are_interrupts_enabled();
+	if (fState)
+		disable_interrupts();
 }
 
 
 inline
 InterruptsLocker::~InterruptsLocker()
 {
-	restore_interrupts(fState);
+	if (fState)
+		enable_interrupts();
 }
 
 
 inline bool
 InterruptsLocker::InterruptsWereEnabled() const
 {
-	return (fState & B_INTERRUPTS_ENABLED) != 0;
+	return fState;
 }
 
 

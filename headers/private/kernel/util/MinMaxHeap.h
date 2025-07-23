@@ -82,10 +82,12 @@ public:
 
 	inline	void		RemoveMinimum();
 	inline	void		RemoveMaximum();
+	inline	void		Remove(Element* element);
 
 	inline	status_t	Insert(Element* element, Key key);
 
 private:
+			void		_Remove(MinMaxHeapLink<Element, Key>* link);
 			status_t	_GrowHeap(int minimalSize = 0);
 
 			void		_MoveUp(MinMaxHeapLink<Element, Key>* link);
@@ -459,6 +461,56 @@ MIN_MAX_HEAP_CLASS_NAME::_ChangeTree(MinMaxHeapLink<Element, Key>* link)
 	}
 
 	return false;
+}
+
+
+MIN_MAX_HEAP_TEMPLATE_LIST
+void
+MIN_MAX_HEAP_CLASS_NAME::Remove(Element* element)
+{
+	_Remove(sGetLink(element));
+}
+
+
+MIN_MAX_HEAP_TEMPLATE_LIST
+void
+MIN_MAX_HEAP_CLASS_NAME::_Remove(MinMaxHeapLink<Element, Key>* link)
+{
+	ASSERT(link->fIndex != -1);
+
+	bool deleteMin = fMaxLastElement < fMinLastElement;
+	if (fMaxLastElement == fMinLastElement)
+		deleteMin = !link->fMinTree;
+
+	Element** tree = deleteMin ? fMinElements : fMaxElements;
+	int& lastElement = deleteMin ? fMinLastElement : fMaxLastElement;
+
+	lastElement--;
+	if (lastElement == link->fIndex && deleteMin == link->fMinTree) {
+#if KDEBUG
+		link->fIndex = -1;
+#endif
+		return;
+	}
+
+	Element* last = tree[lastElement];
+	MinMaxHeapLink<Element, Key>* lastLink = sGetLink(last);
+
+	tree = link->fMinTree ? fMinElements : fMaxElements;
+	tree[link->fIndex] = last;
+	lastLink->fIndex = link->fIndex;
+	lastLink->fMinTree = link->fMinTree;
+
+#if KDEBUG
+	link->fIndex = -1;
+#endif
+
+	if (!_ChangeTree(lastLink)) {
+		if (sCompare(lastLink->fKey, link->fKey) ^ !lastLink->fMinTree)
+			_MoveUp(lastLink);
+		else
+			_MoveDown(lastLink);
+	}
 }
 
 

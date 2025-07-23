@@ -244,7 +244,7 @@ scheduler_calculate_eevdf_slice(Scheduler::ThreadData* threadData, const Schedul
 	return threadData->CalculateDynamicQuantum(cpu);
 }
 
-static void enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry* core);
+static void enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler::CoreEntry* core);
 static bool scheduler_perform_load_balance();
 static int32 scheduler_load_balance_event(timer* unused);
 
@@ -295,11 +295,11 @@ static const int32 kBenefitScoreEligFactor = 1;
 static const bigtime_t kMinUnweightedNormWorkToSteal = 1000;
 
 void
-ThreadEnqueuer::operator()(ThreadData* thread)
+ThreadEnqueuer::operator()(Scheduler::ThreadData* thread)
 {
 	Thread* t = thread->GetThread();
 	Scheduler::CPUEntry* targetCPU = NULL;
-	CoreEntry* targetCore = NULL;
+	Scheduler::CoreEntry* targetCore = NULL;
 	thread->ChooseCoreAndCPU(targetCore, targetCPU);
 	ASSERT(targetCPU != NULL);
 	ASSERT(targetCore != NULL);
@@ -323,7 +323,7 @@ scheduler_dump_thread_data(Thread* thread)
 
 
 static void
-enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry* core)
+enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler::CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	Scheduler::ThreadData* threadData = thread->scheduler_data;
@@ -333,7 +333,7 @@ enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry*
 		thread->id, threadData->GetEffectivePriority(), threadData->VirtualDeadline(), threadData->Lag(), threadData->EligibleTime(), cpu->ID());
 
 	cpu->LockRunQueue();
-	cpu->GetEevdfScheduler().AddThread((ThreadData*)threadData);
+	cpu->GetEevdfScheduler().AddThread(threadData);
 	cpu->UnlockRunQueue();
 
 	NotifySchedulerListeners(&SchedulerListener::ThreadEnqueuedInRunQueue, thread);
@@ -377,7 +377,7 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 		return;
 
 	Scheduler::CPUEntry* cpu = NULL;
-	CoreEntry* core = NULL;
+	Scheduler::CoreEntry* core = NULL;
 	data->ChooseCoreAndCPU(core, cpu);
 	ASSERT(cpu != NULL && core != NULL);
 

@@ -4,7 +4,7 @@
  * Distributed under the terms of the MIT License.
  */
 
-#include "scheduler_thread.hh"
+#include "scheduler_thread.h"
 #include "ThreadData.h"
 
 #include <util/Random.h>

@@ -239,7 +239,7 @@ CPUEntry::_UpdateMinVirtualRuntime()
 	bigtime_t oldLocalMinVR = fMinVirtualRuntime; // For tracing and as the "sticky" value
 	bigtime_t localAnchorVR;
 
-	ThreadData* head = fEevdfScheduler.PeekMinThread();
+	Scheduler::ThreadData* head = (Scheduler::ThreadData*)fEevdfScheduler.PeekMinThread();
 	if (head != NULL && !head->IsIdle()) {
 		localAnchorVR = head->VirtualRuntime();
 	} else {
@@ -274,7 +274,7 @@ CPUEntry::AddThread(ThreadData* thread)
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 	ASSERT(thread != fIdleThread); // Idle thread should not be added to the main run queue.
 
-	fEevdfScheduler.AddThread(thread);
+	fEevdfScheduler.AddThread((Scheduler::ThreadData*)thread);
 	thread->MarkEnqueued(this->Core()); // MarkEnqueued may need EEVDF context
 	atomic_add(&fTotalThreadCount, 1);
 	_UpdateMinVirtualRuntime(); // Update min_vruntime
@@ -289,7 +289,7 @@ CPUEntry::RemoveThread(ThreadData* thread)
 	ASSERT(are_interrupts_enabled() == false); // Check for holding spinlock
 
 	if (thread != fIdleThread) {
-		fEevdfScheduler.RemoveThread(thread);
+		fEevdfScheduler.RemoveThread((Scheduler::ThreadData*)thread);
 		// Caller is responsible for threadData->MarkDequeued() if it's not the idle thread
 		atomic_add(&fTotalThreadCount, -1);
 		ASSERT(atomic_get(&fTotalThreadCount) >= 0);
@@ -310,7 +310,7 @@ CPUEntry::RemoveFromQueue(ThreadData* thread, int mlfqLevel)
 
 
 
-ThreadData*
+Scheduler::ThreadData*
 CPUEntry::PeekEligibleNextThread()
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -320,17 +320,17 @@ CPUEntry::PeekEligibleNextThread()
 	// not chosen) to find the first thread (by VirtualDeadline order) that is
 	// currently eligible (system_time() >= EligibleTime()).
 	// The chosen eligibleCandidate is *not* re-added to the queue.
-	ThreadData* eligibleCandidate = NULL;
+	Scheduler::ThreadData* eligibleCandidate = NULL;
 	// Use a DoublyLinkedList to temporarily store threads popped but not chosen.
 	// This is because we don't know how many we might pop before finding an eligible one.
-	DoublyLinkedList<ThreadData> temporarilyPoppedList;
+	DoublyLinkedList<Scheduler::ThreadData> temporarilyPoppedList;
 
 	bigtime_t now = system_time();
 
 	// Iterate through the heap by popping.
 	// We are looking for the first eligible thread based on VirtualDeadline order.
 	while (!fEevdfScheduler.IsEmpty()) {
-		ThreadData* candidate = fEevdfScheduler.PopMinThread(); // Pop from actual queue
+		Scheduler::ThreadData* candidate = (Scheduler::ThreadData*)fEevdfScheduler.PopMinThread(); // Pop from actual queue
 		if (candidate == NULL) // Should not happen if IsEmpty was false
 			break;
 
@@ -354,8 +354,8 @@ CPUEntry::PeekEligibleNextThread()
 	// Re-add any threads that were popped from fEevdfScheduler but found to be ineligible.
 	// They are re-added in the order they were popped, though Add will place them
 	// correctly by deadline.
-	while (ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
-		fEevdfScheduler.AddThread(toReAdd);
+	while (Scheduler::ThreadData* toReAdd = temporarilyPoppedList.RemoveHead()) {
+		fEevdfScheduler.AddThread((ThreadData*)toReAdd);
 		// fEevdfScheduler.Add() calls _UpdateMinVirtualRuntime if the new item
 		// becomes the head or if the queue was empty. This should cover most cases.
 	}
@@ -378,8 +378,8 @@ CPUEntry::PeekEligibleNextThread()
 }
 
 
-ThreadData*
-CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
+Scheduler::ThreadData*
+CPUEntry::ChooseNextThread(Scheduler::ThreadData* oldThread, bool /*putAtBack*/, int /*oldMlfqLevel*/)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(are_interrupts_enabled() == false); // Caller must hold the run queue lock.
@@ -389,19 +389,19 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 	// re-inserted into the EEVDF run queue.
 	if (oldThread != NULL && oldThread->GetThread()->state == B_THREAD_READY
 		&& oldThread->Core() == this->Core() && oldThread != fIdleThread) {
-		fEevdfScheduler.AddThread(oldThread);
+		fEevdfScheduler.AddThread((ThreadData*)oldThread);
 		_UpdateMinVirtualRuntime();
 	}
 
-	ThreadData* nextThreadData = NULL;
+	Scheduler::ThreadData* nextThreadData = NULL;
 
 	// Check for deadline-scheduled threads
-	ThreadData* deadlineThread = NULL;
+	Scheduler::ThreadData* deadlineThread = NULL;
 	bigtime_t earliestDeadline = -1;
 
-	std::vector<ThreadData*> poppedThreads;
+	std::vector<Scheduler::ThreadData*> poppedThreads;
 	while (!fEevdfScheduler.IsEmpty()) {
-		ThreadData* thread = fEevdfScheduler.PopMinThread();
+		Scheduler::ThreadData* thread = (Scheduler::ThreadData*)fEevdfScheduler.PopMinThread();
 		poppedThreads.push_back(thread);
 		if (thread->fDeadline > 0) {
 			if (deadlineThread == NULL || thread->fDeadline < earliestDeadline) {
@@ -413,15 +413,15 @@ CPUEntry::ChooseNextThread(ThreadData* oldThread, bool /*putAtBack*/, int /*oldM
 
 	if (deadlineThread != NULL) {
 		nextThreadData = deadlineThread;
-		for (ThreadData* thread : poppedThreads) {
+		for (Scheduler::ThreadData* thread : poppedThreads) {
 			if (thread != nextThreadData) {
-				fEevdfScheduler.AddThread(thread);
+				fEevdfScheduler.AddThread((ThreadData*)thread);
 			}
 		}
 		_UpdateMinVirtualRuntime();
 	} else {
-		for (ThreadData* thread : poppedThreads) {
-			fEevdfScheduler.AddThread(thread);
+		for (Scheduler::ThreadData* thread : poppedThreads) {
+			fEevdfScheduler.AddThread((ThreadData*)thread);
 		}
 		nextThreadData = PeekEligibleNextThread();
 	}
@@ -899,7 +899,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	B_INITIALIZE_SPINLOCK(&fCPULock);
+	fCPULock.Init("core cpu lock");
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }
@@ -1093,10 +1093,27 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 		{
 			WriteSpinLocker heapsLock(gCoreHeapsShardLock[this->ID() % kNumCoreLoadHeapShards]);
 			if (this->GetMinMaxHeapLink()->fIndex != -1) {
-				if (fHighLoad)
-					gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
-				else
-					gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].Remove(this);
+				if (fHighLoad) {
+					CoreEntry* entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				} else {
+					CoreEntry* entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				}
 			}
 		}
 		if (fPackage != NULL) {
@@ -1197,10 +1214,27 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (wasInAHeap) {
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
-		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
-		else
-			Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
+		if (highLoadStatusWhenLastInHeap) {
+			CoreEntry* entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		} else {
+			CoreEntry* entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		}
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.
@@ -1327,9 +1361,11 @@ PackageEntry::RemoveIdleCore(CoreEntry* core)
 /* static */ void
 DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
-	SpinLockGuard coreCpuListLock(entry->fCPULock);
-	int32 idleCpuCount = entry->fIdleCPUCount;
-	coreCpuListLock.Unlock();
+	int32 idleCpuCount;
+	{
+		SpinLockGuard coreCpuListLock(entry->fCPULock);
+		idleCpuCount = entry->fIdleCPUCount;
+	}
 
 	const char* typeStr = "UNK";
 	switch (entry->fCoreType) {
@@ -1429,7 +1465,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 	for (int32 shardIdx = 0; shardIdx < Scheduler::kNumCoreLoadHeapShards; shardIdx++) {
 		kprintf("---- Shard %" B_PRId32 " (Low Load) ----\n", shardIdx);
 		WriteSpinLocker shardLocker(Scheduler::gCoreHeapsShardLock[shardIdx]); // Acquire lock for this shard
-		if (Scheduler::gCoreLoadHeapShards[shardIdx].Count() > 0) {
+		if (Scheduler::gCoreLoadHeapShards[shardIdx].PeekMinimum() != NULL) {
 			Scheduler::gCoreLoadHeapShards[shardIdx].Dump(); // Calls DumpCoreLoadHeapEntry
 		} else {
 			kprintf("    (empty)\n");
@@ -1440,7 +1476,7 @@ dump_cpu_heap(int /* argc */, char** /* argv */)
 		// shardLocker is still held, no need to re-acquire for the same shard's other heap
 		// unless Dump() itself releases and re-acquires, which it shouldn't.
 		// For now, assume Dump() doesn't alter lock state.
-		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].Count() > 0) {
+		if (Scheduler::gCoreHighLoadHeapShards[shardIdx].PeekMinimum() != NULL) {
 			Scheduler::gCoreHighLoadHeapShards[shardIdx].Dump();
 		} else {
 			kprintf("    (empty)\n");
@@ -1681,9 +1717,9 @@ Scheduler::SelectTargetCPUForIRQ(CoreEntry* targetCore, int32 irqVector, int32 i
 
 void Scheduler::init_debug_commands()
 {
-	if (sDebugCPUHeap.Count() == 0)
+	if (sDebugCPUHeap.PeekRoot() == NULL)
 		new(&sDebugCPUHeap) CPUPriorityHeap(smp_get_num_cpus());
-	if (sDebugCoreHeap.Count() == 0)
+	if (sDebugCoreHeap.PeekMinimum() == NULL)
 		new(&sDebugCoreHeap) CoreLoadHeap(smp_get_num_cpus());
 
 	add_debugger_command_etc("eevdf_run_queue", (debugger_command_hook)dump_run_queue,

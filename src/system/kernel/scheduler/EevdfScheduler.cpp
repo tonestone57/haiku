@@ -1,4 +1,5 @@
 #include "EevdfScheduler.h"
+#include <support/SupportDefs.h>
 
 bool EevdfScheduler::AddThread(ThreadData* thread) {
     if (!_queue.Add(thread))

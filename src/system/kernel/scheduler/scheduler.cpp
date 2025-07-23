@@ -40,7 +40,6 @@
 #include "scheduler_profiler.h"
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
-#include "scheduler_team.h"
 #include "scheduler_weights.h"
 #include "EevdfScheduler.h"
 #include <thread_defs.h>

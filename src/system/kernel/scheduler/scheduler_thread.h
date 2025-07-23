@@ -41,6 +41,7 @@
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
 #include "scheduler_spin_lock.h"
+#include "ThreadData.h"
 #include <kernel/scheduler.h>
 
 namespace Scheduler {

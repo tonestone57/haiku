@@ -3,6 +3,7 @@
 
 #include "ThreadPriorityQueue.h"
 #include "SimpleHashMap.h"
+#include "ThreadData.h"
 
 class EevdfScheduler {
 public:

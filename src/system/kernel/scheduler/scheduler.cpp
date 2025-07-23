@@ -243,28 +243,6 @@ void remove_team_scheduler_data_from_global_list(TeamSchedulerData* tsd)
 
 }	// namespace Scheduler
 
-status_t
-_user_get_thread_nice_value(thread_id thid, int* niceValue)
-{
-	// TODO: implement
-	return B_OK;
-}
-
-
-status_t
-_user_set_thread_nice_value(thread_id thid, int niceValue)
-{
-	// TODO: implement
-	return B_OK;
-}
-
-
-bigtime_t
-_user_estimate_max_scheduling_latency(thread_id thid)
-{
-	// TODO: implement
-	return 0;
-}
 
 
 status_t
@@ -327,33 +305,6 @@ static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
 
 static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
 
-void
-maybe_relocate_irqs(Thread* thread)
-{
-    if (!thread || thread_is_idle_thread(thread)) return;
-    if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;
-
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-    if (!cpu) return;
-
-    cpu_ent* cpuStruct = &gCPU[cpu->ID()];
-    SpinLocker irqLock(cpuStruct->irqs_lock);
-
-    irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuStruct->irqs);
-    while (irq) {
-        if (irq->load > IRQ_INTERFERENCE_LOAD_THRESHOLD) {
-            Scheduler::CPUEntry* alt = find_quiet_cpu_for_irq(irq, cpu);
-            if (alt && alt != cpu) {
-                bigtime_t now = system_time();
-                if (now - atomic_get64(&gIrqLastFollowMoveTime[irq->irq]) > DYNAMIC_IRQ_MOVE_COOLDOWN) {
-                    assign_io_interrupt_to_cpu(irq->irq, alt->ID());
-                    atomic_set64(&gIrqLastFollowMoveTime[irq->irq], now);
-                }
-            }
-        }
-        irq = (irq_assignment*)list_get_next_item(&cpuStruct->irqs, irq);
-    }
-}
 
 static Scheduler::CPUEntry*
 _find_idle_cpu_on_core(CoreEntry* core)
@@ -500,44 +451,6 @@ scheduler_enqueue_in_run_queue(Thread* thread)
 }
 
 
-void
-scheduler_enqueue(Thread* thread)
-{
-    ASSERT(thread != NULL);
-    ThreadData* data = thread->scheduler_data;
-    if (!data) return;
-
-    Scheduler::CPUEntry* cpu = NULL;
-    CoreEntry* core = NULL;
-    data->ChooseCoreAndCPU(core, cpu);
-    ASSERT(cpu != NULL && core != NULL);
-
-    InterruptsSpinLocker locker(thread->scheduler_lock);
-
-    if (data->IsIdle()) {
-        if (thread->state != B_THREAD_RUNNING)
-            thread->state = B_THREAD_READY;
-        return;
-    }
-
-    data->UpdateEevdfParameters(cpu, true, false);
-    data->MarkEnqueued(core);
-
-    cpu->LockRunQueue();
-    cpu->AddThread(data);
-    cpu->UnlockRunQueue();
-
-    Thread* running = gCPU[cpu->ID()].running_thread;
-    if (!running || thread_is_idle_thread(running)) {
-        gCPU[cpu->ID()].invoke_scheduler = true;
-    } else {
-        ThreadData* runningData = running->scheduler_data;
-        if (system_time() >= data->EligibleTime() &&
-            data->VirtualDeadline() < runningData->VirtualDeadline()) {
-            smp_send_ici(cpu->ID(), SMP_MSG_RESCHEDULE, 0, 0, 0, NULL, SMP_MSG_FLAG_ASYNC);
-        }
-    }
-}
 
 
 // Sets the priority of a thread.
@@ -663,32 +576,11 @@ scheduler_reschedule_ici()
 }
 
 
-static inline void
-stop_cpu_timers(Thread* fromThread, Thread* toThread)
-{
-	SpinLocker teamLocker(&fromThread->team->time_lock);
-	SpinLocker threadLocker(&fromThread->time_lock);
-	if (fromThread->HasActiveCPUTimeUserTimers() || fromThread->team->HasActiveCPUTimeUserTimers())
-		user_timer_stop_cpu_timers(fromThread, toThread);
-}
-
-
-static inline void
-continue_cpu_timers(Thread* thread, cpu_ent* cpu)
-{
-	SpinLocker teamLocker(&thread->team->time_lock);
-	SpinLocker threadLocker(&thread->time_lock);
-	if (thread->HasActiveCPUTimeUserTimers() || thread->team->HasActiveCPUTimeUserTimers())
-		user_timer_continue_cpu_timers(thread, cpu->previous_thread);
-}
-
-
 static void
 thread_resumes(Thread* thread)
 {
 	cpu_ent* cpu = thread->cpu;
 	release_spinlock(&cpu->previous_thread->scheduler_lock);
-	continue_cpu_timers(thread, cpu);
 	if ((thread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0)
 		user_debug_thread_scheduled(thread);
 }
@@ -700,28 +592,6 @@ scheduler_new_thread_entry(Thread* thread)
 	thread_resumes(thread);
 	SpinLocker locker(thread->time_lock);
 	thread->last_time = system_time();
-}
-
-
-static inline void
-switch_thread(Thread* fromThread, Thread* toThread)
-{
-	if ((fromThread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0)
-		user_debug_thread_unscheduled(fromThread);
-
-	stop_cpu_timers(fromThread, toThread);
-
-	cpu_ent* cpu = fromThread->cpu;
-	toThread->previous_cpu = toThread->cpu = cpu;
-	fromThread->cpu = NULL;
-
-	cpu->running_thread = toThread;
-	cpu->previous_thread = fromThread;
-
-	arch_thread_set_current_thread(toThread);
-	arch_thread_context_switch(fromThread, toThread);
-
-	thread_resumes(fromThread);
 }
 
 
@@ -1323,79 +1193,6 @@ reschedule(int32 nextState)
 // Define constants for Mechanism A
 #define IRQ_INTERFERENCE_LOAD_THRESHOLD (kMaxLoad / 20) // e.g., 50 for kMaxLoad = 1000
 #define DYNAMIC_IRQ_MOVE_COOLDOWN (150000)          // 150ms
-
-
-
-void
-scheduler_reschedule(int32 nextState)
-{
-    ASSERT(!are_interrupts_enabled());
-
-    int32 cpuID = smp_get_current_cpu();
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(cpuID);
-    Thread* current = thread_get_current_thread();
-    ThreadData* currentData = current->scheduler_data;
-
-    gCPU[cpuID].invoke_scheduler = false;
-    current->state = nextState;
-
-    if (currentData && !currentData->IsIdle()) {
-        bigtime_t runtime = currentData->TimeUsedInCurrentQuantum();
-
-        int32 weight = scheduler_priority_to_weight(current, cpu);
-        if (weight <= 0) weight = 1;
-
-        uint32 coreCap = cpu->Core()->PerformanceCapacity() ?: SCHEDULER_NOMINAL_CAPACITY;
-        bigtime_t contribution = (runtime * coreCap * SCHEDULER_WEIGHT_SCALE) / (SCHEDULER_NOMINAL_CAPACITY * weight);
-
-        currentData->AddVirtualRuntime(contribution);
-        currentData->AddLag(-contribution);
-    }
-
-    bool shouldReEnqueue = false;
-    switch (nextState) {
-        case B_THREAD_RUNNING:
-        case B_THREAD_READY:
-            shouldReEnqueue = !currentData->IsIdle();
-            break;
-        case THREAD_STATE_FREE_ON_RESCHED:
-            currentData->Dies();
-            break;
-        default:
-            currentData->GoesAway();
-            break;
-    }
-
-    ThreadData* nextData = nullptr;
-    Thread* nextThread = nullptr;
-
-cpu->LockRunQueue();
-    if (gCPU[cpuID].disabled) {
-        nextData = cpu->PeekIdleThread();
-    } else {
-        if (shouldReEnqueue && currentData->Core() == cpu->Core()) {
-            currentData->Continues();
-            currentData->UpdateEevdfParameters(cpu, false, true);
-            cpu->AddThread(currentData);
-        }
-        nextData = cpu->ChooseNextThread(/*skip=*/nullptr, false, 0);
-    }
-    cpu->UnlockRunQueue();
-
-    if (!nextData) panic("scheduler_reschedule: No thread to switch to!");
-
-    nextThread = nextData->GetThread();
-    nextThread->state = B_THREAD_RUNNING;
-    nextData->StartCPUTime();
-    nextData->StartQuantum(nextData->SliceDuration());
-
-    gCPU[cpuID].running_thread = nextThread;
-    gCPU[cpuID].previous_thread = current;
-
-    if (nextThread != current) {
-        switch_thread(current, nextThread);
-    }
-}
 
 
 status_t
@@ -2727,57 +2524,3 @@ scheduler_perform_load_balance()
 	return migrationPerformed;
 }
 
-void
-static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current)
-{
-    Scheduler::CPUEntry* best = nullptr;
-    float bestScore = 1e9;
-    for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-        auto* cpu = Scheduler::CPUEntry::GetCPU(i);
-        if (!cpu || cpu == current || gCPU[i].disabled) continue;
-
-        Thread* t = gCPU[i].running_thread;
-        if (t && t->priority >= B_URGENT_DISPLAY_PRIORITY) continue;
-
-        int32 targetLoad = cpu->CalculateTotalIrqLoad();
-        int32 dynamicMax = Scheduler::scheduler_get_dynamic_max_irq_target_load(cpu, gModeMaxTargetCpuIrqLoad);
-
-        if (targetLoad + irq->load >= dynamicMax) continue;
-
-        float score = targetLoad * 0.7f + cpu->GetInstantaneousLoad() * 0.3f;
-        if (cpu->Core()->Type() == CORE_TYPE_LITTLE) score *= 0.8f;
-
-        if (score < bestScore) {
-            best = cpu;
-            bestScore = score;
-        }
-    }
-    return best;
-}
-
-void maybe_relocate_irqs(Thread* thread)
-{
-    if (!thread || thread_is_idle_thread(thread)) return;
-    if (thread->priority < B_URGENT_DISPLAY_PRIORITY) return;
-
-    Scheduler::CPUEntry* cpu = Scheduler::CPUEntry::GetCPU(thread->cpu->cpu_num);
-    if (!cpu) return;
-
-    cpu_ent* cpuStruct = &gCPU[cpu->ID()];
-    SpinLocker irqLock(cpuStruct->irqs_lock);
-
-    irq_assignment* irq = (irq_assignment*)list_get_first_item(&cpuStruct->irqs);
-    while (irq) {
-        if (irq->load > IRQ_INTERFERENCE_LOAD_THRESHOLD) {
-            Scheduler::CPUEntry* alt = find_quiet_cpu_for_irq(irq, cpu);
-            if (alt && alt != cpu) {
-                bigtime_t now = system_time();
-                if (now - atomic_get64(&gIrqLastFollowMoveTime[irq->irq]) > DYNAMIC_IRQ_MOVE_COOLDOWN) {
-                    assign_io_interrupt_to_cpu(irq->irq, alt->ID());
-                    atomic_set64(&gIrqLastFollowMoveTime[irq->irq], now);
-                }
-            }
-        }
-        irq = (irq_assignment*)list_get_next_item(&cpuStruct->irqs, irq);
-    }
-}

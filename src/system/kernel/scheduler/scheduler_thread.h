@@ -36,7 +36,6 @@
 // Note: <util/MultiHashTable.h> is included in scheduler.cpp, not directly here.
 
 // Local Scheduler Headers
-#include "scheduler_common.h"
 #include "scheduler_cpu.h"     // Forward declares CoreEntry, CPUEntry
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
@@ -47,7 +46,7 @@
 
 
 extern "C" {
-#include <scheduling/scheduler_common.h>
+#include "scheduler_common.h"
 }
 
 namespace Scheduler {

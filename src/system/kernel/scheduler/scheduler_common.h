@@ -281,7 +281,7 @@ static constexpr sched_time_t kMaxEffectiveQuantum = 100000;  // 100 ms
 static constexpr float kInstantLoadEWMAAlpha = 0.4f;
 
 // --- Scheduler Operation Mode Enums ---
-enum class SchedulerLoadBalancePolicy : uint32_t {
+enum SchedulerLoadBalancePolicy : uint32_t {
 	SPREAD = 0,      // Spread load across cores
 	CONSOLIDATE = 1  // Consolidate load to fewer cores
 };

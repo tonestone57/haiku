@@ -456,7 +456,6 @@ CPUEntry::SetIdleThread(ThreadData* idleThread)
 	fIdleThread = idleThread;
 	// Typically, idle threads are not added to the main EEVDF run queue.
 	// They are special and picked when no other eligible thread is available.
-	// So, not modifying fTotalThreadCount or fEevdfRunQueue here.
 	// Their `thread->scheduler_data->fCore` should be set correctly.
 	if (fIdleThread->Core() == NULL) {
 		// This might happen if idle threads are initialized very early.
@@ -1407,7 +1406,6 @@ dump_run_queue(int argc, char** argv)
 
 	if (specificCpu != -1) {
 		if (!gCPU[specificCpu].disabled) {
-			//DebugDumper::DumpEevdfRunQueue(&gCPUEntries[specificCpu], maxThreads);
 		} else {
 			kprintf("CPU %" B_PRId32 " is disabled.\n", specificCpu);
 		}
@@ -1415,7 +1413,6 @@ dump_run_queue(int argc, char** argv)
 		int32 cpuCount = smp_get_num_cpus();
 		for (int32 i = 0; i < cpuCount; i++) {
 			if (gCPUEnabled.GetBit(i)) {
-				//DebugDumper::DumpEevdfRunQueue(&gCPUEntries[i], maxThreads);
 			}
 		}
 	}

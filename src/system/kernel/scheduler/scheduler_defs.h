@@ -145,6 +145,11 @@ static_assert(kLoadBalanceIntervalDecreaseFactor > 0.0 && kLoadBalanceIntervalDe
 #define DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE 300      // 30% load difference
 #define DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY 3           // Max IRQs to move
 
+#define SCHED_LOAD_BALANCE_CONSOLIDATE 1
+#define DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING 0.40f
+#define DEFAULT_IRQ_TARGET_FACTOR_POWER_SAVING 0.5f
+#define DEFAULT_MAX_TARGET_CPU_IRQ_LOAD_POWER_SAVING 500
+
 // Validate IRQ balancing parameters at compile time
 static_assert(DEFAULT_IRQ_BALANCE_CHECK_INTERVAL > 0, "IRQ balance interval must be positive");
 static_assert(DEFAULT_IRQ_TARGET_FACTOR >= 0.0f && DEFAULT_IRQ_TARGET_FACTOR <= 1.0f, 

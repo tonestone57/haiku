@@ -6,6 +6,8 @@
 
 class EevdfScheduler {
 public:
+    EevdfScheduler() : _queue(_threadMap) {}
+
     void Init(int capacity) {
         _threadMap.Init(capacity);
     }
@@ -20,8 +22,8 @@ public:
     void Clear();
 
 private:
-    ThreadPriorityQueue<ThreadData*> _queue;
     SimpleHashMap<ThreadData*, int> _threadMap;
+    ThreadPriorityQueue<ThreadData*> _queue;
 };
 
 #endif // EEVDF_SCHEDULER_H

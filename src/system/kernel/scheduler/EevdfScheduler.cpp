@@ -2,53 +2,19 @@
 #include <support/SupportDefs.h>
 
 bool EevdfScheduler::AddThread(ThreadData* thread) {
-    if (!_queue.Add(thread))
-        return false;
-
-    int index = _queue.Size(); // The inserted position
-    _threadMap.Put(thread, index);
-    return true;
+    return _queue.Add(thread);
 }
 
 bool EevdfScheduler::RemoveThread(ThreadData* thread) {
-    int index;
-    if (!_threadMap.Get(thread, index))
-        return false;
-
-    int lastIndex = _queue.Size();
-    ThreadData* lastThread = _queue.PopMinimum(); // Replaces root with last
-
-    if (index != lastIndex && lastThread != nullptr) {
-        _threadMap.Put(lastThread, index); // Update map with new index
-    }
-
-    _threadMap.Remove(thread);
-    return true;
+    return _queue.Remove(thread);
 }
 
 bool EevdfScheduler::UpdateThread(ThreadData* thread) {
-    int index;
-    if (!_threadMap.Get(thread, index))
-        return false;
-
-    bigtime_t newDeadline = thread->VirtualDeadline();
-    ThreadData* currentThread = _queue.PeekMinimum();
-    if (currentThread == nullptr)
-        return false;
-
-    if (newDeadline < currentThread->VirtualDeadline()) {
-        _queue.Add(thread); // Move up in heap
-    } else if (newDeadline > currentThread->VirtualDeadline()) {
-        _queue.Add(thread); // Move down in heap
-    }
-    return true;
+    return _queue.Update(thread);
 }
 
 ThreadData* EevdfScheduler::PopMinThread() {
-    ThreadData* thread = _queue.PopMinimum();
-    if (thread)
-        _threadMap.Remove(thread);
-    return thread;
+    return _queue.PopMinimum();
 }
 
 ThreadData* EevdfScheduler::PeekMinThread() const {

@@ -87,10 +87,8 @@ private:
 };
 
 
-#if KDEBUG
 static CPUPriorityHeap sDebugCPUHeap;
 static CoreLoadHeap sDebugCoreHeap;
-#endif
 
 
 // Threshold for CoreEntry load changes to trigger global heap updates.
@@ -230,24 +228,6 @@ CPUEntry::Stop()
 		irq = (irq_assignment*)list_get_first_item(&entry->irqs);
 	}
 	locker.Unlock();
-
-	// Also migrate any threads that might still be in the run queue.
-	DoublyLinkedList<ThreadData> threadsToReenqueue;
-	LockRunQueue();
-	while (true) {
-		ThreadData* threadData = fEevdfScheduler.PopMinThread();
-		if (threadData == NULL)
-			break;
-		threadData->MarkDequeued();
-		if (threadData->Core() == fCore)
-			threadData->UnassignCore(false);
-		threadsToReenqueue.Add(threadData);
-	}
-	UnlockRunQueue();
-
-	while (ThreadData* threadData = threadsToReenqueue.RemoveHead()) {
-		scheduler_enqueue_in_run_queue(threadData->GetThread());
-	}
 }
 
 
@@ -1234,10 +1214,27 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (wasInAHeap) {
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
-		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
-		else
-			Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
+		if (highLoadStatusWhenLastInHeap) {
+			CoreEntry* entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		} else {
+			CoreEntry* entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		}
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.
@@ -1257,7 +1254,7 @@ CoreEntry::_UnassignThread(Thread* thread, void* data)
 {
 	CoreEntry* core = static_cast<CoreEntry*>(data);
 	ThreadData* threadData = thread->scheduler_data;
-	if (threadData != NULL && threadData->Core() == core)
+	if (threadData != NULL && threadData->Core() == core && thread->pinned_to_cpu == 0)
 		threadData->UnassignCore(thread->state == B_THREAD_RUNNING);
 }
 

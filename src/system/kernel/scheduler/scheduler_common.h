@@ -115,18 +115,6 @@ namespace Scheduler {
 //        `CoreEntry::_UpdateLoad()`.
 //      This mechanism allows `CoreEntry::fLoad` (used for balancing) to react more
 //      quickly to significant changes in thread demand on the core.
-//
-// 7. ThreadData EEVDF parameters (fLag, fVirtualDeadline, fVirtualRuntime)
-//    - Purpose: These are not direct "load" metrics but are central to the EEVDF
-//      scheduling algorithm for determining which thread should run next and when.
-//    - fLag: Represents the normalized work deficit or surplus of a thread. A positive
-//      lag means the thread has received less service than its fair share.
-//    - fVirtualRuntime: A thread's accumulated runtime, normalized by its weight.
-//      Used to track progress relative to other threads.
-//    - fVirtualDeadline: The time by which a thread should ideally be scheduled to run
-//      next to maintain fairness. It's a key factor in the EEVDF priority queue.
-//    - Usage: These are the primary inputs for the `EevdfScheduler` priority queue,
-//      which determines the next thread to run on a CPU.
 
 
 // --- Debugging and Tracing Macros ---

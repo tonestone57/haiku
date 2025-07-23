@@ -51,7 +51,7 @@ static const float kPowerSavingActiveThreshold = 0.05f;
 static void
 power_saving_switch_to_mode()
 {
-	gSchedulerLoadBalancePolicy = CONSOLIDATE;
+	gSchedulerLoadBalancePolicy = Scheduler::CONSOLIDATE;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL * 2;

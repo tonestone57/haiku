@@ -372,8 +372,9 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 		int32 cpuId = chosenCPU->ID();
 		if (cpuId >= 0 && cpuId < smp_get_num_cpus()) {
 			if (gCPU[cpuId].running_thread == NULL ||
-				thread_is_idle_thread(gCPU[cpuId].running_thread) ||
-				fThread->cpu != &gCPU[cpuId]) {
+				thread_is_idle_thread(gCPU[cpuId].running_thread)) {
+				rescheduleNeeded = true;
+			} else if (fThread->cpu != &gCPU[cpuId]) {
 				rescheduleNeeded = true;
 			}
 		}
@@ -556,17 +557,17 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
 
     // Safe calculation to prevent division by zero and overflow
     bigtime_t baseSlice = SafeMultiply<bigtime_t>(
-        SchedulerConstants::SCHEDULER_TARGET_LATENCY_SAFE,
-        SchedulerConstants::SCHEDULER_WEIGHT_SCALE_SAFE,
+        SchedulerConstants::SCHEDULER_TARGET_LATENCY,
+        SchedulerConstants::SCHEDULER_WEIGHT_SCALE,
         LLONG_MAX
     ) / weight;
 
     // Ensure reasonable bounds on baseSlice
-    baseSlice = std::max(SchedulerConstants::MIN_SLICE_GRANULARITY,
-                        std::min(baseSlice, SchedulerConstants::MAX_SLICE_DURATION));
+    baseSlice = std::max(SchedulerConstants::kMinSliceGranularity,
+                        std::min(baseSlice, SchedulerConstants::kMaxSliceDuration));
 
     if (IsRealTime()) {
-        baseSlice = std::max(baseSlice, SchedulerConstants::RT_MIN_GUARANTEED_SLICE_SAFE);
+        baseSlice = std::max(baseSlice, SchedulerConstants::RT_MIN_GUARANTEED_SLICE);
     }
 
     bigtime_t finalSlice = baseSlice;
@@ -575,18 +576,18 @@ ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
     if (!IsRealTime() && IsLikelyIOBound()) {
         bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
         if (avgBurst > 0 && avgBurst < finalSlice) {
-            finalSlice = std::max(SchedulerConstants::MIN_SLICE_GRANULARITY, avgBurst + avgBurst / 4);
+            finalSlice = std::max(SchedulerConstants::kMinSliceGranularity, avgBurst + avgBurst / 4);
         }
     }
 
     // Dynamic floor adjustment for high CPU contention
-    if (contextCpu != nullptr && contextCpu->GetEevdfScheduler().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD_SAFE) {
-        finalSlice = std::max(finalSlice, (bigtime_t)(SchedulerConstants::MIN_SLICE_GRANULARITY * SchedulerConstants::HIGH_CONTENTION_SLICE_FACTOR));
+    if (contextCpu != nullptr && contextCpu->GetEevdfScheduler().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD) {
+        finalSlice = std::max(finalSlice, (bigtime_t)(SchedulerConstants::kMinSliceGranularity * SchedulerConstants::HIGH_CONTENTION_MIN_SLICE_FACTOR));
     }
 
     // Final clamping
-    finalSlice = std::max(IsRealTime() ? SchedulerConstants::RT_MIN_GUARANTEED_SLICE_SAFE : SchedulerConstants::MIN_SLICE_GRANULARITY,
-                         std::min(finalSlice, SchedulerConstants::MAX_SLICE_DURATION));
+    finalSlice = std::max(IsRealTime() ? SchedulerConstants::RT_MIN_GUARANTEED_SLICE : SchedulerConstants::kMinSliceGranularity,
+                         std::min(finalSlice, SchedulerConstants::kMaxSliceDuration));
 
     // Update cache
     fCachedSlice.store(finalSlice, std::memory_order_release);

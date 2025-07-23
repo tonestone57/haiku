@@ -190,7 +190,7 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SPREAD;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = Scheduler::SPREAD;
 float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
@@ -1144,7 +1144,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	gCurrentMode = sSchedulerModes[mode];
 
 	// gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
-	gSchedulerLoadBalancePolicy = SPREAD;
+	gSchedulerLoadBalancePolicy = Scheduler::SPREAD;
 	gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 	if (gCurrentMode->switch_to_mode != NULL) {
@@ -1152,7 +1152,7 @@ scheduler_set_operation_mode(scheduler_mode mode)
 	} else {
 		if (mode == SCHEDULER_MODE_POWER_SAVING) {
 			// gKernelKDistFactor = 0.6f; // REMOVED
-			gSchedulerLoadBalancePolicy = CONSOLIDATE;
+			gSchedulerLoadBalancePolicy = Scheduler::CONSOLIDATE;
 			gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 		}
 	}
@@ -1975,7 +1975,7 @@ select_thread_to_migrate(CPUEntry* sourceCPU, CoreEntry* finalTargetCore,
 		const bigtime_t E_TO_P_BONUS_DEFAULT = SCHEDULER_TARGET_LATENCY * 2;
 		const bigtime_t P_TO_E_BONUS_EPREF_PS = SCHEDULER_TARGET_LATENCY * 4;
 
-		if (gSchedulerLoadBalancePolicy == SCHEDULER_LOAD_BALANCE_SPREAD) {
+		if (gSchedulerLoadBalancePolicy == Scheduler::SPREAD) {
 			if (taskIsPCritical) {
 				if (sourceType == CORE_TYPE_LITTLE && (targetType == CORE_TYPE_BIG || targetType == CORE_TYPE_UNIFORM_PERFORMANCE)) {
 					typeCompatibilityBonus += E_TO_P_BONUS_PCRITICAL;
@@ -2136,32 +2136,46 @@ scheduler_perform_load_balance()
 		sourceCoreCandidate->ID(), sourceCoreCandidate->GetLoad(),
 		targetCoreCandidate->ID(), targetCoreCandidate->GetLoad(), blAwareLoadDifference);
 
-	Scheduler::CPUEntry* sourceCPU = _scheduler_select_cpu_on_core(sourceCoreCandidate, true, NULL);
+	Scheduler::CPUEntry* sourceCPU = NULL;
+	Scheduler::CPUEntry* targetCPU = NULL;
+	CoreEntry* finalTargetCore = NULL;
+
+	Scheduler::CPUEntry* idleTargetCPUOnTargetCore = _find_idle_cpu_on_core(targetCoreCandidate);
+	if (idleTargetCPUOnTargetCore != NULL) {
+		TRACE_SCHED("LoadBalance: TargetCore %" B_PRId32 " has an idle CPU: %" B_PRId32 "\n",
+			targetCoreCandidate->ID(), idleTargetCPUOnTargetCore->ID());
+	}
+
+	if (!select_load_balance_cpus(sourceCoreCandidate, targetCoreCandidate,
+			finalTargetCore, sourceCPU, idleTargetCPUOnTargetCore)) {
+		return migrationPerformed;
+	}
+
 	if (sourceCPU == NULL) {
 		TRACE("LoadBalance (EEVDF): Could not select a source CPU on core %" B_PRId32 ".\n", sourceCoreCandidate->ID());
 		return false;
 	}
 
 	Scheduler::ThreadData* threadToMove = NULL;
-	if (!select_thread_to_migrate(sourceCPU, targetCoreCandidate,
-			_find_idle_cpu_on_core(targetCoreCandidate), threadToMove)) {
+	if (!select_thread_to_migrate(sourceCPU, finalTargetCore,
+			idleTargetCPUOnTargetCore, threadToMove)) {
 		return migrationPerformed;
 	}
 
-	Scheduler::CPUEntry* targetCPU = _scheduler_select_cpu_on_core(targetCoreCandidate, false, threadToMove);
+	targetCPU = _scheduler_select_cpu_on_core(finalTargetCore, false, threadToMove);
 	if (targetCPU == NULL || targetCPU == sourceCPU) {
 		if (threadToMove != NULL) {
 			sourceCPU->GetEevdfScheduler().AddThread(threadToMove);
 		}
 		sourceCPU->UnlockRunQueue();
 		TRACE("LoadBalance (EEVDF): No suitable target CPU found for thread %" B_PRId32 " on core %" B_PRId32 " or target is source.\n",
-			threadToMove->GetThread()->id, targetCoreCandidate->ID());
+			threadToMove->GetThread()->id, finalTargetCore->ID());
 		return false;
 	}
 
-	int32 threadCount = sourceCPU->GetTotalThreadCount();
-	atomic_add(&threadCount, -1);
-	ASSERT(sourceCPU->GetTotalThreadCount() >=0);
+		int32 threadCount = sourceCPU->GetTotalThreadCount();
+		atomic_add(&threadCount, -1);
+		ASSERT(sourceCPU->GetTotalThreadCount() >=0);
 	sourceCPU->_UpdateMinVirtualRuntime();
 
 	threadToMove->MarkDequeued();
@@ -2197,7 +2211,7 @@ scheduler_perform_load_balance()
 	migrationPerformed = true;
 
 	if (threadToMove->Core() != sourceCPU->Core()) {
-		int32 localIrqList[MAX_AFFINITIZED_IRQS_PER_THREAD];
+		int32 localIrqList[ThreadData::MAX_AFFINITIZED_IRQS_PER_THREAD];
 		int8 localIrqCount = 0;
 		thread_id migratedThId = threadToMove->GetThread()->id;
 

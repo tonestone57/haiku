@@ -33,7 +33,8 @@
  *      individual thread's scheduler-specific data (ThreadData) and state during
  *      transitions. Typically held when a specific thread's state is being
  *      directly manipulated by the scheduler.
- *    - CPUEntry::fQueueLock (per-CPU spinlock): Protects the EEVDF run queue
+ *    - CPUEntry::fQueueLock (per-CPU spinlock): Protects the MLFQ run queues
+ *      (fMlfq) and related counters (fMlfqHighestNonEmptyLevel, fTotalThreadCount)
  *      on a specific CPU. Acquired when threads are added/removed from run queues
  *      or when the queues are inspected.
  *    - CoreEntry::fCPULock (per-core spinlock): Protects the list/heap of CPUs

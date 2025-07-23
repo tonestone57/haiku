@@ -863,12 +863,16 @@ analyze_scheduling(bigtime_t from, bigtime_t until,
 
 				thread->lastTime = entry->Time();
 				thread->state = PREEMPTED;
-			} else if (thread->state == RUNNING) {
+
+		       } else if (thread->state == RUNNING) {
 				// thread starts waiting (it hadn't been added to the run
 				// queue before being unscheduled)
 				thread->runs++;
 				thread->total_run_time += diffTime;
-				thread->UpdateRunTime(diffTime);
+				if (thread->min_run_time < 0 || diffTime < thread->min_run_time)
+					thread->min_run_time = diffTime;
+				if (diffTime > thread->max_run_time)
+					thread->max_run_time = diffTime;
 
 				if (entry->PreviousState() == B_THREAD_WAITING) {
 					void* waitObject = (void*)entry->PreviousWaitObject();

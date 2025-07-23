@@ -1219,8 +1219,10 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 	}
 
 	gCPU[cpuID].disabled = !enabled;
-	if (enabled) gCPUEnabled.SetBitAtomic(cpuID);
-	else gCPUEnabled.ClearBitAtomic(cpuID);
+	if (enabled)
+		Scheduler::gCPUEnabled.SetBitAtomic(cpuID);
+	else
+		Scheduler::gCPUEnabled.ClearBitAtomic(cpuID);
 
 	if (!enabled) {
 		cpuEntry->Stop();

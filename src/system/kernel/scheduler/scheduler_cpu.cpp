@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <stdlib.h> // For abs()
 
-#include <vector>
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_thread.h"
 #include "EevdfScheduler.h"
@@ -400,10 +399,11 @@ CPUEntry::ChooseNextThread(Scheduler::ThreadData* oldThread, bool /*putAtBack*/,
 	Scheduler::ThreadData* deadlineThread = NULL;
 	bigtime_t earliestDeadline = -1;
 
-	std::vector<Scheduler::ThreadData*> poppedThreads;
-	while (!fEevdfScheduler.IsEmpty()) {
+	Scheduler::ThreadData* poppedThreads[MAX_PEEK_ELIGIBLE_CANDIDATES];
+	int32 poppedCount = 0;
+	while (!fEevdfScheduler.IsEmpty() && poppedCount < MAX_PEEK_ELIGIBLE_CANDIDATES) {
 		Scheduler::ThreadData* thread = (Scheduler::ThreadData*)fEevdfScheduler.PopMinThread();
-		poppedThreads.push_back(thread);
+		poppedThreads[poppedCount++] = thread;
 		if (thread->GetDeadline() > 0) {
 			if (deadlineThread == NULL || thread->GetDeadline() < earliestDeadline) {
 				deadlineThread = thread;
@@ -414,14 +414,16 @@ CPUEntry::ChooseNextThread(Scheduler::ThreadData* oldThread, bool /*putAtBack*/,
 
 	if (deadlineThread != NULL) {
 		nextThreadData = deadlineThread;
-		for (Scheduler::ThreadData* thread : poppedThreads) {
+		for (int32 i = 0; i < poppedCount; i++) {
+			Scheduler::ThreadData* thread = poppedThreads[i];
 			if (thread != nextThreadData) {
 				fEevdfScheduler.AddThread((::ThreadData*)thread);
 			}
 		}
 		_UpdateMinVirtualRuntime();
 	} else {
-		for (Scheduler::ThreadData* thread : poppedThreads) {
+		for (int32 i = 0; i < poppedCount; i++) {
+			Scheduler::ThreadData* thread = poppedThreads[i];
 			fEevdfScheduler.AddThread((::ThreadData*)thread);
 		}
 		nextThreadData = PeekEligibleNextThread();
@@ -653,7 +655,7 @@ CPUEntry::_CalculateSmtAwareKey(float& outEffectiveSmtLoad) const
 
 
 void
-CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
+CPUEntry::TrackActivity(Scheduler::ThreadData* oldThreadData, Scheduler::ThreadData* nextThreadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 
@@ -734,7 +736,7 @@ CPUEntry::TrackActivity(ThreadData* oldThreadData, ThreadData* nextThreadData)
 
 
 void
-CPUEntry::StartQuantumTimer(ThreadData* thread, bool wasPreempted, bigtime_t sliceDuration)
+CPUEntry::StartQuantumTimer(Scheduler::ThreadData* thread, bool wasPreempted, bigtime_t sliceDuration)
 {
 	cpu_ent* cpu = &gCPU[ID()];
 
@@ -754,7 +756,7 @@ CPUEntry::StartQuantumTimer(ThreadData* thread, bool wasPreempted, bigtime_t sli
 
 
 void
-CPUEntry::_RequestPerformanceLevel(ThreadData* threadData)
+CPUEntry::_RequestPerformanceLevel(Scheduler::ThreadData* threadData)
 {
 	SCHEDULER_ENTER_FUNCTION();
 
@@ -900,7 +902,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	B_INITIALIZE_SPINLOCK(&fCPULock, "core cpu lock");
+	B_INITIALIZE_SPINLOCK(&fCPULock);
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }

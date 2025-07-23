@@ -18,7 +18,16 @@
 
 using namespace Scheduler;
 
-struct CPUCacheEntry;
+struct CPUCacheEntry {
+	bigtime_t last_update_time;
+	float cached_load;
+	bool cached_defunct_state;
+	spinlock cache_lock;
+
+	CPUCacheEntry() : last_update_time(0), cached_load(0.0f),
+					  cached_defunct_state(true), cache_lock(B_SPINLOCK_INITIALIZER) {}
+};
+
 static CPUCacheEntry* gCPUCache = nullptr;
 
 static CoreEntry* low_latency_choose_core(const Scheduler::ThreadData* threadData);
@@ -52,17 +61,6 @@ struct alignas(64) LowLatencyStats {
 };
 
 static LowLatencyStats gLowLatencyStats;
-
-// Per-CPU cache for frequently accessed data
-struct alignas(64) CPUCacheEntry {
-	bigtime_t last_update_time;
-	float cached_load;
-	bool cached_defunct_state;
-	spinlock cache_lock;
-	
-	CPUCacheEntry() : last_update_time(0), cached_load(0.0f), 
-					  cached_defunct_state(true), cache_lock(B_SPINLOCK_INITIALIZER) {}
-};
 
 static const bigtime_t kCacheValidityPeriod = 1000; // 1ms cache validity
 

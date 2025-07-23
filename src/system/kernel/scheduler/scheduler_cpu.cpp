@@ -902,6 +902,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
+	fCPULock = B_SPINLOCK_INITIALIZER;
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }
@@ -956,7 +957,7 @@ CoreEntry::ThreadCount()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	SpinLocker lock(fCPULock);
+	Scheduler::SpinLockGuard lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1018,7 +1019,7 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	ASSERT(fCPUCount > 0);
 
 	if (cpu->GetHeapLink()->fIndex != -1) {
-		fCPUHeap.Remove(cpu);
+		fCPUHeap.RemoveRoot();
 	}
 
 	// Determine if the CPU being removed was effectively idle *before* this removal operation
@@ -1092,13 +1093,29 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 			fInstantaneousLoad = 0.0f;
 		}
 		{
-			int32 shardIndex = this->ID() % kNumCoreLoadHeapShards;
-			WriteSpinLocker heapsLock(gCoreHeapsShardLock[shardIndex]);
+			WriteSpinLocker heapsLock(gCoreHeapsShardLock[this->ID() % kNumCoreLoadHeapShards]);
 			if (this->GetMinMaxHeapLink()->fIndex != -1) {
-				if (fHighLoad)
-					gCoreHighLoadHeapShards[shardIndex].Remove(this);
-				else
-					gCoreLoadHeapShards[shardIndex].Remove(this);
+				if (fHighLoad) {
+					CoreEntry* entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreHighLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				} else {
+					CoreEntry* entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					while (entry) {
+						if (entry == this) {
+							gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+							break;
+						}
+						gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].RemoveMinimum();
+						entry = gCoreLoadHeapShards[this->ID() % kNumCoreLoadHeapShards].PeekMinimum();
+					}
+				}
 			}
 		}
 		if (fPackage != NULL) {
@@ -1200,9 +1217,9 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
 		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
+			Scheduler::gCoreHighLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
 		else
-			Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
+			Scheduler::gCoreLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.

@@ -348,54 +348,6 @@ PackageEntry::GetIdleCore(int32 index /* = 0 */) const
 }
 
 
-inline CPUEntry*
-ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
-{
-	CPUSet mask = GetCPUMask();
-	if (mask.IsEmpty())
-		mask.SetBit(0);
-
-	if (core->CPUMask().And(mask).IsEmpty()) {
-		// The thread is not allowed to run on this core.
-		// We need to find a different core.
-		CoreEntry* newCore = gCurrentMode->choose_core(this);
-		if (newCore == NULL) {
-			// No core available for this thread.
-			// This should not happen.
-			return NULL;
-		}
-		core = newCore;
-		rescheduleNeeded = true;
-	}
-
-	// If the thread was running on a CPU of this core, prefer that one.
-	cpu_ent* previousCpuEnt = fThread->previous_cpu;
-	if (previousCpuEnt != NULL) {
-		CPUEntry* previousCPU = CPUEntry::GetCPU(previousCpuEnt->cpu_num);
-		if (previousCPU->Core() == core && mask.GetBit(previousCpuEnt->cpu_num))
-			return previousCPU;
-	}
-
-	// Choose the best CPU from the core's heap.
-	CPUPriorityHeap* heap = core->CPUHeap();
-	CPUEntry* bestCPU = NULL;
-	int32 bestPriority = -1;
-
-	heap->Lock();
-	for (int32 i = 0; i < heap->Count(); i++) {
-		CPUEntry* cpu = heap->ElementAt(i);
-		if (mask.GetBit(cpu->ID())) {
-			int32 priority = heap->GetKey(cpu);
-			if (bestCPU == NULL || priority > bestPriority) {
-				bestCPU = cpu;
-				bestPriority = priority;
-			}
-		}
-	}
-	heap->Unlock();
-
-	return bestCPU;
-}
 
 
 extern CPUEntry* gCPUEntries;

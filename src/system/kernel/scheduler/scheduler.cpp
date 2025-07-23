@@ -42,6 +42,7 @@
 #include "scheduler_tracing.h"
 #include "scheduler_weights.h"
 #include "EevdfScheduler.h"
+#include "ThreadData.h"
 #include <thread_defs.h>
 
 #include <util/MultiHashTable.h>

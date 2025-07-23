@@ -119,15 +119,15 @@ cmd_thread_sched_info(int argc, char** argv)
 		}
 		kprintf("  CPU Affinity Mask:  ");
 		CPUSet affinityMask = td->GetCPUMask();
-		if (affinityMask.IsEmpty() || affinityMask.IsFull()) {
+		if (affinityMask.IsEmpty() || affinityMask.IsAllSet()) {
 			kprintf("%s\n", affinityMask.IsEmpty() ? "none" : "all");
 		} else {
 			kprintf("0x");
 			for (int32 i = CPUSet::kArraySize - 1; i >= 0; i--) {
-				if (affinityMask.Bits(i) != 0)
-					kprintf("%x", affinityMask.Bits(i));
+				if (affinityMask.GetBits(i) != 0)
+					kprintf("%x", affinityMask.GetBits(i));
 			}
-			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.CountSetBits());
+			kprintf(" (%" B_PRIu32 " bits set)\n", affinityMask.Count());
 		}
 
 		kprintf("  I/O Bound Heuristic:\n");
@@ -177,8 +177,8 @@ bool gTrackCoreLoad;
 bool gTrackCPULoad;
 // float gKernelKDistFactor = DEFAULT_K_DIST_FACTOR; // REMOVED
 
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHED_LOAD_BALANCE_SPREAD;
-float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_LOW_LATENCY;
+SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SCHEDULER_LOAD_BALANCE_SPREAD;
+float gSchedulerSMTConflictFactor = DEFAULT_SMT_CONFLICT_FACTOR_POWER_SAVING;
 
 bigtime_t gIRQBalanceCheckInterval = DEFAULT_IRQ_BALANCE_CHECK_INTERVAL;
 float gModeIrqTargetFactor = DEFAULT_IRQ_TARGET_FACTOR;
@@ -225,7 +225,7 @@ static int32* sCPUToCore;
 static int32* sCPUToPackage;
 
 static inline bigtime_t
-scheduler_calculate_eevdf_slice(ThreadData* threadData, const Scheduler::CPUEntry* cpu)
+scheduler_calculate_eevdf_slice(Scheduler::ThreadData* threadData, const Scheduler::CPUEntry* cpu)
 {
 	if (threadData == NULL) return kMinSliceGranularity;
 	return threadData->CalculateDynamicQuantum(cpu);
@@ -243,7 +243,7 @@ scheduler_maybe_follow_task_irqs(thread_id thId, const int32* irqList,
 static timer sIRQBalanceTimer;
 static int32 scheduler_irq_balance_event(timer* unused);
 static Scheduler::CPUEntry* _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad);
-static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const ThreadData* affinityCheckThread);
+static Scheduler::CPUEntry* _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest, const Scheduler::ThreadData* affinityCheckThread);
 
 static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
@@ -313,7 +313,7 @@ static void
 enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	ThreadData* threadData = thread->scheduler_data;
+	Scheduler::ThreadData* threadData = thread->scheduler_data;
 
 	T(EnqueueThread(thread, threadData->GetEffectivePriority()));
 	TRACE_SCHED("enqueue_thread_on_cpu_eevdf: T %" B_PRId32 " (prio %" B_PRId32 ", VD %" B_PRId64 ", Lag %" B_PRId64 ", Elig %" B_PRId64 ") onto CPU %" B_PRId32 "\n",

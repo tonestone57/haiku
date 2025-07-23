@@ -65,7 +65,6 @@
 // SCHEDULER_WEIGHT_SCALE is now defined in src/system/kernel/scheduler/scheduler_defs.h
 
 namespace Scheduler {
-TeamQuotaExhaustionPolicy gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
 bool gSchedulerElasticQuotaMode = true;
 }
 
@@ -325,8 +324,6 @@ static int cmd_scheduler_set_smt_factor(int argc, char** argv);
 static int cmd_scheduler_get_smt_factor(int argc, char** argv);
 static int cmd_scheduler_set_elastic_quota_mode(int argc, char** argv);
 static int cmd_scheduler_get_elastic_quota_mode(int argc, char** argv);
-static int cmd_scheduler_set_exhaustion_policy(int argc, char** argv);
-static int cmd_scheduler_get_exhaustion_policy(int argc, char** argv);
 
 static Scheduler::CPUEntry* find_quiet_cpu_for_irq(irq_assignment* irq, Scheduler::CPUEntry* current);
 
@@ -1772,10 +1769,6 @@ _scheduler_init_kdf_debug_commands()
 	add_debugger_command_alias("set_elastic_quota", "scheduler_set_elastic_mode", "Alias for scheduler_set_elastic_mode");
 	add_debugger_command_etc("scheduler_get_elastic_mode", &cmd_scheduler_get_elastic_quota_mode, "Get ... elastic team quota mode.", "...", 0);
 	add_debugger_command_alias("get_elastic_quota", "scheduler_get_elastic_mode", "Alias for scheduler_get_elastic_mode");
-	add_debugger_command_etc("scheduler_set_exhaustion_policy", &cmd_scheduler_set_exhaustion_policy, "Set ... team quota exhaustion policy.", "<starvation|hardstop>\n...", 0);
-	add_debugger_command_alias("set_exhaustion_policy", "scheduler_set_exhaustion_policy", "Alias for scheduler_set_exhaustion_policy");
-	add_debugger_command_etc("scheduler_get_exhaustion_policy", &cmd_scheduler_get_exhaustion_policy, "Get ... team quota exhaustion policy.", "...", 0);
-	add_debugger_command_alias("get_exhaustion_policy", "scheduler_get_exhaustion_policy", "Alias for scheduler_get_exhaustion_policy");
 	// Removido: dump_eevdf_weights
 }
 
@@ -1896,39 +1889,6 @@ cmd_scheduler_get_elastic_quota_mode(int argc, char** argv)
 	return 0;
 }
 
-static int
-cmd_scheduler_set_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 2) {
-		kprintf("Usage: scheduler_set_exhaustion_policy <starvation|hardstop>\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	if (strcmp(argv[1], "starvation") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_STARVATION_LOW;
-		kprintf("Scheduler team quota exhaustion policy set to: starvation\n");
-	} else if (strcmp(argv[1], "hardstop") == 0) {
-		Scheduler::gTeamQuotaExhaustionPolicy = TEAM_QUOTA_EXHAUST_HARD_STOP;
-		kprintf("Scheduler team quota exhaustion policy set to: hardstop\n");
-	} else {
-		kprintf("Invalid argument. Use 'starvation' or 'hardstop'.\n");
-		return B_KDEBUG_ERROR;
-	}
-
-	return 0;
-}
-
-static int
-cmd_scheduler_get_exhaustion_policy(int argc, char** argv)
-{
-	if (argc != 1) {
-		kprintf("Usage: scheduler_get_exhaustion_policy\n");
-		return B_KDEBUG_ERROR;
-	}
-	kprintf("Current scheduler team quota exhaustion policy: %s\n",
-		Scheduler::gTeamQuotaExhaustionPolicy == TEAM_QUOTA_EXHAUST_STARVATION_LOW ? "starvation" : "hardstop");
-	return 0;
-}
 
 static Scheduler::CPUEntry*
 _scheduler_select_cpu_for_irq(CoreEntry* core, int32 irqVector, int32 irqToMoveLoad)

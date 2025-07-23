@@ -42,7 +42,7 @@
 #include "scheduler_tracing.h"
 #include "scheduler_team.h"
 #include "scheduler_weights.h"
-#include "EevdfRunQueue.h"
+#include "EevdfScheduler.h"
 #include <thread_defs.h>
 
 #include <util/MultiHashTable.h>
@@ -638,7 +638,7 @@ scheduler_set_thread_priority(Thread *thread, int32 priority)
 	} else if (wasReadyAndEnqueuedPrior) {
 		if (cpuContextForUpdate != NULL) {
 			cpuContextForUpdate->LockRunQueue();
-			cpuContextForUpdate->GetEevdfRunQueue().Update(threadData);
+			cpuContextForUpdate->GetEevdfScheduler().UpdateThread(threadData);
 			cpuContextForUpdate->UnlockRunQueue();
 			Thread* currentOnThatCpu = gCPU[cpuContextForUpdate->ID()].running_thread;
 			if (currentOnThatCpu == NULL || thread_is_idle_thread(currentOnThatCpu)
@@ -745,7 +745,7 @@ _attempt_one_steal(Scheduler::CPUEntry* thiefCPU, int32 victimCpuID)
 
 	ThreadData* stolenTask = NULL;
 	victimCPUEntry->LockRunQueue();
-	EevdfRunQueue& victimQueue = victimCPUEntry->GetEevdfRunQueue();
+	EevdfScheduler& victimQueue = victimCPUEntry->GetEevdfScheduler();
 
 	if (!victimQueue.IsEmpty()) {
 		ThreadData* candidateTask = victimQueue.PeekMinimum();
@@ -1488,7 +1488,7 @@ scheduler_set_cpu_enabled(int32 cpuID, bool enabled)
 		TRACE_SCHED("scheduler_set_cpu_enabled: Disabling CPU %" B_PRId32 ". Migrating its queued threads.\n", cpuID);
 
 		cpuEntry->LockRunQueue();
-		EevdfRunQueue& runQueue = cpuEntry->GetEevdfRunQueue();
+		EevdfScheduler& runQueue = cpuEntry->GetEevdfScheduler();
 		DoublyLinkedList<ThreadData> threadsToReenqueue;
 
 		while (true) {
@@ -2189,8 +2189,8 @@ _scheduler_select_cpu_on_core(CoreEntry* core, bool preferBusiest,
 				if (currentSmtScore > bestScore) {
 					isBetter = true;
 				} else if (currentSmtScore == bestScore) {
-					int32 currentQueueDepth = currentCPU->GetEevdfRunQueueTaskCount();
-					int32 bestQueueDepth = bestCPU->GetEevdfRunQueueTaskCount();
+					int32 currentQueueDepth = currentCPU->GetEevdfSchedulerTaskCount();
+					int32 bestQueueDepth = bestCPU->GetEevdfSchedulerTaskCount();
 					if (currentQueueDepth < bestQueueDepth) {
 						isBetter = true;
 						TRACE_SCHED_SMT_TIEBREAK("_select_cpu_on_core: CPU %" B_PRId32 " (score %" B_PRId32 ") ties with current best CPU %" B_PRId32 ". CPU %" B_PRId32 " selected due to shallower run queue (%d vs %d).\n",
@@ -2462,7 +2462,7 @@ scheduler_perform_load_balance()
 	bigtime_t now = system_time();
 
 	sourceCPU->LockRunQueue();
-	EevdfRunQueue& sourceQueue = sourceCPU->GetEevdfRunQueue();
+	EevdfScheduler& sourceQueue = sourceCPU->GetEevdfScheduler();
 
 	ThreadData* bestCandidateToMove = NULL;
 	bigtime_t maxBenefitScore = -1;
@@ -2645,11 +2645,11 @@ scheduler_perform_load_balance()
 		}
 
 		if (candidate->IsLikelyIOBound() && affinityBonusWallClock == 0 && targetCpuIdleBonus == 0) {
-			if (representativeTargetCPU != NULL && representativeTargetCPU->GetEevdfRunQueue().Count() > 1) {
+			if (representativeTargetCPU != NULL && representativeTargetCPU->GetEevdfScheduler().Count() > 1) {
 				currentBenefitScore /= kIOBoundScorePenaltyFactor;
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound (no affinity/idle target, target queue > 1), reducing benefit score to %" B_PRId64 " using factor %" B_PRId32 "\n",
 					candidate->GetThread()->id, currentBenefitScore, kIOBoundScorePenaltyFactor);
-			} else if (representativeTargetCPU == NULL || representativeTargetCPU->GetEevdfRunQueue().Count() <=1) {
+			} else if (representativeTargetCPU == NULL || representativeTargetCPU->GetEevdfScheduler().Count() <=1) {
 				TRACE_SCHED("LoadBalance: Candidate T %" B_PRId32 " is likely I/O bound but target queue is short or no other bonus, I/O penalty not applied this time.\n", candidate->GetThread()->id);
 			}
 		} else if (candidate->IsLikelyIOBound() && (affinityBonusWallClock != 0 || targetCpuIdleBonus != 0)) {

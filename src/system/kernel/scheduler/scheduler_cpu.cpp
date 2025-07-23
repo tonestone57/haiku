@@ -902,7 +902,7 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	B_INITIALIZE_SPINLOCK(&fCPULock);
+	fCPULock = B_SPINLOCK_INITIALIZER;
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }
@@ -957,7 +957,7 @@ CoreEntry::ThreadCount()
 {
 	SCHEDULER_ENTER_FUNCTION();
 	int32 totalThreads = 0;
-	SpinLocker lock(fCPULock);
+	InterruptsSpinLocker lock(fCPULock);
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		if (fCPUSet.GetBit(i) && !gCPU[i].disabled) {
 			CPUEntry* cpuEntry = CPUEntry::GetCPU(i);
@@ -1081,7 +1081,6 @@ CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 	// if the CPU transitioned state *before* being marked for removal.
 	// The above adjustment is a safeguard if a CPU is removed while idle.
 
-	lock.Unlock();
 
 	if (fCPUCount == 0) {
 		this->fDefunct = true;

@@ -93,7 +93,7 @@ static CoreLoadHeap sDebugCoreHeap;
 
 // Threshold for CoreEntry load changes to trigger global heap updates.
 // kMaxLoad is 1000, so 50 is 5%.
-static const int32 CORE_LOAD_UPDATE_DELTA_THRESHOLD = kMaxLoad / 20;
+static const sched_load_t CORE_LOAD_UPDATE_DELTA_THRESHOLD = kMaxLoad / 20;
 
 // Constants for Dynamic IRQ Target Load calculation
 static const float kDynamicIrqLoadMinFactor = 0.25f; // Min % of base load for a fully thread-busy CPU

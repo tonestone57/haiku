@@ -1,7 +1,7 @@
 #ifndef THREAD_PRIORITY_QUEUE_H
 #define THREAD_PRIORITY_QUEUE_H
 
-#include "ThreadData.h"
+#include "EevdfThreadData.h"
 #include "SimpleHashMap.h"
 
 template<typename T>

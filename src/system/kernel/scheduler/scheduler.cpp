@@ -39,16 +39,6 @@
 #include "scheduler_modes.h"
 #include "scheduler_profiler.h"
 #include "scheduler_thread.h"
-
-// Validate load parameters
-static_assert(kMaxLoad > 0, "Maximum load must be positive");
-static_assert(LOW_INTENSITY_LOAD_THRESHOLD >= 0, "Low intensity threshold must be non-negative");
-static_assert(LOW_INTENSITY_LOAD_THRESHOLD <= kMaxLoad, "Low intensity threshold must not exceed max load");
-static_assert(DEFAULT_MAX_TARGET_CPU_IRQ_LOAD <= kMaxLoad, "Max target CPU IRQ load must not exceed max load");
-
-namespace SchedulerConstants {
-    constexpr int32 MAX_LOAD = kMaxLoad;
-}
 #include "scheduler_tracing.h"
 #include "scheduler_weights.h"
 #include "EevdfScheduler.h"

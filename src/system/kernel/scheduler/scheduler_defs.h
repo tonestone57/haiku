@@ -182,6 +182,8 @@ static_assert(POWER_SAVING_DTQ_IDLE_CPU_BOOST_FACTOR >= 1.0 && POWER_SAVING_DTQ_
 // Unified Constants Namespace (safer alternative to global constants)
 // ============================================================================
 
+#define MAX_LOAD 1000
+
 namespace SchedulerConstants {
     // Core scheduling parameters
     constexpr int32 SCHEDULER_WEIGHT_SCALE_SAFE = SCHEDULER_WEIGHT_SCALE;

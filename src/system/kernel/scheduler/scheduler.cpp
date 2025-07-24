@@ -40,6 +40,8 @@
 #include "scheduler_profiler.h"
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
+
+const int32 kMaxLoad = 1000;
 #include "scheduler_weights.h"
 #include "EevdfScheduler.h"
 #include "ThreadData.h"

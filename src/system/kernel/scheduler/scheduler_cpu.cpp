@@ -1145,9 +1145,9 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		WriteSpinLocker globalHeapsDefunctLock(Scheduler::gCoreHeapsShardLock[shardIndex]);
 		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If in a heap
 			if (wasDefunctHighLoad)
-				Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+				Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
 			else
-				Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+				Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
 		}
 		// globalHeapsDefunctLock released by destructor
 		return;
@@ -1216,9 +1216,9 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
 		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+			Scheduler::gCoreHighLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
 		else
-			Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+			Scheduler::gCoreLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.

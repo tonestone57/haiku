@@ -1216,9 +1216,9 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
 		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
+			Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
 		else
-			Scheduler::gCoreLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
+			Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.

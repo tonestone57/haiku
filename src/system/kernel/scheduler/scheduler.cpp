@@ -1,5 +1,3 @@
-const int32 kMaxLoad = 1000;
-
 /*
  * Copyright 2013-2014, Paweł Dziepak, pdziepak@quarnos.org.
  * Copyright 2009, Rene Gollent, rene@gollent.com.

@@ -29,7 +29,7 @@ static const int32 kMaxPriorityRange = B_REAL_TIME_PRIORITY + 1;
 // Global weight table and synchronization
 int32* gHaikuContinuousWeights = NULL;
 static spinlock gWeightTableLock = B_SPINLOCK_INITIALIZER;
-static volatile bool gWeightsInitialized = false;
+static volatile int32 gWeightsInitialized = 0;
 
 } // namespace Scheduler
 

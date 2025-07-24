@@ -12,7 +12,6 @@
 #include <algorithm>
 
 namespace Scheduler {
-int32* gHaikuContinuousWeights = NULL;
 }
 
 using namespace Scheduler;

@@ -194,12 +194,11 @@ Scheduler::ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const
 	+eturn The chosen CPUEntry.
 */
 inline CPUEntry*
-Scheduler::ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
+Scheduler::ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& mask) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
 
-	CPUSet mask = GetCPUMask();
 	const bool useMask = !mask.IsEmpty();
 	ASSERT(!useMask || mask.Matches(core->CPUMask()));
 

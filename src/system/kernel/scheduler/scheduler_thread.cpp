@@ -5,7 +5,6 @@
  */
 
 #include "scheduler_thread.h"
-#include "ThreadData.h"
 
 #include <util/Random.h>
 #include <util/atomic.h>
@@ -21,7 +20,7 @@ using namespace Scheduler;
 
 
 CoreEntry*
-ThreadData::_ChooseCore() const
+Scheduler::ThreadData::_ChooseCore() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
@@ -33,7 +32,8 @@ ThreadData::_ChooseCore() const
 	if (gCurrentMode == NULL) {
 		// Add bounds checking for core selection
 		if (gCoreCount <= 0) {
-			TRACE_SCHED_WARNING("_ChooseCore: Invalid gCoreCount %" B_PRId32 "\n", gCoreCount);
+			TRACE_SCHED_WARNING("_ChooseCore: Invalid gCoreCount %" B_PRId32 "
+", gCoreCount);
 			return &gCoreEntries[0]; // Fallback to first core
 		}
 		return &gCoreEntries[get_random<int32>() % gCoreCount];
@@ -42,7 +42,7 @@ ThreadData::_ChooseCore() const
 }
 
 CPUEntry*
-ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& mask) const
+Scheduler::ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& mask) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
@@ -85,7 +85,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& ma
 			// If previous CPU is not too loaded (SMT-aware), prefer it.
 			if (effectiveLoad < 0.75f) {
 				chosenCPU = previousCPUEntry;
-				TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+				TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)
+",
 					fThread->id, chosenCPU->ID(), core->ID(), effectiveLoad);
 			}
 		}
@@ -144,7 +145,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& ma
 		}
 		chosenCPU = bestCandidateOnCore;
 		if (chosenCPU != NULL) {
-			TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+			TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)
+",
 				fThread->id, chosenCPU->ID(), core->ID(), lowestEffectiveLoad);
 		}
 	}
@@ -156,7 +158,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& ma
 			if (coreCPUs.GetBit(i) && !gCPU[i].disabled &&
 				(!useMask || mask.GetBit(i))) {
 				chosenCPU = CPUEntry::GetCPU(i);
-				TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "\n",
+				TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "
+",
 					fThread->id, i, core->ID());
 				break;
 			}
@@ -181,7 +184,7 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& ma
 	return chosenCPU;
 }
 
-ThreadData::ThreadData(Thread* thread)
+Scheduler::ThreadData::ThreadData(Thread* thread)
     :
     fThread(thread),
     fCore(NULL),
@@ -212,7 +215,7 @@ ThreadData::ThreadData(Thread* thread)
 // #pragma mark - IRQ-Task Colocation Methods for ThreadData
 
 bool
-ThreadData::AddAffinitizedIrq(int32 irq)
+Scheduler::ThreadData::AddAffinitizedIrq(int32 irq)
 {
     SpinLockGuard guard(fDataLock);
     if (fAffinitizedIrqCount >= MAX_AFFINITIZED_IRQS_PER_THREAD) {
@@ -228,7 +231,7 @@ ThreadData::AddAffinitizedIrq(int32 irq)
 }
 
 bool
-ThreadData::RemoveAffinitizedIrq(int32 irq)
+Scheduler::ThreadData::RemoveAffinitizedIrq(int32 irq)
 {
     SpinLockGuard guard(fDataLock);
     for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
@@ -246,7 +249,7 @@ ThreadData::RemoveAffinitizedIrq(int32 irq)
 }
 
 void
-ThreadData::ClearAffinitizedIrqs()
+Scheduler::ThreadData::ClearAffinitizedIrqs()
 {
     SpinLockGuard guard(fDataLock);
     fAffinitizedIrqCount = 0;
@@ -254,7 +257,7 @@ ThreadData::ClearAffinitizedIrqs()
 }
 
 void
-ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, bool isRequeue)
+Scheduler::ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, bool isRequeue)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(this->GetThread() != NULL);
@@ -280,7 +283,8 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 		this->SetVirtualRuntime(std::max(currentVRuntime, reference_min_vruntime));
 	}
 
-	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice_wall_clock %" B_PRId64 ", refMinVR_norm %" B_PRId64 ", VR_norm set to %" B_PRId64 " (was %" B_PRId64 ")\n",
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", newSlice_wall_clock %" B_PRId64 ", refMinVR_norm %" B_PRId64 ", VR_norm set to %" B_PRId64 " (was %" B_PRId64 ")
+",
 		this->GetThread()->id, newSliceDuration, reference_min_vruntime, this->VirtualRuntime(), currentVRuntime);
 
 	// 4. Update Lag (fLag now represents normalized weighted work deficit/surplus)
@@ -293,11 +297,13 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 		if (capacity > 0) {
 			contextCoreCapacity = capacity;
 		} else {
-			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 ", contextCpu Core %" B_PRId32 " has 0 capacity! Using nominal %u for entitlement calc.\n",
+			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 ", contextCpu Core %" B_PRId32 " has 0 capacity! Using nominal %u for entitlement calc.
+",
 				this->GetThread()->id, contextCpu->Core()->ID(), SCHEDULER_NOMINAL_CAPACITY);
 		}
 	} else if (contextCpu == NULL) {
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", contextCpu is NULL, using nominal capacity %u for entitlement calc.\n",
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", contextCpu is NULL, using nominal capacity %u for entitlement calc.
+",
 			this->GetThread()->id, SCHEDULER_NOMINAL_CAPACITY);
 	}
 
@@ -317,11 +323,13 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 
 	if (isRequeue) {
 		this->AddLag(weightedNormalizedSliceEntitlement);
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag_norm ADDED %" B_PRId64 " (from normSliceWork %" B_PRId64 ") -> new lag_norm %" B_PRId64 "\n",
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Requeue): T %" B_PRId32 ", lag_norm ADDED %" B_PRId64 " (from normSliceWork %" B_PRId64 ") -> new lag_norm %" B_PRId64 "
+",
 			this->GetThread()->id, weightedNormalizedSliceEntitlement, normalizedSliceWork, this->Lag());
 	} else {
 		this->SetLag(weightedNormalizedSliceEntitlement - (this->VirtualRuntime() - reference_min_vruntime));
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag_norm SET to %" B_PRId64 " (wNormSliceEnt %" B_PRId64 ", VR_norm %" B_PRId64 ", refMinVR_norm %" B_PRId64 ")\n",
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams (Set): T %" B_PRId32 ", lag_norm SET to %" B_PRId64 " (wNormSliceEnt %" B_PRId64 ", VR_norm %" B_PRId64 ", refMinVR_norm %" B_PRId64 ")
+",
 			this->GetThread()->id, this->Lag(), weightedNormalizedSliceEntitlement, this->VirtualRuntime(), reference_min_vruntime);
 	}
 
@@ -348,7 +356,8 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 
 		if (wallClockDelay == 0) {
 			wallClockDelay = SCHEDULER_TARGET_LATENCY * 2;
-			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 " - Error in eligibility delay calc! lag_norm %" B_PRId64 ", weight %" B_PRId32 ", targetCap %" B_PRIu32 "\n",
+			TRACE_SCHED_WARNING("UpdateEevdfParams: T %" B_PRId32 " - Error in eligibility delay calc! lag_norm %" B_PRId64 ", weight %" B_PRId32 ", targetCap %" B_PRIu32 "
+",
 				this->GetThread()->id, this->Lag(), weight, targetCoreCapacity);
 		}
 
@@ -356,23 +365,26 @@ ThreadData::UpdateEevdfParameters(CPUEntry* contextCpu, bool isNewOrRelocated, b
 		wallClockDelay = std::max(wallClockDelay, (bigtime_t)SCHEDULER_MIN_GRANULARITY);
 		this->SetEligibleTime(system_time() + wallClockDelay);
 
-		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", neg_lag_norm %" B_PRId64 ", targetCap %" B_PRIu32 ", calculated wallClockDelay %" B_PRId64 "\n",
+		TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", neg_lag_norm %" B_PRId64 ", targetCap %" B_PRIu32 ", calculated wallClockDelay %" B_PRId64 "
+",
 			this->GetThread()->id, this->Lag(), targetCoreCapacity, wallClockDelay);
 	}
 
-	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time_wall_clock set to %" B_PRId64 "\n",
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", elig_time_wall_clock set to %" B_PRId64 "
+",
 		this->GetThread()->id, this->EligibleTime());
 
 	// 6. Update Virtual Deadline (fVirtualDeadline is wall-clock)
 	this->SetVirtualDeadline(this->EligibleTime() + this->SliceDuration());
-	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", VD set to %" B_PRId64 "\n",
+	TRACE_SCHED_EEVDF_PARAM("UpdateEevdfParams: T %" B_PRId32 ", VD set to %" B_PRId64 "
+",
 		this->GetThread()->id, this->VirtualDeadline());
 }
 
 // #pragma mark - Core Logic
 
 inline CoreEntry*
-ThreadData::_ChooseCore() const
+Scheduler::ThreadData::_ChooseCore() const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(!gSingleCore);
@@ -384,7 +396,8 @@ ThreadData::_ChooseCore() const
 	if (gCurrentMode == NULL) {
 		// Add bounds checking for core selection
 		if (gCoreCount <= 0) {
-			TRACE_SCHED_WARNING("_ChooseCore: Invalid gCoreCount %" B_PRId32 "\n", gCoreCount);
+			TRACE_SCHED_WARNING("_ChooseCore: Invalid gCoreCount %" B_PRId32 "
+", gCoreCount);
 			return &gCoreEntries[0]; // Fallback to first core
 		}
 		return &gCoreEntries[get_random<int32>() % gCoreCount];
@@ -401,10 +414,10 @@ ThreadData::_ChooseCore() const
 	\param core The physical core on which to choose a logical CPU.
 	\param rescheduleNeeded Output parameter; set to true if a reschedule is likely
 	       needed on the chosen CPU.
-	\return The chosen CPUEntry.
+	+eturn The chosen CPUEntry.
 */
 inline CPUEntry*
-ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
+Scheduler::ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 {
 	SCHEDULER_ENTER_FUNCTION();
 	ASSERT(core != NULL);
@@ -448,7 +461,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 			// If previous CPU is not too loaded (SMT-aware), prefer it.
 			if (effectiveLoad < 0.75f) {
 				chosenCPU = previousCPUEntry;
-				TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+				TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)
+",
 					fThread->id, chosenCPU->ID(), core->ID(), effectiveLoad);
 			}
 		}
@@ -507,7 +521,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 		}
 		chosenCPU = bestCandidateOnCore;
 		if (chosenCPU != NULL) {
-			TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
+			TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)
+",
 				fThread->id, chosenCPU->ID(), core->ID(), lowestEffectiveLoad);
 		}
 	}
@@ -519,7 +534,8 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 			if (coreCPUs.GetBit(i) && !gCPU[i].disabled &&
 				(!useMask || mask.GetBit(i))) {
 				chosenCPU = CPUEntry::GetCPU(i);
-				TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "\n",
+				TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "
+",
 					fThread->id, i, core->ID());
 				break;
 			}
@@ -545,7 +561,7 @@ ThreadData::_ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const
 }
 
 void
-ThreadData::Init()
+Scheduler::ThreadData::Init()
 {
 	_InitBase();
 	fCore = NULL;
@@ -561,7 +577,7 @@ ThreadData::Init()
 }
 
 void
-ThreadData::Init(CoreEntry* core)
+Scheduler::ThreadData::Init(CoreEntry* core)
 {
 	_InitBase();
 	fCore = core;
@@ -571,45 +587,65 @@ ThreadData::Init(CoreEntry* core)
 }
 
 void
-ThreadData::Dump() const
+Scheduler::ThreadData::Dump() const
 {
-	kprintf("\teffective_priority:\t%" B_PRId32 "\n", GetEffectivePriority());
-	kprintf("\ttime_used_in_quantum:\t%" B_PRId64 " us (of %" B_PRId64 " us)\n",
+	kprintf("	effective_priority:	%" B_PRId32 "
+", GetEffectivePriority());
+	kprintf("	time_used_in_quantum:	%" B_PRId64 " us (of %" B_PRId64 " us)
+",
 		fTimeUsedInCurrentQuantum, fCurrentEffectiveQuantum);
-	kprintf("\tstolen_time:\t\t%" B_PRId64 " us\n", fStolenTime);
-	kprintf("\tquantum_start_wall:\t%" B_PRId64 " us\n", fQuantumStartWallTime);
-	kprintf("\tlast_migration_time:\t%" B_PRId64 " us\n", fLastMigrationTime);
-	kprintf("\tneeded_load:\t\t%" B_PRId32 "%%\n", fNeededLoad.load(std::memory_order_relaxed) / (kMaxLoad/100));
-	kprintf("\twent_sleep:\t\t%" B_PRId64 "\n", fWentSleep);
-	kprintf("\twent_sleep_active:\t%" B_PRId64 "\n", fWentSleepActive);
-	kprintf("\tcore:\t\t\t%" B_PRId32 "\n",
+	kprintf("	stolen_time:		%" B_PRId64 " us
+", fStolenTime);
+	kprintf("	quantum_start_wall:	%" B_PRId64 " us
+", fQuantumStartWallTime);
+	kprintf("	last_migration_time:	%" B_PRId64 " us
+", fLastMigrationTime);
+	kprintf("	needed_load:		%" B_PRId32 "%%
+", fNeededLoad.load(std::memory_order_relaxed) / (kMaxLoad/100));
+	kprintf("	went_sleep:		%" B_PRId64 "
+", fWentSleep);
+	kprintf("	went_sleep_active:	%" B_PRId64 "
+", fWentSleepActive);
+	kprintf("	core:			%" B_PRId32 "
+",
 		fCore != NULL ? fCore->ID() : -1);
 
-	kprintf("\tEEVDF specific:\n");
-	kprintf("\t  virtual_deadline:\t%" B_PRId64 "\n", VirtualDeadline());
-	kprintf("\t  lag:\t\t\t%" B_PRId64 "\n", Lag());
-	kprintf("\t  eligible_time:\t%" B_PRId64 "\n", EligibleTime());
-	kprintf("\t  slice_duration:\t%" B_PRId64 "\n", SliceDuration());
-	kprintf("\t  virtual_runtime:\t%" B_PRId64 "\n", VirtualRuntime());
+	kprintf("	EEVDF specific:
+");
+	kprintf("	  virtual_deadline:	%" B_PRId64 "
+", VirtualDeadline());
+	kprintf("	  lag:			%" B_PRId64 "
+", Lag());
+	kprintf("	  eligible_time:	%" B_PRId64 "
+", EligibleTime());
+	kprintf("	  slice_duration:	%" B_PRId64 "
+", SliceDuration());
+	kprintf("	  virtual_runtime:	%" B_PRId64 "
+", VirtualRuntime());
 
-	kprintf("\tI/O Heuristics:\n");
-	kprintf("\t  avg_burst_time_ewma:\t%" B_PRId64 " us\n", AverageRunBurstTime());
-	kprintf("\t  voluntary_sleep_transitions:\t%" B_PRIu32 "\n", VoluntarySleepTransitions());
-	kprintf("\t  is_likely_io_bound:\t%s\n", IsLikelyIOBound() ? "true" : "false");
+	kprintf("	I/O Heuristics:
+");
+	kprintf("	  avg_burst_time_ewma:	%" B_PRId64 " us
+", AverageRunBurstTime());
+	kprintf("	  voluntary_sleep_transitions:	%" B_PRIu32 "
+", VoluntarySleepTransitions());
+	kprintf("	  is_likely_io_bound:	%s
+", IsLikelyIOBound() ? "true" : "false");
 
     SpinLockGuard guard(fDataLock);
 	if (fAffinitizedIrqCount > 0) {
-		kprintf("\tAffinitized IRQs (%d):\t", fAffinitizedIrqCount);
+		kprintf("	Affinitized IRQs (%d):	", fAffinitizedIrqCount);
 		for (int8 i = 0; i < fAffinitizedIrqCount; i++) {
 			kprintf("%" B_PRId32 "%s", fAffinitizedIrqs[i],
 				(i < fAffinitizedIrqCount - 1) ? ", " : "");
 		}
-		kprintf("\n");
+		kprintf("
+");
 	}
 }
 
 bool
-ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
+Scheduler::ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 {
 	SCHEDULER_ENTER_FUNCTION();
 	bool rescheduleNeeded = false;
@@ -669,7 +705,8 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 		if (!IsIdle()) {
 			SetLastMigrationTime(system_time());
 			if (initialCoreForComparison != NULL) {
-				TRACE_SCHED_LB("ChooseCoreAndCPU: T %" B_PRId32 " placed on new core %" B_PRId32 " (was %" B_PRId32 "), setting LastMigrationTime.\n",
+				TRACE_SCHED_LB("ChooseCoreAndCPU: T %" B_PRId32 " placed on new core %" B_PRId32 " (was %" B_PRId32 "), setting LastMigrationTime.
+",
 					GetThread()->id, chosenCore->ID(),
 					initialCoreForComparison->ID());
 			}
@@ -679,318 +716,4 @@ ThreadData::ChooseCoreAndCPU(CoreEntry*& targetCore, CPUEntry*& targetCPU)
 	targetCore = chosenCore;
 	targetCPU = chosenCPU;
 	return rescheduleNeeded;
-}
-
-
-bigtime_t
-ThreadData::CalculateDynamicQuantum(const CPUEntry* contextCpu) const
-{
-    SCHEDULER_ENTER_FUNCTION();
-
-    if (IsIdle()) {
-        return B_INFINITE_TIMEOUT;
-    }
-
-    // Check cache validity first
-    bigtime_t now = system_time();
-    if (now - fCacheTimestamp.load(std::memory_order_acquire) < CACHE_VALIDITY_PERIOD) {
-        bigtime_t cachedSlice = fCachedSlice.load(std::memory_order_acquire);
-        if (cachedSlice > 0) {
-            return cachedSlice;
-        }
-    }
-
-    SpinLockGuard guard(fDataLock);
-
-    // Double-check cache after acquiring lock
-    if (now - fCacheTimestamp.load(std::memory_order_relaxed) < CACHE_VALIDITY_PERIOD) {
-        bigtime_t cachedSlice = fCachedSlice.load(std::memory_order_relaxed);
-        if (cachedSlice > 0) {
-            return cachedSlice;
-        }
-    }
-
-    // Get thread weight with bounds checking
-    int32 weight = scheduler_priority_to_weight(fThread, contextCpu);
-    if (weight <= 0) {
-        weight = 1;
-    }
-
-    // Safe calculation to prevent division by zero and overflow
-    bigtime_t baseSlice = SafeMultiply<bigtime_t>(
-        SchedulerConstants::SCHEDULER_TARGET_LATENCY,
-        SchedulerConstants::SCHEDULER_WEIGHT_SCALE,
-        LLONG_MAX
-    ) / weight;
-
-    // Ensure reasonable bounds on baseSlice
-    baseSlice = std::max(SchedulerConstants::kMinSliceGranularity,
-                        std::min(baseSlice, SchedulerConstants::kMaxSliceDuration));
-
-    if (IsRealTime()) {
-        baseSlice = std::max(baseSlice, SchedulerConstants::RT_MIN_GUARANTEED_SLICE);
-    }
-
-    bigtime_t finalSlice = baseSlice;
-
-    // Adaptive adjustment for I/O-bound threads
-    if (!IsRealTime() && IsLikelyIOBound()) {
-        bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
-        if (avgBurst > 0 && avgBurst < finalSlice) {
-            finalSlice = std::max(SchedulerConstants::kMinSliceGranularity, avgBurst + avgBurst / 4);
-        }
-    }
-
-    // Dynamic floor adjustment for high CPU contention
-    if (contextCpu != nullptr && contextCpu->GetEevdfScheduler().Count() > SchedulerConstants::HIGH_CONTENTION_THRESHOLD) {
-        finalSlice = std::max(finalSlice, (bigtime_t)(SchedulerConstants::kMinSliceGranularity * SchedulerConstants::HIGH_CONTENTION_MIN_SLICE_FACTOR));
-    }
-
-    // Final clamping
-    finalSlice = std::max(IsRealTime() ? SchedulerConstants::RT_MIN_GUARANTEED_SLICE : SchedulerConstants::kMinSliceGranularity,
-                         std::min(finalSlice, SchedulerConstants::kMaxSliceDuration));
-
-    // Update cache
-    fCachedSlice.store(finalSlice, std::memory_order_release);
-    fCacheTimestamp.store(now, std::memory_order_release);
-
-    return finalSlice;
-}
-
-void
-ThreadData::UnassignCore(bool running)
-{
-    SCHEDULER_ENTER_FUNCTION();
-
-    SpinLockGuard guard(fDataLock);
-
-    if (fCore != nullptr && !IsIdle()) {
-        if (fReady || running) {
-            int32 neededLoad = fNeededLoad.load(std::memory_order_relaxed);
-            fCore->RemoveLoad(neededLoad, true);
-        }
-    }
-
-    if (!running) {
-        fCore = nullptr;
-        // Invalidate cache when core changes
-        fCacheTimestamp.store(0, std::memory_order_release);
-    }
-}
-
-void
-ThreadData::_ComputeNeededLoad()
-{
-    SCHEDULER_ENTER_FUNCTION();
-    ASSERT(!IsIdle());
-
-    SpinLockGuard guard(fDataLock);
-
-    bigtime_t currentTime = fMeasureAvailableTime.load(std::memory_order_relaxed);
-    bigtime_t lastTime = fLastMeasureAvailableTime.load(std::memory_order_relaxed);
-    bigtime_t period = currentTime - lastTime;
-
-    if (period <= 0) {
-        return;
-    }
-
-    bigtime_t activeTime = fMeasureAvailableActiveTime.load(std::memory_order_relaxed);
-
-    // Safe calculation to prevent overflow
-    int32 currentLoadPercentage = 0;
-    if (activeTime > 0 && period > 0) {
-        // Use 64-bit arithmetic to prevent overflow
-        int64_t loadCalc = (static_cast<int64_t>(activeTime) * SchedulerConstants::kMaxLoad) / period;
-        currentLoadPercentage = static_cast<int32>(
-            std::max(static_cast<int64_t>(0),
-                    std::min(static_cast<int64_t>(SchedulerConstants::kMaxLoad), loadCalc))
-        );
-    }
-
-    // EWMA calculation with bounds checking
-    constexpr float alpha = 0.5f;
-    int32 oldNeededLoad = fNeededLoad.load(std::memory_order_relaxed);
-    int32 newNeededLoad = static_cast<int32>(
-        alpha * currentLoadPercentage + (1.0f - alpha) * oldNeededLoad
-    );
-    newNeededLoad = std::max(0, std::min(SchedulerConstants::kMaxLoad, newNeededLoad));
-
-    if (fCore != nullptr && newNeededLoad != oldNeededLoad) {
-        fCore->ChangeLoad(newNeededLoad - oldNeededLoad);
-    }
-
-    // Update atomic values
-    fNeededLoad.store(newNeededLoad, std::memory_order_relaxed);
-    fLastMeasureAvailableTime.store(currentTime, std::memory_order_relaxed);
-    fMeasureAvailableActiveTime.store(0, std::memory_order_relaxed);
-}
-
-void
-ThreadData::_ComputeEffectivePriority() const
-{
-    SCHEDULER_ENTER_FUNCTION();
-
-    int32 effectivePriority;
-
-    if (IsIdle()) {
-        effectivePriority = B_IDLE_PRIORITY;
-    } else if (IsRealTime()) {
-        effectivePriority = GetBasePriority();
-    } else {
-        effectivePriority = GetBasePriority();
-        // Clamp to valid range for non-RT threads
-        if (effectivePriority >= B_FIRST_REAL_TIME_PRIORITY) {
-            effectivePriority = B_URGENT_DISPLAY_PRIORITY - 1;
-        }
-        if (effectivePriority < B_LOWEST_ACTIVE_PRIORITY) {
-            effectivePriority = B_LOWEST_ACTIVE_PRIORITY;
-        }
-    }
-
-    fEffectivePriority.store(effectivePriority, std::memory_order_release);
-}
-
-void
-ThreadData::RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice)
-{
-    SCHEDULER_ENTER_FUNCTION();
-
-    if (IsIdle() || actualRuntimeInSlice < 0) {
-        return;
-    }
-
-    // Use atomic operations for thread-safe updates
-    uint32 currentTransitions = fVoluntarySleepTransitions.load(std::memory_order_acquire);
-    bigtime_t currentAverage = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
-
-    bigtime_t newAverage;
-    if (currentTransitions < SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
-        newAverage = actualRuntimeInSlice;
-    } else {
-        // EWMA calculation with bounds checking to prevent overflow
-        int64_t numerator = static_cast<int64_t>(actualRuntimeInSlice) * 2 +
-            (SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL - 2) *
-            static_cast<int64_t>(currentAverage);
-        newAverage = static_cast<bigtime_t>(
-            numerator / SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL
-        );
-    }
-
-    // Update atomically
-    fAverageRunBurstTimeEWMA.store(newAverage, std::memory_order_release);
-
-    if (currentTransitions < SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
-        fVoluntarySleepTransitions.fetch_add(1, std::memory_order_release);
-    }
-
-    TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " RecordVoluntarySleep: ran %" B_PRId64
-        "us, new avgBurst %" B_PRId64 "us, transitions %" B_PRIu32 "\n",
-        fThread->id, actualRuntimeInSlice, newAverage, currentTransitions + 1);
-
-    if (actualRuntimeInSlice < SCHEDULER_TARGET_LATENCY / 2) {
-        fBurstCredits++;
-    }
-
-    if (SliceDuration() < SCHEDULER_TARGET_LATENCY / 2) {
-        SetSliceDuration(SliceDuration() * 9 / 10);
-    }
-
-    if (AverageRunBurstTime() < 1000) {
-        fInteractivityClass = 2; // Interactive
-    } else if (AverageRunBurstTime() < 10000) {
-        fInteractivityClass = 1; // Semi-interactive
-    } else {
-        fInteractivityClass = 0; // Batch
-    }
-}
-
-bool
-ThreadData::IsLikelyIOBound() const
-{
-    SCHEDULER_ENTER_FUNCTION();
-
-    if (IsIdle()) {
-        return false;
-    }
-
-    uint32 transitions = fVoluntarySleepTransitions.load(std::memory_order_acquire);
-    if (transitions < SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
-        return false;
-    }
-
-    bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
-    bool isIOBound = avgBurst < SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US;
-
-	if (GetBasePriority() < B_NORMAL_PRIORITY)
-		isIOBound = isIOBound || (avgBurst < SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US * 2);
-
-    TRACE_SCHED_IO("ThreadData: T %" B_PRId32 " IsLikelyIOBound: avgBurst %" B_PRId64
-        "us, threshold %" B_PRId64 "us => %s\n",
-        fThread->id, avgBurst, SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US,
-        isIOBound ? "true" : "false");
-
-    return isIOBound;
-}
-
-
-bool
-ThreadData::IsLikelyCPUBound() const
-{
-	SCHEDULER_ENTER_FUNCTION();
-
-	if (IsIdle())
-		return false;
-
-	if (GetBasePriority() < B_NORMAL_PRIORITY)
-		return false;
-
-	uint32 transitions = fVoluntarySleepTransitions.load(std::memory_order_acquire);
-	if (transitions > SchedulerConstants::IO_BOUND_MIN_TRANSITIONS) {
-		return false;
-	}
-
-	bigtime_t avgBurst = fAverageRunBurstTimeEWMA.load(std::memory_order_acquire);
-	return avgBurst > SchedulerConstants::IO_BOUND_BURST_THRESHOLD_US * 2;
-}
-
-void
-ThreadData::_InitBase()
-{
-	// Deadline scheduling
-	fDeadline = 0;
-	fRuntime = 0;
-	fPeriod = 0;
-
-	// I/O-bound heuristic
-	fAverageRunBurstTimeEWMA.store(SCHEDULER_TARGET_LATENCY / 2, std::memory_order_relaxed);
-	fVoluntarySleepTransitions.store(0, std::memory_order_relaxed);
-
-	// IRQ-Task Colocation
-	fAffinitizedIrqCount = 0;
-	memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
-
-	// Fields related to a specific quantum slice, reset when a new quantum starts
-	fTimeUsedInCurrentQuantum = 0;
-	fCurrentEffectiveQuantum = 0;
-	fStolenTime = 0;
-	fQuantumStartWallTime = 0;
-	fLastInterruptTime = 0;
-
-	// Fields related to sleep/wake state
-	fWentSleep = 0;
-	fWentSleepActive = 0;
-
-	// Queueing state
-	fEnqueued = false;
-	fReady = false;
-
-	// Load estimation
-	fNeededLoad.store(0, std::memory_order_relaxed);
-	fLoadMeasurementEpoch = 0;
-	fMeasureAvailableActiveTime.store(0, std::memory_order_relaxed);
-	fMeasureAvailableTime.store(0, std::memory_order_relaxed);
-	fLastMeasureAvailableTime.store(0, std::memory_order_relaxed);
-
-	// Load balancing
-	fLastMigrationTime = 0;
 }

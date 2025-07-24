@@ -46,8 +46,6 @@ enum scheduler_core_type {
 
 class DebugDumper;
 
-#include "ThreadData.h"
-
 class ThreadProcessing;
 
 class CPUEntry;

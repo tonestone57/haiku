@@ -4,8 +4,11 @@
 #define _KERNEL_SCHEDULER_DEFS_H
 
 #include <OS.h> // For bigtime_t, prio_t
+#define kMaxLoad kMaxLoad_dummy
 #include <SupportDefs.h> // For int8, int32, etc.
+#undef kMaxLoad
 
+static constexpr int32 kMaxLoad = 1000;
 // ============================================================================
 // Core Scheduling Constants
 // ============================================================================

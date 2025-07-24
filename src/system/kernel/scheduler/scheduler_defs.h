@@ -4,9 +4,9 @@
 #define _KERNEL_SCHEDULER_DEFS_H
 
 #include <OS.h> // For bigtime_t, prio_t
-#include "scheduler_constants.h"
 #include <SupportDefs.h> // For int8, int32, etc.
 
+extern const int32 kMaxLoad;
 // ============================================================================
 // Core Scheduling Constants
 // ============================================================================
@@ -93,14 +93,14 @@ static_assert(HIGH_CONTENTION_MIN_SLICE_FACTOR <= 10.0, "Contention slice factor
 // Load and Priority Constants
 // ============================================================================
 
-// Load threshold (0-SchedulerConstants::kMaxLoad) below which a task might be considered low intensity.
-// SchedulerConstants::kMaxLoad represents 100% of nominal core capacity.
-static constexpr int32 LOW_INTENSITY_LOAD_THRESHOLD = SchedulerConstants::kMaxLoad / 10; // 10% of nominal capacity
+// Load threshold (0-kMaxLoad) below which a task might be considered low intensity.
+// kMaxLoad represents 100% of nominal core capacity.
+static constexpr int32 LOW_INTENSITY_LOAD_THRESHOLD = kMaxLoad / 10; // 10% of nominal capacity
 
 // Validate load parameters
-static_assert(SchedulerConstants::kMaxLoad > 0, "Maximum load must be positive");
+static_assert(kMaxLoad > 0, "Maximum load must be positive");
 static_assert(LOW_INTENSITY_LOAD_THRESHOLD >= 0, "Low intensity threshold must be non-negative");
-static_assert(LOW_INTENSITY_LOAD_THRESHOLD <= SchedulerConstants::kMaxLoad, "Low intensity threshold must not exceed max load");
+static_assert(LOW_INTENSITY_LOAD_THRESHOLD <= kMaxLoad, "Low intensity threshold must not exceed max load");
 
 // ============================================================================
 // Real-Time Thread Configuration
@@ -162,7 +162,7 @@ static_assert(DEFAULT_IRQ_BALANCE_CHECK_INTERVAL > 0, "IRQ balance interval must
 static_assert(DEFAULT_IRQ_TARGET_FACTOR >= 0.0f && DEFAULT_IRQ_TARGET_FACTOR <= 1.0f, 
               "IRQ target factor must be between 0.0 and 1.0");
 static_assert(DEFAULT_MAX_TARGET_CPU_IRQ_LOAD > 0, "Max target CPU IRQ load must be positive");
-static_assert(DEFAULT_MAX_TARGET_CPU_IRQ_LOAD <= SchedulerConstants::kMaxLoad, "Max target CPU IRQ load must not exceed max load");
+static_assert(DEFAULT_MAX_TARGET_CPU_IRQ_LOAD <= kMaxLoad, "Max target CPU IRQ load must not exceed max load");
 static_assert(DEFAULT_HIGH_ABSOLUTE_IRQ_THRESHOLD > 0, "High IRQ threshold must be positive");
 static_assert(DEFAULT_SIGNIFICANT_IRQ_LOAD_DIFFERENCE > 0, "Significant IRQ load difference must be positive");
 static_assert(DEFAULT_MAX_IRQS_TO_MOVE_PROACTIVELY > 0, "Max IRQs to move must be positive");
@@ -200,7 +200,7 @@ namespace SchedulerConstants {
     constexpr bigtime_t RT_MIN_GUARANTEED_SLICE_SAFE = RT_MIN_GUARANTEED_SLICE;
     
     // Load and contention
-    constexpr int32 MAX_LOAD = SchedulerConstants::kMaxLoad;
+    constexpr int32 MAX_LOAD = kMaxLoad;
     constexpr int32 LOW_INTENSITY_THRESHOLD = LOW_INTENSITY_LOAD_THRESHOLD;
     constexpr int32 HIGH_CONTENTION_THRESHOLD_SAFE = HIGH_CONTENTION_THRESHOLD;
     constexpr double HIGH_CONTENTION_SLICE_FACTOR = HIGH_CONTENTION_MIN_SLICE_FACTOR;

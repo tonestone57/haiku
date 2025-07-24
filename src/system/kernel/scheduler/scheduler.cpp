@@ -9,7 +9,7 @@
 
 #include <cpu.h>
 #include <debug.h>
-#include <int.h>
+#include <stdint.h>
 #include <kscheduler.h>
 #include <listeners.h>
 #include <load_tracking.h>

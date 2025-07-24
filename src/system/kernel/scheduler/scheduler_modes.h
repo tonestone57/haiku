@@ -11,7 +11,11 @@
 #include <kernel.h>
 #include <lock.h>
 
-#include "scheduler_thread.h"
+namespace Scheduler {
+	class ThreadData;
+	class CoreEntry;
+	class CPUEntry;
+}
 
 class CPUSet;
 

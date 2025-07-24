@@ -6,6 +6,7 @@
 #include <OS.h> // For bigtime_t, prio_t
 #include <SupportDefs.h> // For int8, int32, etc.
 
+using sched_load_t = int32;
 static constexpr sched_load_t kMaxLoad = 1000;
 // ============================================================================
 // Core Scheduling Constants

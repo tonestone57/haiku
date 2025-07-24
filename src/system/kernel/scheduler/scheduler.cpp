@@ -9,7 +9,6 @@
 
 #include <cpu.h>
 #include <debug.h>
-#include <stdint.h>
 #include <kscheduler.h>
 #include <listeners.h>
 #include <load_tracking.h>
@@ -20,7 +19,11 @@
 
 #include <new>
 
+#include "scheduler_common.h"
+#include "scheduler_cpu.h"
+#include "scheduler_modes.h"
 #include "scheduler_thread.h"
+#include "slab_cache.h"
 
 
 // The userland-visible scheduler mode. Can be changed via a private system call.
@@ -28,6 +31,12 @@ scheduler_mode gSchedulerMode = SCHEDULER_MODE_LOW_LATENCY;
 
 // Whether or not we are using the affinitized scheduler.
 bool gSchedulerAffinity = true;
+
+// The slab cache for thread data.
+slab_cache* gSchedulerThreadDataSlab;
+
+// The idle thread function.
+static int32 scheduler_idle_thread(void*);
 
 // Whether or not CPU load tracking is enabled.
 bool gTrackCPULoad = false;
@@ -42,7 +51,7 @@ uint32 gSchedulerNominalCapacity = 1024;
 float gSchedulerSMTConflictFactor = 0.5f;
 
 // The policy for load balancing.
-SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = SPREAD;
+Scheduler::SchedulerLoadBalancePolicy gSchedulerLoadBalancePolicy = Scheduler::SPREAD;
 
 // The minimum guaranteed slice for real-time threads.
 bigtime_t gSchedulerRTMinGuaranteedSlice = 1000;
@@ -129,38 +138,37 @@ spinlock gGlobalMinVRuntimeLock = B_SPINLOCK_INITIALIZER;
 int64 gReportedCpuMinVR[SMP_MAX_CPUS];
 
 // The current scheduler mode.
-Scheduler::scheduler_mode_operations* gCurrentMode = &gSchedulerLowLatencyMode;
+scheduler_mode_operations* gCurrentMode = &gSchedulerLowLatencyMode;
 
 
 void
 scheduler_init()
 {
 	// Create the thread data slab.
-	gSchedulerThreadDataSlab = new(std::nothrow) slab_cache("scheduler thread data",
-		sizeof(Scheduler::ThreadData), 0, NULL, NULL, NULL);
+	gSchedulerThreadDataSlab = create_slab(sizeof(Scheduler::ThreadData), 0, NULL, NULL, NULL, 0);
 	if (gSchedulerThreadDataSlab == NULL)
 		panic("scheduler_init: failed to create thread data slab");
 
 	// Create the CPU entries.
-	gCPUEntries = new(std::nothrow) Scheduler::CPUEntry[smp_get_num_cpus()];
-	if (gCPUEntries == NULL)
+	Scheduler::gCPUEntries = new(std::nothrow) Scheduler::CPUEntry[smp_get_num_cpus()];
+	if (Scheduler::gCPUEntries == NULL)
 		panic("scheduler_init: failed to create CPU entries");
 
 	// Create the core entries.
-	gCoreEntries = new(std::nothrow) Scheduler::CoreEntry[smp_get_num_cpus()];
-	if (gCoreEntries == NULL)
+	Scheduler::gCoreEntries = new(std::nothrow) Scheduler::CoreEntry[smp_get_num_cpus()];
+	if (Scheduler::gCoreEntries == NULL)
 		panic("scheduler_init: failed to create core entries");
 
 	// Create the package entries.
-	gPackageEntries = new(std::nothrow) Scheduler::PackageEntry[smp_get_num_cpus()];
-	if (gPackageEntries == NULL)
+	Scheduler::gPackageEntries = new(std::nothrow) Scheduler::PackageEntry[smp_get_num_cpus()];
+	if (Scheduler::gPackageEntries == NULL)
 		panic("scheduler_init: failed to create package entries");
 
 	// Initialize the CPU, core, and package entries.
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-		new(&gCPUEntries[i]) Scheduler::CPUEntry();
-		new(&gCoreEntries[i]) Scheduler::CoreEntry();
-		new(&gPackageEntries[i]) Scheduler::PackageEntry();
+		new(&Scheduler::gCPUEntries[i]) Scheduler::CPUEntry();
+		new(&Scheduler::gCoreEntries[i]) Scheduler::CoreEntry();
+		new(&Scheduler::gPackageEntries[i]) Scheduler::PackageEntry();
 	}
 
 	// Initialize the scheduler modes.
@@ -178,11 +186,12 @@ scheduler_init_post_thread()
 	for (int32 i = 0; i < smp_get_num_cpus(); i++) {
 		char name[B_OS_NAME_LENGTH];
 		snprintf(name, sizeof(name), "idle thread %" B_PRId32, i);
-		thread_id thread = spawn_kernel_thread(
+		thread_id threadId = spawn_kernel_thread(
 			(thread_func)scheduler_idle_thread, name, B_IDLE_PRIORITY, NULL);
-		if (thread < 0)
+		if (threadId < 0)
 			panic("scheduler_init_post_thread: failed to create idle thread");
-		gCPU[i].idle_thread = thread_get_thread_struct(thread);
-		gCPUEntries[i].SetIdleThread(gCPU[i].idle_thread->scheduler_data);
+		Thread* thread = thread_get_thread_struct(threadId);
+		gCPU[i].idle_thread = thread;
+		Scheduler::gCPUEntries[i].SetIdleThread(thread->scheduler_data);
 	}
 }

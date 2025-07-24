@@ -43,6 +43,7 @@
 #include <kernel/scheduler.h>
 
 #include "scheduler_defs.h"
+#include "scheduler_weights.h"
 
 
 extern "C" {
@@ -74,12 +75,12 @@ private:
     std::atomic<bigtime_t> fVirtualDeadline{0};
     std::atomic<bigtime_t> fLag{0};
     std::atomic<bigtime_t> fEligibleTime{0};
-    std::atomic<bigtime_t> fSliceDuration{SCHEDULER_TARGET_LATENCY};
+    std::atomic<bigtime_t> fSliceDuration{SchedulerConstants::SCHEDULER_TARGET_LATENCY_SAFE};
     std::atomic<bigtime_t> fVirtualRuntime{0};
 
     // I/O bound detection
     std::atomic<uint32> fVoluntarySleepTransitions{0};
-    std::atomic<bigtime_t> fAverageRunBurstTimeEWMA{SCHEDULER_TARGET_LATENCY / 2};
+    std::atomic<bigtime_t> fAverageRunBurstTimeEWMA{SchedulerConstants::SCHEDULER_TARGET_LATENCY_SAFE / 2};
 
     // Other atomic members
     mutable std::atomic<int32> fEffectivePriority{B_NORMAL_PRIORITY};
@@ -136,7 +137,7 @@ public:
         } else {
                 fNeededLoad.store(kMaxLoad / 10, std::memory_order_relaxed);
         }
-        _ComputeEffectivePriority();
+        GetEffectivePriority();
     }
     void Init(CoreEntry* core)
     {
@@ -144,7 +145,7 @@ public:
         fCore = core;
         fReady = true;
         fNeededLoad.store(0, std::memory_order_relaxed);
-        _ComputeEffectivePriority();
+        GetEffectivePriority();
     }
     void Dump() const;
 
@@ -260,7 +261,7 @@ public:
 
     bool IsRealTime() const
     {
-        return fThread->priority >= B_MAX_REAL_TIME_PRIORITY;
+        return fThread->priority >= B_REAL_TIME_PRIORITY;
     }
     bool IsIdle() const
     {
@@ -287,7 +288,7 @@ public:
             return false;
 
         bool reschedule;
-        targetCPU = _ChooseCPU(targetCore, reschedule);
+        targetCPU = _ChooseCPU(targetCore, reschedule, GetCPUMask());
         return reschedule;
     }
 
@@ -300,7 +301,7 @@ public:
     bigtime_t CalculateDynamicQuantum(const CPUEntry* contextCpu) const
     {
         if (IsRealTime())
-            return SCHEDULER_REALTIME_QUANTUM;
+            return SchedulerConstants::RT_MIN_GUARANTEED_SLICE_SAFE;
 
         int32 priority = GetEffectivePriority();
         if (priority < B_LOW_PRIORITY)
@@ -308,7 +309,7 @@ public:
         else if (priority > B_URGENT_DISPLAY_PRIORITY)
             priority = B_URGENT_DISPLAY_PRIORITY;
 
-        float quantum = SCHEDULER_QUANTUM_NORMAL + (SCHEDULER_QUANTUM_HIGH - SCHEDULER_QUANTUM_NORMAL) * (priority - B_NORMAL_PRIORITY) / (B_URGENT_DISPLAY_PRIORITY - B_NORMAL_PRIORITY);
+        float quantum = SchedulerConstants::SCHEDULER_TARGET_LATENCY_SAFE;
 
         if (contextCpu != NULL) {
                 quantum *= SCHEDULER_NOMINAL_CAPACITY;
@@ -456,16 +457,16 @@ public:
 
     bool IsLikelyIOBound() const
     {
-        return fInteractivityClass == SCHEDULER_INTERACTIVITY_CLASS_IO;
+        return fInteractivityClass == 2;
     }
     bool IsLikelyCPUBound() const
     {
-        return fInteractivityClass == SCHEDULER_INTERACTIVITY_CLASS_CPU;
+        return fInteractivityClass == 0;
     }
     void RecordVoluntarySleepAndUpdateBurstTime(bigtime_t actualRuntimeInSlice)
     {
         fVoluntarySleepTransitions++;
-        fAverageRunBurstTimeEWMA = (SCHEDULER_INTERACTIVITY_ALPHA * actualRuntimeInSlice) + ((100 - SCHEDULER_INTERACTIVITY_ALPHA) * fAverageRunBurstTimeEWMA) / 100;
+        fAverageRunBurstTimeEWMA = (SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL_SAFE * actualRuntimeInSlice) + ((100 - SchedulerConstants::IO_BOUND_EWMA_ALPHA_RECIPROCAL_SAFE) * fAverageRunBurstTimeEWMA) / 100;
     }
 
     bigtime_t AverageRunBurstTime() const { return fAverageRunBurstTimeEWMA.load(std::memory_order_relaxed); }
@@ -493,7 +494,7 @@ private:
         fLoadMeasurementEpoch = 0;
         fBurstCredits = 0;
         fLatencyViolations = 0;
-        fInteractivityClass = SCHEDULER_INTERACTIVITY_CLASS_NORMAL;
+        fInteractivityClass = 1;
         fAffinitizedIrqCount = 0;
         fDeadline = 0;
         fRuntime = 0;
@@ -509,152 +510,9 @@ private:
         fAverageRunBurstTimeEWMA.store(SCHEDULER_TARGET_LATENCY / 2, std::memory_order_relaxed);
     }
     CoreEntry* _ChooseCore() const;
-    CPUEntry* _ChooseCPU(CoreEntry* core, bool& rescheduleNeeded) const;
-        const bool useMask = !mask.IsEmpty();
-        ASSERT(!useMask || mask.Matches(core->CPUMask()));
-
-        rescheduleNeeded = false; // Default
-        CPUEntry* chosenCPU = NULL;
-
-        // Check previous CPU for cache affinity first, only if it's on the chosen core.
-        cpu_ent* previousCpuEnt = fThread->previous_cpu;
-        if (previousCpuEnt != NULL && previousCpuEnt->cpu_num >= 0 &&
-            previousCpuEnt->cpu_num < smp_get_num_cpus() &&
-            !gCPU[previousCpuEnt->cpu_num].disabled) {
-
-            CPUEntry* previousCPUEntry = CPUEntry::GetCPU(previousCpuEnt->cpu_num);
-            if (previousCPUEntry != NULL && previousCPUEntry->Core() == core &&
-                (!useMask || mask.GetBit(previousCpuEnt->cpu_num))) {
-
-                // Previous CPU is on the target core and matches affinity.
-                // Check its SMT-aware effective load.
-                float smtPenalty = 0.0f;
-                if (core->CPUCount() > 1) { // SMT is possible
-                    int32 prevCpuID = previousCPUEntry->ID();
-                    int32 prevSMTID = gCPU[prevCpuID].topology_id[CPU_TOPOLOGY_SMT];
-                    if (prevSMTID != -1) {
-                        for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-                            if (k == prevCpuID || gCPU[k].disabled ||
-                                CPUEntry::GetCPU(k)->Core() != core)
-                                continue;
-                            if (gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == prevSMTID) {
-                                smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-                            }
-                        }
-                    }
-                }
-                float effectiveLoad = previousCPUEntry->GetInstantaneousLoad() + smtPenalty;
-
-                // If previous CPU is not too loaded (SMT-aware), prefer it.
-                if (effectiveLoad < 0.75f) {
-                    chosenCPU = previousCPUEntry;
-                    TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to previous CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
-                        fThread->id, chosenCPU->ID(), core->ID(), effectiveLoad);
-                }
-            }
-        }
-
-        if (fThread->pinned_to_cpu > 0) {
-            chosenCPU = CPUEntry::GetCPU(fThread->pinned_to_cpu - 1);
-        } else if (chosenCPU == NULL) {
-            // Previous CPU not suitable or not on this core.
-            // Iterate all enabled CPUs on the chosen core, select the one with the best SMT-aware effective load.
-            CPUEntry* bestCandidateOnCore = NULL;
-            float lowestEffectiveLoad = 2.0f; // Start high (max load is 1.0 + penalty)
-
-            CPUSet coreCPUs = core->CPUMask();
-            for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-                if (!coreCPUs.GetBit(i) || gCPU[i].disabled)
-                    continue;
-
-                CPUEntry* candidateCPU = CPUEntry::GetCPU(i);
-                if (candidateCPU == NULL || candidateCPU->Core() != core)
-                    continue;
-
-                if (useMask && !mask.GetBit(i)) // Check affinity mask
-                    continue;
-
-                float currentInstLoad = candidateCPU->GetInstantaneousLoad();
-                float smtPenalty = 0.0f;
-
-                if (core->CPUCount() > 1) { // SMT is possible
-                    int32 candidateCpuID = candidateCPU->ID();
-                    int32 candidateSMTID = gCPU[candidateCpuID].topology_id[CPU_TOPOLOGY_SMT];
-
-                    if (candidateSMTID != -1) {
-                        for (int32 k = 0; k < smp_get_num_cpus(); k++) {
-                            if (k == candidateCpuID || gCPU[k].disabled ||
-                                CPUEntry::GetCPU(k)->Core() != core)
-                                continue;
-                            // Check if CPU 'k' is an SMT sibling of 'candidateCPU'
-                            if (gCPU[k].topology_id[CPU_TOPOLOGY_SMT] == candidateSMTID) {
-                                smtPenalty += CPUEntry::GetCPU(k)->GetInstantaneousLoad() * gSchedulerSMTConflictFactor;
-                            }
-                        }
-                    }
-                }
-                float effectiveLoad = currentInstLoad + smtPenalty;
-
-                if (effectiveLoad < lowestEffectiveLoad || bestCandidateOnCore == NULL) {
-                    lowestEffectiveLoad = effectiveLoad;
-                    bestCandidateOnCore = candidateCPU;
-                } else if (effectiveLoad == lowestEffectiveLoad) {
-                    // Tie-breaking: prefer CPU with fewer total tasks
-                    if (candidateCPU->GetTotalThreadCount() < bestCandidateOnCore->GetTotalThreadCount()) {
-                        bestCandidateOnCore = candidateCPU;
-                    }
-                }
-            }
-            chosenCPU = bestCandidateOnCore;
-            if (chosenCPU != NULL) {
-                TRACE_SCHED_SMT("_ChooseCPU: T %" B_PRId32 " to best SMT-aware CPU %" B_PRId32 " on core %" B_PRId32 " (effLoad %.2f)\n",
-                    fThread->id, chosenCPU->ID(), core->ID(), lowestEffectiveLoad);
-            }
-        }
-
-        if (chosenCPU == NULL) {
-            // Last resort: just pick the first available CPU on this core
-            CPUSet coreCPUs = core->CPUMask();
-            for (int32 i = 0; i < smp_get_num_cpus(); i++) {
-                if (coreCPUs.GetBit(i) && !gCPU[i].disabled &&
-                    (!useMask || mask.GetBit(i))) {
-                    chosenCPU = CPUEntry::GetCPU(i);
-                    TRACE_SCHED_WARNING("_ChooseCPU: T %" B_PRId32 " fallback to CPU %" B_PRId32 " on core %" B_PRId32 "\n",
-                        fThread->id, i, core->ID());
-                    break;
-                }
-            }
-        }
-
-        ASSERT(chosenCPU != NULL && "Could not find a schedulable CPU on the chosen core");
-
-        // Determine if reschedule is needed
-        if (chosenCPU != NULL) {
-            int32 cpuId = chosenCPU->ID();
-            if (cpuId >= 0 && cpuId < smp_get_num_cpus()) {
-                if (gCPU[cpuId].running_thread == NULL ||
-                    thread_is_idle_thread(gCPU[cpuId].running_thread)) {
-                    rescheduleNeeded = true;
-                } else if (fThread->cpu != &gCPU[cpuId]) {
-                    rescheduleNeeded = true;
-                }
-            }
-        }
-
-        return chosenCPU;
-    }
-    void _ComputeNeededLoad()
-    {
-        // This is a placeholder for a more sophisticated load calculation.
-        // For now, we'll just use a fixed value.
-        fNeededLoad.store(kMaxLoad / 10, std::memory_order_relaxed);
-    }
-    void _ComputeEffectivePriority() const
-    {
-        // This is a placeholder for a more sophisticated effective priority
-        // calculation. For now, we'll just use the base priority.
-        fEffectivePriority.store(GetBasePriority(), std::memory_order_relaxed);
-    }
+    CPUEntry* _ChooseCPU(CoreEntry* core, bool& rescheduleNeeded, const CPUSet& mask) const;
+    void _ComputeNeededLoad();
+    void _ComputeEffectivePriority() const;
 
     // Safe arithmetic helpers
     template<typename T>

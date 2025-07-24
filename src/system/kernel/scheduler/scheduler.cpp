@@ -41,6 +41,7 @@
 #include "scheduler_thread.h"
 #include "scheduler_tracing.h"
 
+const sched_load_t kMaxLoad = 1000;
 #include "scheduler_weights.h"
 #include "EevdfScheduler.h"
 #include "ThreadData.h"

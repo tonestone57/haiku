@@ -21,7 +21,7 @@
 
 // Architecture-independent type definitions
 using sched_time_t = int64_t;  // Use consistent time type
-using sched_load_t = int32_t;  // Load value type
+using sched_load_t = int;  // Load value type
 using cpu_id_t = int32_t;      // CPU identifier type
 
 // Forward declarations to avoid circular dependencies

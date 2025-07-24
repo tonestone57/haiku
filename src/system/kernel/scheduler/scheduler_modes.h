@@ -11,14 +11,7 @@
 #include <kernel.h>
 #include <lock.h>
 
-#include "ThreadData.h"
-
-// Forward declarations
-namespace Scheduler {
-	class CoreEntry;
-	class CPUEntry;
-	class PackageEntry;
-}
+#include "scheduler_thread.h"
 
 class CPUSet;
 

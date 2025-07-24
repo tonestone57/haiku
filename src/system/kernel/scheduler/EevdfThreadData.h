@@ -1,5 +1,5 @@
-#ifndef THREAD_DATA_H
-#define THREAD_DATA_H
+#ifndef EEVDF_THREAD_DATA_H
+#define EEVDF_THREAD_DATA_H
 
 #include <stdint.h>
 

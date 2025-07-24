@@ -14,7 +14,7 @@
 #include <AutoDeleter.h>
 #include <cpu.h>
 #include <debug.h>
-#include <interrupts.h>
+#include <stdint.h>
 #include <kernel.h>
 #include <kscheduler.h>
 #include <listeners.h>
@@ -2268,4 +2268,3 @@ scheduler_perform_load_balance(void)
 	}
 	return migrationPerformed;
 }
-

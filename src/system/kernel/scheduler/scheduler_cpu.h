@@ -46,8 +46,6 @@ enum scheduler_core_type {
 
 class DebugDumper;
 
-#include "ThreadData.h"
-
 class ThreadProcessing;
 
 class CPUEntry;
@@ -346,6 +344,8 @@ PackageEntry::GetIdleCore(int32 index /* = 0 */) const
 		element = fIdleCores.GetPrevious(element);
 	return element;
 }
+
+
 
 
 extern CPUEntry* gCPUEntries;

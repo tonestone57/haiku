@@ -6,7 +6,6 @@
 #include <OS.h> // For bigtime_t, prio_t
 #include <SupportDefs.h> // For int8, int32, etc.
 
-extern const int32 kMaxLoad;
 // ============================================================================
 // Core Scheduling Constants
 // ============================================================================

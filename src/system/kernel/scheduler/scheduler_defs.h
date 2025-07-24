@@ -6,9 +6,7 @@
 #include <OS.h> // For bigtime_t, prio_t
 #include <SupportDefs.h> // For int8, int32, etc.
 
-// Defines the load value representing 100% of a nominal core's capacity.
-static constexpr int32 kMaxLoad = 1000;
-
+extern const int32 kMaxLoad;
 // ============================================================================
 // Core Scheduling Constants
 // ============================================================================

@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-class EevdfThreadData {
+class ThreadData {
 public:
-    EevdfThreadData(int id, int64_t deadline)
+    ThreadData(int id, int64_t deadline)
         : _id(id),
           _virtualDeadline(deadline),
           _runtime(0)

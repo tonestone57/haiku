@@ -3,7 +3,7 @@
 
 #include "ThreadPriorityQueue.h"
 #include "SimpleHashMap.h"
-#include "EevdfThreadData.h"
+#include "ThreadData.h"
 
 class EevdfScheduler {
 public:
@@ -13,18 +13,18 @@ public:
         _threadMap.Init(capacity);
     }
 
-    bool AddThread(EevdfThreadData* thread);
-    bool RemoveThread(EevdfThreadData* thread);
-    bool UpdateThread(EevdfThreadData* thread);
-    EevdfThreadData* PopMinThread();
-    EevdfThreadData* PeekMinThread() const;
+    bool AddThread(ThreadData* thread);
+    bool RemoveThread(ThreadData* thread);
+    bool UpdateThread(ThreadData* thread);
+    ThreadData* PopMinThread();
+    ThreadData* PeekMinThread() const;
     bool IsEmpty() const;
     int Count() const;
     void Clear();
 
 private:
-    SimpleHashMap<EevdfThreadData*, int> _threadMap;
-    ThreadPriorityQueue<EevdfThreadData*> _queue;
+    SimpleHashMap<ThreadData*, int> _threadMap;
+    ThreadPriorityQueue<ThreadData*> _queue;
 };
 
 #endif // EEVDF_SCHEDULER_H

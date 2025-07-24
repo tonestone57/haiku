@@ -1,23 +1,23 @@
 #include "EevdfScheduler.h"
 #include <support/SupportDefs.h>
 
-bool EevdfScheduler::AddThread(EevdfThreadData* thread) {
+bool EevdfScheduler::AddThread(ThreadData* thread) {
     return _queue.Add(thread);
 }
 
-bool EevdfScheduler::RemoveThread(EevdfThreadData* thread) {
+bool EevdfScheduler::RemoveThread(ThreadData* thread) {
     return _queue.Remove(thread);
 }
 
-bool EevdfScheduler::UpdateThread(EevdfThreadData* thread) {
+bool EevdfScheduler::UpdateThread(ThreadData* thread) {
     return _queue.Update(thread);
 }
 
-EevdfThreadData* EevdfScheduler::PopMinThread() {
+ThreadData* EevdfScheduler::PopMinThread() {
     return _queue.PopMinimum();
 }
 
-EevdfThreadData* EevdfScheduler::PeekMinThread() const {
+ThreadData* EevdfScheduler::PeekMinThread() const {
     return _queue.PeekMinimum();
 }
 

@@ -902,7 +902,6 @@ CoreEntry::CoreEntry()
 	fPerformanceCapacity(SCHEDULER_NOMINAL_CAPACITY),
 	fEnergyEfficiency(0)
 {
-	B_INITIALIZE_SPINLOCK(&fCPULock);
 	B_INITIALIZE_SEQLOCK(&fActiveTimeLock);
 	B_INITIALIZE_RW_SPINLOCK(&fLoadLock);
 }

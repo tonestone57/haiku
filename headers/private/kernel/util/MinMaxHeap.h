@@ -86,8 +86,8 @@ public:
 
 	inline	status_t	Insert(Element* element, Key key);
 
-private:
 			void		_Remove(MinMaxHeapLink<Element, Key>* link);
+private:
 			status_t	_GrowHeap(int minimalSize = 0);
 
 			void		_MoveUp(MinMaxHeapLink<Element, Key>* link);

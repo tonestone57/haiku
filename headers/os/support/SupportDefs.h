@@ -389,6 +389,6 @@ extern int64	atomic_get64(int64 *value);
 #endif
 
 
-extern const int32 kMaxLoad;
+const int32 kMaxLoad = 1000;
 
 #endif	/* _SUPPORT_DEFS_H */

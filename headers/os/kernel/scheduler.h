@@ -66,19 +66,11 @@ bigtime_t estimate_max_scheduling_latency(thread_id th = -1);
 status_t set_scheduler_mode(int32 mode);
 int32 get_scheduler_mode(void);
 
-void scheduler_update_total_system_lag(bigtime_t lag_delta);
-
-void scheduler_thread_received_input(thread_id thread);
-
 }
 #else
 
 int32 suggest_thread_priority(uint32 what, int32 period, bigtime_t jitter,
 	bigtime_t length);
-
-void scheduler_update_total_system_lag(bigtime_t lag_delta);
-
-void scheduler_thread_received_input(thread_id thread);
 
 bigtime_t estimate_max_scheduling_latency(thread_id th);
 	/* default is current thread */

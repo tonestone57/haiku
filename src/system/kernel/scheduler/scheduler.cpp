@@ -329,17 +329,6 @@ scheduler_dump_thread_data(Thread* thread)
 
 
 static void
-reschedule(int32 nextState);
-
-
-void
-scheduler_reschedule()
-{
-	reschedule(B_THREAD_READY);
-}
-
-
-static void
 enqueue_thread_on_cpu_eevdf(Thread* thread, Scheduler::CPUEntry* cpu, Scheduler::CoreEntry* core)
 {
 	SCHEDULER_ENTER_FUNCTION();
@@ -850,16 +839,6 @@ update_old_thread_state(Thread* oldThread, int32 nextState, CoreEntry* core)
 }
 
 
-static void
-reschedule(int32 nextState);
-
-
-void
-scheduler_reschedule()
-{
-	reschedule(B_THREAD_READY);
-}
-
 
 static void
 reschedule(int32 nextState)
@@ -1063,6 +1042,12 @@ reschedule(int32 nextState)
 	if (nextThread != oldThread) {
 		thread_resumes(nextThread);
 	}
+}
+
+void
+scheduler_reschedule()
+{
+	reschedule(B_THREAD_READY);
 }
 
 

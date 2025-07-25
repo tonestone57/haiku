@@ -304,20 +304,20 @@ extern float gSchedulerSMTConflictFactor;
 
 // --- Load Threshold Constants ---
 // Define load constants based on kMaxLoad (assumed to be defined in scheduler_defs.h)
-static constexpr sched_load_t kLowLoad = kMaxLoad * 20 / 100;      // 20%
-static constexpr sched_load_t kTargetLoad = kMaxLoad * 55 / 100;   // 55%
-static constexpr sched_load_t kMediumLoad = kMaxLoad * 62 / 100;   // 62% (avg of target and high)
-static constexpr sched_load_t kHighLoad = kMaxLoad * 70 / 100;     // 70%
-static constexpr sched_load_t kVeryHighLoad = kMaxLoad * 85 / 100; // 85% (avg of max and high)
+static const sched_load_t kLowLoad = kMaxLoad * 20 / 100;      // 20%
+static const sched_load_t kTargetLoad = kMaxLoad * 55 / 100;   // 55%
+static const sched_load_t kMediumLoad = kMaxLoad * 62 / 100;   // 62% (avg of target and high)
+static const sched_load_t kHighLoad = kMaxLoad * 70 / 100;     // 70%
+static const sched_load_t kVeryHighLoad = kMaxLoad * 85 / 100; // 85% (avg of max and high)
 
 // Load difference threshold for balancing decisions
-static constexpr sched_load_t kLoadDifference = kMaxLoad * 20 / 100;
+static const sched_load_t kLoadDifference = kMaxLoad * 20 / 100;
 
 // --- Cache-Aware Task Placement Constants ---
 // Allowance for how much more loaded a cache-warm core can be vs alternatives
-static constexpr sched_load_t kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15%
+static const sched_load_t kCacheWarmCoreLoadBonus = kMaxLoad * 15 / 100; // 15%
 // Maximum load threshold for strongly preferring cache-warm cores
-static constexpr sched_load_t kMaxLoadForWarmCorePreference = kHighLoad;
+static const sched_load_t kMaxLoadForWarmCorePreference = kHighLoad;
 
 // --- System Configuration Flags ---
 extern bool gSingleCore;       // System has only one core

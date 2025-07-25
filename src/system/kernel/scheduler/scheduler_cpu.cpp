@@ -1144,10 +1144,27 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 		int32 shardIndex = this->ID() % Scheduler::kNumCoreLoadHeapShards;
 		WriteSpinLocker globalHeapsDefunctLock(Scheduler::gCoreHeapsShardLock[shardIndex]);
 		if (this->GetMinMaxHeapLink()->fIndex != -1) { // If in a heap
-			if (wasDefunctHighLoad)
-				Scheduler::gCoreHighLoadHeapShards[shardIndex].Remove(this);
-			else
-				Scheduler::gCoreLoadHeapShards[shardIndex].Remove(this);
+			if (wasDefunctHighLoad) {
+				CoreEntry* entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+				while (entry) {
+					if (entry == this) {
+						Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+						break;
+					}
+					Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+					entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+				}
+			} else {
+				CoreEntry* entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+				while (entry) {
+					if (entry == this) {
+						Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+						break;
+					}
+					Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+					entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+				}
+			}
 		}
 		// globalHeapsDefunctLock released by destructor
 		return;
@@ -1215,10 +1232,27 @@ CoreEntry::_UpdateLoad(bool forceUpdate)
 	if (wasInAHeap) {
 		// Remove using the status (highLoadStatusWhenLastInHeap) that got it into its current heap.
 		// The key for removal is implicitly handled by MinMaxHeap::Remove(this) using its stored link->fKey.
-		if (highLoadStatusWhenLastInHeap)
-			Scheduler::gCoreHighLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
-		else
-			Scheduler::gCoreLoadHeapShards[shardIndex]._Remove(this->GetMinMaxHeapLink());
+		if (highLoadStatusWhenLastInHeap) {
+			CoreEntry* entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreHighLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreHighLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		} else {
+			CoreEntry* entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			while (entry) {
+				if (entry == this) {
+					Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+					break;
+				}
+				Scheduler::gCoreLoadHeapShards[shardIndex].RemoveMinimum();
+				entry = Scheduler::gCoreLoadHeapShards[shardIndex].PeekMinimum();
+			}
+		}
 	}
 
 	// Insert into the new correct heap using the CoreEntry's current (just updated) fLoad and fHighLoad.

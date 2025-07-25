@@ -29,7 +29,7 @@ static const int32 kMaxPriorityRange = B_REAL_TIME_PRIORITY + 1;
 // Global weight table and synchronization
 int32* gHaikuContinuousWeights = NULL;
 static spinlock gWeightTableLock = B_SPINLOCK_INITIALIZER;
-static volatile bool gWeightsInitialized = false;
+static volatile int32 gWeightsInitialized = 0;
 
 } // namespace Scheduler
 
@@ -48,12 +48,6 @@ sched_get_priority_max(int policy)
 		case SCHED_OTHER:
 			return B_URGENT_DISPLAY_PRIORITY;
 
-		case SCHED_OTHER:
-			return B_NORMAL_PRIORITY;
-
-		case SCHED_OTHER:
-			return B_IDLE_PRIORITY;
-
 		default:
 			return -1;
 	}
@@ -67,10 +61,6 @@ sched_get_priority_min(int policy)
 		case SCHED_RR:
 		case SCHED_FIFO:
 			return B_REAL_TIME_DISPLAY_PRIORITY;
-
-		case SCHED_OTHER:
-		case SCHED_OTHER:
-			return B_IDLE_PRIORITY;
 
 		case SCHED_OTHER:
 			return B_IDLE_PRIORITY;

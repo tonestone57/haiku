@@ -130,6 +130,8 @@ struct Thread : HashObject, scheduling_analysis_thread {
 
 	// Helper methods to safely update min/max values
 	void UpdateRunTime(bigtime_t time) {
+		if (runs == 0)
+			return;
 		if (runs == 1 || time < min_run_time)
 			min_run_time = time;
 		if (time > max_run_time)
@@ -137,6 +139,8 @@ struct Thread : HashObject, scheduling_analysis_thread {
 	}
 
 	void UpdateLatency(bigtime_t time) {
+		if (latencies == 0)
+			return;
 		if (latencies == 1 || time < min_latency)
 			min_latency = time;
 		if (time > max_latency)
@@ -144,6 +148,8 @@ struct Thread : HashObject, scheduling_analysis_thread {
 	}
 
 	void UpdateRerunTime(bigtime_t time) {
+		if (reruns == 0)
+			return;
 		if (reruns == 1 || time < min_rerun_time)
 			min_rerun_time = time;
 		if (time > max_rerun_time)

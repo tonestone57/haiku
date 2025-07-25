@@ -5,6 +5,9 @@
 
 #include <OS.h> // For bigtime_t, prio_t
 #include <SupportDefs.h> // For int8, int32, etc.
+#include <load_tracking.h>
+
+using sched_load_t = int32;
 
 // ============================================================================
 // Core Scheduling Constants
@@ -94,7 +97,7 @@ static_assert(HIGH_CONTENTION_MIN_SLICE_FACTOR <= 10.0, "Contention slice factor
 
 // Load threshold (0-kMaxLoad) below which a task might be considered low intensity.
 // kMaxLoad represents 100% of nominal core capacity.
-static constexpr int32 LOW_INTENSITY_LOAD_THRESHOLD = kMaxLoad / 10; // 10% of nominal capacity
+static const sched_load_t LOW_INTENSITY_LOAD_THRESHOLD = kMaxLoad / 10; // 10% of nominal capacity
 
 // Validate load parameters
 static_assert(kMaxLoad > 0, "Maximum load must be positive");
@@ -199,7 +202,7 @@ namespace SchedulerConstants {
     constexpr bigtime_t RT_MIN_GUARANTEED_SLICE_SAFE = RT_MIN_GUARANTEED_SLICE;
     
     // Load and contention
-    constexpr int32 MAX_LOAD = kMaxLoad;
+    const int32 MAX_LOAD = kMaxLoad;
     constexpr int32 LOW_INTENSITY_THRESHOLD = LOW_INTENSITY_LOAD_THRESHOLD;
     constexpr int32 HIGH_CONTENTION_THRESHOLD_SAFE = HIGH_CONTENTION_THRESHOLD;
     constexpr double HIGH_CONTENTION_SLICE_FACTOR = HIGH_CONTENTION_MIN_SLICE_FACTOR;

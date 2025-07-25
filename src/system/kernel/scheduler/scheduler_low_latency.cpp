@@ -4,6 +4,7 @@
  * Distributed under the terms of the MIT License.
  */
 
+#include "scheduler_thread.h"
 #include "scheduler_cpu.h"
 #include "scheduler_modes.h"
 #include "scheduler_common.h"

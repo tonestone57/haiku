@@ -147,12 +147,9 @@
 #   define ZYAN_PPC
 #elif defined(__riscv) && __riscv_xlen == 64
 #   define ZYAN_RISCV64
-#elif defined(__m68k__) || defined(m68k)
-#   define ZYAN_M68K
 #else
 #   error "Unsupported architecture detected"
 #endif
-
 
 /* ============================================================================================== */
 /* Debug/Release detection                                                                        */

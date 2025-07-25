@@ -839,6 +839,13 @@ update_old_thread_state(Thread* oldThread, int32 nextState, CoreEntry* core)
 }
 
 
+void
+scheduler_reschedule()
+{
+	reschedule(B_THREAD_READY);
+}
+
+
 static void
 reschedule(int32 nextState)
 {

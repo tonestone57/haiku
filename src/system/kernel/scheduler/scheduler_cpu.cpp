@@ -131,7 +131,7 @@ CoreEntry::CpuInstantaneousLoadChanged(CPUEntry* /* changedCpu */)
 	// can affect the SMT-aware key of its SMT siblings.
 	SCHEDULER_ENTER_FUNCTION();
 
-	SpinLockGuard lock(fCPULock); // Protects fCPUHeap modifications
+	SpinLocker lock(fCPULock); // Protects fCPUHeap modifications
 
 	if (fDefunct || fCPUCount == 0) // No active CPUs on this core or core is defunct
 		return;
@@ -971,7 +971,7 @@ void
 CoreEntry::AddCPU(CPUEntry* cpu)
 {
 	SCHEDULER_ENTER_FUNCTION();
-	SpinLockGuard lock(fCPULock);
+	SpinLocker lock(fCPULock);
 
 	ASSERT_PRINT(cpu->Core() == this, "CPU %" B_PRId32 " belongs to core %" B_PRId32
 		", not %" B_PRId32, cpu->ID(), cpu->Core()->ID(), ID());
@@ -1013,7 +1013,7 @@ CoreEntry::AddCPU(CPUEntry* cpu)
 void
 CoreEntry::RemoveCPU(CPUEntry* cpu, ThreadProcessing& threadPostProcessing)
 {
-	SpinLockGuard lock(fCPULock);
+	SpinLocker lock(fCPULock);
 
 	ASSERT(fCPUCount > 0);
 
@@ -1381,7 +1381,7 @@ DebugDumper::DumpCoreLoadHeapEntry(CoreEntry* entry)
 {
 	int32 idleCpuCount;
 	{
-		SpinLockGuard coreCpuListLock(entry->fCPULock);
+		SpinLocker coreCpuListLock(entry->fCPULock);
 		idleCpuCount = entry->fIdleCPUCount;
 	}
 

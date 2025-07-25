@@ -39,7 +39,7 @@
 #include "scheduler_cpu.h"     // Forward declares CoreEntry, CPUEntry
 #include "scheduler_locking.h"
 #include "scheduler_profiler.h"
-#include "scheduler_spin_lock.h"
+#include <util/AutoLock.h>
 #include <kernel/scheduler.h>
 
 #include "scheduler_defs.h"
@@ -66,7 +66,7 @@ extern int32* gHaikuContinuousWeights;
 
 struct ThreadData : public DoublyLinkedListLinkImpl<ThreadData> {
 private:
-    mutable SpinLock fDataLock;
+    mutable spinlock fDataLock;
     Thread* fThread;
     CoreEntry* fCore;
     bool fReady;
@@ -417,7 +417,7 @@ public:
     // IRQ affinity
     bool AddAffinitizedIrq(int32 irq)
     {
-        SpinLockGuard guard(fDataLock);
+        SpinLocker guard(fDataLock);
         if (fAffinitizedIrqCount >= MAX_AFFINITIZED_IRQS_PER_THREAD) {
             return false;
         }
@@ -431,7 +431,7 @@ public:
     }
     bool RemoveAffinitizedIrq(int32 irq)
     {
-        SpinLockGuard guard(fDataLock);
+        SpinLocker guard(fDataLock);
         for (int8 i = 0; i < fAffinitizedIrqCount; ++i) {
             if (fAffinitizedIrqs[i] == irq) {
                 fAffinitizedIrqCount--;
@@ -445,12 +445,12 @@ public:
     }
     void ClearAffinitizedIrqs()
     {
-        SpinLockGuard guard(fDataLock);
+        SpinLocker guard(fDataLock);
         fAffinitizedIrqCount = 0;
         memset(fAffinitizedIrqs, 0, sizeof(fAffinitizedIrqs));
     }
     const int32* GetAffinitizedIrqs(int8& count) const {
-        SpinLockGuard guard(fDataLock);
+        SpinLocker guard(fDataLock);
         count = fAffinitizedIrqCount;
         return fAffinitizedIrqs;
     }

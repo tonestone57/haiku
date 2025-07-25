@@ -25,7 +25,7 @@
 #include "scheduler_common.h" // For TRACE_SCHED_SMT
 #include "scheduler_modes.h"
 #include "EevdfScheduler.h"
-#include "scheduler_spin_lock.h"
+#include <util/AutoLock.h>
 
 
 namespace Scheduler {
@@ -139,7 +139,7 @@ private:
 						EevdfScheduler	fEevdfScheduler;
 						ThreadData*		fIdleThread;
 						bigtime_t		fMinVirtualRuntime;
-						SpinLock		fQueueLock;
+						spinlock		fQueueLock;
 
 						int32			fLoad;
 						float			fInstantaneousLoad;
@@ -240,7 +240,7 @@ private:
 						CPUSet			fCPUSet;
 						int32			fIdleCPUCount; // Protected by fCPULock
 						CPUPriorityHeap	fCPUHeap;
-						SpinLock		fCPULock;
+						spinlock		fCPULock;
 
 						bigtime_t		fActiveTime;
 	mutable				seqlock			fActiveTimeLock;
@@ -386,7 +386,7 @@ CPUEntry::UnlockRunQueue()
 inline bigtime_t
 CPUEntry::MinVirtualRuntime()
 {
-	SpinLockGuard _(fQueueLock);
+	SpinLocker _(fQueueLock);
 	_UpdateMinVirtualRuntime();
 	return fMinVirtualRuntime;
 }
